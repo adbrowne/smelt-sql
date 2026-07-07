@@ -288,25 +288,73 @@ pub fn scope_over_alignment(
         };
     }
     for window in &windows {
-        let Some(partition_by) = window.partition_by() else {
-            return PartitionAlignment::NotAligned {
-                reason: "a window OVER clause in this scope has no PARTITION BY".to_string(),
-            };
-        };
-        let keys: Vec<String> = partition_by
-            .expressions()
-            .map(|e| e.text().trim().to_string())
-            .collect();
-        if !keys.iter().any(|k| k == partition_col) {
-            return PartitionAlignment::NotAligned {
-                reason: format!(
-                    "window OVER (PARTITION BY {}) does not include the partition_column '{partition_col}'",
-                    keys.join(", ")
-                ),
-            };
+        if let not_aligned @ PartitionAlignment::NotAligned { .. } =
+            window_over_alignment(window, partition_col)
+        {
+            return not_aligned;
         }
     }
     PartitionAlignment::Aligned
+}
+
+/// Partition-alignment verdict for a single window `OVER` clause: `Aligned`
+/// when its `PARTITION BY` keys are a superset containing `partition_col`.
+/// A window with no `PARTITION BY` (including a named-window reference,
+/// `OVER w`) fails closed to `NotAligned` — never optimistic. This is the
+/// per-window leaf classifier the composition walk invokes for every window
+/// scope it enumerates (`model_properties.md` §"The composition walk").
+pub fn window_over_alignment(
+    window: &smelt_parser::WindowSpec,
+    partition_col: &str,
+) -> PartitionAlignment {
+    let Some(partition_by) = window.partition_by() else {
+        return PartitionAlignment::NotAligned {
+            reason: "a window OVER clause in this scope has no PARTITION BY".to_string(),
+        };
+    };
+    let keys: Vec<String> = partition_by
+        .expressions()
+        .map(|e| e.text().trim().to_string())
+        .collect();
+    if !keys.iter().any(|k| k == partition_col) {
+        return PartitionAlignment::NotAligned {
+            reason: format!(
+                "window OVER (PARTITION BY {}) does not include the partition_column '{partition_col}'",
+                keys.join(", ")
+            ),
+        };
+    }
+    PartitionAlignment::Aligned
+}
+
+/// True when a window's frame is a bounded `RANGE BETWEEN INTERVAL '…'
+/// PRECEDING [AND …]` (Form A) with no `UNBOUNDED` bound. Such a frame has a
+/// finite reach the source-bound deriver picks up and the planner widens the
+/// source read to cover, so the window is partition-local up to that bound —
+/// admissible even when its `PARTITION BY` omits the partition column
+/// (alignment is the zero-lookback license; frame-reach is the
+/// bounded-lookback one). An `UNBOUNDED` bound reads across all history and
+/// is deliberately excluded. Leaf classifier over the frame clause's AST.
+pub fn window_has_bounded_range_interval_frame(window: &smelt_parser::WindowSpec) -> bool {
+    let Some(frame) = window.frame() else {
+        return false;
+    };
+    if frame.unit() != Some(smelt_parser::FrameUnit::Range) {
+        return false;
+    }
+    let bounds = frame.bounds();
+    // `BETWEEN <lo> AND <hi>` yields two bounds; the single-bound spelling
+    // (`RANGE INTERVAL '…' PRECEDING`) is not the derivable Form A shape.
+    if bounds.len() != 2 {
+        return false;
+    }
+    let has_interval = bounds
+        .iter()
+        .any(|b| b.text().to_uppercase().contains("INTERVAL"));
+    let has_unbounded = bounds
+        .iter()
+        .any(|b| b.text().to_uppercase().contains("UNBOUNDED"));
+    has_interval && !has_unbounded
 }
 
 /// Analyze a SELECT statement from SQL text.

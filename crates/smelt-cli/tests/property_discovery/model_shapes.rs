@@ -744,6 +744,52 @@ FROM smelt.sources.logins l
     }
 }
 
+/// `SC-7`: a **cross-partition `DISTINCT` inside a CTE body**, consumed by an
+/// outer aligned per-row query (`docs/research/20260707-property-partition-alignment.md`
+/// §6 gap 2, catalog cell `SC-7`). The CTE dedups `(user_id, tier)` with no
+/// partition column in its projected set, so the dedup key set is
+/// cross-partition state: a row appended into a LATER partition changes the
+/// CTE's output for keys whose joined fact rows live in an EARLIER,
+/// already-written partition. The outer query itself is clean (projects `d`,
+/// no DISTINCT/HAVING/OVER/LIMIT of its own), so only a per-scope admission
+/// walk that descends into CTE bodies can see the hazard.
+pub fn cte_cross_partition_distinct() -> ModelShape {
+    ModelShape {
+        name: "events_tiered",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d, user_id, tier]
+---
+WITH user_tiers AS (
+    SELECT DISTINCT user_id, tier FROM smelt.sources.events
+)
+SELECT e.d, e.user_id, t.tier
+FROM smelt.sources.events e
+JOIN user_tiers t ON e.user_id = t.user_id
+"#,
+        source: "events",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "user_id",
+                ty: "BIGINT",
+            },
+            SourceColumn {
+                name: "tier",
+                ty: "VARCHAR",
+            },
+        ],
+    }
+}
+
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //

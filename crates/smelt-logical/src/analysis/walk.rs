@@ -876,6 +876,239 @@ pub fn enumerate_scopes(sql: &str) -> Option<ScopeEnumeration> {
     Some(walk(&tree, &ScopeEnum))
 }
 
+// ===== Batched admission: alignment judged per walk-enumerated scope =====
+
+/// Which batched admission gate a violation falls under. Each gate maps to
+/// one `safety_overrides.allow_*` escape; `Unsupported` has no escape short
+/// of disabling every gate (an unenumerable construct defeats them all).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdmissionGate {
+    /// A window `OVER` whose `PARTITION BY` omits the partition column and
+    /// whose frame is not a bounded `RANGE BETWEEN INTERVAL` (Form A).
+    WindowOver,
+    /// A `HAVING` whose owning scope's `GROUP BY` omits the partition column
+    /// (HAVING inherits its GROUP BY scope's alignment verdict).
+    Having,
+    /// A `SELECT DISTINCT` scope that does not project the partition column.
+    Distinct,
+    /// A `LIMIT` clause (global top-k — never partition-local).
+    Limit,
+    /// A construct the walk could not normalize; the gates cannot prove the
+    /// absence of an inadmissible scope inside it, so it refuses fail-closed.
+    Unsupported,
+}
+
+/// One admission violation found by the walk: the gate it trips, a
+/// human-readable detail (the alignment reason or construct description),
+/// and the nesting path of the scope it lives in.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct AdmissionViolation {
+    pub gate: AdmissionGate,
+    pub detail: String,
+    pub path: Vec<PathSeg>,
+}
+
+impl AdmissionViolation {
+    /// Render the scope's nesting path for a diagnostic message; empty for
+    /// the top scope.
+    pub fn path_display(&self) -> String {
+        if self.path.is_empty() {
+            return String::new();
+        }
+        let segs: Vec<String> = self
+            .path
+            .iter()
+            .map(|seg| match seg {
+                PathSeg::Cte(name) => format!("CTE '{name}'"),
+                PathSeg::SetOpBranch(i) => format!("set-operation branch {}", i + 1),
+                PathSeg::DerivedTable(alias) if alias.is_empty() => {
+                    "an unaliased derived table".to_string()
+                }
+                PathSeg::DerivedTable(alias) => format!("derived table '{alias}'"),
+            })
+            .collect();
+        format!(" (in {})", segs.join(" → "))
+    }
+}
+
+/// The batched-admission transfer function: every scope the walk enumerates —
+/// CTE bodies, derived tables, and set-operation arms included — is judged by
+/// the same AST-pure per-scope alignment classifiers the top scope is judged
+/// by (`scope_group_by_alignment` / `scope_distinct_alignment` /
+/// `window_over_alignment`), and an unnormalizable construct yields an
+/// `Unsupported` violation (fail-closed by construction,
+/// `model_properties.md` §"The composition walk").
+struct BatchedAdmission<'a> {
+    partition_col: &'a str,
+}
+
+impl Transfer for BatchedAdmission<'_> {
+    type Verdict = Vec<AdmissionViolation>;
+
+    fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) -> Self::Verdict {
+        Vec::new()
+    }
+
+    fn operator(&self, op: &OpNode<'_>, children: &[Self::Verdict], cx: &NodeCx) -> Self::Verdict {
+        let mut out = Vec::new();
+        match op {
+            OpNode::Unsupported { reason } => {
+                out.push(AdmissionViolation {
+                    gate: AdmissionGate::Unsupported,
+                    detail: reason.to_string(),
+                    path: cx.path.clone(),
+                });
+            }
+            OpNode::Select(sn) => {
+                let n_ctes = sn.ctes.len();
+                for child in &children[..n_ctes] {
+                    out.extend(child.iter().cloned());
+                }
+                for (input, child) in sn.inputs.iter().zip(&children[n_ctes..]) {
+                    // A CTE body's violations are counted once at its
+                    // definition site, however many times it is referenced.
+                    if !matches!(input, InputItem::CteRef { .. }) {
+                        out.extend(child.iter().cloned());
+                    }
+                }
+                out.extend(select_own_admission_violations(
+                    &sn.select,
+                    self.partition_col,
+                    &cx.path,
+                ));
+            }
+            OpNode::SetOp(_) => {
+                for child in children {
+                    out.extend(child.iter().cloned());
+                }
+            }
+        }
+        out
+    }
+}
+
+/// The admission violations declared by one SELECT scope's own clauses
+/// (nested walk nodes — CTE bodies, derived tables, set-op arms — belong to
+/// their own nodes and are pruned from this scope's region).
+fn select_own_admission_violations(
+    select: &SelectStmt,
+    partition_col: &str,
+    path: &[PathSeg],
+) -> Vec<AdmissionViolation> {
+    use super::{
+        scope_distinct_alignment, scope_group_by_alignment,
+        window_has_bounded_range_interval_frame, window_over_alignment, PartitionAlignment,
+    };
+
+    let mut out = Vec::new();
+
+    if select.having_clause().is_some() {
+        if let PartitionAlignment::NotAligned { reason } =
+            scope_group_by_alignment(select, partition_col)
+        {
+            out.push(AdmissionViolation {
+                gate: AdmissionGate::Having,
+                detail: reason,
+                path: path.to_vec(),
+            });
+        }
+    }
+
+    if select.is_distinct() {
+        if let PartitionAlignment::NotAligned { reason } =
+            scope_distinct_alignment(select, partition_col)
+        {
+            out.push(AdmissionViolation {
+                gate: AdmissionGate::Distinct,
+                detail: reason,
+                path: path.to_vec(),
+            });
+        }
+    }
+
+    let (windows, has_limit) = collect_scope_region(select);
+    for window in &windows {
+        // A bounded RANGE BETWEEN INTERVAL frame (Form A) is a reach
+        // obligation the bound deriver picks up, not an alignment one.
+        if window_has_bounded_range_interval_frame(window) {
+            continue;
+        }
+        if let PartitionAlignment::NotAligned { reason } =
+            window_over_alignment(window, partition_col)
+        {
+            out.push(AdmissionViolation {
+                gate: AdmissionGate::WindowOver,
+                detail: reason,
+                path: path.to_vec(),
+            });
+        }
+    }
+
+    if has_limit {
+        out.push(AdmissionViolation {
+            gate: AdmissionGate::Limit,
+            detail: "LIMIT clause".to_string(),
+            path: path.to_vec(),
+        });
+    }
+
+    out
+}
+
+/// Collect the window specs and LIMIT presence of one SELECT scope's own
+/// region: every descendant of the scope's node except the subtrees that are
+/// walk nodes of their own — its WITH clause (CTE bodies), its FROM clause
+/// (derived tables), and a direct-child SELECT (the next set-operation arm).
+/// Expression-position subqueries (`EXISTS (…)`, a scalar subquery) are NOT
+/// walk nodes, so their windows/LIMITs are judged here, in the owning scope —
+/// fail-closed coverage for scopes the tree normalization does not model.
+fn collect_scope_region(select: &SelectStmt) -> (Vec<smelt_parser::WindowSpec>, bool) {
+    use smelt_parser::SyntaxKind::{FROM_CLAUSE, SELECT_STMT, WITH_CLAUSE};
+
+    fn collect_rec(
+        node: &smelt_parser::syntax_kind::SyntaxNode,
+        windows: &mut Vec<smelt_parser::WindowSpec>,
+        has_limit: &mut bool,
+    ) {
+        use smelt_parser::SyntaxKind::{LIMIT_CLAUSE, WINDOW_SPEC};
+        match node.kind() {
+            WINDOW_SPEC => {
+                if let Some(window) = smelt_parser::WindowSpec::cast(node.clone()) {
+                    windows.push(window);
+                }
+            }
+            LIMIT_CLAUSE => {
+                *has_limit = true;
+            }
+            _ => {}
+        }
+        for child in node.children() {
+            collect_rec(&child, windows, has_limit);
+        }
+    }
+
+    let mut windows = Vec::new();
+    let mut has_limit = false;
+    for child in select.syntax().children() {
+        if matches!(child.kind(), WITH_CLAUSE | FROM_CLAUSE | SELECT_STMT) {
+            continue;
+        }
+        collect_rec(&child, &mut windows, &mut has_limit);
+    }
+    (windows, has_limit)
+}
+
+/// Convenience entry: every batched-admission violation in a model's SQL,
+/// judged per walk-enumerated scope. `None` when the text has no SELECT
+/// statement at all.
+pub fn batched_admission_violations(
+    sql: &str,
+    partition_col: &str,
+) -> Option<Vec<AdmissionViolation>> {
+    let tree = QueryTree::from_sql(sql)?;
+    Some(walk(&tree, &BatchedAdmission { partition_col }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

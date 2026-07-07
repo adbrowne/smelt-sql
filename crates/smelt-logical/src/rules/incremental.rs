@@ -12,8 +12,7 @@ use crate::analysis::source_bounds::{
 use crate::analysis::temporal::{analyze_temporal_dependencies, TemporalOffset};
 use crate::analysis::{
     analyze_select, find_item_expr_by_alias_or_position, item_alias, item_expr,
-    scope_distinct_alignment, scope_group_by_alignment, select_stmt_items, PartitionAlignment,
-    SelectItemKind,
+    scope_group_by_alignment, select_stmt_items, PartitionAlignment, SelectItemKind,
 };
 use crate::graph::{ModelGraph, ModelInfo};
 use crate::types::{Opportunity, OpportunityData, Transformation};
@@ -339,25 +338,50 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
 
     // --- Safety checks ---
 
+    // 2a/2b/2c/2f: the four alignment-family admission gates (window OVER /
+    // HAVING / LIMIT / DISTINCT) judge every scope the composition walk
+    // enumerates — CTE bodies, derived tables, and set-operation arms
+    // included — using the same AST-pure per-scope classifiers for every
+    // scope (`model_properties.md` §"The composition walk";
+    // `batched_models.md` §"Safety checks"). A construct the walk cannot
+    // normalize yields an `Unsupported` violation: the gates cannot prove
+    // the absence of an inadmissible scope inside it, so it refuses
+    // fail-closed (checked after the per-gate violations so a judged scope
+    // gets its specific diagnostic first).
+    let any_alignment_gate_active = !overrides.allow_window_functions
+        || !overrides.allow_having
+        || !overrides.allow_limit
+        || !overrides.allow_distinct;
+    let admission_violations: Vec<crate::analysis::walk::AdmissionViolation> =
+        if any_alignment_gate_active {
+            crate::analysis::walk::batched_admission_violations(stripped_sql, partition_col)
+                .unwrap_or_default()
+        } else {
+            Vec::new()
+        };
+    let first_violation = |gate: crate::analysis::walk::AdmissionGate| {
+        admission_violations.iter().find(|v| v.gate == gate)
+    };
+
     // 2a: Window functions (OVER clause)
     // Partition-aligned OVER is admitted: OVER (PARTITION BY <keys>) where
     // <keys> is a superset of the model's partition_column is safe because the
-    // window is partition-local and the DELETE+INSERT contract holds.
-    // Any OVER without PARTITION BY, or whose PARTITION BY keys do not include
-    // the partition_column, is rejected unless allow_window_functions is set.
+    // window is partition-local and the DELETE+INSERT contract holds. A
+    // bounded RANGE BETWEEN INTERVAL frame (Form A) is exempt — a reach
+    // obligation, not an alignment one. Any other OVER without PARTITION BY,
+    // or whose PARTITION BY keys do not include the partition_column, is
+    // rejected unless allow_window_functions is set.
     if !overrides.allow_window_functions {
-        let upper_sql = stripped_sql.to_uppercase();
-        if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
-            // Extract every OVER clause and check its PARTITION BY keys.
-            if let Some(bad_over) = find_inadmissible_over(stripped_sql, partition_col) {
-                return Err(format!(
-                    "Model '{}': window function with OVER clause is not compatible with \
-                     incremental materialization — window partition keys ({}) do not include \
-                     the model's partition_column '{}'. Use OVER (PARTITION BY {} ...) to make \
-                     it partition-aligned, or set safety_overrides.allow_window_functions: true",
-                    model.name, bad_over, partition_col, partition_col
-                ));
-            }
+        if let Some(v) = first_violation(crate::analysis::walk::AdmissionGate::WindowOver) {
+            return Err(format!(
+                "Model '{}': window function with OVER clause is not compatible with \
+                 incremental materialization — {}{}. Use OVER (PARTITION BY {} ...) to make \
+                 it partition-aligned, or set safety_overrides.allow_window_functions: true",
+                model.name,
+                v.detail,
+                v.path_display(),
+                partition_col
+            ));
         }
     }
 
@@ -367,23 +391,32 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     // deletes and re-inserts whole partitions, so a HAVING that only filters
     // groups already scoped to a single partition cannot see a different
     // group composition on a partial (batched) run than on a full refresh.
-    // Walked across every UNION branch (not just the outer SELECT) so a
-    // HAVING living in a later branch is judged by *that* branch's own
-    // GROUP BY, never the outer/first-branch one.
+    // Judged for every enumerated scope, so a HAVING living in a UNION
+    // branch or a CTE body is judged by *that* scope's own GROUP BY, never
+    // the outer/first-branch one.
     if !overrides.allow_having {
-        if let Some(select) = &top_select {
-            check_having_alignment_all_scopes(select, partition_col, &model.name)?;
+        if let Some(v) = first_violation(crate::analysis::walk::AdmissionGate::Having) {
+            return Err(format!(
+                "Model '{}': HAVING clause is not compatible with incremental \
+                 materialization unless its own GROUP BY includes the partition_column \
+                 '{partition_col}' ({}{}) — set safety_overrides.allow_having: true \
+                 to override",
+                model.name,
+                v.detail,
+                v.path_display()
+            ));
         }
     }
 
-    // 2c: LIMIT clause
+    // 2c: LIMIT clause — a global top-k scope, never partition-local,
+    // wherever it lives in the tree.
     if !overrides.allow_limit {
-        let upper_sql = stripped_sql.to_uppercase();
-        if has_keyword_at_boundary(&upper_sql, "LIMIT") {
+        if let Some(v) = first_violation(crate::analysis::walk::AdmissionGate::Limit) {
             return Err(format!(
-                "Model '{}': LIMIT clause is not compatible with incremental materialization \
+                "Model '{}': LIMIT clause{} is not compatible with incremental materialization \
                  — different time ranges would produce different row subsets",
-                model.name
+                model.name,
+                v.path_display()
             ));
         }
     }
@@ -440,10 +473,36 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     // they agree on partition_column — i.e. only within the same partition.
     // A DISTINCT computed on a partial (batched) run therefore dedups
     // exactly the same way a full refresh would within that partition.
-    // Walked across every UNION branch, same as HAVING.
+    // Judged for every enumerated scope, same as HAVING.
     if !overrides.allow_distinct {
-        if let Some(select) = &top_select {
-            check_distinct_alignment_all_scopes(select, partition_col, &model.name)?;
+        if let Some(v) = first_violation(crate::analysis::walk::AdmissionGate::Distinct) {
+            return Err(format!(
+                "Model '{}': SELECT DISTINCT is not compatible with incremental \
+                 materialization unless the partition_column '{partition_col}' is projected \
+                 in this scope ({}{}) — set safety_overrides.allow_distinct: true to \
+                 override",
+                model.name,
+                v.detail,
+                v.path_display()
+            ));
+        }
+    }
+
+    // 2g: a construct the composition walk could not normalize — the four
+    // gates above cannot prove the absence of an inadmissible HAVING /
+    // DISTINCT / OVER / LIMIT scope inside it, so admission refuses
+    // fail-closed rather than under-enumerating silently.
+    if any_alignment_gate_active {
+        if let Some(v) = first_violation(crate::analysis::walk::AdmissionGate::Unsupported) {
+            return Err(format!(
+                "Model '{}': this model contains a construct the batched admission analysis \
+                 cannot judge ({}{}); HAVING/DISTINCT/window/LIMIT admission is fail-closed \
+                 on constructs it cannot enumerate — rewrite the construct into a plain \
+                 SELECT shape",
+                model.name,
+                v.detail,
+                v.path_display()
+            ));
         }
     }
 
@@ -462,17 +521,6 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     }))
 }
 
-/// Scan `sql` for OVER clauses that are not partition-aligned with `partition_col`.
-///
-/// Returns `Some(description)` for the first OVER clause whose PARTITION BY
-/// keys do not form a superset of `{partition_col}`.
-///
-/// An OVER clause is admissible when its `PARTITION BY` list contains
-/// `partition_col` (case-insensitive, trimmed). An OVER clause with no
-/// `PARTITION BY` is inadmissible.
-///
-/// Returns `None` when every OVER clause in the SQL is admissible (or there
-/// are none).
 /// Find the first subquery-in-FROM/JOIN construct in `sql`, for the blunt
 /// `detect()` structural gate (see call site — deliberately not extended to
 /// WITH-clause CTEs). Requires `safety_overrides.allow_subqueries: true`;
@@ -484,67 +532,6 @@ fn parse_top_select(sql: &str) -> Option<smelt_parser::SelectStmt> {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
     file.select_stmt()
-}
-
-/// Walk `select` and every subsequent UNION branch, rejecting (fail-closed)
-/// the first scope whose own `HAVING` is not licensed by
-/// `scope_group_by_alignment` — the shared partition-alignment signal
-/// (`batched_models.md` §"Safety checks").
-fn check_having_alignment_all_scopes(
-    select: &smelt_parser::SelectStmt,
-    partition_col: &str,
-    model_name: &str,
-) -> Result<(), String> {
-    let mut current = select.clone();
-    loop {
-        if current.having_clause().is_some() {
-            if let PartitionAlignment::NotAligned { reason } =
-                scope_group_by_alignment(&current, partition_col)
-            {
-                return Err(format!(
-                    "Model '{model_name}': HAVING clause is not compatible with incremental \
-                     materialization unless its own GROUP BY includes the partition_column \
-                     '{partition_col}' ({reason}) — set safety_overrides.allow_having: true \
-                     to override"
-                ));
-            }
-        }
-        match current.union_select() {
-            Some(next) => current = next,
-            None => break,
-        }
-    }
-    Ok(())
-}
-
-/// Walk `select` and every subsequent UNION branch, rejecting (fail-closed)
-/// the first scope whose own `SELECT DISTINCT` is not licensed by
-/// `scope_distinct_alignment`.
-fn check_distinct_alignment_all_scopes(
-    select: &smelt_parser::SelectStmt,
-    partition_col: &str,
-    model_name: &str,
-) -> Result<(), String> {
-    let mut current = select.clone();
-    loop {
-        if current.is_distinct() {
-            if let PartitionAlignment::NotAligned { reason } =
-                scope_distinct_alignment(&current, partition_col)
-            {
-                return Err(format!(
-                    "Model '{model_name}': SELECT DISTINCT is not compatible with incremental \
-                     materialization unless the partition_column '{partition_col}' is projected \
-                     in this scope ({reason}) — set safety_overrides.allow_distinct: true to \
-                     override"
-                ));
-            }
-        }
-        match current.union_select() {
-            Some(next) => current = next,
-            None => break,
-        }
-    }
-    Ok(())
 }
 
 fn find_first_derived_table_construct(sql: &str) -> Option<String> {
@@ -570,87 +557,6 @@ fn find_first_derived_table_construct(sql: &str) -> Option<String> {
     }
 
     None
-}
-
-fn find_inadmissible_over(sql: &str, partition_col: &str) -> Option<String> {
-    let upper_sql = sql.to_uppercase();
-    let partition_col_upper = partition_col.to_uppercase();
-
-    let mut search_from = 0;
-    while let Some(over_pos) = find_over_keyword(&upper_sql, search_from) {
-        // Advance past "OVER" so we don't re-match the same position.
-        search_from = over_pos + 4;
-
-        // Skip whitespace after OVER to find the opening '('.
-        let rest = &upper_sql[search_from..];
-        let paren_offset = match rest.find('(') {
-            Some(p) => p,
-            None => continue,
-        };
-        // Ensure only whitespace between OVER and '('.
-        let between = &rest[..paren_offset];
-        if !between.trim().is_empty() {
-            continue;
-        }
-
-        let paren_start = search_from + paren_offset; // position of '(' in upper_sql
-                                                      // Extract the balanced content inside the OVER (...).
-        let over_content = match extract_balanced_parens(&upper_sql, paren_start) {
-            Some(c) => c,
-            None => continue,
-        };
-        search_from = paren_start + over_content.len() + 2; // skip '(' content ')'
-
-        // A window carrying a bounded RANGE INTERVAL frame (Form A) is admitted
-        // regardless of PARTITION BY alignment: the bounded lookback widens the
-        // source read to cover the frame, so the window is partition-local up to
-        // that bound and the DELETE+INSERT contract still holds. An UNBOUNDED
-        // frame is cumulative-across-history and is NOT made safe this way.
-        if has_bounded_range_interval_frame(&over_content) {
-            continue;
-        }
-
-        // Check for PARTITION BY inside the window spec.
-        if let Some(pb_pos) = find_partition_by_in_over(&over_content) {
-            let after_pb = &over_content[pb_pos..];
-            // Keys end at ORDER BY, ROWS/RANGE/GROUPS, or end of content.
-            let keys_text = trim_to_window_clause_end(after_pb);
-            // Parse the comma-separated key identifiers.
-            let keys: Vec<String> = keys_text
-                .split(',')
-                .map(|k| k.trim().to_string())
-                .filter(|k| !k.is_empty())
-                .collect();
-
-            // Check that partition_col is among the keys.
-            let contains_partition_col = keys.iter().any(|k| {
-                // Strip any trailing qualifiers (e.g. "t.event_date" → "event_date")
-                let bare = k.rsplit('.').next().unwrap_or(k);
-                bare.trim() == partition_col_upper
-            });
-
-            if !contains_partition_col {
-                let key_display: Vec<&str> = keys.iter().map(|s| s.as_str()).collect();
-                return Some(key_display.join(", "));
-            }
-        } else {
-            // No PARTITION BY at all — inadmissible.
-            return Some("<no PARTITION BY>".to_string());
-        }
-    }
-    None
-}
-
-/// True if a window spec's frame is a bounded `RANGE BETWEEN INTERVAL '…'
-/// PRECEDING [AND …]` (Form A) with no `UNBOUNDED` bound. Such a frame has a
-/// finite lookback/lookforward that the source-bound deriver picks up and the
-/// planner widens the source read to cover, so the window is partition-local up
-/// to that bound — safe for incremental even when PARTITION BY is not aligned to
-/// the partition_column. An `UNBOUNDED` bound reads across all history and is
-/// deliberately excluded.
-fn has_bounded_range_interval_frame(over_content: &str) -> bool {
-    let upper = over_content.to_uppercase();
-    upper.contains("RANGE BETWEEN") && upper.contains("INTERVAL") && !upper.contains("UNBOUNDED")
 }
 
 /// Find the next position of the OVER keyword (word boundary) at or after `from`.
@@ -703,56 +609,6 @@ fn extract_balanced_parens(sql: &str, paren_pos: usize) -> Option<String> {
     let s = start?;
     let e = end?;
     Some(sql[s..e].to_string())
-}
-
-/// Find the position (within `over_content`) just after "PARTITION BY ".
-/// Returns the offset of the first key character.
-fn find_partition_by_in_over(over_content: &str) -> Option<usize> {
-    let kw = "PARTITION BY ";
-    let upper = over_content.to_uppercase();
-    // Find at word boundary
-    let mut i = 0;
-    while let Some(pos) = upper[i..].find(kw) {
-        let abs = i + pos;
-        let before_ok = abs == 0 || !upper.as_bytes()[abs - 1].is_ascii_alphanumeric();
-        if before_ok {
-            return Some(abs + kw.len());
-        }
-        i = abs + 1;
-    }
-    // Also try without trailing space (for "PARTITION BY\n")
-    let kw2 = "PARTITION BY";
-    let mut i = 0;
-    while let Some(pos) = upper[i..].find(kw2) {
-        let abs = i + pos;
-        let before_ok = abs == 0 || !upper.as_bytes()[abs - 1].is_ascii_alphanumeric();
-        let after_pos = abs + kw2.len();
-        let after_ok =
-            after_pos >= upper.len() || !upper.as_bytes()[after_pos].is_ascii_alphanumeric();
-        if before_ok && after_ok {
-            // Skip trailing whitespace
-            let skip = upper[after_pos..].len() - upper[after_pos..].trim_start().len();
-            return Some(after_pos + skip);
-        }
-        i = abs + 1;
-    }
-    None
-}
-
-/// Trim a PARTITION BY key list to just the key portion, stopping before
-/// ORDER BY, ROWS, RANGE, GROUPS, or end of text.
-fn trim_to_window_clause_end(text: &str) -> &str {
-    let upper = text.to_uppercase();
-    let terminators = ["ORDER BY", "ROWS ", "RANGE ", "GROUPS "];
-    let mut end = text.len();
-    for term in &terminators {
-        if let Some(pos) = upper.find(term) {
-            if pos < end {
-                end = pos;
-            }
-        }
-    }
-    &text[..end]
 }
 
 /// Check if a keyword appears at a word boundary in uppercase text.
@@ -1495,6 +1351,23 @@ mod tests {
     use crate::graph::TimeseriesConfig;
     use crate::types::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 
+    /// Test shim for the walk-based OVER admission gate: accepts either a
+    /// full SELECT statement or a bare select-item fragment (wrapped in a
+    /// minimal SELECT), and returns the first `WindowOver` violation detail
+    /// (`None` = every window admitted).
+    fn over_admission_violation(sql: &str, partition_col: &str) -> Option<String> {
+        let full = if sql.trim_start().to_uppercase().starts_with("SELECT") {
+            sql.to_string()
+        } else {
+            format!("SELECT {sql} FROM events")
+        };
+        crate::analysis::walk::batched_admission_violations(&full, partition_col)
+            .unwrap_or_default()
+            .into_iter()
+            .find(|v| v.gate == crate::analysis::walk::AdmissionGate::WindowOver)
+            .map(|v| v.detail)
+    }
+
     fn model(name: &str, sql: &str, partition_column: &str) -> ModelInfo {
         model_with_event_time(name, sql, partition_column, "event_timestamp")
     }
@@ -1720,7 +1593,7 @@ mod tests {
         // DELETE+INSERT contract holds. It must be admitted without an override.
         let sql = "SELECT MAX(boundary_ts) OVER (PARTITION BY device_id ORDER BY event_ts \
                    RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS s FROM events";
-        assert_eq!(find_inadmissible_over(sql, "session_start_date"), None);
+        assert_eq!(over_admission_violation(sql, "session_start_date"), None);
     }
 
     #[test]
@@ -1729,7 +1602,7 @@ mod tests {
         // function reads unbounded prior rows within the partition).
         let sql =
             "SELECT ROW_NUMBER() OVER (PARTITION BY device_id ORDER BY event_ts) AS rn FROM events";
-        assert!(find_inadmissible_over(sql, "session_start_date").is_some());
+        assert!(over_admission_violation(sql, "session_start_date").is_some());
     }
 
     #[test]
@@ -1738,7 +1611,7 @@ mod tests {
         // is not made safe by the lookback widening — still inadmissible.
         let sql = "SELECT SUM(x) OVER (PARTITION BY device_id ORDER BY event_ts \
                    RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) AS s FROM events";
-        assert!(find_inadmissible_over(sql, "session_start_date").is_some());
+        assert!(over_admission_violation(sql, "session_start_date").is_some());
     }
 
     /// A `HAVING` whose own scope's `GROUP BY` is a superset of
@@ -2026,6 +1899,138 @@ mod tests {
         assert!(result.is_err(), "expected Err, got {:?}", result);
         let err = result.unwrap_err();
         assert!(err.contains("DISTINCT"), "err: {err}");
+    }
+
+    /// The same HAVING construct must be judged identically at the top level
+    /// and inside a CTE body: an aligned HAVING (its own scope's GROUP BY
+    /// contains the partition column) is admitted in both positions; an
+    /// unaligned one is refused in both (`model_properties.md` §"The
+    /// composition walk": a scope inside a CTE body is judged by the same
+    /// rule as the same scope at the top level).
+    #[test]
+    fn cte_body_having_gated_same_as_outer() {
+        // Aligned HAVING inside a CTE body: admitted, same as the top-level
+        // aligned case (`test_detect_admits_group_aligned_having`).
+        let aligned = model_with_event_time(
+            "cte_having_aligned",
+            "WITH agg AS (SELECT event_date, user_id, COUNT(*) AS cnt FROM events \
+             GROUP BY 1, 2 HAVING COUNT(*) > 10) \
+             SELECT event_date, user_id, cnt FROM agg",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&aligned);
+        assert!(
+            result.is_ok(),
+            "aligned CTE-internal HAVING must stay admitted; got {:?}",
+            result
+        );
+        assert!(result.unwrap().is_some());
+
+        // Unaligned HAVING inside a CTE body: refused, same as the top-level
+        // unaligned case (`test_detect_rejects_having_not_group_aligned_in_union_branch`).
+        let unaligned = model_with_event_time(
+            "cte_having_unaligned",
+            "WITH agg AS (SELECT user_id, COUNT(*) AS cnt FROM events \
+             GROUP BY user_id HAVING COUNT(*) > 10) \
+             SELECT e.event_date, e.user_id, a.cnt \
+             FROM events e JOIN agg a ON e.user_id = a.user_id",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&unaligned);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("HAVING"), "err: {err}");
+    }
+
+    /// A cross-partition DISTINCT inside a CTE body must be refused by the
+    /// same per-scope rule as a top-level DISTINCT (SC-7, unit-level mirror
+    /// of `sc_7_cte_body_admission`); an aligned CTE-internal DISTINCT must
+    /// stay admitted — no blanket CTE refusal.
+    #[test]
+    fn cte_body_distinct_gated_same_as_outer() {
+        let unaligned = model_with_event_time(
+            "cte_distinct_unaligned",
+            "WITH user_tiers AS (SELECT DISTINCT user_id, tier FROM events) \
+             SELECT e.event_date, e.user_id, t.tier \
+             FROM events e JOIN user_tiers t ON e.user_id = t.user_id",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&unaligned);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("DISTINCT"), "err: {err}");
+
+        let aligned = model_with_event_time(
+            "cte_distinct_aligned",
+            "WITH dedup AS (SELECT DISTINCT event_date, user_id FROM events) \
+             SELECT event_date, user_id FROM dedup",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&aligned);
+        assert!(
+            result.is_ok(),
+            "aligned CTE-internal DISTINCT must stay admitted; got {:?}",
+            result
+        );
+        assert!(result.unwrap().is_some());
+    }
+
+    /// An unaligned window OVER inside a CTE body must be refused; the
+    /// bounded-`RANGE INTERVAL`-frame exemption must survive inside a CTE
+    /// body too (it is a reach obligation, not an alignment one).
+    #[test]
+    fn cte_body_over_gated_same_as_outer() {
+        let unaligned = model_with_event_time(
+            "cte_over_unaligned",
+            "WITH ranked AS (SELECT event_date, user_id, \
+             ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_date) AS rn FROM events) \
+             SELECT event_date, user_id, rn FROM ranked",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&unaligned);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("window function"), "err: {err}");
+
+        let bounded_frame = model_with_event_time(
+            "cte_over_bounded_frame",
+            "WITH rolled AS (SELECT event_date, user_id, \
+             SUM(amount) OVER (PARTITION BY user_id ORDER BY event_date \
+             RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW) AS s FROM events) \
+             SELECT event_date, user_id, s FROM rolled",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&bounded_frame);
+        assert!(
+            result.is_ok(),
+            "bounded RANGE INTERVAL frame must stay exempt inside a CTE; got {:?}",
+            result
+        );
+        assert!(result.unwrap().is_some());
+    }
+
+    /// A LIMIT inside a CTE body must be refused by the same rule as a
+    /// top-level LIMIT.
+    #[test]
+    fn cte_body_limit_gated_same_as_outer() {
+        let m = model_with_event_time(
+            "cte_limit",
+            "WITH top_rows AS (SELECT event_date, user_id FROM events \
+             ORDER BY user_id LIMIT 10) \
+             SELECT event_date, user_id FROM top_rows",
+            "event_date",
+            "event_date",
+        );
+        let result = detect(&m);
+        assert!(result.is_err(), "expected Err, got {:?}", result);
+        let err = result.unwrap_err();
+        assert!(err.contains("LIMIT"), "err: {err}");
     }
 
     #[test]
@@ -3065,7 +3070,7 @@ mod tests {
 
     /// The sessionization harness: `LAG(...) OVER (PARTITION BY device_id
     /// ORDER BY event_ts RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND
-    /// CURRENT ROW)` is admitted (`find_inadmissible_over` returns `None`)
+    /// CURRENT ROW)` is admitted (no `WindowOver` admission violation)
     /// even though the model's own `partition_column` is a *derived*
     /// `session_start_date` unrelated to the window's `PARTITION BY
     /// device_id` — the bounded RANGE frame is the licensing lookback. The
@@ -3076,7 +3081,7 @@ mod tests {
         let sql = "LAG(event_ts) OVER (PARTITION BY device_id ORDER BY event_ts \
                    RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW) AS prev_ts";
         assert_eq!(
-            find_inadmissible_over(sql, "session_start_date"),
+            over_admission_violation(sql, "session_start_date"),
             None,
             "a bounded RANGE INTERVAL frame must be admitted regardless of PARTITION BY alignment"
         );
@@ -3135,7 +3140,7 @@ mod tests {
     fn test_bare_lag_no_range_stays_inadmissible() {
         let sql = "LAG(event_ts) OVER (PARTITION BY device_id ORDER BY event_ts) AS prev_ts";
         assert!(
-            find_inadmissible_over(sql, "session_start_date").is_some(),
+            over_admission_violation(sql, "session_start_date").is_some(),
             "a bare LAG with no RANGE frame must stay inadmissible"
         );
     }
@@ -3149,7 +3154,7 @@ mod tests {
         let sql = "SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
                    ROWS BETWEEN 5 PRECEDING AND CURRENT ROW) AS running";
         assert!(
-            find_inadmissible_over(sql, "session_start_date").is_some(),
+            over_admission_violation(sql, "session_start_date").is_some(),
             "a ROWS frame must not be admitted by the RANGE-INTERVAL exception"
         );
     }
@@ -3161,7 +3166,7 @@ mod tests {
         let sql = "SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
                    GROUPS BETWEEN 5 PRECEDING AND CURRENT ROW) AS running";
         assert!(
-            find_inadmissible_over(sql, "session_start_date").is_some(),
+            over_admission_violation(sql, "session_start_date").is_some(),
             "a GROUPS frame must not be admitted by the RANGE-INTERVAL exception"
         );
     }
@@ -3174,7 +3179,7 @@ mod tests {
         let sql = "SUM(amount) OVER (PARTITION BY device_id ORDER BY event_ts \
                    RANGE BETWEEN INTERVAL '1 day' PRECEDING AND UNBOUNDED FOLLOWING) AS running";
         assert!(
-            find_inadmissible_over(sql, "session_start_date").is_some(),
+            over_admission_violation(sql, "session_start_date").is_some(),
             "UNBOUNDED FOLLOWING must not be admitted even with a bounded PRECEDING half"
         );
     }

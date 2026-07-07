@@ -1097,3 +1097,39 @@ Block schema:
 - Coverage caveat (design §2.1 N4): deterministic 3-run schedule (fold, fold, re-fold) — the
   violation is mechanism-level (no ledger consultation exists), not data-dependent; adversarial
   value schedules add nothing until a ledger exists to stress.
+
+---
+
+## SC-7 — cross-partition `DISTINCT`/`HAVING` inside a CTE body × batched admission + partition rewrite — 2026-07-07
+
+- construct: `refresh: batched` model whose CTE body holds a cross-partition scope
+  (`SELECT DISTINCT user_id, tier FROM events` — no partition column in the dedup key set),
+  consumed by an outer aligned per-row query. The outer query is clean; only the CTE body is
+  hazardous.
+- verdict: **REFUTED = fail-OPEN admission hole, confirmed and FIXED.** RED: the model was
+  ADMITTED (the HAVING/DISTINCT admission walks covered only the outer UNION chain and CTE
+  bodies are exempt from the subquery gate — research doc §6 gap 2); a late row appended into
+  the NEXT partition changed the CTE's dedup output for a key whose fact rows live in the
+  already-written 2024-01-01 partition, which batched maintenance never rewrites: maintained
+  1 row vs full-refresh oracle 2 rows, permanently. GREEN: batched admission now judges
+  **every scope the composition walk enumerates** (CTE bodies, derived tables, set-operation
+  arms) with the same AST-pure per-scope classifiers (`scope_group_by_alignment` /
+  `scope_distinct_alignment` / `window_over_alignment`), and refuses the model.
+- production files/functions changed: `crates/smelt-logical/src/analysis/walk.rs`
+  (`batched_admission_violations` — the admission transfer function over the Phase-1 walk;
+  per-scope region collection for OVER/LIMIT), `crates/smelt-logical/src/analysis/mod.rs`
+  (`window_over_alignment` + `window_has_bounded_range_interval_frame` leaf classifiers),
+  `crates/smelt-logical/src/rules/incremental.rs` (gates 2a/2b/2c/2f rewired onto the walk;
+  the uppercase-substring `find_inadmissible_over` scanner and the textual LIMIT keyword scan
+  deleted; new gate 2g refuses fail-closed on any construct the walk cannot normalize).
+  Bounded-`RANGE BETWEEN INTERVAL` frames stay exempt (reach obligation, not alignment),
+  now via the frame's AST.
+- evidence: `smelt-cli::tests::property_discovery::sc_7_cte_body_admission::
+  cte_internal_cross_partition_distinct_is_refused` (owning test; red-then-green through
+  `execute_project` with `enforce_safety`), plus unit mirrors
+  `smelt-logical::rules::incremental::tests::cte_body_{having,distinct,over,limit}_gated_same_as_outer`
+  (same construct judged identically at top level and inside a CTE; aligned CTE-internal
+  scopes stay admitted — no blanket refusal). Full workspace suite, `example_diagnostics`
+  (115 passed) and `example_workspaces` (34 passed) green — no example model newly refused.
+- Coverage caveat (design §2.1 N4): deterministic 2-run schedule — the divergence is
+  mechanism-level (an unjudged cross-partition scope), not data-dependent.
