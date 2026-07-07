@@ -10,7 +10,14 @@ pub mod monotonicity;
 pub mod presentation;
 pub mod source_bounds;
 pub mod temporal;
+pub mod walk;
 pub mod window_independence;
+
+pub use walk::{
+    enumerate_scopes, walk, ColumnLineage, CteDef, InputItem, LeafColumn, LeafInput, NodeCx,
+    OpNode, PathSeg, QueryNode, QueryTree, RelationSource, Scope, ScopeEnum, ScopeEnumeration,
+    ScopeKind, SelectNode, SetOpKind, SetOpNode, Transfer, UnsupportedConstruct,
+};
 
 use serde::Serialize;
 use smelt_types::SqlFunction;
