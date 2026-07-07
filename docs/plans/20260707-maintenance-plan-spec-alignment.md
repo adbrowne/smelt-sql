@@ -62,7 +62,7 @@ Three of the spec-diff map's rows landed (`maintenance_plan.md` created; `models
 | SA1   | done     | `spec(batched): demote to the partition-grain shape profile; admission as per-cell obligations` | 2026-07-07 |
 | SA2   | done     | `spec(keyed): demote to the key-grain shape profile; admission as per-cell obligations` | 2026-07-07 |
 | SA3   | done     | `spec(versioned): demote to the SCD-2 shape profile; admission as per-cell obligations` | 2026-07-07 |
-| SA4   | pending  |        |      |
+| SA4   | done     | `spec(transforms): column-scoped merge, ledger fold/reset, and field-backfill as transform contracts` | 2026-07-07 |
 | SA5   | pending  |        |      |
 | SA6   | pending  |        |      |
 | SA7   | pending  |        |      |
