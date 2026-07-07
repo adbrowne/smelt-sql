@@ -325,6 +325,26 @@ You are executing this plan from the start of a new session. Your job is to driv
   is excluded from `walk_coverage.rs`'s scanned-file list rather than mislabeled as a leaf
   classifier or advisory heuristic it isn't. Tracked as remaining debt for a future
   property-discovery pass. (Phase 7)
+- **`union_discriminated_grain` compares literal discriminators by text, not value** (final review):
+  two arms tagged `1` and `1.0` are textually distinct so they read as disjoint discriminators, but
+  as values they collide — a spurious "disjoint" key. Harmless while `PropertyVector.grain` has no
+  consumer; fix (normalize literal discriminators to a canonical value before comparison) before the
+  grain gains a consumer. (final review)
+- **`scope_determinism` launders nondeterminism through computed expressions** (final review): inner
+  Row/Run determinism levels propagate only through plain `ColumnRef` projections, so a computed
+  projection over a nondeterministic column (`r + 1` over `random() AS r`) surfaces as `Clean`. Harmless
+  while `check_nondeterminism` is the real admission gate (it catches the `random()` directly); fix
+  (propagate the inner level through computed expressions, not just column refs) before the determinism
+  facts gain a consumer. (final review)
+- **Transfer-helper duplication** (final review): the two-form context-key lookup is duplicated
+  (`ReachTransfer::leaf`, `TraceTransfer::trace_item`), the alias-keyed input-verdict map build is
+  triplicated, and qualifier→alias resolution is duplicated across transfer functions. Unify into shared
+  helpers before the next transfer function lands. (final review)
+- **`batched_admission_violations(...).unwrap_or_default()` is a fail-open default on an unreachable
+  path** (`rules/incremental.rs`, final review): `None` is returned only for SQL with no `SELECT_STMT`,
+  which a parsed SELECT model never is. Classified infallible with an explanatory comment at the call
+  site (empty ⇒ no violations is the correct value on the dead branch; it never fails open on a real
+  model). (final review)
 
 ## Verification
 

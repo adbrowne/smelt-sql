@@ -354,6 +354,12 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         || !overrides.allow_distinct;
     let admission_violations: Vec<crate::analysis::walk::AdmissionViolation> =
         if any_alignment_gate_active {
+            // `batched_admission_violations` returns `None` only when the SQL
+            // has no `SELECT_STMT` at all; a model that reached this rule has
+            // already been parsed and confirmed to be a SELECT model, so `None`
+            // is unreachable here. `unwrap_or_default()` (empty ⇒ no violations)
+            // is the correct value on that dead branch and never fails open on
+            // a real model — the only reachable arm carries the real verdict.
             crate::analysis::walk::batched_admission_violations(stripped_sql, partition_col)
                 .unwrap_or_default()
         } else {

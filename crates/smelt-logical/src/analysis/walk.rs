@@ -1053,7 +1053,39 @@ fn select_own_admission_violations(
         }
     }
 
-    let (windows, has_limit) = collect_scope_region(select);
+    let (windows, has_limit, subqueries) = collect_scope_region(select);
+
+    // Expression-position subqueries are not walk nodes; their own
+    // DISTINCT/HAVING are judged here, in the owning scope, with the same
+    // per-scope leaf classifiers — a `SELECT DISTINCT` / `HAVING` one nesting
+    // level down (a scalar subquery, `EXISTS (…)`) is the same cross-partition
+    // hazard and must trip the same gate. The violation is attributed to the
+    // owning scope's `path` (the subquery has no walk-node path of its own).
+    for sub in &subqueries {
+        if sub.having_clause().is_some() {
+            if let PartitionAlignment::NotAligned { reason } =
+                scope_group_by_alignment(sub, partition_col)
+            {
+                out.push(AdmissionViolation {
+                    gate: AdmissionGate::Having,
+                    detail: reason,
+                    path: path.to_vec(),
+                });
+            }
+        }
+        if sub.is_distinct() {
+            if let PartitionAlignment::NotAligned { reason } =
+                scope_distinct_alignment(sub, partition_col)
+            {
+                out.push(AdmissionViolation {
+                    gate: AdmissionGate::Distinct,
+                    detail: reason,
+                    path: path.to_vec(),
+                });
+            }
+        }
+    }
+
     for window in &windows {
         // A bounded RANGE BETWEEN INTERVAL frame (Form A) is a reach
         // obligation the bound deriver picks up, not an alignment one.
@@ -1082,20 +1114,27 @@ fn select_own_admission_violations(
     out
 }
 
-/// Collect the window specs and LIMIT presence of one SELECT scope's own
-/// region: every descendant of the scope's node except the subtrees that are
-/// walk nodes of their own — its WITH clause (CTE bodies), its FROM clause
-/// (derived tables), and a direct-child SELECT (the next set-operation arm).
-/// Expression-position subqueries (`EXISTS (…)`, a scalar subquery) are NOT
-/// walk nodes, so their windows/LIMITs are judged here, in the owning scope —
-/// fail-closed coverage for scopes the tree normalization does not model.
-fn collect_scope_region(select: &SelectStmt) -> (Vec<smelt_parser::WindowSpec>, bool) {
+/// The window specs, LIMIT presence, and expression-position subquery scopes
+/// of one SELECT scope's own region: every descendant of the scope's node
+/// except the subtrees that are walk nodes of their own — its WITH clause (CTE
+/// bodies), its FROM clause (derived tables), and a direct-child SELECT (the
+/// next set-operation arm). Expression-position subqueries (`EXISTS (…)`, a
+/// scalar subquery) are NOT walk nodes, so their windows, LIMITs, **and**
+/// DISTINCT/HAVING scopes are judged here, in the owning scope — fail-closed
+/// coverage for scopes the tree normalization does not model. The returned
+/// `SelectStmt`s are every such expression-position `SELECT_STMT` in the
+/// region; the caller judges each one's DISTINCT/HAVING alignment with the
+/// same per-scope leaf classifiers the owning scope is judged by.
+fn collect_scope_region(
+    select: &SelectStmt,
+) -> (Vec<smelt_parser::WindowSpec>, bool, Vec<SelectStmt>) {
     use smelt_parser::SyntaxKind::{FROM_CLAUSE, SELECT_STMT, WITH_CLAUSE};
 
     fn collect_rec(
         node: &smelt_parser::syntax_kind::SyntaxNode,
         windows: &mut Vec<smelt_parser::WindowSpec>,
         has_limit: &mut bool,
+        subqueries: &mut Vec<SelectStmt>,
     ) {
         use smelt_parser::SyntaxKind::{LIMIT_CLAUSE, WINDOW_SPEC};
         match node.kind() {
@@ -1107,22 +1146,31 @@ fn collect_scope_region(select: &SelectStmt) -> (Vec<smelt_parser::WindowSpec>, 
             LIMIT_CLAUSE => {
                 *has_limit = true;
             }
+            SELECT_STMT => {
+                // An expression-position subquery reached inside the region (a
+                // scalar subquery or `EXISTS (…)`) — not a walk node, so its
+                // own DISTINCT/HAVING must be judged in this owning scope.
+                if let Some(sub) = SelectStmt::cast(node.clone()) {
+                    subqueries.push(sub);
+                }
+            }
             _ => {}
         }
         for child in node.children() {
-            collect_rec(&child, windows, has_limit);
+            collect_rec(&child, windows, has_limit, subqueries);
         }
     }
 
     let mut windows = Vec::new();
     let mut has_limit = false;
+    let mut subqueries = Vec::new();
     for child in select.syntax().children() {
         if matches!(child.kind(), WITH_CLAUSE | FROM_CLAUSE | SELECT_STMT) {
             continue;
         }
-        collect_rec(&child, &mut windows, &mut has_limit);
+        collect_rec(&child, &mut windows, &mut has_limit, &mut subqueries);
     }
-    (windows, has_limit)
+    (windows, has_limit, subqueries)
 }
 
 /// The raw text of one SELECT scope's own region: every token of the scope's
@@ -1823,6 +1871,40 @@ mod tests {
             e.unsupported.is_empty(),
             "nothing unrecognised here: {:?}",
             e.unsupported
+        );
+    }
+
+    #[test]
+    fn expression_position_distinct_is_judged_by_admission() {
+        // A `SELECT DISTINCT` in an expression-position scalar subquery is the
+        // SC-7 cross-partition-dedup hazard one nesting level down: it dedups
+        // `profiles` rows across partitions, unaligned to the model's `d`
+        // partition. It is not a walk node, so it must be judged in the owning
+        // scope's region — the admission gate must flag it, not silently pass.
+        let sql = "SELECT e.d, e.user_id, \
+                   (SELECT DISTINCT tier FROM smelt.sources.profiles p \
+                     WHERE p.user_id = e.user_id) AS tier \
+                   FROM smelt.sources.events e";
+        let violations = batched_admission_violations(sql, "d").expect("model parses");
+        assert!(
+            violations.iter().any(|v| v.gate == AdmissionGate::Distinct),
+            "expression-position SELECT DISTINCT must trip the Distinct gate; got {violations:?}"
+        );
+    }
+
+    #[test]
+    fn expression_position_aligned_distinct_is_admitted() {
+        // An expression-position DISTINCT whose key includes the partition
+        // column is partition-local — it must NOT trip the gate (no
+        // over-refusal of a legitimately-aligned dedup).
+        let sql = "SELECT e.d, \
+                   (SELECT DISTINCT d FROM smelt.sources.profiles p \
+                     WHERE p.user_id = e.user_id) AS d2 \
+                   FROM smelt.sources.events e";
+        let violations = batched_admission_violations(sql, "d").expect("model parses");
+        assert!(
+            !violations.iter().any(|v| v.gate == AdmissionGate::Distinct),
+            "an aligned expression-position DISTINCT must be admitted; got {violations:?}"
         );
     }
 
