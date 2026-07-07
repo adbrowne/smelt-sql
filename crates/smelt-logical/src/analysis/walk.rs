@@ -2103,6 +2103,42 @@ mod tests {
         }
     }
 
+    #[test]
+    fn expression_subquery_reference_site_keeps_flat_scan_floor() {
+        use super::super::source_bounds::{
+            derive_model_bounds, BoundContext, BoundResult, Seconds,
+        };
+
+        // `metrics` is referenced twice: once as a plain FROM leaf (the outer
+        // JOIN, zero margin) and once inside an expression-position scalar
+        // subquery carrying a 30-day lookback band. The subquery is not a walk
+        // node, so the leaf-path walk verdict only carries the zero-margin FROM
+        // reach; the flat-scan floor must widen it back to 30 days so the
+        // injected scan filter covers the subquery's reference site.
+        let sql = "WITH agg AS (\
+             SELECT u.d, \
+                    (SELECT MAX(m.v) FROM smelt.sources.metrics m \
+                      WHERE m.d >= u.d - INTERVAL '30 days' AND m.d <= u.d) AS peak \
+             FROM smelt.sources.activity u\
+         ) \
+         SELECT r.d, r.v, a.peak \
+         FROM smelt.sources.metrics r JOIN agg a ON a.d = r.d";
+        let ctx = BoundContext::new()
+            .with_source("sources.metrics", "d")
+            .with_source("sources.activity", "d");
+        let bounds = derive_model_bounds(sql, &ctx);
+        match bounds.get("sources.metrics") {
+            Some(BoundResult::Bounded { before, .. }) => {
+                assert!(
+                    *before >= Seconds::days(30),
+                    "metrics scan must cover the subquery's 30-day band; got before={:?}",
+                    before
+                );
+            }
+            other => panic!("expected metrics Bounded with >=30d before, got {other:?}"),
+        }
+    }
+
     // ===== Property-vector transfer functions =====
 
     fn vector_of(sql: &str) -> PropertyVector {

@@ -316,14 +316,29 @@ pub fn derive_model_bounds(sql: &str, ctx: &BoundContext) -> HashMap<String, Bou
             _ => HashMap::new(),
         };
 
-    // Fallback: a context source with no FROM leaf in any walk node (e.g.
-    // referenced only inside an expression-position subquery, which is not a
-    // walk node) keeps the whole-text derivation it always had.
+    // Floor: merge every context source's walk verdict with its whole-text
+    // flat-scan derivation. The walk models reach only along a source's FROM-
+    // leaf paths, so a source referenced *both* as a plain FROM leaf and inside
+    // an expression-position subquery (which is not a walk node) would carry
+    // only its leaf-path reach — the subquery region's band would be dropped,
+    // and the injected scan filter would under-cover that reference site. The
+    // flat scan reads every textual occurrence, so merging it in restores the
+    // dropped band. `merge` takes max on margins and gives rejection precedence
+    // (`Unbounded`/`NotDerivable` absorbing), so the walk may only WIDEN the
+    // flat scan, never narrow it: series-added margins (SC-4: max(10d walk, 7d
+    // flat) = 10d) and global symbolic/bare-LAG absorption both survive, and no
+    // source ever falls below the flat-scan floor. This also covers sources
+    // with no walk leaf at all (referenced only inside an expression subquery),
+    // subsuming the old `!contains_key` fallback.
     for (source_name, partition_col) in &ctx.source_partition_cols {
-        if !result.contains_key(source_name) {
-            if let Some(b) = derive_bound_for_source(sql, partition_col) {
-                result.insert(source_name.clone(), b);
-            }
+        if let Some(flat) = derive_bound_for_source(sql, partition_col) {
+            result
+                .entry(source_name.clone())
+                .and_modify(|existing| {
+                    *existing =
+                        std::mem::replace(existing, BoundResult::Unbounded).merge(flat.clone());
+                })
+                .or_insert(flat);
         }
     }
 
