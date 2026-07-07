@@ -44,17 +44,20 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Windowed-keyed-maintenance driver | driving-fact / anchor + monoid rung | sequence `merge_into` across driving partitions: classify → step over partitions in temporal order → per-partition pushdown → create-or-merge | **built** |
 | Source-filter pushdown (window-an-input) | monotonicity trace + derived bound | wrap each bounded input ref in a `partition_column` subquery so the scan reads only its window | **built** |
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
-| Outer output-clamp | event-time projection (needs no proof) | filter the outermost `SELECT` on the projected `event_time` to the write window | **built** |
+| Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
+| Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[start − k − offset, end)`, clamp output to `[start, end)`: read the margin, never re-write it | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
 | Explicit bounded-domain multiset state | bounded-domain budget assertion | store a per-key value→count multiset (a bounded-domain Z-set); one state serves many presentations and free retraction | unbuilt |
 | Compile-time pinning | run-determinism (`NOW`/`CURRENT_*`) | resolve a run-deterministic function to a single literal once per run, before emit | **built** |
-| Targeted column backfill | additive-only model diff | `UPDATE`/dimension-merge only the added columns in place, never a full rebuild | **built** |
+| Definition-change field-backfill: in-place `UPDATE` | additive-only model diff, payload field is a pure function of stored columns | backfill the added column with an in-place `UPDATE`, no upstream re-read; refused (`MaintenanceSkeletonColumnAdded`) if the field lands in a skeleton (identity/grouping/dedup/ordering) position — that is a grain change, not a backfill | **built** |
+| Definition-change field-backfill: keyed column-scoped `MERGE` | additive-only model diff, payload field re-derives from upstream | backfill the added column by re-deriving from upstream via the generic column-scoped merge, keyed where the source is keyed, inheriting that source's partition-locality verdict unchanged; refused (`MaintenanceSkeletonColumnAdded`) in a skeleton position for the same reason | unbuilt |
 | Dimension-driven horizon-bounded MERGE | target-as-replica + join-contribution monotonicity + a **derived** horizon `H` | merge a dimension batch straight into the target slice `[conv_ts − H, conv_ts]`; never re-read the fact. Licensed by a *derived* `H` only — a *declared*-on-source `H` no longer licenses this transform (an under-declared source lateness would silently truncate the recompute); where `H` is not derivable the transform is simply not licensed and the enrichment evaluates via the ordinary widened scan | **built** |
 | Horizon settled-delay / tail-rewrite | maintained-window / **derived** horizon derivation | for a forward-reach (late-arriving) source, hold the write until the derived horizon has settled, or rewrite the tail slice within the horizon on a later run; the write clamp tracks the *derived* horizon, never a declared value. Batched-side forward-reach machinery, confirmed derived-only (never licensed by a declared horizon) | unbuilt |
-| Transactional merge ledger | window-forward keyed consumption | record each merged window in a per-model ledger, written atomically with that window's `merge_into`; enforcement is required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
+| Reconciliation-ledger fold | additive column-group algebra | consult the `(output-region × column-group)` ledger entry before merging: refuse (never fold) a delta already in its processed set, otherwise combine and extend it; required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
+| Reconciliation-ledger recompute-reset | a region recompute | reset every ledger entry the recompute's footprint intersects to exactly the input the recompute read, so a later fold cannot double-count against stale bookkeeping | unbuilt |
 | Idempotent window re-scan vs delta-driven probe | idempotent monoid + source mutation profile | unconditional CDF-free re-scan when the fold is idempotent; a per-run changed-set probe when a change feed is available | *partial* |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
 | DAG composition | litmus rule (`models.md`) | express a mode combination as two composed models at two grains, not a new mode | mechanism exists |
@@ -121,14 +124,48 @@ maintainable. The multiset is **opt-in and fail-loud**: state is `O(active
 domain)`, so it is applied only under a declared bounded-domain budget and the
 runtime caps it with a full-refresh fallback.
 
-**Targeted column backfill** and **dimension-driven horizon MERGE** avoid a full
-rebuild for two enrichment shapes. Backfill is licensed by an *additive-only model
-diff* — an edit that only adds columns derivable from `{existing target} ∪
-{monotone dimension}` — and edits those columns in place. The horizon MERGE is
-licensed by target-as-replica **plus** a monotone join contribution **plus** a
-bounded horizon `H`: a dimension batch merges directly into the target slice
-`[conv_ts − H, conv_ts]` without re-reading the fact. Both refuse (fall back to
-rebuild) the moment their licensing property does not hold.
+**Generic column-scoped merge** is the general targeted-write primitive: a
+`MERGE`/`UPDATE ... FROM` restricted to the columns of one mutation-sensitivity
+group, keyed where the source is keyed, licensed by a bounded write footprint
+(the reflection of the scan bound onto a bounded set of output addresses) and a
+well-defined mutation-sensitivity partition. **Dimension-driven horizon MERGE**
+and the upstream-re-deriving half of **definition-change field-backfill** are
+named instances of it, each adding its own licensing property on top: the
+horizon MERGE additionally needs target-as-replica plus a monotone join
+contribution plus a **derived** bounded horizon `H`, merging a dimension batch
+directly into the target slice `[conv_ts − H, conv_ts]` without re-reading the
+fact.
+
+**Definition-change field-backfill** is the pair of techniques a model gaining
+output fields backfills with (`maintenance_plan.md` §"The definition-change
+trigger"), chosen by what the added field reads: a payload field that is a
+*pure function of stored columns* backfills as an **in-place `UPDATE`** (no
+upstream read), admitted only under the additive-only model-diff proof; a
+payload field that *re-derives from upstream* backfills as the **generic
+column-scoped merge**, keyed where the source is keyed, inheriting that
+source's partition-locality verdict unchanged. Both members of the pair are
+**refused** with `MaintenanceSkeletonColumnAdded` — never applied — when the
+added field lands in a **skeleton** position (identity/grouping/dedup/ordering):
+that is a grain change, not a backfill, and the honest plan is a recompute
+(effectively a new model). Fields added together factor by shared
+mutation-sensitivity into one backfill op per group; a newly-added group's
+backfill is always full-input, since there is no prior state of that column to
+fold onto.
+
+**The reconciliation-ledger fold/recompute-reset pair** is the bookkeeping every
+additive column-group technique consults before it merges, per
+`maintenance_plan.md` §"The reconciliation ledger": each `(output-region ×
+column-group)` ledger entry records the processed-input vector the region has
+already folded. **Fold** refuses (never merges) a delta already reflected in
+the entry's processed set, otherwise combines and extends it — the real
+obligation behind "never fold a delta twice," required by any non-idempotent
+(additive-fold) combiner. **Recompute-reset** is the other side: a region
+recompute resets every ledger entry its footprint intersects to exactly the
+input it read, so a subsequent fold cannot double-count against stale
+bookkeeping. The interchangeability rule that licenses choosing between two
+techniques for one cell holds only modulo this ledger: fold-then-recompute is
+safe (the recompute resets the region's ledger), but recompute-then-refold
+double-counts.
 
 **Compile-time pinning** resolves a run-deterministic function (`NOW()`,
 `CURRENT_DATE`) to one literal per run so every partition of that run sees the same
@@ -235,11 +272,12 @@ by `docs/plans/20260704-model-updates.md` (design:
   zero-margin fast path (`is_transparent_single_source`), which skips the
   outer clamp entirely since the source-level filter already is the output
   clamp; full refresh; backend lowering/emulation (`insert_overwrite`,
-  cross-engine Parquet); targeted column backfill
-  (`crates/smelt-runtime/src/backfill.rs::targeted_column_backfill`), which
-  builds the `UPDATE ... FROM (...) AS src` statement licensed by an
-  additive-only model diff and a non-empty `unique_key`; dimension-driven
-  horizon-bounded MERGE
+  cross-engine Parquet); the in-place-`UPDATE` half of definition-change
+  field-backfill (`crates/smelt-runtime/src/backfill.rs::targeted_column_backfill`),
+  which builds the `UPDATE ... FROM (...) AS src` statement licensed by an
+  additive-only model diff and a non-empty `unique_key` (the keyed
+  column-scoped-`MERGE` half, and the `MaintenanceSkeletonColumnAdded` refusal,
+  are unbuilt); dimension-driven horizon-bounded MERGE
   (`crates/smelt-runtime/src/dimension_horizon_merge.rs::dimension_horizon_merge`),
   which clamps a dimension batch's recompute `SELECT` to `[conv_ts − H,
   conv_ts]` and hands it to `Backend::merge_into`, licensed by a monotone
@@ -257,8 +295,16 @@ by `docs/plans/20260704-model-updates.md` (design:
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
-  bounded-domain multiset, compile-time pinning. Idempotent re-scan vs delta
-  probe is partial (input-delta discovery is partial).
+  bounded-domain multiset, compile-time pinning; the reconciliation-ledger
+  fold/recompute-reset pair (no `(output-region × column-group)` ledger
+  storage exists yet — every technique today behaves as if it always folds
+  cleanly); the keyed column-scoped-`MERGE` half of definition-change
+  field-backfill and its `MaintenanceSkeletonColumnAdded` refusal. Generic
+  column-scoped merge is **built** as a mechanism only through its existing
+  named instance (dimension-driven horizon MERGE); it has not yet been
+  generalised into a standalone entry point a new consumer can call directly.
+  Idempotent re-scan vs delta probe is partial (input-delta discovery is
+  partial).
 - **Hidden decomposed state + presentation view is built as a mechanism**
   (`crates/smelt-logical/src/analysis/decomposed_state.rs`
   `decompose_to_state`): given a decomposable combiner (F4) it derives the
