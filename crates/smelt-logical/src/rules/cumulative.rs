@@ -352,6 +352,18 @@ pub fn classify_cumulative(
     }
 
     // Rule: no window functions in the outer body.
+    //
+    // Known walk-invariant violation: this is a raw whole-SQL text scan in an
+    // admission path, not a leaf classifier invoked by the shared
+    // composition walk (`docs/specs/architecture.md` §"Property composition
+    // walk rule"). It predates that walk and is excluded from the
+    // `walk_coverage` structural gate (`crates/smelt-logical/tests/walk_coverage.rs`'s
+    // `KNOWN_NONCOMPLIANT` skip-list) rather than mislabeled with a
+    // classification tag it doesn't actually carry. Migrating this admission
+    // check onto the walk is tracked as deferred work in
+    // `docs/plans/20260707-property-composition-walk.md` (see "Deferred
+    // during implementation") and `docs/specs/model_properties.md` §Known
+    // Divergences ("Heuristic text-scanning layer").
     let upper_sql = sql.to_uppercase();
     if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
         diagnostics.push(KeyedDiagnostic::KeyedForbidsWindowFunctions);

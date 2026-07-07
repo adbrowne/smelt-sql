@@ -29,25 +29,64 @@ fn repo_root() -> PathBuf {
         .to_path_buf()
 }
 
-/// The admission/proof modules this gate covers. Deliberately excludes
-/// `rules/cumulative.rs`: its cumulative-model admission gate predates this
-/// plan's scope and is not yet migrated onto the shared walk or otherwise
-/// classified — tracked as separate debt, not silently mislabeled here.
-const SCANNED_FILES: &[&str] = &[
-    "crates/smelt-logical/src/analysis/mod.rs",
-    "crates/smelt-logical/src/analysis/source_bounds.rs",
-    "crates/smelt-logical/src/analysis/temporal.rs",
-    "crates/smelt-logical/src/analysis/monotonicity.rs",
-    "crates/smelt-logical/src/analysis/functional_dependency.rs",
-    "crates/smelt-logical/src/analysis/join_shape.rs",
-    "crates/smelt-logical/src/analysis/bounded_domain.rs",
-    "crates/smelt-logical/src/analysis/window_independence.rs",
-    "crates/smelt-logical/src/analysis/walk.rs",
-    "crates/smelt-logical/src/analysis/discriminants.rs",
-    "crates/smelt-logical/src/analysis/presentation.rs",
-    "crates/smelt-logical/src/rules/incremental.rs",
-    "crates/smelt-logical/src/rules/rule_diagnostics.rs",
+/// The admission/proof directories this gate covers, relative to the repo
+/// root. Every `*.rs` file under these directories (recursively — mirrors
+/// `crates/smelt-core/tests/hardening_budget.rs`'s `count_println_in_src_dir`
+/// idiom) is scanned; a new file dropped into either directory is picked up
+/// automatically rather than needing to be added to a hardcoded list.
+const SCANNED_DIRS: &[&str] = &[
+    "crates/smelt-logical/src/analysis",
+    "crates/smelt-logical/src/rules",
 ];
+
+/// Files under `SCANNED_DIRS` excluded from the gate, each with a reason.
+/// `rules/cumulative.rs`: its `classify_cumulative` whole-SQL window-function
+/// admission scan is a known, already-documented violation of the property
+/// composition walk invariant (`docs/specs/architecture.md` §"Property
+/// composition walk rule") — a live admission scan predating the walk, not
+/// silently mislabeled with a classification tag it doesn't carry. Migrating
+/// it onto the shared walk is tracked as deferred work in
+/// `docs/plans/20260707-property-composition-walk.md` ("Deferred during
+/// implementation") and `docs/specs/model_properties.md` §Known Divergences
+/// ("Heuristic text-scanning layer").
+const KNOWN_NONCOMPLIANT: &[&str] = &["crates/smelt-logical/src/rules/cumulative.rs"];
+
+/// Recursively collect every `*.rs` file under `dir` (relative to `root`),
+/// mirroring `hardening_budget.rs`'s `count_println_in_src_dir` traversal.
+fn collect_rs_files(root: &Path, dir: &Path, out: &mut Vec<PathBuf>) {
+    let entries = match fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            collect_rs_files(root, &path, out);
+        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            out.push(
+                path.strip_prefix(root)
+                    .expect("scanned path is under repo root")
+                    .to_path_buf(),
+            );
+        }
+    }
+}
+
+/// The scan set: every `*.rs` file under `SCANNED_DIRS`, minus
+/// `KNOWN_NONCOMPLIANT`, as repo-root-relative paths (sorted for
+/// deterministic diagnostics).
+fn scanned_files(root: &Path) -> Vec<PathBuf> {
+    let mut files = Vec::new();
+    for dir in SCANNED_DIRS {
+        collect_rs_files(root, &root.join(dir), &mut files);
+    }
+    files.retain(|rel| {
+        let rel_str = rel.to_string_lossy().replace('\\', "/");
+        !KNOWN_NONCOMPLIANT.contains(&rel_str.as_str())
+    });
+    files.sort();
+    files
+}
 
 const TAGS: &[&str] = &["leaf classifier", "advisory heuristic"];
 
@@ -193,12 +232,17 @@ fn unclassified_raw_scans(path: &Path) -> Vec<(usize, String)> {
 #[test]
 fn admission_paths_have_no_raw_text_scans() {
     let root = repo_root();
+    let files = scanned_files(&root);
+    assert!(
+        !files.is_empty(),
+        "expected at least one *.rs file under {SCANNED_DIRS:?}"
+    );
     let mut all_violations = Vec::new();
-    for rel in SCANNED_FILES {
+    for rel in &files {
         let path = root.join(rel);
-        assert!(path.exists(), "{rel} not found under {root:?}");
+        assert!(path.exists(), "{} not found under {root:?}", rel.display());
         for (line_no, text) in unclassified_raw_scans(&path) {
-            all_violations.push(format!("{rel}:{line_no}: {text}"));
+            all_violations.push(format!("{}:{line_no}: {text}", rel.display()));
         }
     }
     assert!(
