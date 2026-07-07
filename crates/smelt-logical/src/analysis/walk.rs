@@ -228,6 +228,33 @@ impl QueryTree {
     }
 }
 
+impl QueryNode {
+    /// Whether this subtree contains any construct the normalization could
+    /// not model (an `Unsupported` node or FROM item). Consumers that need
+    /// exact whole-tree coverage — rather than fail-closed rejection — use
+    /// this to fall back to their legacy whole-text derivation. Known case:
+    /// the parser does not nest a redundantly-parenthesized derived table
+    /// (`FROM ((SELECT …)) AS t`, the shape function expansion emits), so
+    /// that FROM item normalizes to `Unsupported`.
+    pub(crate) fn has_unsupported(&self) -> bool {
+        match self {
+            QueryNode::Unsupported { .. } => true,
+            QueryNode::Select(sn) => {
+                sn.ctes.iter().any(|c| c.body.has_unsupported())
+                    || sn.inputs.iter().any(|i| match i {
+                        InputItem::Unsupported { .. } => true,
+                        InputItem::Derived { body, .. } => body.has_unsupported(),
+                        InputItem::Table { .. } | InputItem::CteRef { .. } => false,
+                    })
+            }
+            QueryNode::SetOp(so) => {
+                so.ctes.iter().any(|c| c.body.has_unsupported())
+                    || so.branches.iter().any(|b| b.has_unsupported())
+            }
+        }
+    }
+}
+
 /// The set of CTE names visible at a point of the normalization
 /// (lowercased for case-insensitive SQL identifier matching).
 #[derive(Debug, Clone, Default)]
@@ -1098,6 +1125,40 @@ fn collect_scope_region(select: &SelectStmt) -> (Vec<smelt_parser::WindowSpec>, 
     (windows, has_limit)
 }
 
+/// The raw text of one SELECT scope's own region: every token of the scope's
+/// node except the subtrees that are walk nodes of their own — its WITH
+/// clause (CTE bodies), derived-table bodies in FROM, and a direct-child
+/// SELECT (the next set-operation arm). Expression-position subqueries
+/// (`EXISTS (…)`, a scalar subquery) are NOT walk nodes, so their text stays
+/// in the owning scope's region — fail-closed coverage for content the tree
+/// normalization does not model. Join `ON` conditions live in the FROM
+/// clause and are kept (only the derived-table `SUBQUERY` bodies under a
+/// `TABLE_REF` are pruned).
+pub(crate) fn own_region_text(select: &SelectStmt) -> String {
+    use smelt_parser::syntax_kind::SyntaxNode;
+    use smelt_parser::SyntaxKind::{SELECT_STMT, SUBQUERY, TABLE_REF, WITH_CLAUSE};
+
+    fn collect(node: &SyntaxNode, root: &SyntaxNode, out: &mut String) {
+        for element in node.children_with_tokens() {
+            if let Some(token) = element.as_token() {
+                out.push_str(token.text());
+            } else if let Some(child) = element.as_node() {
+                match child.kind() {
+                    WITH_CLAUSE => {}
+                    SELECT_STMT if node == root => {}
+                    SUBQUERY if node.kind() == TABLE_REF => {}
+                    _ => collect(child, root, out),
+                }
+            }
+        }
+    }
+
+    let root = select.syntax();
+    let mut out = String::new();
+    collect(root, root, &mut out);
+    out
+}
+
 /// Convenience entry: every batched-admission violation in a model's SQL,
 /// judged per walk-enumerated scope. `None` when the text has no SELECT
 /// statement at all.
@@ -1300,5 +1361,109 @@ mod tests {
             !e.unsupported.is_empty(),
             "table function in FROM must yield an Unsupported entry"
         );
+    }
+
+    #[test]
+    fn reach_series_adds_parallel_maxes() {
+        use super::super::source_bounds::{
+            derive_model_bounds, BoundContext, BoundResult, Seconds,
+        };
+
+        // Stacked frames across a CTE boundary compose in SERIES: an output
+        // row reads 3d of s7 values, each of which reads 7d of source rows —
+        // true backward reach 10d, not max(7, 3) = 7.
+        let stacked = "WITH seven AS (\
+             SELECT d, SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS s7 \
+             FROM smelt.sources.metrics\
+         ) \
+         SELECT d, MAX(s7) OVER (ORDER BY d RANGE BETWEEN INTERVAL '3 days' PRECEDING AND CURRENT ROW) AS m3 \
+         FROM seven";
+        let ctx = BoundContext::new().with_source("sources.metrics", "d");
+        let bounds = derive_model_bounds(stacked, &ctx);
+        assert_eq!(
+            bounds.get("sources.metrics"),
+            Some(&BoundResult::Bounded {
+                source_partition_col: "d".to_string(),
+                before: Seconds::days(10),
+                after: Seconds::ZERO,
+            }),
+            "stacked frames must series-add (7d + 3d = 10d)"
+        );
+
+        // Set-operation arms are PARALLEL: the source is read independently
+        // by each arm, so the reach is the max across arms, not the sum.
+        let unioned = "SELECT d, SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS x \
+             FROM smelt.sources.metrics \
+             UNION ALL \
+             SELECT d, SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '3 days' PRECEDING AND CURRENT ROW) AS x \
+             FROM smelt.sources.metrics";
+        let bounds = derive_model_bounds(unioned, &ctx);
+        assert_eq!(
+            bounds.get("sources.metrics"),
+            Some(&BoundResult::Bounded {
+                source_partition_col: "d".to_string(),
+                before: Seconds::days(7),
+                after: Seconds::ZERO,
+            }),
+            "set-op arms must parallel-max (max(7d, 3d) = 7d)"
+        );
+
+        // A symbolic (month/year) offset anywhere on the series path is
+        // absorbing: the source's bound is NotDerivable, never approximated.
+        let symbolic = "WITH seven AS (\
+             SELECT d, SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '1 month' PRECEDING AND CURRENT ROW) AS s7 \
+             FROM smelt.sources.metrics\
+         ) \
+         SELECT d, MAX(s7) OVER (ORDER BY d RANGE BETWEEN INTERVAL '3 days' PRECEDING AND CURRENT ROW) AS m3 \
+         FROM seven";
+        let bounds = derive_model_bounds(symbolic, &ctx);
+        assert_eq!(
+            bounds.get("sources.metrics"),
+            Some(&BoundResult::NotDerivable),
+            "a symbolic offset in a series position must absorb to NotDerivable"
+        );
+    }
+
+    #[test]
+    fn chained_join_bands_add_along_path() {
+        use super::super::source_bounds::{
+            derive_model_bounds, BoundContext, BoundResult, Seconds,
+        };
+
+        // Chained interval-join bands: b within 1d of a, c within 2d of b —
+        // source c's reach relative to the run window is 3d. Structurally the
+        // chain nests (the inner hop is a CTE the outer hop joins), so the
+        // series-add composes the bands along the path.
+        let sql = "WITH ab AS (\
+             SELECT b.d AS d, b.v AS v \
+             FROM smelt.sources.a a \
+             JOIN smelt.sources.b b ON b.d >= a.d - INTERVAL '1 day' AND b.d <= a.d\
+         ) \
+         SELECT c.d, c.v \
+         FROM ab \
+         JOIN smelt.sources.c c ON c.d >= ab.d - INTERVAL '2 days' AND c.d <= ab.d";
+        let ctx = BoundContext::new()
+            .with_source("sources.a", "d")
+            .with_source("sources.b", "d")
+            .with_source("sources.c", "d");
+        let bounds = derive_model_bounds(sql, &ctx);
+        assert_eq!(
+            bounds.get("sources.c"),
+            Some(&BoundResult::Bounded {
+                source_partition_col: "d".to_string(),
+                before: Seconds::days(3),
+                after: Seconds::ZERO,
+            }),
+            "the far source's bands must add along the join path (1d + 2d = 3d)"
+        );
+        // The nearer sources stay bounded (the composition may widen them —
+        // a wider scan is sound — but must never lose their bound).
+        for src in ["sources.a", "sources.b"] {
+            assert!(
+                matches!(bounds.get(src), Some(BoundResult::Bounded { .. })),
+                "{src} must stay Bounded; got {:?}",
+                bounds.get(src)
+            );
+        }
     }
 }

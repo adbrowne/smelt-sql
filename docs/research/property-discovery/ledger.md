@@ -1133,3 +1133,70 @@ Block schema:
   (115 passed) and `example_workspaces` (34 passed) green — no example model newly refused.
 - Coverage caveat (design §2.1 N4): deterministic 2-run schedule — the divergence is
   mechanism-level (an unjudged cross-partition scope), not data-dependent.
+
+## SC-4 — stacked bounded `RANGE` frames across CTE layers × widened scan + exact clamp — 2026-07-07
+
+- construct: `refresh: batched` model with a 7-day `RANGE` frame inside a CTE and a 3-day
+  `RANGE` frame over the CTE's output. True backward reach is the SERIES SUM (10 days): an
+  output row reads 3d of inner values, each of which reads 7d of source rows.
+- verdict: **REFUTED = under-widened scan, confirmed and FIXED.** RED: the whole-text bound
+  derivation (`derive_bound_for_source`) max-merged every frame it found → 7d; run 2's source
+  scan `[D−7d, D+1)` excluded a row 10 days back, truncating the inner running sum near the
+  scan edge: maintained `m3(2024-01-11)` = 2 vs full-refresh oracle = 101, silently (the
+  model is admitted — bounded `RANGE INTERVAL` frames are the Form-A exemption). GREEN:
+  `derive_model_bounds` now runs the composition walk — each query-tree node derives reach
+  from its OWN region only, children compose in parallel (`BoundResult::merge`, max) across
+  set-op arms and join inputs, and a node's own reach composes in series (`BoundResult::then`,
+  add) onto every source beneath it. Chained interval-join bands add along the path via a
+  conservative sibling-slack carry (may over-widen a scan, never under-widen). An absorbing
+  region verdict (`Unbounded`/`NotDerivable`) still rejects every context source — the
+  whole-text conservatism is kept for rejections; only the additive arithmetic is per-region.
+- coverage caveats (recorded honestly): (a) a tree the walk cannot fully normalize falls back
+  to the legacy whole-text derivation for every source — the known case is the redundantly-
+  parenthesized derived table function expansion emits (`FROM ((SELECT …)) AS t`), which the
+  parser does not nest (`QueryNode::has_unsupported` gates the fallback); series-add does not
+  apply there, exactly matching pre-fix behaviour. (b) Same-scope chained bands (a→b→c all in
+  ONE FROM clause) still max-merge within the region; chains split across CTE/derived-table
+  layers compose correctly. Both residues tracked in `model_properties.md` §Known Divergences.
+- production files/functions changed: `crates/smelt-logical/src/analysis/source_bounds.rs`
+  (`BoundResult::then`, `ReachTransfer`, `derive_region_reach`, `derive_model_bounds`
+  rerouted through the walk with the fallback above; context keys resolved in both planner
+  (`sources.x`) and runtime (`smelt.sources.x`) forms), `crates/smelt-logical/src/analysis/walk.rs`
+  (`own_region_text` — a node's region minus child walk-node subtrees, expression-position
+  subqueries kept; `QueryNode::has_unsupported`).
+- evidence: `smelt-cli::tests::property_discovery::sc_4_stacked_frames::
+  late_row_inside_summed_reach_is_folded` (owning test; red-then-green through
+  `execute_project`), plus unit mirrors `smelt-logical::analysis::walk::tests::
+  {reach_series_adds_parallel_maxes, chained_join_bands_add_along_path}` (series-add,
+  parallel-max, symbolic-offset absorption, chained-band carry). Full workspace suite,
+  `example_diagnostics` (115), `example_workspaces` (34), `property_discovery` (38) green.
+
+## SC-5 — window frame + declared lateness folded with max × widened scan — 2026-07-07
+
+- construct: a bounded frame (computation-reach) plus declared lateness (`data_latency` on
+  the event-time column), combined by `compute_effective_window` with `max` where the sound
+  composition of two independent quantities is `+`.
+- verdict: **CONFIRMED AT THE SITE, NOT REPRODUCIBLE AT linkC — fixed as a unit-level
+  correction, with a larger finding recorded.** The max-vs-sum site is real
+  (`temporal.rs::compute_effective_window`), but the value it feeds —
+  `IncrementalBatch::{filter_start, filter_end}` — is consumed by **no live execute path**:
+  the runtime's actual scan widening is `inject_source_filters` ← `build_source_bound_map`
+  ← `derive_model_bounds` (per-source `BoundResult`), and the declared lateness never enters
+  that map. In the current write-window model (write window = the requested range only, never
+  extended backward by lateness) lateness scan-widening is not needed for the write window's
+  own correctness: any input row affecting an output in the write window lies within the
+  computation-reach of that window regardless of when it arrived. Lateness only becomes a
+  scan obligation once a lateness-extended write window exists — the unbuilt horizon
+  settled-delay / tail-rewrite transform (`model_transforms.md`). Fixing max→sum at the site
+  keeps the advisory number sound for that future consumer.
+- production files/functions changed: `crates/smelt-logical/src/analysis/temporal.rs`
+  (`compute_effective_window`: `ast_days.max(latency)` → `ast_days.saturating_add(latency)`).
+  Tests that encoded the max (`test_effective_window_ast_wins_over_latency` →
+  `..._ast_plus_latency`, `..._latency_wins_over_ast` → `..._latency_plus_ast`,
+  `windowing_parity::test_multi_source_bound_aware_windows`) updated with the rationale
+  in-place.
+- evidence: `smelt-logical::analysis::temporal::tests::effective_window_sums_lateness_and_reach`
+  (owning unit test, red-then-green). No linkC harness cell lands (the divergence is not
+  reachable through `execute_project` today); the dead-consumer finding
+  (`batch.filter_start/filter_end` unused outside tests) is the actionable residue, tracked
+  with the tail-rewrite transform.

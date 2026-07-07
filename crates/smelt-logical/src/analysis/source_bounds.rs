@@ -229,6 +229,39 @@ impl BoundResult {
     }
 }
 
+impl BoundResult {
+    /// Series composition (`model_properties.md` §"The composition walk"):
+    /// the margins of two sequentially-nested reaches **add** — a stacked
+    /// window frame or a chained join band each widens how far outside the
+    /// run window the source beneath it must be read. `NotDerivable` and
+    /// `Unbounded` are absorbing, in that order of precedence (matching
+    /// [`BoundResult::merge`], the parallel composition).
+    pub fn then(self, other: BoundResult) -> BoundResult {
+        match (self, other) {
+            (BoundResult::NotDerivable, _) | (_, BoundResult::NotDerivable) => {
+                BoundResult::NotDerivable
+            }
+            (BoundResult::Unbounded, _) | (_, BoundResult::Unbounded) => BoundResult::Unbounded,
+            (
+                BoundResult::Bounded {
+                    source_partition_col,
+                    before: b1,
+                    after: a1,
+                },
+                BoundResult::Bounded {
+                    before: b2,
+                    after: a2,
+                    ..
+                },
+            ) => BoundResult::Bounded {
+                source_partition_col,
+                before: Seconds(b1.0.saturating_add(b2.0)),
+                after: Seconds(a1.0.saturating_add(a2.0)),
+            },
+        }
+    }
+}
+
 /// Context for bound derivation: maps source name → its declared partition column.
 /// Sources not present in the map are treated as lookups (no bound derived).
 #[derive(Debug, Default)]
@@ -263,26 +296,267 @@ impl BoundContext {
 /// Returns a map from source name → bound. Only entries for timeseries sources in
 /// `ctx` are produced; lookup sources (not in ctx) are absent from the result.
 pub fn derive_model_bounds(sql: &str, ctx: &BoundContext) -> HashMap<String, BoundResult> {
-    let mut result: HashMap<String, BoundResult> = HashMap::new();
+    // The composition walk (`model_properties.md` §"The composition walk"):
+    // each query-tree node derives reach from its OWN region only, children
+    // compose in parallel (max, `BoundResult::merge`) across set-op arms and
+    // join inputs, and a node's own reach composes in series (add,
+    // `BoundResult::then`) onto every source beneath it — a stacked window
+    // frame or a chained join band widens the sources it reads over, where a
+    // whole-text scan would under-derive them by max-merging.
+    // A tree with any `Unsupported` normalization (e.g. the redundantly-
+    // parenthesized derived table function expansion emits, which the parser
+    // does not nest) keeps the legacy whole-text derivation for every source
+    // — the series composition applies only where the walk models the whole
+    // tree, and never degrades coverage below the flat scan.
+    let mut result: HashMap<String, BoundResult> =
+        match crate::analysis::walk::QueryTree::from_sql(sql) {
+            Some(tree) if !tree.root.has_unsupported() => {
+                crate::analysis::walk::walk(&tree, &ReachTransfer { ctx })
+            }
+            _ => HashMap::new(),
+        };
 
-    // Walk Form A and Form B patterns in the SQL text.
-    // For each source in the context, check whether the SQL contains patterns
-    // that constrain that source's partition column.
-
+    // Fallback: a context source with no FROM leaf in any walk node (e.g.
+    // referenced only inside an expression-position subquery, which is not a
+    // walk node) keeps the whole-text derivation it always had.
     for (source_name, partition_col) in &ctx.source_partition_cols {
-        let bound = derive_bound_for_source(sql, partition_col);
-        if let Some(b) = bound {
-            result
-                .entry(source_name.clone())
-                .and_modify(|existing| {
-                    *existing =
-                        std::mem::replace(existing, BoundResult::Unbounded).merge(b.clone());
-                })
-                .or_insert(b);
+        if !result.contains_key(source_name) {
+            if let Some(b) = derive_bound_for_source(sql, partition_col) {
+                result.insert(source_name.clone(), b);
+            }
         }
     }
 
     result
+}
+
+/// One region's contribution to the series composition: the reach the
+/// region's own frames/bands force, or an absorbing reject.
+enum RegionReach {
+    /// Additive margins (zero when the region has no temporal construct).
+    Reach(Seconds, Seconds),
+    Unbounded,
+    NotDerivable,
+}
+
+/// Derive one region's own reach — the same Form A / Form B extraction and
+/// fail-closed guards as the whole-text derivation, but over a single walk
+/// node's region text, so nesting composes in the walk instead of being
+/// flattened away.
+fn derive_region_reach(region_upper: &str, partition_col: &str) -> RegionReach {
+    if has_unbounded_forward_reach(region_upper) {
+        return RegionReach::Unbounded;
+    }
+    if has_symbolic_interval_in_bound_position(region_upper) {
+        return RegionReach::NotDerivable;
+    }
+
+    let partition_col_upper = partition_col.to_uppercase();
+    let mut accumulated: Option<(Seconds, Seconds)> = None;
+    let contributions = extract_form_a_bounds(region_upper)
+        .into_iter()
+        .chain(extract_form_b_bounds(region_upper, &partition_col_upper));
+    for (before, after) in contributions {
+        // Within one region, contributions are parallel (two window frames
+        // over the same scope input read the same rows): max, not add.
+        accumulated = Some(match accumulated {
+            None => (before, after),
+            Some((b, a)) => (b.max(before), a.max(after)),
+        });
+    }
+
+    match accumulated {
+        Some((before, after)) => RegionReach::Reach(before, after),
+        None => {
+            if has_bare_lag_lead_over(region_upper) {
+                RegionReach::NotDerivable
+            } else if has_unbounded_preceding_range(region_upper) {
+                RegionReach::Unbounded
+            } else {
+                RegionReach::Reach(Seconds::ZERO, Seconds::ZERO)
+            }
+        }
+    }
+}
+
+/// The bound/reach transfer function over the composition walk. Verdict: a
+/// per-source map of [`BoundResult`]s for the sources visible beneath the
+/// node. Leaves start at zero margin; each node's own-region reach
+/// series-adds onto every source under it; parallel children (set-op arms,
+/// join inputs, repeated CTE references) merge with max.
+struct ReachTransfer<'a> {
+    ctx: &'a BoundContext,
+}
+
+impl ReachTransfer<'_> {
+    fn merge_child(out: &mut HashMap<String, BoundResult>, child: &HashMap<String, BoundResult>) {
+        for (source, bound) in child {
+            out.entry(source.clone())
+                .and_modify(|existing| {
+                    *existing =
+                        std::mem::replace(existing, BoundResult::Unbounded).merge(bound.clone());
+                })
+                .or_insert_with(|| bound.clone());
+        }
+    }
+
+    /// Fail-closed verdict for a construct the walk cannot see through: every
+    /// context source is `NotDerivable` (`model_properties.md` §Constraints —
+    /// absence of a proof is a rejection).
+    fn all_not_derivable(&self) -> HashMap<String, BoundResult> {
+        self.ctx
+            .source_partition_cols
+            .keys()
+            .map(|source| (source.clone(), BoundResult::NotDerivable))
+            .collect()
+    }
+}
+
+impl crate::analysis::walk::Transfer for ReachTransfer<'_> {
+    type Verdict = HashMap<String, BoundResult>;
+
+    fn leaf(
+        &self,
+        leaf: &crate::analysis::walk::LeafInput<'_>,
+        _cx: &crate::analysis::walk::NodeCx,
+    ) -> Self::Verdict {
+        // Context keys vary by caller: the planner keys sources by their
+        // segment path (`sources.metrics`), the runtime by the full smelt
+        // reference (`smelt.sources.metrics`). The walk leaf carries the
+        // segment path; resolve either form, and key the verdict by the
+        // CONTEXT's own key so every caller's downstream lookups match.
+        let mut map = HashMap::new();
+        let entry = self
+            .ctx
+            .source_partition_cols
+            .get_key_value(leaf.name)
+            .or_else(|| {
+                self.ctx
+                    .source_partition_cols
+                    .get_key_value(&format!("smelt.{}", leaf.name))
+            });
+        if let Some((ctx_key, partition_col)) = entry {
+            map.insert(
+                ctx_key.clone(),
+                BoundResult::Bounded {
+                    source_partition_col: partition_col.clone(),
+                    before: Seconds::ZERO,
+                    after: Seconds::ZERO,
+                },
+            );
+        }
+        map
+    }
+
+    fn operator(
+        &self,
+        op: &crate::analysis::walk::OpNode<'_>,
+        children: &[Self::Verdict],
+        _cx: &crate::analysis::walk::NodeCx,
+    ) -> Self::Verdict {
+        use crate::analysis::walk::OpNode;
+        match op {
+            OpNode::Unsupported { .. } => self.all_not_derivable(),
+            OpNode::SetOp(so) => {
+                // Arms are parallel reads; CTE-definition children are
+                // skipped — each reference site carries the definition's
+                // verdict already.
+                let mut out = HashMap::new();
+                for child in &children[so.ctes.len()..] {
+                    Self::merge_child(&mut out, child);
+                }
+                out
+            }
+            OpNode::Select(sn) => {
+                // Skip the CTE-definition children — each reference site's
+                // child already carries the definition's verdict, so repeated
+                // references merge in parallel like any other pair of inputs.
+                let input_children = &children[sn.ctes.len()..];
+                let mut out = HashMap::new();
+                for child in input_children {
+                    Self::merge_child(&mut out, child);
+                }
+                if out.is_empty() {
+                    return out;
+                }
+                let region_upper =
+                    crate::analysis::walk::own_region_text(&sn.select).to_uppercase();
+                // Region reach depends only on the partition column; compute
+                // once per distinct column among the sources beneath.
+                let mut per_col: HashMap<&str, RegionReach> = HashMap::new();
+                let sources: Vec<String> = out.keys().cloned().collect();
+                for source in &sources {
+                    let Some(partition_col) = self.ctx.source_partition_cols.get(source) else {
+                        continue;
+                    };
+                    let reach = per_col
+                        .entry(partition_col.as_str())
+                        .or_insert_with(|| derive_region_reach(&region_upper, partition_col));
+                    let addition = match reach {
+                        RegionReach::Reach(before, after) => BoundResult::Bounded {
+                            source_partition_col: partition_col.clone(),
+                            before: *before,
+                            after: *after,
+                        },
+                        // An absorbing construct in this region rejects every
+                        // context source, not just the ones beneath this node
+                        // — the whole-text derivation's conservatism, kept
+                        // deliberately (the region attribution narrows only
+                        // the additive arithmetic, never a rejection).
+                        RegionReach::Unbounded => {
+                            return self
+                                .ctx
+                                .source_partition_cols
+                                .keys()
+                                .map(|s| (s.clone(), BoundResult::Unbounded))
+                                .collect();
+                        }
+                        RegionReach::NotDerivable => return self.all_not_derivable(),
+                    };
+                    // A nonzero own-region reach is a temporal tie across this
+                    // node's inputs (a band or frame over the joined rows).
+                    // A source constrained relative to a sibling input's
+                    // column inherits that sibling's own accumulated slack —
+                    // chained join bands add along the path. The sibling
+                    // resolution is conservative (max slack over the inputs
+                    // that do not carry this source): it may over-widen a
+                    // scan, never under-widen it.
+                    let is_zero = matches!(
+                        addition,
+                        BoundResult::Bounded { before, after, .. }
+                            if before == Seconds::ZERO && after == Seconds::ZERO
+                    );
+                    let sibling = if is_zero || input_children.len() < 2 {
+                        (Seconds::ZERO, Seconds::ZERO)
+                    } else {
+                        let mut max_before = Seconds::ZERO;
+                        let mut max_after = Seconds::ZERO;
+                        for child in input_children {
+                            if child.contains_key(source) {
+                                continue;
+                            }
+                            for bound in child.values() {
+                                if let BoundResult::Bounded { before, after, .. } = bound {
+                                    max_before = max_before.max(*before);
+                                    max_after = max_after.max(*after);
+                                }
+                            }
+                        }
+                        (max_before, max_after)
+                    };
+                    let addition = addition.then(BoundResult::Bounded {
+                        source_partition_col: partition_col.clone(),
+                        before: sibling.0,
+                        after: sibling.1,
+                    });
+                    if let Some(bound) = out.get_mut(source) {
+                        *bound = std::mem::replace(bound, BoundResult::Unbounded).then(addition);
+                    }
+                }
+                out
+            }
+        }
+    }
 }
 
 /// The single bound-derivation orchestration entry point: derive every

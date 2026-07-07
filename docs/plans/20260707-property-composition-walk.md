@@ -63,9 +63,9 @@ You are executing this plan from the start of a new session. Your job is to driv
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | 4424b2fc | 2026-07-07 |
-| 2     | done     |        | 2026-07-07 |
-| 3     | pending  |        |      |
-| 4     | pending  |        |      |
+| 2     | done     | a121cce8 | 2026-07-07 |
+| 3     | done     |        | 2026-07-07 |
+| 4     | done     |        | 2026-07-07 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
@@ -278,6 +278,22 @@ You are executing this plan from the start of a new session. Your job is to driv
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Parser: redundantly-parenthesized derived tables are not nested** (`FROM ((SELECT …)) AS t`,
+  the shape `expand_function_calls` emits): the `TABLE_REF` parses childless and the inner
+  `SELECT_STMT` surfaces as an error-recovery sibling, so the walk normalizes it to
+  `Unsupported`. `derive_model_bounds` falls back to the whole-text scan for such trees
+  (`QueryNode::has_unsupported`); fixing the parser would let expanded-function models get
+  series-composed reach too. (Phase 3)
+- **Same-scope chained join bands** (a→b→c written in one FROM clause) still max-merge within
+  their region; only chains split across CTE/derived-table layers series-add. Full same-scope
+  chaining needs alias-resolved band endpoints (lhs/rhs column identity) in the extraction.
+  (Phase 3)
+- **Declared lateness is inert in the live scan path**: `IncrementalBatch::filter_start/filter_end`
+  (the only lateness-widened values) are consumed by no execute path, and under the current
+  write-window model lateness widening is not a correctness obligation. Wire lateness into the
+  scan when the horizon settled-delay / tail-rewrite transform lands (`model_transforms.md`).
+  (Phase 4 / SC-5 finding)
 
 ## Verification
 

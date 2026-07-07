@@ -794,3 +794,48 @@ JOIN user_tiers t ON e.user_id = t.user_id
 //    ModelShape; keep them here so the tested scope stays in one file. ──
 //
 // G-10  join fan-out on a COMPOSITE unique key · append-only.
+
+/// `SC-4`: **stacked bounded `RANGE` frames across CTE layers**
+/// (`docs/research/20260707-property-bounded-reach.md` §5/§7, catalog cell
+/// `SC-4`). The inner CTE computes a 7-day running sum; the outer scope takes
+/// a 3-day running max OVER the CTE's output. The true backward reach is the
+/// SERIES SUM (10 days): an output row at day D reads s7 values from days
+/// D−3..D, and each s7 value at day E reads source rows from days E−7..E.
+/// A whole-text scan that max-merges the two frames derives 7 days and
+/// under-widens the source scan.
+pub fn stacked_range_frames() -> ModelShape {
+    ModelShape {
+        name: "metrics_stacked",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: batched
+batched:
+  unique_key: [d]
+---
+WITH seven AS (
+    SELECT
+        d,
+        SUM(v) OVER (ORDER BY d RANGE BETWEEN INTERVAL '7 days' PRECEDING AND CURRENT ROW) AS s7
+    FROM smelt.sources.metrics
+)
+SELECT
+    d,
+    MAX(s7) OVER (ORDER BY d RANGE BETWEEN INTERVAL '3 days' PRECEDING AND CURRENT ROW) AS m3
+FROM seven
+"#,
+        source: "metrics",
+        source_columns: &[
+            SourceColumn {
+                name: "d",
+                ty: "DATE",
+            },
+            SourceColumn {
+                name: "v",
+                ty: "DOUBLE",
+            },
+        ],
+    }
+}

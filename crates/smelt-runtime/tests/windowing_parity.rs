@@ -47,7 +47,9 @@ fn no_dep_timeseries() -> HashMap<String, (Vec<String>, String)> {
 fn test_multi_source_bound_aware_windows() {
     // A model with a LAG dependency (3-period lookback) and additional data
     // latency produces correct (partition_start, partition_end, filter_start, filter_end)
-    // shapes. The filter widens by max(SQL-lookback, data_latency_days).
+    // shapes. Lateness and computation-reach are independent quantities, so
+    // the filter widens by their SUM (a max here encoded the truncated-frame
+    // bug — catalog cell SC-5).
     let sql = "SELECT date_trunc('day', event_time) as d, \
                LAG(amount, 3) OVER (ORDER BY d) as prev \
                FROM events";
@@ -55,7 +57,7 @@ fn test_multi_source_bound_aware_windows() {
     let inc = make_inc();
     let range = make_range("2026-03-20", "2026-03-22");
 
-    // data_latency_days=2; SQL has 3-period lookback; max=3
+    // data_latency_days=2; SQL has 3-period lookback; sum=5
     let windows =
         compute_incremental_windows(&ts, &inc, sql, &no_dep_timeseries(), 2, &range, None, false)
             .unwrap();
@@ -65,8 +67,8 @@ fn test_multi_source_bound_aware_windows() {
     let b = &windows.batches[0];
     assert_eq!(b.partition_start.to_string(), "2026-03-20");
     assert_eq!(b.partition_end.to_string(), "2026-03-22");
-    // max(3, 2) = 3 days lookback → filter_start = 2026-03-17
-    assert_eq!(b.filter_start.to_string(), "2026-03-17");
+    // 3 + 2 = 5 days lookback → filter_start = 2026-03-15
+    assert_eq!(b.filter_start.to_string(), "2026-03-15");
     assert_eq!(b.filter_end.to_string(), "2026-03-22");
 }
 
