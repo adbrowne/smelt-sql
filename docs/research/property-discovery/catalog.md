@@ -31,6 +31,13 @@ start a property cell while a `P0` cell it depends on is still `pending`.
 | G-08 | running total (ROWS UNBOUNDED PRECEDING) | append-only, late row | fold end-state / stored trajectory | linkC | CONDITIONAL (as-of-run) for the trajectory grain |
 | G-09 | `UNION ALL` | append-only both arms | recompute-region | linkC | HOLDS — bound derivation composes across arms |
 | G-10 | join fan-out on **composite** unique key | append-only | column re-derivation | linkB | `join_shape` single-column-only → mislabeled fan-out |
+| **SC-3** | `MAX(ts)` as event_time + `assert_monotonic` | append-only, late row moves a group's MAX into window | window-forward pushdown | linkC | aggregate clock hits the *Undecidable* arm the declaration may widen → unsound admission → **REFUTED = bug** (B1, `20260707-property-event-time-monotonicity.md`) |
+| **SC-4** | stacked window frames across CTEs (7d inner, 3d outer) | append-only, late row 8–10d back | widened scan + clamp | linkC | `BoundResult::merge` uses **max** where series composition needs **add** (true reach 10d, derived 7d) → **REFUTED = bug** (B2, `20260707-property-bounded-reach.md`) |
+| **SC-5** | window frame + declared `source_lateness` | append-only, late row inside lateness+reach but outside max | widened scan + clamp | linkC | `compute_effective_window` folds lateness/reach with **max** not **sum** → truncated frame → **REFUTED = bug** (B3, same doc) |
+| **SC-6** | declared FD over `UNION ALL` (same key, different value per branch) | append-only both arms | once-write / FD admission | linkB | `FunctionalDependency.key` parsed but never read; no union analysis → declaration widens unsoundly (B4, `20260707-property-per-key-constancy.md`) |
+| **SC-7** | unaligned `DISTINCT`/`HAVING` **inside a CTE body** | append-only, late row | batched admission + partition rewrite | linkC | CTE bodies exempt from the admission walks — judged by nobody → fail-**open** admission hole (B5, `20260707-property-partition-alignment.md`) |
+| **SC-8** | `BIT_XOR` combiner classification | mutable (retraction schedule) | fold-delta with retraction | linkB | `discriminants.rs` says `needs_inverse: true`, spec rung 3 says self-inverse group — spec/code drift (B6, `20260707-property-aggregate-algebra.md`) |
+| **SC-9** | UDF/opaque function in a skeleton position | append-only | determinism taint gate | linkB | unknown functions default **deterministic** outside the event-time trace → fail-open taint gate → mis-addressed replay (B7, `20260707-property-determinism.md`) |
 
 Verdicts land in `ledger.md`; every REFUTED/CONDITIONAL also lands one line in `unsupported.md`
 (the admission-matrix negative space).
