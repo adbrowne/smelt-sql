@@ -15,6 +15,7 @@
 //! cannot resolve), never substitute for F6's positive proof of variance.
 
 use crate::analysis::join_shape::Cardinality;
+use crate::analysis::walk::PropertyVector;
 
 /// The verdict of composing a functional-dependency declaration with F6's
 /// fan-out proof for the `determines` column's origin.
@@ -71,9 +72,148 @@ pub fn functional_dependency_verdict(
     }
 }
 
+/// Compose a declared `key → determines` functional dependency with the
+/// model's whole-model [`PropertyVector`] (the walk-derived grain, FD, and
+/// structural facts). This is the key-aware verdict that reads the declared
+/// `key` columns — closing the "parsed but never read" gap
+/// (`20260707-property-per-key-constancy.md` §7 gap 5a) and the FD-over-union
+/// widening bug (§3.8, catalog cell SC-6):
+///
+/// - the declaration is **consulted against the model's columns** — a `key`
+///   (or `determines`) column the model does not project cannot be widened
+///   (`NotProven`);
+/// - a proven grain key that is a subset of the declared `key` already
+///   establishes the FD by construction (`Constant`, no declaration needed —
+///   the `GROUP BY`/`DISTINCT`/discriminated-union factory);
+/// - a `determines` column crossing a proven fan-out join, or an
+///   undiscriminated set operation whose branches are not proven key-disjoint,
+///   is a **structural disproof** the declaration cannot override (`Refused`);
+/// - only a genuinely undecidable single-branch origin is widened by the
+///   declaration (`Constant` when declared, else `NotProven`).
+pub fn functional_dependency_verdict_over_vector(
+    key: &[String],
+    determines: &str,
+    vector: &PropertyVector,
+    declared: bool,
+) -> FunctionalDependencyVerdict {
+    // Consult the declaration against what the model actually produces. A
+    // determined or key column absent from the output relation is a
+    // declaration the analysis cannot honour — never widened.
+    if !vector
+        .columns
+        .iter()
+        .any(|c| c.eq_ignore_ascii_case(determines))
+    {
+        return FunctionalDependencyVerdict::NotProven;
+    }
+    if !key
+        .iter()
+        .all(|k| vector.columns.iter().any(|c| c.eq_ignore_ascii_case(k)))
+    {
+        return FunctionalDependencyVerdict::NotProven;
+    }
+
+    // Query-derived: a proven key that is a subset of the declared key
+    // determines every output column — the FD holds by construction.
+    let declared_key: std::collections::BTreeSet<String> =
+        key.iter().map(|c| c.to_ascii_lowercase()).collect();
+    if vector.grain.has_subset_key(&declared_key) {
+        return FunctionalDependencyVerdict::Constant;
+    }
+
+    // Structural disproofs the declaration cannot override.
+    if vector.has_fan_out_join {
+        return FunctionalDependencyVerdict::Refused(
+            "the determined column is sourced from a join proven to fan out (OneToMany); a \
+             declared functional dependency cannot substitute for that proof of per-key variance"
+                .to_string(),
+        );
+    }
+    if vector.has_set_op_barrier {
+        return FunctionalDependencyVerdict::Refused(
+            "the determined column crosses a UNION ALL / set operation whose branches are not \
+             proven key-disjoint (no literal discriminator covering the declared key); an FD \
+             holding in each branch does not hold in the union, so a declared functional \
+             dependency cannot be assumed to survive it"
+                .to_string(),
+        );
+    }
+
+    // Genuinely undecidable single-branch origin — the case a declaration
+    // widens.
+    if declared {
+        FunctionalDependencyVerdict::Constant
+    } else {
+        FunctionalDependencyVerdict::NotProven
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::analysis::join_shape::JoinContext;
+    use crate::analysis::walk::model_property_vector;
+
+    /// The declared `key` field is consulted (previously parsed but never
+    /// read): a declaration whose key column the model does not produce is not
+    /// widened, whereas a plausible single-branch declaration still is.
+    #[test]
+    fn fd_key_field_is_consulted() {
+        let vector = model_property_vector(
+            "SELECT customer_id, region FROM orders",
+            &JoinContext::new(),
+        )
+        .expect("parses");
+
+        // A declared key column absent from the model must not widen.
+        let bogus = functional_dependency_verdict_over_vector(
+            &["not_a_real_column".to_string()],
+            "region",
+            &vector,
+            true,
+        );
+        assert!(
+            !bogus.is_constant(),
+            "a declared key absent from the model must not widen to Constant; got {bogus:?}"
+        );
+
+        // A plausible single-branch declaration (key projected, undecidable
+        // origin) still widens.
+        let plausible = functional_dependency_verdict_over_vector(
+            &["customer_id".to_string()],
+            "region",
+            &vector,
+            true,
+        );
+        assert!(
+            plausible.is_constant(),
+            "a plausible single-branch declaration still widens; got {plausible:?}"
+        );
+    }
+
+    /// SC-6 at the unit layer: a declared FD over a bare `UNION ALL` body is a
+    /// structural disproof, not a widenable undecidable origin.
+    #[test]
+    fn declared_fd_over_union_all_does_not_widen() {
+        let vector = model_property_vector(
+            "SELECT customer_id, region FROM crm_a \
+             UNION ALL \
+             SELECT customer_id, region FROM crm_b",
+            &JoinContext::new(),
+        )
+        .expect("parses");
+
+        let verdict = functional_dependency_verdict_over_vector(
+            &["customer_id".to_string()],
+            "region",
+            &vector,
+            true,
+        );
+        assert!(
+            !verdict.is_constant(),
+            "a declared FD over a bare UNION ALL must not widen to Constant; got {verdict:?}"
+        );
+    }
 
     #[test]
     fn undeclared_and_unproven_stays_not_proven() {

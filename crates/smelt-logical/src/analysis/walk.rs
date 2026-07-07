@@ -26,7 +26,7 @@ use std::collections::BTreeMap;
 
 use smelt_parser::{ColumnRef, SelectStmt};
 
-use super::{item_expr, resolve_scope_group_by, select_stmt_items};
+use super::{item_alias, item_expr, resolve_scope_group_by, select_stmt_items, SelectItemKind};
 
 /// One segment of a node's nesting path, from the model's top scope down.
 /// The top scope itself has an empty path.
@@ -1170,6 +1170,585 @@ pub fn batched_admission_violations(
     Some(walk(&tree, &BatchedAdmission { partition_col }))
 }
 
+// ===== The model property vector: grain, FDs, discriminants, determinism =====
+
+use crate::analysis::discriminants::{combiner_discriminants, Discriminants};
+use crate::analysis::join_shape::{fan_out, Cardinality, JoinContext};
+use crate::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
+
+/// One proven key of a relation: a set of output-column names that together
+/// uniquely identify a row. The empty grain (no keys) is the fail-closed
+/// default — an unkeyed relation is `OneToMany`.
+pub type KeySet = Vec<String>;
+
+/// The proven grain of a relation node — the keys the walk can establish from
+/// query structure (a `GROUP BY` factory key, a `DISTINCT` whole-row key, a
+/// discriminated-union key). Empty ⇒ no key proven ⇒ `OneToMany` (fail-closed;
+/// grain is never optimistically assumed, `model_properties.md` §Constraints).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Grain {
+    /// Column sets each of which uniquely identifies an output row.
+    pub keys: Vec<KeySet>,
+}
+
+impl Grain {
+    /// The fail-closed grain: no key proven.
+    pub fn unkeyed() -> Self {
+        Grain { keys: Vec::new() }
+    }
+
+    /// Whether some proven key is a subset of `candidate` (augmentation: a
+    /// superkey of a key is itself a key, so it determines every column).
+    pub fn has_subset_key(&self, candidate: &std::collections::BTreeSet<String>) -> bool {
+        self.keys.iter().any(|k| {
+            k.iter()
+                .all(|c| candidate.contains(&c.to_ascii_lowercase()))
+        })
+    }
+}
+
+/// A functional dependency derived by the walk from query structure:
+/// `key → determines` (output-column names in the node's own scope). An empty
+/// `key` is the constant-column FD (`∅ → c` for a literal column).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct DerivedFd {
+    pub key: KeySet,
+    pub determines: String,
+}
+
+/// Determinism level of a projected column — the lattice `Clean < Run < Row`
+/// (`model_properties.md` §"Determinism (run vs row) and the nondeterminism
+/// predicate"). A columnar union takes the per-position lub (`clean ∪ clean =
+/// clean`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Determinism {
+    /// Deterministic every run (a plain column, a deterministic expression).
+    Clean,
+    /// One value per run (`NOW`, `CURRENT_DATE`) — a per-run constant.
+    Run,
+    /// A fresh value per row (`RANDOM`, `UUID`) — unpinnable.
+    Row,
+}
+
+/// Per-column determinism fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDeterminism {
+    pub output: String,
+    pub level: Determinism,
+}
+
+/// Per-column algebraic discriminants of an aggregate output column (the
+/// combiner classifier applied at the aggregate's defining scope).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnDiscriminant {
+    pub output: String,
+    pub discriminants: Discriminants,
+}
+
+/// The whole-model property vector — one derivation every current and future
+/// consumer reads (`model_properties.md` §"The composition walk"). Grain,
+/// functional dependencies, per-column discriminants, and the determinism
+/// predicate are folded bottom-up by [`PropertyTransfer`]; the fields are the
+/// four fact families, all fail-closed by default.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct PropertyVector {
+    /// Output columns of this node, in projection order.
+    pub columns: Vec<String>,
+    /// The proven grain (keys). Empty ⇒ unkeyed.
+    pub grain: Grain,
+    /// Query-derived functional dependencies (from grain + literal columns).
+    pub fds: Vec<DerivedFd>,
+    /// Per-column determinism.
+    pub determinism: Vec<ColumnDeterminism>,
+    /// Per-column aggregate discriminants (aggregate outputs only).
+    pub discriminants: Vec<ColumnDiscriminant>,
+    /// Output columns that are constant literals here, name → literal text.
+    pub literal_columns: Vec<(String, String)>,
+    /// Whether an output column crosses a set operation (`UNION`/`INTERSECT`/
+    /// `EXCEPT`) whose branches are not proven key-disjoint — a structural
+    /// barrier for FD survival (`20260707-property-per-key-constancy.md` §3.8).
+    pub has_set_op_barrier: bool,
+    /// Whether an input join proves `OneToMany` (row-multiplying) — a
+    /// structural disproof of per-key constancy for probe-side FDs.
+    pub has_fan_out_join: bool,
+}
+
+impl PropertyVector {
+    /// The FD set implied by grain and literal columns: every proven key
+    /// determines every other output column, and every literal column is
+    /// `∅ → c`.
+    fn fds_from_facts(&self) -> Vec<DerivedFd> {
+        let mut out = Vec::new();
+        for key in &self.grain.keys {
+            let key_lower: std::collections::BTreeSet<String> =
+                key.iter().map(|c| c.to_ascii_lowercase()).collect();
+            for c in &self.columns {
+                if !key_lower.contains(&c.to_ascii_lowercase()) {
+                    out.push(DerivedFd {
+                        key: key.clone(),
+                        determines: c.clone(),
+                    });
+                }
+            }
+        }
+        for (name, _lit) in &self.literal_columns {
+            out.push(DerivedFd {
+                key: Vec::new(),
+                determines: name.clone(),
+            });
+        }
+        out
+    }
+}
+
+/// The property-vector transfer function: grain / FD / discriminant /
+/// determinism folded together over the walk (`model_properties.md` §"The
+/// composition walk"). Leaf-level classifiers (the join-fan-out proof, the
+/// aggregate discriminant classifier, the nondeterminism predicate) are the
+/// existing pure functions, invoked per node; the operator rules apply the
+/// per-construct transfer rules of `20260707-property-per-key-constancy.md`
+/// §§3–5 (the `GROUP BY`/`DISTINCT` factory; undiscriminated-union barrier;
+/// discriminated-union key survival).
+pub struct PropertyTransfer<'a> {
+    pub ctx: &'a JoinContext,
+}
+
+impl PropertyTransfer<'_> {
+    /// Map this scope's `GROUP BY` keys to their output-column names. Returns
+    /// `None` (fail-closed ⇒ unkeyed) when any grouping key is not a projected
+    /// output column (grouped by a non-projected expression), since such a key
+    /// cannot be named on the output relation.
+    fn group_by_output_keys(&self, sn: &SelectNode) -> Option<Vec<String>> {
+        let items = select_stmt_items(&sn.select)?;
+        let gb_keys = resolve_scope_group_by(&sn.select, &items);
+        if gb_keys.is_empty() {
+            return None;
+        }
+        let mut out = Vec::with_capacity(gb_keys.len());
+        for key in &gb_keys {
+            let named = items.iter().find_map(|item| {
+                if item_expr(item).text().trim() == key {
+                    let alias = item_alias(item);
+                    Some(if alias.is_empty() {
+                        key.clone()
+                    } else {
+                        alias.to_string()
+                    })
+                } else {
+                    None
+                }
+            });
+            out.push(named?);
+        }
+        Some(out)
+    }
+
+    /// Per-column determinism of one SELECT scope, reducing plain column refs
+    /// through CTE/derived inputs where the input's own determinism is known.
+    fn scope_determinism(
+        &self,
+        sn: &SelectNode,
+        cx: &NodeCx,
+        input_props: &BTreeMap<String, &PropertyVector>,
+    ) -> Vec<ColumnDeterminism> {
+        let Some(select_list) = sn.select.select_list() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in select_list.items() {
+            if item.is_wildcard() {
+                continue;
+            }
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            let output = item
+                .column_name()
+                .unwrap_or_else(|| expr.text().trim().to_string());
+            let mut level = expr_determinism(&expr);
+            // Reduce a plain column reference through a CTE/derived input.
+            if let Some(col_ref) = smelt_parser::ColumnRef::from_expr(&expr) {
+                if let Some(source) = resolve_alias_source(cx, col_ref.qualifier()) {
+                    if let Some(inner) = input_props.get(&source) {
+                        if let Some(d) = inner
+                            .determinism
+                            .iter()
+                            .find(|d| d.output.eq_ignore_ascii_case(col_ref.name()))
+                        {
+                            level = level.max(d.level);
+                        }
+                    }
+                }
+            }
+            out.push(ColumnDeterminism { output, level });
+        }
+        out
+    }
+
+    /// Per-column aggregate discriminants of one SELECT scope.
+    fn scope_discriminants(&self, sn: &SelectNode) -> Vec<ColumnDiscriminant> {
+        let Some(items) = select_stmt_items(&sn.select) else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in &items {
+            let (name, distinct, alias) = match item {
+                SelectItemKind::CountDistinct { alias, .. } => {
+                    (Some("COUNT".to_string()), true, alias.clone())
+                }
+                SelectItemKind::OtherAggregate { expr, alias, .. } => (
+                    expr.as_function_call().and_then(|f| f.name()),
+                    false,
+                    alias.clone(),
+                ),
+                SelectItemKind::GroupByKey { .. } => continue,
+            };
+            let Some(name) = name else { continue };
+            let Some(func) = smelt_types::SqlFunction::from_name(&name.to_uppercase()) else {
+                continue;
+            };
+            if alias.is_empty() {
+                continue;
+            }
+            out.push(ColumnDiscriminant {
+                output: alias,
+                discriminants: combiner_discriminants(func, distinct),
+            });
+        }
+        out
+    }
+
+    /// The constant-literal output columns of one SELECT scope, name → text.
+    fn scope_literals(&self, sn: &SelectNode) -> Vec<(String, String)> {
+        let Some(select_list) = sn.select.select_list() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in select_list.items() {
+            if item.is_wildcard() {
+                continue;
+            }
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            if !is_constant_literal(&expr) {
+                continue;
+            }
+            let output = item
+                .column_name()
+                .unwrap_or_else(|| expr.text().trim().to_string());
+            out.push((output, expr.text().trim().to_string()));
+        }
+        out
+    }
+
+    /// Whether any join in this scope's FROM clause proves `OneToMany`.
+    fn scope_has_fan_out(&self, sn: &SelectNode) -> bool {
+        let Some(from) = sn.select.from_clause() else {
+            return false;
+        };
+        let joins: Vec<_> = from.joins().collect();
+        joins
+            .iter()
+            .any(|join| fan_out(join, self.ctx) == Cardinality::OneToMany)
+    }
+}
+
+impl Transfer for PropertyTransfer<'_> {
+    type Verdict = PropertyVector;
+
+    fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) -> PropertyVector {
+        // A base relation contributes no projections of its own; grain is
+        // established by the consuming scope's own operators (fail-closed:
+        // no key is assumed for a bare table).
+        PropertyVector::default()
+    }
+
+    fn operator(
+        &self,
+        op: &OpNode<'_>,
+        children: &[PropertyVector],
+        cx: &NodeCx,
+    ) -> PropertyVector {
+        match op {
+            OpNode::Unsupported { .. } => PropertyVector::default(),
+            OpNode::Select(sn) => {
+                let columns: Vec<String> = cx.columns.iter().map(|c| c.output.clone()).collect();
+
+                // Input verdicts keyed like the walk's alias map, for
+                // determinism reduction through CTE / derived-table inputs.
+                let mut input_props: BTreeMap<String, &PropertyVector> = BTreeMap::new();
+                let mut input_barrier = false;
+                for (input, child) in sn.inputs.iter().zip(&children[sn.ctes.len()..]) {
+                    input_barrier |= child.has_set_op_barrier;
+                    match input {
+                        InputItem::CteRef { name, alias } => {
+                            let key = alias.as_deref().unwrap_or(name).to_ascii_lowercase();
+                            input_props.insert(key, child);
+                        }
+                        InputItem::Derived {
+                            alias: Some(alias), ..
+                        } => {
+                            input_props.insert(alias.to_ascii_lowercase(), child);
+                        }
+                        _ => {}
+                    }
+                }
+
+                let has_fan_out_join = self.scope_has_fan_out(sn);
+                let literal_columns = self.scope_literals(sn);
+
+                // Grain: DISTINCT ⇒ whole projected row; GROUP BY ⇒ factory
+                // key on the grouping columns; otherwise fail-closed unkeyed
+                // (a plain scan or an unproven join establishes no key).
+                let grain = if sn.select.is_distinct() && !columns.is_empty() {
+                    Grain {
+                        keys: vec![columns.clone()],
+                    }
+                } else if let Some(key) = self.group_by_output_keys(sn) {
+                    Grain { keys: vec![key] }
+                } else {
+                    Grain::unkeyed()
+                };
+
+                let determinism = self.scope_determinism(sn, cx, &input_props);
+                let discriminants = self.scope_discriminants(sn);
+
+                let mut vector = PropertyVector {
+                    columns,
+                    grain,
+                    fds: Vec::new(),
+                    determinism,
+                    discriminants,
+                    literal_columns,
+                    has_set_op_barrier: input_barrier,
+                    has_fan_out_join,
+                };
+                vector.fds = vector.fds_from_facts();
+                vector
+            }
+            OpNode::SetOp(so) => {
+                let branches = &children[so.ctes.len()..];
+                let is_union_all = so.ops.iter().all(|o| *o == SetOpKind::UnionAll);
+
+                // Output columns and names come from the first arm.
+                let columns = branches
+                    .first()
+                    .map(|b| b.columns.clone())
+                    .unwrap_or_default();
+
+                // Determinism: per output position, the lub across arms.
+                let determinism = union_determinism(branches);
+
+                // Grain survival: only the discriminated-union case keeps a
+                // key. A literal-discriminator column (a distinct constant per
+                // arm) added to a key shared by every arm makes the arms
+                // provably key-disjoint (§3.8 survival case 1).
+                let grain = if is_union_all {
+                    union_discriminated_grain(branches)
+                } else {
+                    Grain::unkeyed()
+                };
+
+                let mut vector = PropertyVector {
+                    columns,
+                    grain,
+                    fds: Vec::new(),
+                    determinism,
+                    discriminants: Vec::new(),
+                    literal_columns: Vec::new(),
+                    // A set operation is always an FD barrier for any key it
+                    // does not itself preserve as grain.
+                    has_set_op_barrier: true,
+                    has_fan_out_join: branches.iter().any(|b| b.has_fan_out_join),
+                };
+                vector.fds = vector.fds_from_facts();
+                vector
+            }
+        }
+    }
+}
+
+/// Resolve `qualifier` (or the sole input when unqualified) to its lowercased
+/// alias key in `cx.aliases`.
+fn resolve_alias_source(cx: &NodeCx, qualifier: Option<&str>) -> Option<String> {
+    match qualifier {
+        Some(q) => {
+            let key = q.to_ascii_lowercase();
+            cx.aliases.contains_key(&key).then_some(key)
+        }
+        None if cx.aliases.len() == 1 => cx.aliases.keys().next().cloned(),
+        None => None,
+    }
+}
+
+/// The per-position determinism lub across set-operation arms — `clean ∪ clean
+/// = clean`, escalating to the strongest arm otherwise.
+fn union_determinism(branches: &[PropertyVector]) -> Vec<ColumnDeterminism> {
+    let Some(first) = branches.first() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(first.determinism.len());
+    for (i, col) in first.determinism.iter().enumerate() {
+        let mut level = col.level;
+        for other in &branches[1..] {
+            if let Some(o) = other.determinism.get(i) {
+                level = level.max(o.level);
+            }
+        }
+        out.push(ColumnDeterminism {
+            output: col.output.clone(),
+            level,
+        });
+    }
+    out
+}
+
+/// The grain surviving a `UNION ALL`: unkeyed unless a literal discriminator
+/// (a distinct constant column per arm, by position) exists and every arm
+/// shares a key — then the discriminator column joins that key
+/// (`20260707-property-per-key-constancy.md` §3.8 survival case 1).
+fn union_discriminated_grain(branches: &[PropertyVector]) -> Grain {
+    if branches.len() < 2 {
+        return branches
+            .first()
+            .map(|b| b.grain.clone())
+            .unwrap_or_default();
+    }
+    // Find a discriminator: an output-column position that is a distinct
+    // constant literal in every arm.
+    let width = branches[0].columns.len();
+    let mut discriminator: Option<String> = None;
+    for pos in 0..width {
+        let mut lits: Vec<String> = Vec::with_capacity(branches.len());
+        let mut all_literal = true;
+        for b in branches {
+            let Some(name) = b.columns.get(pos) else {
+                all_literal = false;
+                break;
+            };
+            match b
+                .literal_columns
+                .iter()
+                .find(|(n, _)| n.eq_ignore_ascii_case(name))
+            {
+                Some((_, lit)) => lits.push(lit.clone()),
+                None => {
+                    all_literal = false;
+                    break;
+                }
+            }
+        }
+        if !all_literal {
+            continue;
+        }
+        // Pairwise-distinct literal values ⇒ the arms cannot collide on it.
+        let distinct: std::collections::BTreeSet<&String> = lits.iter().collect();
+        if distinct.len() == branches.len() {
+            discriminator = branches[0].columns.get(pos).cloned();
+            break;
+        }
+    }
+    let Some(disc) = discriminator else {
+        return Grain::unkeyed();
+    };
+
+    // The keys shared (as name-sets) by every arm.
+    let shared: Vec<KeySet> = branches[0]
+        .grain
+        .keys
+        .iter()
+        .filter(|k| {
+            let ks: std::collections::BTreeSet<String> =
+                k.iter().map(|c| c.to_ascii_lowercase()).collect();
+            branches[1..].iter().all(|b| {
+                b.grain.keys.iter().any(|k2| {
+                    let k2s: std::collections::BTreeSet<String> =
+                        k2.iter().map(|c| c.to_ascii_lowercase()).collect();
+                    k2s == ks
+                })
+            })
+        })
+        .cloned()
+        .collect();
+
+    let keys = shared
+        .into_iter()
+        .map(|mut k| {
+            if !k.iter().any(|c| c.eq_ignore_ascii_case(&disc)) {
+                k.push(disc.clone());
+            }
+            k.sort();
+            k
+        })
+        .collect::<Vec<_>>();
+    Grain { keys }
+}
+
+/// The determinism of an expression from the nondeterminism predicate over
+/// every function call it contains — the fail-closed leaf classifier
+/// (`monotonicity::classify_function_determinism`).
+fn expr_determinism(expr: &smelt_parser::Expr) -> Determinism {
+    let mut level = Determinism::Clean;
+    for node in expr.syntax().descendants() {
+        if node.kind() != smelt_parser::SyntaxKind::FUNCTION_CALL {
+            continue;
+        }
+        let Some(func) = smelt_parser::FunctionCall::cast(node) else {
+            continue;
+        };
+        let Some(name) = func.name() else { continue };
+        let contrib = match classify_function_determinism(&name) {
+            FunctionDeterminism::RowNondeterministic => Determinism::Row,
+            FunctionDeterminism::RunDeterministic => Determinism::Run,
+            FunctionDeterminism::Neither => Determinism::Clean,
+        };
+        level = level.max(contrib);
+    }
+    level
+}
+
+/// Whether `expr` is a constant literal — a string/number literal with no
+/// column reference or function call (a discriminator/tag candidate).
+fn is_constant_literal(expr: &smelt_parser::Expr) -> bool {
+    if smelt_parser::ColumnRef::from_expr(expr).is_some() {
+        return false;
+    }
+    use smelt_parser::SyntaxKind::{FUNCTION_CALL, IDENT, NUMBER, STRING};
+    let mut saw_literal = false;
+    for element in expr.syntax().descendants_with_tokens() {
+        if let Some(n) = element.as_node() {
+            if n.kind() == FUNCTION_CALL {
+                return false;
+            }
+        } else if let Some(t) = element.as_token() {
+            match t.kind() {
+                STRING | NUMBER => saw_literal = true,
+                // A bare identifier that is not a type keyword (DATE '…') is a
+                // column reference, not a constant.
+                IDENT => {
+                    let up = t.text().to_ascii_uppercase();
+                    if !matches!(up.as_str(), "DATE" | "TIME" | "TIMESTAMP" | "INTERVAL") {
+                        return false;
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
+    saw_literal
+}
+
+/// The whole-model property vector — the single walk-derived derivation of
+/// grain, functional dependencies, discriminants, and determinism
+/// (`model_properties.md` §"The composition walk"). `ctx` supplies the
+/// declared unique keys the fan-out proof reads. `None` when the text has no
+/// SELECT statement at all.
+pub fn model_property_vector(sql: &str, ctx: &JoinContext) -> Option<PropertyVector> {
+    let tree = QueryTree::from_sql(sql)?;
+    Some(walk(&tree, &PropertyTransfer { ctx }))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1522,5 +2101,116 @@ mod tests {
                 bounds.get(src)
             );
         }
+    }
+
+    // ===== Property-vector transfer functions =====
+
+    fn vector_of(sql: &str) -> PropertyVector {
+        model_property_vector(sql, &JoinContext::new()).expect("model parses to a SELECT")
+    }
+
+    fn keyset(cols: &[&str]) -> std::collections::BTreeSet<String> {
+        cols.iter().map(|c| c.to_ascii_lowercase()).collect()
+    }
+
+    #[test]
+    fn group_by_establishes_grain_and_fds() {
+        // The GROUP BY factory: the grouping key uniquely identifies an output
+        // row, so `customer_id → every output column` by construction (§3.5).
+        let v =
+            vector_of("SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id");
+
+        assert!(
+            v.grain.keys.iter().any(
+                |k| keyset(&k.iter().map(String::as_str).collect::<Vec<_>>())
+                    == keyset(&["customer_id"])
+            ),
+            "GROUP BY customer_id must establish [customer_id] as a grain key; got {:?}",
+            v.grain
+        );
+        assert!(
+            v.fds
+                .iter()
+                .any(|fd| fd.key == vec!["customer_id".to_string()] && fd.determines == "total"),
+            "the factory must carry customer_id → total; got {:?}",
+            v.fds
+        );
+    }
+
+    #[test]
+    fn union_all_drops_grain_and_fds_unless_discriminated() {
+        // Both arms keyed by [customer_id], but the union has no discriminator
+        // — the same customer_id may appear in both arms, so the union is
+        // unkeyed (§3.8: FD/grain destroyed by a bare UNION ALL).
+        let undiscriminated = vector_of(
+            "SELECT customer_id FROM crm_a GROUP BY customer_id \
+             UNION ALL \
+             SELECT customer_id FROM crm_b GROUP BY customer_id",
+        );
+        assert!(
+            undiscriminated.grain.keys.is_empty(),
+            "a bare UNION ALL of two keyed arms is unkeyed; got {:?}",
+            undiscriminated.grain
+        );
+        assert!(
+            undiscriminated.has_set_op_barrier,
+            "the union node must record its FD barrier"
+        );
+
+        // A distinct literal tag column per arm, added to the key, makes the
+        // arms provably disjoint — (src, customer_id) survives as a key.
+        let discriminated = vector_of(
+            "SELECT 'a' AS src, customer_id FROM crm_a GROUP BY customer_id \
+             UNION ALL \
+             SELECT 'b' AS src, customer_id FROM crm_b GROUP BY customer_id",
+        );
+        assert!(
+            discriminated.grain.keys.iter().any(|k| keyset(
+                &k.iter().map(String::as_str).collect::<Vec<_>>()
+            ) == keyset(&["src", "customer_id"])),
+            "a literal discriminator in the key preserves the union key; got {:?}",
+            discriminated.grain
+        );
+    }
+
+    #[test]
+    fn determinism_predicate_registered_as_leaf() {
+        // clean ∪ clean = clean across a UNION ALL (columnar union lub).
+        let clean =
+            vector_of("SELECT user_id FROM events_a UNION ALL SELECT user_id FROM events_b");
+        assert_eq!(
+            clean
+                .determinism
+                .iter()
+                .find(|d| d.output == "user_id")
+                .map(|d| d.level),
+            Some(Determinism::Clean),
+            "clean ∪ clean must stay clean; got {:?}",
+            clean.determinism
+        );
+
+        // A row-nondeterministic function taints its column (leaf predicate).
+        let row = vector_of("SELECT random() AS r FROM t");
+        assert_eq!(
+            row.determinism
+                .iter()
+                .find(|d| d.output == "r")
+                .map(|d| d.level),
+            Some(Determinism::Row),
+            "random() must classify Row; got {:?}",
+            row.determinism
+        );
+
+        // A run-deterministic clock is a per-run constant, not row-tainted.
+        let run = vector_of("SELECT now() AS t FROM src");
+        assert_eq!(
+            run.determinism
+                .iter()
+                .find(|d| d.output == "t")
+                .map(|d| d.level),
+            Some(Determinism::Run),
+            "now() must classify Run; got {:?}",
+            run.determinism
+        );
     }
 }

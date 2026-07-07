@@ -29,6 +29,7 @@ mod sc_1_correlated_exists;
 mod sc_1b_column_name_collision;
 mod sc_2_clocked_mutable_window_forward;
 mod sc_4_stacked_frames;
+mod sc_6_fd_over_union;
 mod sc_7_cte_body_admission;
 mod smoke;
 mod tracer_evolution;

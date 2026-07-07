@@ -1200,3 +1200,52 @@ Block schema:
   reachable through `execute_project` today); the dead-consumer finding
   (`batch.filter_start/filter_end` unused outside tests) is the actionable residue, tracked
   with the tail-rewrite transform.
+
+## SC-6 — declared FD over a `UNION ALL` body × once-write / FD-widened admission — 2026-07-08
+
+- construct: a model whose body is `SELECT customer_id, region FROM crm_a UNION ALL SELECT
+  customer_id, region FROM crm_b`, with a declared `functional_dependencies: [{key:
+  [customer_id], determines: region}]`. Each arm may hold `customer_id → region` as a
+  world-fact, but the union does not — the same `customer_id` can appear in both arms with a
+  different `region` (concretely `(c1,'EU')` in arm A, `(c1,'US')` in arm B).
+- verdict: **CONFIRMED = analyzer-fact bug (linkB), FIXED.** RED: `functional_dependency_verdict`
+  took only `declared: bool` and never read `FunctionalDependency.key`, and no union analysis
+  existed; a `determines` column with no traceable join origin resolved `determines_fan_out =
+  None`, so a declared FD over the union widened `None → Constant` — exactly the unsound
+  widening §3.8 shows destroys the FD. GREEN: the composition walk now derives a per-model
+  `PropertyVector` (grain from the `GROUP BY`/`DISTINCT` factory and the discriminated-union
+  rule; a set-operation FD barrier; per-column determinism; per-column aggregate
+  discriminants), and the new key-aware `functional_dependency_verdict_over_vector(key,
+  determines, vector, declared)` reads the declared `key`: it refuses a `determines` column
+  crossing an undiscriminated `UNION ALL` (`has_set_op_barrier`), refuses a fan-out join
+  (`has_fan_out_join`), returns `Constant` when a proven grain key subsumes the declared key
+  (query-derived, no declaration needed), and widens only a genuinely-undecidable
+  single-branch origin. A declared key column the model does not project is not widened
+  (the "parsed but never read" gap closed).
+- smelt analyzer: was **unsound** (widened a union FD it could not prove) → now **sound**
+  (fail-closed refusal, over-refusal permitted). No once-write consumer is wired, so this is a
+  proof-layer classification fix only (no transform emitted; wiring stays with the
+  model-updates master).
+- interaction with G-10 (composite unique key inexpressible in `JoinContext`): not worsened.
+  The vector's grain/fan-out facts still flow through `join_shape::fan_out`, which fails closed
+  to `OneToMany` on a composite key — a declared FD backed by a composite unique key therefore
+  falls to the undecidable-single-branch arm and is widened by the declaration (unchanged), or
+  refused if it crosses a union (correct). G-10's over-conservatism is inherited, not deepened.
+- production files/functions changed: `crates/smelt-logical/src/analysis/walk.rs`
+  (`PropertyVector`, `Grain`, `DerivedFd`, `Determinism`/`ColumnDeterminism`,
+  `ColumnDiscriminant`, `PropertyTransfer`, `model_property_vector`; the union
+  discriminated-grain and columnar-determinism folds), `crates/smelt-logical/src/analysis/
+  functional_dependency.rs` (`functional_dependency_verdict_over_vector` — the key-aware
+  verdict; existing `functional_dependency_verdict` preserved and still used for the pairwise
+  join case), `crates/smelt-logical/src/analysis/mod.rs` (re-exports).
+- evidence: `smelt-cli::tests::property_discovery::sc_6_fd_over_union::
+  declared_fd_over_union_all_is_refused` (owning test; the over-narrowing guard
+  `declared_fd_over_single_branch_still_widens` alongside it), plus unit mirrors
+  `smelt-logical::analysis::functional_dependency::tests::{fd_key_field_is_consulted,
+  declared_fd_over_union_all_does_not_widen}` and `smelt-logical::analysis::walk::tests::
+  {group_by_establishes_grain_and_fds, union_all_drops_grain_and_fds_unless_discriminated,
+  determinism_predicate_registered_as_leaf}`. Full `smelt-logical` lib (323 passed),
+  `property_discovery` (40 passed), `example_diagnostics` (115 passed) green.
+- Coverage caveat: the SC-6 cell is linkB — it asserts the analyzer fact directly (no once-write
+  consumer exists to drive a linkC divergence). The narrative divergence (a frozen once-write
+  value for a colliding key) is described, not executed.

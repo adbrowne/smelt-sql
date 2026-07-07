@@ -67,7 +67,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 3     | done     |        | 2026-07-07 |
 | 4     | done     |        | 2026-07-07 |
 | 5     | done     |        | 2026-07-08 |
-| 6     | pending  |        |      |
+| 6     | done     |        | 2026-07-08 |
 | 7     | pending  |        |      |
 
 ---
@@ -294,6 +294,24 @@ You are executing this plan from the start of a new session. Your job is to driv
   write-window model lateness widening is not a correctness obligation. Wire lateness into the
   scan when the horizon settled-delay / tail-rewrite transform lands (`model_transforms.md`).
   (Phase 4 / SC-5 finding)
+- **FD structural facts are model-level booleans, not per-`determines` lineage**: the property
+  vector carries `has_set_op_barrier` / `has_fan_out_join` as whole-node bits (any set operation
+  or fanned-out join anywhere in the scope's subtree raises the bit), and the FD verdict refuses a
+  declared FD whenever the bit is set and no grain key covers the declared key. This is fail-closed
+  (it over-refuses a declared FD whose `determines` column does not actually flow through the
+  union/fan-out) rather than unsound. Per-column FD lineage — the transitive-import Armstrong
+  closure of `20260707-property-per-key-constancy.md` §§3.3/5 (`order_id → customer_id → region`
+  across a proven 1:1 join hop) — would tighten this to only the columns that cross the barrier;
+  it needs an FD-set-per-column annotation the vector does not yet carry. (Phase 6)
+- **Discriminated-union grain requires all arms to share the same key set**: `union_discriminated_grain`
+  preserves `{discriminator} ∪ K` only when every arm proves the *same* key `K`; arms with
+  differently-shaped keys drop to unkeyed even when a discriminator exists. Predicate-based key
+  disjointness (§3.8 survival case 2) and shared-upstream derivation (case 3) are not derived —
+  only the literal-discriminator idiom (case 1). (Phase 6)
+- **Per-column aggregate discriminants are folded but unconsumed**: `PropertyVector.discriminants`
+  is populated at aggregate outputs via `combiner_discriminants`, but no verdict reads it yet
+  (the idempotence discriminant of `20260707-property-aggregate-algebra.md` §2 is not added to the
+  tuple here). (Phase 6)
 
 ## Verification
 

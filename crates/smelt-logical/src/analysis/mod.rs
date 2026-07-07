@@ -14,9 +14,11 @@ pub mod walk;
 pub mod window_independence;
 
 pub use walk::{
-    enumerate_scopes, walk, ColumnLineage, CteDef, InputItem, LeafColumn, LeafInput, NodeCx,
-    OpNode, PathSeg, QueryNode, QueryTree, RelationSource, Scope, ScopeEnum, ScopeEnumeration,
-    ScopeKind, SelectNode, SetOpKind, SetOpNode, Transfer, UnsupportedConstruct,
+    enumerate_scopes, model_property_vector, walk, ColumnDeterminism, ColumnDiscriminant,
+    ColumnLineage, CteDef, DerivedFd, Determinism, Grain, InputItem, KeySet, LeafColumn, LeafInput,
+    NodeCx, OpNode, PathSeg, PropertyTransfer, PropertyVector, QueryNode, QueryTree,
+    RelationSource, Scope, ScopeEnum, ScopeEnumeration, ScopeKind, SelectNode, SetOpKind,
+    SetOpNode, Transfer, UnsupportedConstruct,
 };
 
 use serde::Serialize;
