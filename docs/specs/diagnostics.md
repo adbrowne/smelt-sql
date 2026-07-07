@@ -437,9 +437,24 @@ Owned by `docs/specs/virtual_environments.md`.
 
 ---
 
+### Maintenance plan
+
+Owned by `docs/specs/maintenance_plan.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `MaintenanceNoAdmissibleTechnique` | Error | No maintenance technique survives a cell's admission; names the cell. |
+| `MaintenanceReachNotDerivable` | Error | A required scan bound is neither derivable nor declared. |
+| `MaintenanceScanUnbounded` | Error | A scan or write footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists. |
+| `MaintenanceUnboundedFootprint` | Error | A targeted write was requested for a cell whose write footprint is unbounded (e.g. a stored trajectory under late data). |
+| `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. |
+| `MaintenanceGraphUnsupportedNode` | Error | A keyed-grain or self-referential node in the propagation graph; refused fail-loud rather than silently under-running. |
+
+---
+
 ## Known divergences
 
-None currently open.
+- **The `Maintenance*` family is specified and unimplemented.** No `DiagnosticCode` enum variant exists yet for any of the six codes above — the plan they cover (`crates/smelt-logical/src/maintenance/`) is a tracer with no production consumer, so nothing emits them today. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
 
 ## Open questions
 

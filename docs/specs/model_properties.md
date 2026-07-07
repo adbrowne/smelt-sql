@@ -144,4 +144,4 @@ A property implementation must not re-derive composition by scanning the query t
 - **User docs**: the per-mode refresh pages under `docs-site/docs/` consume these properties; no standalone user page (the properties are internal to the analysis layer).
 - **Plans (history)**: `docs/plans/20260704-model-updates.md` (the mode-vertical master whose capabilities this spec re-homes).
 - **Design research**: `docs/research/20260707-property-composition-overview.md` (the per-operator transfer rules and composition algebra behind §"The composition walk", with nine per-property companion docs).
-- **Related specs**: `model_maintenance.md`, `model_transforms.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `timeseries.md`, `sources.md`, `multi_backend.md`, `schema_evolution.md`.
+- **Related specs**: `model_maintenance.md`, `maintenance_plan.md`, `model_transforms.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `timeseries.md`, `sources.md`, `multi_backend.md`, `schema_evolution.md`.
