@@ -183,7 +183,42 @@ CRITICAL — sentinel emission contract: your final user-facing message MUST con
 # one sub-plan only).
 PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../sweep-loop-prompt.txt")}"
 
+# Warn when a single iteration's spend crosses this (USD). Purely advisory —
+# the $27 and $34 outlier iterations were reviewer/implementer thrash worth a
+# human look at the time.
+ITER_COST_WARN="${ITER_COST_WARN:-15}"
+
 cd "${REPO_ROOT}"
+
+# Pre-extract the next unit of work from the registry + status tables so the
+# agent doesn't have to read the whole master plan (~45KB) + sub-plan just to
+# find one row. Best-effort: emits a HINT line on stdout, or nothing (in which
+# case the prompt is unchanged and the agent derives the phase itself). The
+# hint is advisory — the tables stay the source of truth (the agent still
+# updates them), so a stale/wrong hint costs nothing but the saved read.
+phase_hint() {
+  local master line sub status phase
+  master="$(grep -E '^master_plan:' "${SCRIPT_DIR}/../active-plan" 2>/dev/null | tail -1 | awk '{print $2}')"
+  [ -n "${master}" ] && [ -f "${master}" ] || return 0
+  # Registry table rows under "## Spawned sub-plans", in order. Skip the
+  # header/divider rows; each data row carries a docs/plans/ path and a
+  # Status in its last cell.
+  while IFS= read -r line; do
+    sub="$(printf '%s' "${line}" | grep -oE 'docs/plans/[A-Za-z0-9._-]+\.md' | head -1)"
+    [ -n "${sub}" ] && [ -f "${sub}" ] || continue
+    status="$(printf '%s' "${line}" | awk -F'|' '{v=$(NF-1); gsub(/^[ `]+|[ `]+$/,"",v); print v}')"
+    case "${status}" in done*|Done*) continue ;; esac
+    # First `pending` row of the sub-plan's Progress table.
+    phase="$(awk -F'|' '/^\|/ { p=$2; s=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",s);
+                               if (s=="pending") { print p; exit } }' "${sub}")"
+    if [ -n "${phase}" ]; then
+      printf 'WRAPPER PRE-SCAN HINT: the first READY sub-plan appears to be `%s` and its next `pending` phase appears to be `%s`. Verify against that sub-plan'"'"'s Progress table (one targeted read) instead of re-deriving from the full master plan; if the tables disagree with this hint, the tables win.' "${sub}" "${phase}"
+      return 0
+    fi
+  done < <(awk '/^## Spawned sub-plans/{f=1; next} f && /^## /{exit} f' "${master}" \
+             | grep -E '^\|' | grep -vE '^\|[-: ]+\||Sub-plan')
+  return 0
+}
 
 # Find our cgroup (the tmux-spawn scope, when launched from tmux). systemd-oomd
 # kills a whole scope when it fires, so memory.current / memory.peak on this
@@ -364,12 +399,17 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   if [ "${#ITER_SCOPE_BASE[@]}" -gt 0 ]; then
     iter_scope=("${ITER_SCOPE_BASE[@]}" --unit="autonomy-iter-${ts}-$(printf '%02d' "${iteration}")" --)
   fi
+  # Recomputed every iteration — the previous iteration flipped a table row.
+  hint="$(phase_hint)"
+  [ -n "${hint}" ] && echo "Pre-scan:   ${hint}"
   "${iter_scope[@]}" claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --no-session-persistence \
     --model "${MODEL}" \
     --output-format json \
-    "${PROMPT}" 2>&1 | tee "${log}"
+    "${PROMPT}${hint:+
+
+${hint}}" 2>&1 | tee "${log}"
   rc="${PIPESTATUS[0]}"
 
   # Always stop the sampler before any break/continue below.
@@ -402,6 +442,13 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
        cache_read: .usage.cache_read_input_tokens
      }' "${log}" >> "${USAGE_LOG}" 2>/dev/null || \
     echo "{\"ts\":\"${ts}\",\"event\":\"headless-iter\",\"iter\":${iteration},\"rc\":${rc},\"note\":\"unparseable-log\"}" >> "${USAGE_LOG}"
+
+  # Advisory cost check: a single phase costing >$ITER_COST_WARN usually means
+  # implementer/reviewer thrash or a runaway context — worth a post-hoc look.
+  iter_cost="$(jq -r 'select(.type=="result") | .total_cost_usd // 0' "${log}" 2>/dev/null | tail -1)"
+  if [ -n "${iter_cost}" ] && awk -v c="${iter_cost}" -v w="${ITER_COST_WARN}" 'BEGIN{exit !(c>w)}'; then
+    echo "===== WARNING: iteration cost \$${iter_cost} exceeded ITER_COST_WARN=\$${ITER_COST_WARN} — review ${log} ====="
+  fi
 
   echo
 
