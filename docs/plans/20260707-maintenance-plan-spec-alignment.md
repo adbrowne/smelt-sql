@@ -65,7 +65,7 @@ Three of the spec-diff map's rows landed (`maintenance_plan.md` created; `models
 | SA4   | done     | `spec(transforms): column-scoped merge, ledger fold/reset, and field-backfill as transform contracts` | 2026-07-07 |
 | SA5   | done     | `spec(architecture+diagnostics): maintenance-plan purity invariant; Maintenance* catalogue family` | 2026-07-07 |
 | SA6   | done     | `3b2eb8e2` `spec(properties): the complete proof catalogue — plan proof inputs re-homed as referenced rows` | 2026-07-08 |
-| SA7   | pending  |        |      |
+| SA7   | done     | `spec(second-ring): sync cli/run_state/schema_evolution/timeseries + sweep removed mode names` | 2026-07-08 |
 
 ---
 

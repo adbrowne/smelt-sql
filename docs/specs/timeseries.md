@@ -65,7 +65,7 @@ A source that declares `timeseries:` must declare the named `event_time_column` 
 | Code | Severity | Trigger |
 |---|---|---|
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule (missing required key, unknown key, `granularity` not in the enum, `partition_column` absent from the model's output / source's columns, `event_time_column` has an incompatible type). |
-| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: batched` without `timeseries:`. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` without `timeseries:`. |
 
 ### `smelt.yml` (project-level overrides)
 
@@ -88,6 +88,8 @@ A model or source carrying `timeseries:` declares to the planner: *this output h
 
 A model or source **without** `timeseries:` is non-timeseries — it has no declared time dimension. Downstream rules that need partition information treat it as a lookup (read in full, no pushdown).
 
+**`granularity` is the declared propagation grain, checked rather than derived.** For cross-model dependency propagation, `granularity` is each node's partition-axis grain — `maintenance_plan.md` §"The graph layer" defines a dependency edge as running between two partition axes whose grain is the declared `timeseries.granularity` of each node, never per-edge and never derived from the SQL. The SQL's own grouping (a `GROUP BY`/`date_trunc` at some cadence) is not the source of truth; it is only *checked* against the declaration by the grain-alignment proof (`model_properties.md` §"Grain-alignment check"), which reports `Aligned` or `NotAligned{reason}` and never substitutes a derived value for the declared one.
+
 ### Compatibility with materialization modes
 
 | Materialization | `timeseries:` allowed? |
@@ -98,19 +100,19 @@ A model or source **without** `timeseries:` is non-timeseries — it has no decl
 | `ephemeral` | No — ephemeral models have no persisted output; declaring `timeseries:` is `MalformedTimeseries`. |
 | `test` | No — test models are not persistent outputs; declaring `timeseries:` is `MalformedTimeseries`. |
 
-### Interaction with `refresh: batched`
+### Interaction with the partition grain (`grain: partition`)
 
-A model that declares `refresh: batched` (per `batched_models.md`) must also declare `timeseries:`. The two blocks have independent surfaces — `timeseries:` declares the time dimension, the optional `batched:` block carries strategy-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `refresh: batched` without `timeseries:` is `TimeseriesRequiredForBatched`.
+A model that declares `refresh: incremental` + `grain: partition` (the shape profile detailed in `batched_models.md`) must also declare `timeseries:`. The two surfaces are independent — `timeseries:` declares the time dimension, the partition-grain surface carries grain-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `grain: partition` without `timeseries:` is `TimeseriesRequiredForBatched`.
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
-### Interaction with `refresh: keyed`
+### Interaction with the key grain (`grain: key`)
 
-A `refresh: keyed` model may declare `timeseries:` to time-partition its keyed output. Admission is gated on **key temporal locality**, owned by `keyed_models.md` §"Key temporal locality" — this spec owns only the block grammar and the structural rules below. A keyed model without an admitted block has non-timeseries output (a lookup).
+A `grain: key` model (the shape profile detailed in `keyed_models.md`) may declare `timeseries:` to time-partition its keyed output. Admission is gated on **key temporal locality**, owned by `keyed_models.md` §"Key temporal locality" — this spec owns only the block grammar and the structural rules below. A key-grain model without an admitted block has non-timeseries output (a lookup).
 
 ### Validation rules
 
-1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY` — except on a `refresh: keyed` model, where it may instead be an aggregate projection admitted by key temporal locality; `keyed_models.md` §"Key temporal locality"). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
+1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY` — except on a `grain: key` model, where it may instead be an aggregate projection admitted by key temporal locality; `keyed_models.md` §"Key temporal locality"). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 2. **Event-time column projection.** For a model, `event_time_column` must appear in the model's output. For a source, it must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 3. **Type constraint on event_time_column.** Must be a date, timestamp, or timestamp-with-timezone type per `types.md`. Violation produces `MalformedTimeseries`.
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.

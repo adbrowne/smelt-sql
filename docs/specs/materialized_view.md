@@ -59,16 +59,16 @@ A `refresh: materialized_view` model is created and handed to the engine by `sme
 
 ### Freshness owner: the engine (push)
 
-`refresh: materialized_view` and `refresh: keyed` both uphold **end-state equivalence** (`model_maintenance.md` §"The equivalence invariant") over the inputs processed so far, though `materialized_view`'s output shape is engine-defined rather than smelt's specific one-row-per-key contract (§"Output shape"). They differ in **who discharges the invariant** and in **who owns freshness**:
+`refresh: materialized_view` and `refresh: incremental` + `grain: key` both uphold **end-state equivalence** (`model_maintenance.md` §"The equivalence invariant") over the inputs processed so far, though `materialized_view`'s output shape is engine-defined rather than smelt's specific one-row-per-key contract (§"Output shape"). They differ in **who discharges the invariant** and in **who owns freshness**:
 
-| | `keyed` | `materialized_view` |
+| | `grain: key` | `materialized_view` |
 |---|---|---|
 | invariant discharged by | the smelt equivalence oracle (smelt runs the combiner) | the **engine's native IVM** (smelt runs no combiner) |
 | freshness model | **pull** — correct as of the last `smelt build` | **push** — engine keeps it current continuously |
 | cadence owner | smelt | the engine |
 | "is it up to date?" | after the last run | between runs too |
 
-That different operational commitment — a different answer to "is this table fresh, and who is responsible" — is why `materialized_view` is a peer refresh value rather than a hidden maintainer flag on `keyed`.
+That different operational commitment — a different answer to "is this table fresh, and who is responsible" — is why `materialized_view` is a peer refresh value rather than a hidden maintainer flag on `grain: key`.
 
 ### Engine-incrementalizability (the delegated eligibility gate)
 
@@ -82,7 +82,7 @@ smelt performs **no** native-IVM eligibility analysis of its own. It does not at
 
 Because the refresh modes are peers and smelt never chooses a mode for the user (`model_maintenance.md` §"Validator, not chooser"; `models.md` §Design), `refresh: materialized_view` cannot silently degrade to another mode:
 
-1. **Backend has no native IVM** (e.g. DuckDB; `supports_native_ivm = false`) → **hard error**: *"`refresh: materialized_view` requires native incremental-view maintenance; this engine has none — use `refresh: keyed` for smelt-driven maintenance."* smelt does **not** quietly substitute `keyed` (that would swap the declared freshness contract) and does **not** fall back to a full-refresh table. This is the one carve-out from the backend's lower-don't-reject rule (`multi_backend.md` §Semantics).
+1. **Backend has no native IVM** (e.g. DuckDB; `supports_native_ivm = false`) → **hard error**: *"`refresh: materialized_view` requires native incremental-view maintenance; this engine has none — use `refresh: incremental` with `grain: key` for smelt-driven maintenance."* smelt does **not** quietly substitute `grain: key` (that would swap the declared freshness contract) and does **not** fall back to a full-refresh table. This is the one carve-out from the backend's lower-don't-reject rule (`multi_backend.md` §Semantics).
 2. **Backend has native IVM but rejects the query** → **hard error** carrying the engine's own reason (e.g. Enzyme's `MATERIALIZED_VIEW_NOT_INCREMENTALIZABLE`). smelt surfaces the backend's message rather than masking it.
 
 The inability to rescue the user into a different mode is the honest price of peer status; it keeps the refresh enum coherent (each value means exactly one thing).

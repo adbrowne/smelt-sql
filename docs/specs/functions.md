@@ -141,7 +141,7 @@ smelt.as_struct(<table-alias> [EXCEPT <col1>, <col2>, …])
 
 ### Pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`)
 
-Three aggregate-position functions name the intent behind a `refresh: keyed` column
+Three aggregate-position functions name the intent behind a key-grain column
 family (`keyed_models.md` §"The column-family catalogue") without adding any privileged
 treatment — each is an ordinary transparent function, defined with the same
 `smelt.define` machinery as a user-authored one, whose expansion is admitted on exactly
@@ -153,7 +153,7 @@ the terms a hand-written call would be:
 | `smelt.once(value)` | the once-write `COALESCE`-first-non-null canonical spelling | once-write (still requires the once-write provenance proof) |
 | `smelt.current(value)` | `ANY_VALUE(value)` | plain overwrite (snapshot-reconcile posture only) |
 
-Because these are transparent functions, the `refresh: keyed` classifier sees the
+Because these are transparent functions, the key-grain classifier sees the
 expanded body, not the call — `smelt.latest(status, updated_at)` classifies identically
 to a hand-written `MAX_BY(status, updated_at)`, and `smelt.once`/`smelt.current` are
 still gated by the once-write provenance proof and the snapshot-reconcile admission
