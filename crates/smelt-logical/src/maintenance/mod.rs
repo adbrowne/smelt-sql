@@ -10,12 +10,13 @@
 //! `07-example-catalogue.md`) and prove equivalence against a full refresh.
 //!
 //! Honest v0 boundaries (see `09-spec-readiness.md` §2):
-//! - **Column groups are supplied by the caller**, not derived — the
-//!   mutation-sensitivity partitioning is the single largest new derivation
-//!   and is deliberately deferred; every research-loop cell likewise worked
-//!   with hand-known groups.
-//! - **Skeleton roles are supplied by the caller** (`OutputSpec::skeleton_columns`),
-//!   not extracted from the SQL.
+//! - Column groups (`ColumnGroup`) and skeleton columns
+//!   (`OutputSpec::skeleton_columns`) may now be **derived** —
+//!   [`grouping::derive_column_groups`] and [`skeleton::skeleton_columns`] —
+//!   or still hand-supplied by a caller that needs a shape outside their v0
+//!   scope (a CTE/set-operation-composed model); `derive_maintenance_plan`
+//!   itself is agnostic to which and keeps taking `ColumnGroup`/
+//!   `skeleton_columns` as plain data.
 //! - Scan bounds are derived (`analysis::source_bounds`), combiner algebra is
 //!   derived (`analysis::discriminants`), additive-only column adds are
 //!   proven (`analysis::model_diff`) — the derivations that exist are
@@ -26,7 +27,9 @@
 
 pub mod derive;
 pub mod emit;
+pub mod grouping;
 pub mod propagate;
+pub mod skeleton;
 
 use std::collections::BTreeSet;
 
@@ -60,8 +63,8 @@ pub struct SourceFacts {
 }
 
 /// A named group of output columns sharing mutation-sensitivity
-/// (`01-framework.md` §5). v0: supplied by the caller, not derived.
-#[derive(Debug, Clone)]
+/// (`01-framework.md` §5), derived by [`grouping::derive_column_groups`].
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ColumnGroup {
     pub columns: Vec<String>,
     /// Sources whose *post-creation* deltas can change these columns'

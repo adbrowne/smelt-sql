@@ -345,18 +345,24 @@ disagree; one per node cannot). Deeper rationale:
   G-12 (`crates/smelt-cli/tests/property_discovery/g_12_keyed_merge_reprocessed_window.rs`;
   ledger entry in `docs/research/property-discovery/ledger.md`). The fix is the ledger's
   fold-refusal operation, not a spot check.
-- **The seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
-  per-column mutation-sensitivity/column provenance, skeleton-role extraction, footprint
-  reflection, partition-locality projection, faithful-fold conditions, the grain-alignment check
-  (the tracer takes edge-declared grains instead — a shortcut ratified away by P3), and
-  definition-change column classification. Column-group-scoped dirt, gated by provenance, today
-  coarsens to whole-partition — safe, over-running. Hour granularity is declared surface
-  (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are deferred.
-  Full verdict definitions: `model_properties.md` §Surface "Derived proofs" (the `not-yet` rows).
-  Build order and code placement: `docs/plans/20260707-maintenance-plan-impl.md` phases MP4
-  (mutation-sensitivity/provenance, skeleton-role), MP5 (footprint reflection,
-  partition-locality), MP6 (faithful-fold, grain-alignment), and MP14 (definition-change
-  classification). `09-spec-readiness.md` §2.
+- **Five of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
+  footprint reflection, partition-locality projection, faithful-fold conditions, the
+  grain-alignment check (the tracer takes edge-declared grains instead — a shortcut ratified away
+  by P3), and definition-change column classification. Column-group-scoped dirt, gated by
+  provenance, today coarsens to whole-partition — safe, over-running. Hour granularity is declared
+  surface (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are
+  deferred. **Per-column mutation-sensitivity/column provenance and skeleton-role extraction are
+  built**, as leaf classifiers over a model's own single top-level `SELECT` scope
+  (`crates/smelt-logical/src/maintenance/grouping.rs`, `.../skeleton.rs`): a model composed
+  through a CTE, set operation, derived-table `FROM` item, or an unqualified reference ambiguous
+  among more than one joined source is outside what either classifier resolves, and both fail
+  closed on such a shape — mutation-sensitivity grouping collapses every non-skeleton column into
+  one group sensitive to every declared source rather than guessing, and the caller may still
+  hand-supply `ColumnGroup`/`skeleton_columns` for a shape wider than this. Full verdict
+  definitions: `model_properties.md` §Surface "Derived proofs" (the `not-yet` rows). Build order
+  and code placement: `docs/plans/20260707-maintenance-plan-impl.md` phases MP5 (footprint
+  reflection, partition-locality), MP6 (faithful-fold, grain-alignment), and MP14
+  (definition-change classification). `09-spec-readiness.md` §2.
 - **The ledger substrate is the degenerate case**: `smelt-state`'s interval store is
   frontier-only and per-model; per-delta grading and `(region × group)` keying do not exist.
 - **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed

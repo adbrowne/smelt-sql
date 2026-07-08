@@ -13,6 +13,8 @@ use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, Mode
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold, Region,
 };
+use smelt_logical::maintenance::grouping::derive_column_groups;
+use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
     ColumnGroup, Corner, Grain, MutationProfile, OutputSpec, PartitionLocal, Refusal, SourceFacts,
     Technique, Trigger,
@@ -60,25 +62,41 @@ fn column_def(name: &str, sql_expr: &str) -> ColumnDef {
 // ---------------------------------------------------------------------------
 
 fn ex02_inputs() -> ModelInputs<'static> {
+    let sql = "SELECT event_id, user_id, event_date, event_ts, page, referrer \
+               FROM smelt.sources.events";
+    let sources = vec![source(
+        "events",
+        MutationProfile::AppendOnly,
+        Some("event_date"),
+    )];
+    // Derived, not hand-supplied (MP4): `event_id` is the declared unique
+    // key, `event_date` the partition column — both skeleton by
+    // declaration; the mutation-sensitivity grouping then partitions the
+    // remaining payload columns by provenance × source `mutation_profile`.
+    // `events` is append-only and none of `user_id`/`page`/`referrer`
+    // aggregate over it, so the whole payload lands in one group with empty
+    // sensitivity — the load-bearing append-only case
+    // (`maintenance_plan.md` §Design "Factoring by mutation-sensitivity").
+    let skeleton = skeleton_columns(sql, &["event_id".to_string()], Some("event_date"));
+    assert_eq!(skeleton, set(&["event_id", "event_date"]));
+    let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+
     ModelInputs {
-        sql: "SELECT event_id, user_id, event_date, event_ts, page, referrer \
-              FROM smelt.sources.events",
+        sql,
         output: OutputSpec {
             table: "clickstream".to_string(),
             grain: Grain::Partition {
                 partition_col: "event_date".to_string(),
             },
-            skeleton_columns: set(&["event_id", "event_date"]),
+            skeleton_columns: skeleton,
         },
-        sources: vec![source(
-            "events",
-            MutationProfile::AppendOnly,
-            Some("event_date"),
-        )],
-        column_groups: vec![ColumnGroup {
-            columns: strings(&["page", "referrer"]),
-            mutation_sensitivity: BTreeSet::new(),
-        }],
+        sources,
+        column_groups: grouping.groups,
         fold: None,
         column_add_proof: None,
     }
@@ -144,31 +162,47 @@ fn ex07_inputs(allow_full_scan: bool) -> ModelInputs<'static> {
         allow_full_scan: false,
     };
     customers.allow_full_scan = allow_full_scan;
+    let sql = "SELECT o.order_date, o.order_id, o.user_id, o.amount, c.tier \
+               FROM smelt.sources.orders o \
+               JOIN smelt.sources.customers c ON c.user_id = o.user_id";
+    let sources = vec![
+        source("orders", MutationProfile::AppendOnly, Some("order_date")),
+        customers,
+    ];
+    // Derived, not hand-supplied (MP4): `amount` (and `user_id`) read only
+    // the append-only `orders` join input without aggregating over it, so
+    // they land in the empty-sensitivity group; `tier` reads the mutable
+    // `customers` dimension and lands in its own group sensitive to
+    // `customers` — dimension churn drives its column-scoped merge below.
+    let skeleton = skeleton_columns(sql, &["order_id".to_string()], Some("order_date"));
+    assert_eq!(skeleton, set(&["order_id", "order_date"]));
+    let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+    assert!(
+        grouping
+            .groups
+            .iter()
+            .any(|g| g.columns.contains(&"tier".to_string())
+                && g.mutation_sensitivity == set(&["customers"])),
+        "groups: {:?}",
+        grouping.groups
+    );
+
     ModelInputs {
-        sql: "SELECT o.order_date, o.order_id, o.user_id, o.amount, c.tier \
-              FROM smelt.sources.orders o \
-              JOIN smelt.sources.customers c ON c.user_id = o.user_id",
+        sql,
         output: OutputSpec {
             table: "orders_tiered".to_string(),
             grain: Grain::Partition {
                 partition_col: "order_date".to_string(),
             },
-            skeleton_columns: set(&["order_id", "order_date"]),
+            skeleton_columns: skeleton,
         },
-        sources: vec![
-            source("orders", MutationProfile::AppendOnly, Some("order_date")),
-            customers,
-        ],
-        column_groups: vec![
-            ColumnGroup {
-                columns: strings(&["amount"]),
-                mutation_sensitivity: BTreeSet::new(),
-            },
-            ColumnGroup {
-                columns: strings(&["tier"]),
-                mutation_sensitivity: set(&["customers"]),
-            },
-        ],
+        sources,
+        column_groups: grouping.groups,
         fold: None,
         column_add_proof: None,
     }
@@ -228,25 +262,46 @@ fn ex07_backfill_locality_names_the_unclocked_lookup() {
 
 #[test]
 fn ex13_new_day_is_partition_local_recompute_region() {
+    let sql = "SELECT pay_date, SUM(amount) AS revenue \
+               FROM smelt.sources.payments GROUP BY pay_date";
+    let sources = vec![source(
+        "payments",
+        MutationProfile::AppendOnly,
+        Some("pay_date"),
+    )];
+    // Derived, not hand-supplied (MP4): `pay_date` is both the `GROUP BY`
+    // key and the partition column, so it's skeleton either way; `revenue`
+    // is an aggregate over the append-only `payments` source, so — unlike
+    // EX-02/EX-07's non-aggregated append-only reads — new same-day rows
+    // still change an already-created output row's value, and the
+    // aggregate contributes `payments` sensitivity.
+    let skeleton = skeleton_columns(sql, &[], Some("pay_date"));
+    assert_eq!(skeleton, set(&["pay_date"]));
+    let grouping = derive_column_groups(sql, &sources, &skeleton);
+    assert!(
+        grouping.degenerate.is_empty(),
+        "degenerate: {:?}",
+        grouping.degenerate
+    );
+    assert_eq!(
+        grouping.groups,
+        vec![ColumnGroup {
+            columns: strings(&["revenue"]),
+            mutation_sensitivity: set(&["payments"]),
+        }]
+    );
+
     let inputs = ModelInputs {
-        sql: "SELECT pay_date, SUM(amount) AS revenue \
-              FROM smelt.sources.payments GROUP BY pay_date",
+        sql,
         output: OutputSpec {
             table: "daily_revenue".to_string(),
             grain: Grain::Partition {
                 partition_col: "pay_date".to_string(),
             },
-            skeleton_columns: set(&["pay_date"]),
+            skeleton_columns: skeleton,
         },
-        sources: vec![source(
-            "payments",
-            MutationProfile::AppendOnly,
-            Some("pay_date"),
-        )],
-        column_groups: vec![ColumnGroup {
-            columns: strings(&["revenue"]),
-            mutation_sensitivity: set(&["payments"]),
-        }],
+        sources,
+        column_groups: grouping.groups,
         fold: None,
         column_add_proof: None,
     };
