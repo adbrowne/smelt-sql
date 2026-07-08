@@ -299,10 +299,11 @@ pub fn build_catalog(
 
         let tests_targeting = test_targets.get(model_name).cloned().unwrap_or_default();
 
-        // Emit `refresh: "keyed"` when the model is keyed; omit otherwise.
+        // Emit `refresh: "incremental"` when the model is keyed
+        // (`refresh: incremental` + `grain: key`); omit otherwise.
         let refresh = metadata
-            .and_then(|m| m.refresh.clone())
-            .filter(|r| *r == RefreshStrategy::Keyed);
+            .filter(|m| m.is_keyed())
+            .and_then(|m| m.refresh.clone());
 
         models.insert(
             model_name.to_string(),

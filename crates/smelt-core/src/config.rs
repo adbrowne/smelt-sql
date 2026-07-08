@@ -16,33 +16,43 @@ pub enum ConfigError {
     },
 }
 
-/// The refresh axis — how a stored model's output is recomputed across runs.
+/// The refresh axis — the freshness-owner trichotomy for how a stored
+/// model's output is recomputed across runs (`docs/specs/models.md`
+/// §"Refresh axis").
 ///
-/// Stored outputs (`materialization: table`) may
-/// opt into a non-default refresh strategy.  `Full` is the default (no key
-/// needed).  `Batched` processes new data forward in partition-sized slices
-/// (see `docs/specs/batched_models.md`).  `Keyed` enables the key-addressed
-/// merge loop (see `docs/specs/keyed_models.md`).
+/// `Full` is the default (no `grain:` needed): smelt recomputes everything
+/// each run. `Incremental` means smelt keeps the table current by running
+/// the derived maintenance plan each run — it additionally requires a
+/// declared `grain:` (see [`Grain`]), since an incremental output needs a
+/// declared row identity/shape. `MaterializedView` delegates freshness to
+/// the backend's native incremental-view maintenance.
+///
+/// The former `Batched`/`Keyed` variants are folded into `Incremental` +
+/// `grain:`: `Batched` ≡ `(Incremental, Grain::Partition)`, `Keyed` ≡
+/// `(Incremental, Grain::Key)`. The bare mode names no longer parse — see
+/// the `Deserialize` impl's fix-it errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum RefreshStrategy {
-    /// Rebuild from scratch on every run (default; no key required).
+    /// Rebuild from scratch on every run (default; no `grain:` required).
     Full,
-    /// Partitioned window-forward refresh: per-partition slice, driven by a
-    /// `timeseries:` block. Opt-in: `refresh: batched` (+ optional `batched:`
-    /// block for `unique_key`/`safety_overrides`).
-    Batched,
-    /// Keyed merge: one row per GROUP BY key, grown across partitions by
-    /// folding each run's per-key delta into the stored state via
-    /// `merge_into`, using per-column-family combiners.
-    Keyed,
+    /// smelt keeps the stored table current by running the derived
+    /// maintenance plan each run. Requires a sibling `grain:` declaration
+    /// (see [`Grain`]) — the output's declared shape and row identity.
+    Incremental,
     /// Engine-maintained materialized view: the backend keeps the output
     /// current with its own native incremental-view maintenance, not a
-    /// smelt-driven refresh loop. Keyed output, like `Keyed`; forbids
-    /// `timeseries:` and a `batched:` block. Requires the resolved backend's
-    /// `supports_native_ivm` capability — otherwise a hard error, never a
-    /// silent fallback (`docs/specs/materialized_view.md` §"No silent fallback").
+    /// smelt-driven refresh loop. Keyed output, like `Incremental` +
+    /// `Grain::Key`; forbids `timeseries:`, `grain:`, and a `batched:`
+    /// block. Requires the resolved backend's `supports_native_ivm`
+    /// capability — otherwise a hard error, never a silent fallback
+    /// (`docs/specs/materialized_view.md` §"No silent fallback").
     MaterializedView,
 }
+
+/// Fix-it text shared by every removed `refresh:` mode name — named as a
+/// constant so every hard-cut error site (and its tests) agrees on the exact
+/// replacement wording (`docs/specs/models.md` §"Refresh axis").
+const REFRESH_INCREMENTAL_FIXIT: &str = "use `refresh: incremental` with the matching `grain:`";
 
 impl<'de> Deserialize<'de> for RefreshStrategy {
     fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
@@ -52,16 +62,34 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
         let s = String::deserialize(deserializer)?;
         match s.to_lowercase().as_str() {
             "full" => Ok(RefreshStrategy::Full),
-            "batched" => Ok(RefreshStrategy::Batched),
-            "cumulative" => Err(serde::de::Error::custom(
-                "Invalid refresh strategy: 'cumulative'. `refresh: cumulative` is now \
-                 `refresh: keyed` — rename the frontmatter/config value (see \
-                 docs/specs/keyed_models.md)",
-            )),
-            "keyed" => Ok(RefreshStrategy::Keyed),
+            "incremental" => Ok(RefreshStrategy::Incremental),
             "materialized_view" => Ok(RefreshStrategy::MaterializedView),
+            "batched" => Err(serde::de::Error::custom(format!(
+                "Invalid refresh strategy: 'batched'. `refresh: batched` is now \
+                 `refresh: incremental` with `grain: partition` — {} \
+                 (see docs/specs/batched_models.md)",
+                REFRESH_INCREMENTAL_FIXIT
+            ))),
+            "keyed" => Err(serde::de::Error::custom(format!(
+                "Invalid refresh strategy: 'keyed'. `refresh: keyed` is now \
+                 `refresh: incremental` with `grain: key` — {} \
+                 (see docs/specs/keyed_models.md)",
+                REFRESH_INCREMENTAL_FIXIT
+            ))),
+            "cumulative" => Err(serde::de::Error::custom(format!(
+                "Invalid refresh strategy: 'cumulative'. `refresh: cumulative` is now \
+                 `refresh: incremental` with `grain: key` — {} \
+                 (see docs/specs/keyed_models.md)",
+                REFRESH_INCREMENTAL_FIXIT
+            ))),
+            "versioned" => Err(serde::de::Error::custom(format!(
+                "Invalid refresh strategy: 'versioned'. `refresh: versioned` is now \
+                 `refresh: incremental` with `grain: key` (+ `versioning: interval`) — {} \
+                 (see docs/specs/versioned_models.md)",
+                REFRESH_INCREMENTAL_FIXIT
+            ))),
             _ => Err(serde::de::Error::custom(format!(
-                "Invalid refresh strategy: {}. Must be 'full', 'batched', 'keyed', or 'materialized_view'",
+                "Invalid refresh strategy: {}. Must be 'full', 'incremental', or 'materialized_view'",
                 s
             ))),
         }
@@ -75,9 +103,63 @@ impl Serialize for RefreshStrategy {
     {
         match self {
             RefreshStrategy::Full => serializer.serialize_str("full"),
-            RefreshStrategy::Batched => serializer.serialize_str("batched"),
-            RefreshStrategy::Keyed => serializer.serialize_str("keyed"),
+            RefreshStrategy::Incremental => serializer.serialize_str("incremental"),
             RefreshStrategy::MaterializedView => serializer.serialize_str("materialized_view"),
+        }
+    }
+}
+
+/// The declared output shape and grain for an `refresh: incremental` model —
+/// what a stored row *is* and how it is addressed. Required whenever
+/// `refresh: incremental` is set; rejected (hard error) otherwise
+/// (`docs/specs/models.md` §"Refresh axis").
+///
+/// `Batched` (the former refresh mode) ≡ `Grain::Partition`; `Keyed` ≡
+/// `Grain::Key`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Grain {
+    /// A stored row is one row of a complete, partition-addressed table.
+    /// `unique_key` is optional (a within-partition dedup aid only, never
+    /// key-addressing); `timeseries:` is required.
+    Partition,
+    /// A stored row is the end-state per key. `unique_key` is required
+    /// (composite-valued); `timeseries:` is admitted only when key temporal
+    /// locality is established (`docs/specs/keyed_models.md` §"Key temporal
+    /// locality").
+    Key,
+    /// A stored row is the trajectory: one row per `(key, partition)`.
+    /// `unique_key` and `timeseries:` are both required — the partition axis
+    /// is half the grain.
+    KeyPerPartition,
+}
+
+impl<'de> Deserialize<'de> for Grain {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let s = String::deserialize(deserializer)?;
+        match s.to_lowercase().as_str() {
+            "partition" => Ok(Grain::Partition),
+            "key" => Ok(Grain::Key),
+            "key_per_partition" => Ok(Grain::KeyPerPartition),
+            _ => Err(serde::de::Error::custom(format!(
+                "Invalid grain: {}. Must be 'partition', 'key', or 'key_per_partition'",
+                s
+            ))),
+        }
+    }
+}
+
+impl Serialize for Grain {
+    fn serialize<S>(&self, serializer: S) -> Result<S::Ok, S::Error>
+    where
+        S: serde::Serializer,
+    {
+        match self {
+            Grain::Partition => serializer.serialize_str("partition"),
+            Grain::Key => serializer.serialize_str("key"),
+            Grain::KeyPerPartition => serializer.serialize_str("key_per_partition"),
         }
     }
 }
@@ -103,7 +185,7 @@ impl<'de> Deserialize<'de> for Materialization {
             _ => Err(serde::de::Error::custom(format!(
                 "Invalid materialization type: {}. Must be 'table', 'view', or 'ephemeral'. \
                  Note: 'test' has been removed — use `smelt.test` declarations instead. \
-                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: keyed` instead. \
+                 Note: 'cumulative_aggregate' has been removed — use `materialization: table` + `refresh: incremental` + `grain: key` instead. \
                  Note: 'materialized_view' has been removed — use `refresh: materialized_view` instead.",
                 s
             ))),
@@ -330,12 +412,19 @@ pub struct ModelConfig {
     pub materialization: Option<Materialization>,
     #[serde(default)]
     pub timeseries: Option<TimeseriesConfig>,
-    /// Refresh axis override (`full` | `batched` | `keyed`). Frontmatter
-    /// wins over this when both set it (see `Config::get_refresh`).
+    /// Refresh axis override (`full` | `incremental` | `materialized_view`).
+    /// Frontmatter wins over this when both set it (see
+    /// `Config::get_refresh`).
     #[serde(default)]
     pub refresh: Option<RefreshStrategy>,
+    /// Declared grain (`partition` | `key` | `key_per_partition`). Required
+    /// whenever `refresh: incremental` is set, rejected otherwise. See
+    /// [`Grain`].
+    #[serde(default)]
+    pub grain: Option<Grain>,
     /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
-    /// itself is `refresh: batched`, not the presence of this block.
+    /// itself is `refresh: incremental` + `grain: partition`, not the
+    /// presence of this block.
     #[serde(default)]
     pub batched: Option<BatchedConfig>,
     #[serde(default)]
@@ -481,7 +570,7 @@ pub struct BatchedSafetyOverrides {
 /// decide *how* (which strategy to use) via `resolve_strategy()`.
 ///
 /// UPSERT (`MERGE`) is **not** an incremental strategy — it is the physical
-/// primitive used by the `refresh: keyed` merge loop
+/// primitive used by the `refresh: incremental` + `grain: key` merge loop
 /// (`docs/specs/keyed_models.md`), which is a separate sibling rule
 /// with a different equivalence contract. `Backend::merge_into` remains on
 /// the backend trait for that caller; it is not reachable from this enum.
@@ -497,8 +586,9 @@ pub enum IncrementalStrategy {
 ///
 /// Factored out of `BatchedConfig` so that views, non-batched tables,
 /// and external sources can declare a time dimension without opting into
-/// batched execution. `refresh: batched` consumes this block; any model
-/// declaring `refresh: batched` must also declare `timeseries:`.
+/// incremental execution. `refresh: incremental` + `grain: partition` consumes this
+/// block; any model
+/// declaring `grain: partition` must also declare `timeseries:`.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct TimeseriesConfig {
@@ -573,8 +663,8 @@ pub struct BoundedDomain {
     pub max_cardinality: u64,
 }
 
-/// The `batched:` block — configuration layered on top of the `refresh: batched`
-/// selector. Selection itself is `refresh: batched`; this struct carries only
+/// The `batched:` block — configuration layered on top of `refresh: incremental` +
+/// `grain: partition`. Selection itself is that pair; this struct carries only
 /// the optional knobs (`unique_key`, `safety_overrides`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -773,15 +863,44 @@ impl Config {
         self.get_refresh(model_name)
     }
 
-    /// Get the `batched:` block for a model, when the model is selected into
-    /// batched refresh (`refresh: batched`), from smelt.yml only.
+    /// Get the declared `grain:` for a model, from smelt.yml only.
     ///
-    /// The opt-in is `refresh: batched`, not the presence of the `batched:`
-    /// block — a batched model with no block returns `Some(default)`.
+    /// **Precedence**: smelt.yml only (for now). Use
+    /// [`Config::get_grain_with_metadata`] to also consider SQL frontmatter.
+    pub fn get_grain(&self, model_name: &str) -> Option<Grain> {
+        self.models.get(model_name).and_then(|m| m.grain)
+    }
+
+    /// Get the declared `grain:` for a model.
+    ///
+    /// **Precedence**: SQL file metadata > smelt.yml model config.
+    pub fn get_grain_with_metadata(
+        &self,
+        model_name: &str,
+        sql_metadata: Option<&ModelMetadata>,
+    ) -> Option<Grain> {
+        if let Some(metadata) = sql_metadata {
+            if let Some(grain) = metadata.grain {
+                return Some(grain);
+            }
+        }
+        self.get_grain(model_name)
+    }
+
+    /// Get the `batched:` block for a model, when the model is selected into
+    /// partition-grain incremental refresh (`refresh: incremental` +
+    /// `grain: partition` — the former `refresh: batched`), from smelt.yml
+    /// only.
+    ///
+    /// The opt-in is `refresh: incremental` + `grain: partition`, not the
+    /// presence of the `batched:` block — a selected model with no block
+    /// returns `Some(default)`.
     ///
     /// **Precedence**: smelt.yml only (for now).
     pub fn get_incremental(&self, model_name: &str) -> Option<BatchedConfig> {
-        if !matches!(self.get_refresh(model_name), RefreshStrategy::Batched) {
+        if !matches!(self.get_refresh(model_name), RefreshStrategy::Incremental)
+            || self.get_grain(model_name) != Some(Grain::Partition)
+        {
             return None;
         }
         Some(
@@ -899,11 +1018,15 @@ impl Config {
     }
 
     /// Get the `batched:` block for a model, when the model is selected into
-    /// batched refresh (`refresh: batched`), with SQL metadata precedence.
+    /// partition-grain incremental refresh (`refresh: incremental` +
+    /// `grain: partition` — the former `refresh: batched`), with SQL
+    /// metadata precedence.
     ///
-    /// The opt-in is `refresh: batched` (frontmatter wins over smelt.yml, see
-    /// [`Config::get_refresh_with_metadata`]), not the presence of the
-    /// `batched:` block — a batched model with no block returns
+    /// The opt-in is `refresh: incremental` + `grain: partition`
+    /// (frontmatter wins over smelt.yml, see
+    /// [`Config::get_refresh_with_metadata`] /
+    /// [`Config::get_grain_with_metadata`]), not the presence of the
+    /// `batched:` block — a selected model with no block returns
     /// `Some(default)`.
     ///
     /// **Precedence**: SQL file metadata > smelt.yml model config
@@ -914,8 +1037,9 @@ impl Config {
     ) -> Option<BatchedConfig> {
         if !matches!(
             self.get_refresh_with_metadata(model_name, sql_metadata),
-            RefreshStrategy::Batched
-        ) {
+            RefreshStrategy::Incremental
+        ) || self.get_grain_with_metadata(model_name, sql_metadata) != Some(Grain::Partition)
+        {
             return None;
         }
         if let Some(metadata) = sql_metadata {
@@ -1109,7 +1233,7 @@ models:
     #[test]
     fn test_materialization_cumulative_aggregate_is_rejected() {
         // `materialization: cumulative_aggregate` is no longer valid —
-        // use `materialization: table` + `refresh: keyed` instead.
+        // use `materialization: table` + `refresh: incremental` + `grain: key` instead.
         let yaml = r#"
 name: test_project
 version: 1
@@ -1134,18 +1258,20 @@ models:
         );
     }
 
-    /// `refresh: keyed` models cannot carry a `batched:` block.
-    /// The forbid is enforced in `validate_timeseries` via `is_keyed()`.
-    /// Since `materialization: cumulative_aggregate` is no longer accepted,
-    /// this test uses the new surface (`materialization: table` + `refresh: keyed`).
+    /// `refresh: incremental` + `grain: key` models cannot carry a
+    /// `batched:` block. The forbid is enforced in `validate_timeseries` via
+    /// `is_keyed()`. Since `materialization: cumulative_aggregate` is no
+    /// longer accepted, this test uses the new surface
+    /// (`materialization: table` + `refresh: incremental` + `grain: key`).
     #[test]
     fn test_validate_refresh_keyed_forbids_incremental_via_metadata() {
-        use crate::config::{BatchedConfig, BatchedSafetyOverrides, RefreshStrategy};
+        use crate::config::{BatchedConfig, BatchedSafetyOverrides, Grain, RefreshStrategy};
         use crate::metadata::{validate_timeseries, MetadataError, ModelMetadata};
 
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Keyed),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(Grain::Key),
             batched: Some(BatchedConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
@@ -1154,7 +1280,7 @@ models:
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("refresh: keyed + batched: must error");
+            .expect_err("refresh: incremental + grain: key + batched: must error");
         assert!(
             matches!(err, MetadataError::KeyedForbidsBatched),
             "Expected KeyedForbidsBatched, got: {}",
@@ -1162,11 +1288,11 @@ models:
         );
     }
 
-    /// `refresh: keyed` deserializes to `RefreshStrategy::Keyed`.
+    /// `refresh: incremental` deserializes to `RefreshStrategy::Incremental`.
     #[test]
-    fn test_refresh_strategy_keyed_deserializes() {
-        let strategy: RefreshStrategy = serde_yaml::from_str("keyed").unwrap();
-        assert_eq!(strategy, RefreshStrategy::Keyed);
+    fn test_refresh_strategy_incremental_deserializes() {
+        let strategy: RefreshStrategy = serde_yaml::from_str("incremental").unwrap();
+        assert_eq!(strategy, RefreshStrategy::Incremental);
     }
 
     /// `refresh: cumulative` is a hard error pointing at the renamed value.
@@ -1177,9 +1303,25 @@ models:
             .expect_err("`refresh: cumulative` must be rejected")
             .to_string();
         assert!(
-            err.contains("`refresh: cumulative` is now `refresh: keyed`"),
-            "error must contain the exact pointer message; got: {err}"
+            err.contains("refresh: incremental") && err.contains("grain:"),
+            "error must name the refresh: incremental + grain: replacement; got: {err}"
         );
+    }
+
+    /// `refresh: batched`/`keyed`/`versioned` are all hard errors pointing at
+    /// the `refresh: incremental` + `grain:` replacement.
+    #[test]
+    fn test_refresh_strategy_removed_names_are_hard_errors() {
+        for value in ["batched", "keyed", "versioned"] {
+            let result: Result<RefreshStrategy, _> = serde_yaml::from_str(value);
+            let err = result
+                .expect_err("removed refresh name must be rejected")
+                .to_string();
+            assert!(
+                err.contains("refresh: incremental") && err.contains("grain:"),
+                "error for '{value}' must name the refresh: incremental + grain: replacement; got: {err}"
+            );
+        }
     }
 
     /// `refresh: latest_value` and `refresh: accumulating_snapshot` remain
@@ -1402,7 +1544,7 @@ targets:
     }
 
     /// `merge` is not an incremental strategy — UPSERT is the physical
-    /// primitive used by the keyed merge loop (`refresh: keyed`),
+    /// primitive used by the keyed merge loop (`refresh: incremental` + `grain: key`),
     /// not a knob on `incremental:`. Deserialising it must fail.
     #[test]
     fn test_incremental_strategy_no_merge_variant() {
@@ -1410,7 +1552,7 @@ targets:
         assert!(
             result.is_err(),
             "`merge` must not deserialise as an IncrementalStrategy — it is the \
-             physical primitive of the keyed merge loop (`refresh: keyed`)"
+             physical primitive of the keyed merge loop (`refresh: incremental` + `grain: key`)"
         );
     }
 
@@ -1831,7 +1973,8 @@ targets:
 models:
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     batched:
       event_time_column: ts
 "#;
@@ -1857,7 +2000,8 @@ targets:
 models:
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date

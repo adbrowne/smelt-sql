@@ -3,21 +3,23 @@
 //! Spec oracle: `docs/specs/models.md` §"YAML frontmatter keys" and
 //! `docs/specs/keyed_models.md` §Surface.
 
-use smelt_core::config::{Materialization, RefreshStrategy};
+use smelt_core::config::{Grain, Materialization, RefreshStrategy};
 use smelt_core::metadata::{
     extract_file_metadata, validate_timeseries, FileMetadata, ModelMetadata,
 };
 
-// ── refresh: keyed parses ─────────────────────────────────────────────────────
+// ── refresh: incremental + grain: key parses ──────────────────────────────────
 
-/// `materialization: table` + `refresh: keyed` parses to
-/// `RefreshStrategy::Keyed`; a model with no `refresh:` key defaults to
-/// `RefreshStrategy::Full` (or `None` in the `Option<RefreshStrategy>` field).
+/// `materialization: table` + `refresh: incremental` + `grain: key` parses to
+/// `RefreshStrategy::Incremental` + `Grain::Key`; a model with no `refresh:`
+/// key defaults to `RefreshStrategy::Full` (or `None` in the
+/// `Option<RefreshStrategy>` field).
 #[test]
 fn refresh_keyed_parses() {
     let source = r#"---
 materialization: table
-refresh: keyed
+refresh: incremental
+grain: key
 ---
 SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, user_id"#;
 
@@ -25,11 +27,12 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
     match result {
         FileMetadata::Single { metadata, .. } => {
             assert_eq!(metadata.materialization, Some(Materialization::Table));
-            assert_eq!(metadata.refresh, Some(RefreshStrategy::Keyed));
+            assert_eq!(metadata.refresh, Some(RefreshStrategy::Incremental));
+            assert_eq!(metadata.grain, Some(Grain::Key));
             // is_keyed() must return true for the new surface
             assert!(
                 metadata.is_keyed(),
-                "is_keyed() must be true for refresh: keyed"
+                "is_keyed() must be true for refresh: incremental + grain: key"
             );
         }
         _ => panic!("Expected Single variant"),
@@ -49,8 +52,8 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
     let err = extract_file_metadata(source).expect_err("`refresh: cumulative` must be rejected");
     let message = err.to_string();
     assert!(
-        message.contains("`refresh: cumulative` is now `refresh: keyed`"),
-        "error must contain the exact pointer message; got: {message}"
+        message.contains("refresh: incremental") && message.contains("grain:"),
+        "error must name the refresh: incremental + grain: replacement; got: {message}"
     );
 }
 
@@ -98,7 +101,7 @@ SELECT 1 AS n"#;
 
 /// `materialization: cumulative_aggregate` must fail to deserialize with a clear
 /// unknown-value error now that the variant has been removed.
-/// The opt-in is `materialization: table` + `refresh: keyed`.
+/// The opt-in is `materialization: table` + `refresh: incremental` + `grain: key`.
 #[test]
 fn cumulative_aggregate_materialization_rejected() {
     let source = r#"---
@@ -110,7 +113,8 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
     assert!(
         result.is_err(),
         "`materialization: cumulative_aggregate` must fail to deserialize — \
-         the variant has been removed. Use `materialization: table` + `refresh: keyed` instead."
+         the variant has been removed. Use `materialization: table` + \
+         `refresh: incremental` + `grain: key` instead."
     );
     let err = result.unwrap_err().to_string();
     assert!(
@@ -121,7 +125,7 @@ SELECT device_id, user_id, COUNT(*) AS n FROM smelt.events GROUP BY device_id, u
 
 /// `refresh: latest_value` and `refresh: accumulating_snapshot` remain
 /// unknown-value errors — the keyed rename does not introduce them as
-/// aliases for `refresh: keyed`.
+/// aliases for `refresh: incremental` + `grain: key`.
 #[test]
 fn refresh_latest_value_and_accumulating_snapshot_remain_unknown() {
     for value in ["latest_value", "accumulating_snapshot"] {
@@ -134,9 +138,9 @@ fn refresh_latest_value_and_accumulating_snapshot_remain_unknown() {
     }
 }
 
-// ── refresh: keyed forbids timeseries: and batched: ───────────────────────────
+// ── refresh: incremental + grain: key forbids timeseries: and batched: ───────
 
-/// `refresh: keyed` + `timeseries:` → `KeyedForbidsTimeseries`.
+/// `refresh: incremental` + `grain: key` + `timeseries:` → `KeyedForbidsTimeseries`.
 #[test]
 fn refresh_keyed_forbids_timeseries() {
     use smelt_core::config::{Granularity, TimeseriesConfig};
@@ -144,7 +148,8 @@ fn refresh_keyed_forbids_timeseries() {
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        refresh: Some(RefreshStrategy::Keyed),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(Grain::Key),
         timeseries: Some(TimeseriesConfig {
             event_time_column: "ts".to_string(),
             partition_column: "dt".to_string(),
@@ -155,7 +160,7 @@ fn refresh_keyed_forbids_timeseries() {
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-        .expect_err("refresh: keyed + timeseries: must error");
+        .expect_err("refresh: incremental + grain: key + timeseries: must error");
     assert!(
         matches!(err, MetadataError::KeyedForbidsTimeseries),
         "Expected KeyedForbidsTimeseries, got: {}",
@@ -163,7 +168,7 @@ fn refresh_keyed_forbids_timeseries() {
     );
 }
 
-/// `refresh: keyed` + `batched:` → `KeyedForbidsBatched`.
+/// `refresh: incremental` + `grain: key` + `batched:` → `KeyedForbidsBatched`.
 #[test]
 fn refresh_keyed_forbids_incremental() {
     use smelt_core::config::{BatchedConfig, BatchedSafetyOverrides};
@@ -171,7 +176,8 @@ fn refresh_keyed_forbids_incremental() {
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        refresh: Some(RefreshStrategy::Keyed),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(Grain::Key),
         batched: Some(BatchedConfig {
             unique_key: vec![],
             nondeterministic_columns: vec![],
@@ -180,7 +186,7 @@ fn refresh_keyed_forbids_incremental() {
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-        .expect_err("refresh: keyed + batched: must error");
+        .expect_err("refresh: incremental + grain: key + batched: must error");
     assert!(
         matches!(err, MetadataError::KeyedForbidsBatched),
         "Expected KeyedForbidsBatched, got: {}",
@@ -188,14 +194,16 @@ fn refresh_keyed_forbids_incremental() {
     );
 }
 
-// ── refresh: batched selector + batched: block ────────────────────────────────
+// ── refresh: incremental + grain: partition selector + batched: block ────────
 
-/// `refresh: batched` deserialises to `RefreshStrategy::Batched`.
+/// `refresh: incremental` + `grain: partition` deserialises to
+/// `RefreshStrategy::Incremental` + `Grain::Partition`.
 #[test]
 fn refresh_batched_parses() {
     let source = r#"---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: ts
   partition_column: dt
@@ -206,33 +214,35 @@ SELECT dt FROM foo"#;
     let result = extract_file_metadata(source).expect("should parse");
     match result {
         FileMetadata::Single { metadata, .. } => {
-            assert_eq!(metadata.refresh, Some(RefreshStrategy::Batched));
+            assert_eq!(metadata.refresh, Some(RefreshStrategy::Incremental));
+            assert_eq!(metadata.grain, Some(Grain::Partition));
         }
         _ => panic!("Expected Single variant"),
     }
 }
 
-/// A bare `refresh: foo` still errors listing `batched` among the valid values.
+/// A bare `refresh: foo` still errors listing `incremental` among the valid values.
 #[test]
 fn refresh_unknown_value_lists_batched() {
     let err = serde_yaml::from_str::<RefreshStrategy>("foo")
         .expect_err("unknown refresh value must fail");
     let message = err.to_string();
     assert!(
-        message.contains("batched"),
-        "error must list 'batched' among valid refresh values; got: {}",
+        message.contains("incremental"),
+        "error must list 'incremental' among valid refresh values; got: {}",
         message
     );
 }
 
-/// `refresh: batched` + `timeseries:` validates cleanly.
+/// `refresh: incremental` + `grain: partition` + `timeseries:` validates cleanly.
 #[test]
 fn refresh_batched_with_timeseries_is_valid() {
     use smelt_core::config::{Granularity, TimeseriesConfig};
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        refresh: Some(RefreshStrategy::Batched),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(Grain::Partition),
         timeseries: Some(TimeseriesConfig {
             event_time_column: "ts".to_string(),
             partition_column: "dt".to_string(),
@@ -243,21 +253,23 @@ fn refresh_batched_with_timeseries_is_valid() {
         ..Default::default()
     };
     validate_timeseries(&metadata, "SELECT dt FROM foo")
-        .expect("refresh: batched + timeseries: must validate");
+        .expect("refresh: incremental + grain: partition + timeseries: must validate");
 }
 
-/// `refresh: batched` without `timeseries:` → `TimeseriesRequiredForBatched`.
+/// `refresh: incremental` + `grain: partition` without `timeseries:` →
+/// `TimeseriesRequiredForBatched`.
 #[test]
 fn refresh_batched_without_timeseries_errors() {
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        refresh: Some(RefreshStrategy::Batched),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(Grain::Partition),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-        .expect_err("refresh: batched without timeseries: must error");
+        .expect_err("refresh: incremental + grain: partition without timeseries: must error");
     assert!(
         matches!(err, MetadataError::TimeseriesRequiredForBatched),
         "Expected TimeseriesRequiredForBatched, got: {}",
@@ -265,7 +277,8 @@ fn refresh_batched_without_timeseries_errors() {
     );
 }
 
-/// A `batched:` block without `refresh: batched` is a hard error.
+/// A `batched:` block without `refresh: incremental` + `grain: partition` is
+/// a hard error.
 #[test]
 fn batched_block_without_refresh_batched_errors() {
     use smelt_core::config::BatchedConfig;
@@ -277,7 +290,7 @@ fn batched_block_without_refresh_batched_errors() {
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT 1")
-        .expect_err("batched: without refresh: batched must error");
+        .expect_err("batched: without refresh: incremental + grain: partition must error");
     assert!(
         matches!(err, MetadataError::BatchedRequiresRefreshBatched),
         "Expected BatchedRequiresRefreshBatched, got: {}",
@@ -286,8 +299,8 @@ fn batched_block_without_refresh_batched_errors() {
 }
 
 /// A model declaring the retired `incremental:` block is a hard error naming
-/// `refresh: batched` as the replacement — the hard-cut has no dual-accept
-/// deprecation window.
+/// `refresh: incremental` + `grain:` as the replacement — the hard-cut has
+/// no dual-accept deprecation window.
 #[test]
 fn legacy_incremental_block_is_hard_cut() {
     let source = r#"---
@@ -305,32 +318,34 @@ SELECT dt FROM foo"#;
         extract_file_metadata(source).expect_err("declaring incremental: must be a hard error");
     let message = err.to_string();
     assert!(
-        message.contains("refresh: batched"),
-        "error must name refresh: batched as the replacement; got: {}",
+        message.contains("refresh: incremental") && message.contains("grain:"),
+        "error must name refresh: incremental + grain: as the replacement; got: {}",
         message
     );
 }
 
-// ── view + refresh: keyed is a warning (no error) ─────────────────────────────
+// ── view + refresh: incremental + grain: key is a warning (no error) ─────────
 
-/// `view` + `refresh: keyed` emits an advisory warning but does NOT
-/// produce a hard error — the config is ignored and the model parses cleanly.
-/// (Mirrors the existing `view` + `incremental` treatment.)
+/// `view` + `refresh: incremental` + `grain: key` emits an advisory warning
+/// but does NOT produce a hard error — the config is ignored and the model
+/// parses cleanly. (Mirrors the existing `view` + `incremental` treatment.)
 #[test]
 fn refresh_on_view_is_warning() {
     let metadata = ModelMetadata {
         materialization: Some(Materialization::View),
-        refresh: Some(RefreshStrategy::Keyed),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(Grain::Key),
         ..Default::default()
     };
     // Must not error — warning is advisory
-    validate_timeseries(&metadata, "SELECT 1")
-        .expect("view + refresh: keyed must not be a hard error (only a warning)");
+    validate_timeseries(&metadata, "SELECT 1").expect(
+        "view + refresh: incremental + grain: key must not be a hard error (only a warning)",
+    );
 }
 
-// ── ephemeral + refresh: keyed is a hard error ────────────────────────────────
+// ── ephemeral + refresh: incremental + grain: key is a hard error ────────────
 
-/// `ephemeral` + `refresh: keyed` must be a hard error.
+/// `ephemeral` + `refresh: incremental` + `grain: key` must be a hard error.
 /// Ephemeral models have no persisted output to merge into, so the
 /// combination is nonsensical. Mirrors the existing `ephemeral` +
 /// `incremental:` treatment (hard error, not a warning).
@@ -340,11 +355,12 @@ fn refresh_on_ephemeral_is_error() {
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Ephemeral),
-        refresh: Some(RefreshStrategy::Keyed),
+        refresh: Some(RefreshStrategy::Incremental),
+        grain: Some(Grain::Key),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT 1")
-        .expect_err("ephemeral + refresh: keyed must be a hard error");
+        .expect_err("ephemeral + refresh: incremental + grain: key must be a hard error");
     assert!(
         matches!(err, MetadataError::MalformedTimeseries { .. }),
         "Expected MalformedTimeseries, got: {}",

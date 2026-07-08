@@ -1,6 +1,7 @@
 ---
 materialization: table
-refresh: keyed
+refresh: incremental
+grain: key
 ---
 -- STRING_AGG is NOT in the keyed allowlist; the classifier must refuse
 -- this model (KeyedUnknownCombiner) regardless of run window.

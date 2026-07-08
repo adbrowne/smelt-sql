@@ -281,7 +281,8 @@ async fn test_incremental_full_then_partial() {
 
     let model_sql = r#"---
 materialized: table
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [event_date, user_id]
 timeseries:
@@ -413,7 +414,8 @@ async fn test_composed_cube_split_incremental() {
 
     let model_sql = r#"---
 materialized: table
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [event_date]
 timeseries:
@@ -564,7 +566,8 @@ GROUP BY 1, 2 -- smelt:cube_split"#;
 fn test_mandatory_time_range_detection() {
     let model_sql = r#"---
 materialized: table
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [event_date]
 timeseries:

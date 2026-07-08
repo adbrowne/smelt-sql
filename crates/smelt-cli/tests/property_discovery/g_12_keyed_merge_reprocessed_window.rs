@@ -49,7 +49,8 @@ SELECT * FROM (
 "#;
     let device_stats_sql = r#"---
 materialization: table
-refresh: keyed
+refresh: incremental
+grain: key
 ---
 SELECT
     device_id,

@@ -1,6 +1,7 @@
 ---
 materialization: table
-refresh: keyed
+refresh: incremental
+grain: key
 timeseries:
   event_time_column: event_date
   partition_column: event_date

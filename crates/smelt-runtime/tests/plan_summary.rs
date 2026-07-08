@@ -207,7 +207,8 @@ async fn test_planner_override_applied() {
 
     // Write a model with incremental frontmatter so it's classified as Incremental
     let inc_sql = r#"---
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -229,7 +230,8 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            refresh: Some(smelt_core::config::RefreshStrategy::Batched),
+            refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Partition),
             batched: Some(BatchedConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],

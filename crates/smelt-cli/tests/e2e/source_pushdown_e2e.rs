@@ -105,7 +105,8 @@ timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 ---
 SELECT event_date, COUNT(*) AS cnt FROM smelt.sources.events GROUP BY event_date
 "#;
@@ -380,7 +381,8 @@ timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   safety_overrides:
     allow_subqueries: true
@@ -575,7 +577,8 @@ timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 ---
 SELECT event_date, user_id FROM smelt.sources.events_a
 UNION ALL

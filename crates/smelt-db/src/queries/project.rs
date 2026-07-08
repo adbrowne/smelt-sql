@@ -3503,7 +3503,8 @@ mod tests {
         let generator = concat!(
             "---\n",
             "generates: models\n",
-            "refresh: batched\n",
+            "refresh: incremental\n",
+            "grain: partition\n",
             "batched:\n",
             "  unique_key: [dt]\n",
             "timeseries:\n",
@@ -3656,7 +3657,8 @@ mod tests {
         let generator = concat!(
             "---\n",
             "generates: models\n",
-            "refresh: batched\n",
+            "refresh: incremental\n",
+            "grain: partition\n",
             "batched:\n",
             "  unique_key: [dt]\n",
             "timeseries:\n",

@@ -5,7 +5,8 @@ timeseries:
   partition_column: partition_key
   granularity: day
   assert_monotonic: true
-refresh: batched
+refresh: incremental
+grain: partition
 ---
 
 -- `ABS(...)` is a real, recognized SQL function (so type inference is

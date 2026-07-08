@@ -1068,7 +1068,7 @@ impl SqlCompiler {
     ///
     /// No backend advertises `supports_native_ivm` today, so this always fires
     /// for `refresh: materialized_view` models — never a silent fallback to
-    /// `keyed` or a full-refresh table
+    /// `refresh: incremental` or a full-refresh table
     /// (`docs/specs/materialized_view.md` §"No silent fallback"). Called from
     /// every compile entry point (`compile`, `compile_with_sql`,
     /// `compile_with_sql_and_ephemerals`) so the gate applies uniformly
@@ -1080,7 +1080,8 @@ impl SqlCompiler {
         if refresh == RefreshStrategy::MaterializedView && !self.capabilities.supports_native_ivm {
             anyhow::bail!(
                 "`refresh: materialized_view` requires native incremental-view maintenance; \
-                 this engine has none — use `refresh: keyed` for smelt-driven maintenance."
+                 this engine has none — use `refresh: incremental` with `grain: key` for \
+                 smelt-driven maintenance."
             );
         }
         Ok(())
@@ -2154,8 +2155,8 @@ JOIN smelt.model_b b ON a.id = b.id
             message
         );
         assert!(
-            message.contains("use `refresh: keyed`"),
-            "expected the hard error to point at `refresh: keyed`, got: {}",
+            message.contains("use `refresh: incremental` with `grain: key`"),
+            "expected the hard error to point at `refresh: incremental` + `grain: key`, got: {}",
             message
         );
     }
@@ -2182,6 +2183,7 @@ JOIN smelt.model_b b ON a.id = b.id
                 materialization: Some(Materialization::Table),
                 timeseries: None,
                 refresh: None,
+                grain: None,
                 batched: None,
                 tags: Vec::new(),
                 target: None,

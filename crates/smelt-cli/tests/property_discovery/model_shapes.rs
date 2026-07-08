@@ -45,7 +45,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [id]
 ---
@@ -110,7 +111,8 @@ timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [user_id, event_date]
 ---
@@ -178,7 +180,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -220,7 +223,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -259,7 +263,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -301,7 +306,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -344,7 +350,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d, user_id]
 ---
@@ -419,7 +426,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d, user_id]
 ---
@@ -486,7 +494,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -528,7 +537,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -577,7 +587,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---
@@ -627,7 +638,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d, id, src]
 ---
@@ -697,7 +709,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [user_id, d]
 ---
@@ -761,7 +774,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d, user_id, tier]
 ---
@@ -811,7 +825,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [d]
 ---

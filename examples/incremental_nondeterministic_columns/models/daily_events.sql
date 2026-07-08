@@ -4,7 +4,8 @@ timeseries:
   event_time_column: event_ts
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   nondeterministic_columns:
     - inserted_at

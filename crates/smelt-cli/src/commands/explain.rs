@@ -360,9 +360,11 @@ mod tests {
         ModelFile,
     };
 
-    /// A model declared with `materialization: table` + `refresh: cumulative`
-    /// must report `"cumulative_aggregate"` as its physical strategy in
-    /// `smelt explain` output (the human-readable strategy label), NOT `"full_refresh"`.
+    /// A model declared with `materialization: table` + `refresh: incremental`
+    /// and `grain: key` (the former `refresh: cumulative`/`keyed`) must
+    /// report `"cumulative_aggregate"` as its physical strategy in `smelt
+    /// explain` output (the human-readable strategy label), NOT
+    /// `"full_refresh"`.
     #[test]
     fn refresh_cumulative_table_strategy_is_cumulative_aggregate() {
         // Minimal smelt.yml in a temp dir.
@@ -375,12 +377,13 @@ mod tests {
         std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
         let config = smelt_cli::Config::load(tmp.path()).expect("Config::load from temp smelt.yml");
 
-        // Build a ModelFile with `materialization: table` + `refresh: cumulative`.
+        // Build a ModelFile with `materialization: table` + `refresh: incremental` + `grain: key`.
         let model_name = "my_cumulative_model";
         let path: std::path::PathBuf = format!("models/{}.sql", model_name).into();
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Keyed),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Key),
             ..ModelMetadata::default()
         };
         let model_file = ModelFile {

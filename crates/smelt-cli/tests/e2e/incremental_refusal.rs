@@ -40,7 +40,8 @@ fn stage_workspace(tmp: &TempDir, name: &str, model_files: &[(&str, &str)]) -> P
 /// A model with OVER in the outer body (window function — not partition-local).
 const SQL_OVER: &str = r#"---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -61,7 +62,8 @@ GROUP BY 1, 2
 /// (`batched_models.md` §"Safety checks").
 const SQL_HAVING_MISALIGNED: &str = r#"---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -84,7 +86,8 @@ HAVING COUNT(*) > 5
 /// GROUP BY key is a superset of `partition_column`).
 const SQL_HAVING_ALIGNED: &str = r#"---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date

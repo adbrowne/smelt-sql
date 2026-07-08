@@ -4,7 +4,8 @@ timeseries:
   event_time_column: event_ts
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 horizon_ceiling: '30 days'
 ---
 -- A 2-hour `RANGE BETWEEN INTERVAL` lookback derives a horizon far inside

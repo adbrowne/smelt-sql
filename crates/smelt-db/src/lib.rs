@@ -120,6 +120,8 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::MaterializedViewForbidsBatched => None,
         MetadataError::MalformedFunctionalDependency { .. } => None,
         MetadataError::MalformedBoundedDomain { .. } => None,
+        MetadataError::GrainRequiredForIncremental => None,
+        MetadataError::GrainRequiresIncremental => None,
     }
 }
 
@@ -1465,6 +1467,13 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     ts_err.to_string(),
                     DiagnosticCode::MaterializedViewForbidsBatched,
                 )),
+                smelt_core::metadata::MetadataError::GrainRequiredForIncremental => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::GrainRequiredForIncremental,
+                )),
+                smelt_core::metadata::MetadataError::GrainRequiresIncremental => {
+                    Some((ts_err.to_string(), DiagnosticCode::GrainRequiresIncremental))
+                }
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
                 _ => None,
@@ -1556,14 +1565,15 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // query only gathers inputs and aggregates, so the editor and the build
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
-        // Route keyed detection through is_keyed() (a `refresh: keyed` model)
-        // and batched detection through `refresh: batched` (the opt-in,
-        // independent of whether the optional `batched:` block is present)
-        // so both reach the classifier. The strings below are the
+        // Route keyed detection through is_keyed() (`refresh: incremental` +
+        // `grain: key`) and partition-grain detection through
+        // is_partition_grain() (`refresh: incremental` + `grain: partition`
+        // — the opt-in, independent of whether the optional `batched:` block
+        // is present) so both reach the classifier. The strings below are the
         // classifier's internal keys for each rule, not user surface values.
         let materialization = if metadata.is_keyed() {
             "cumulative_aggregate"
-        } else if metadata.refresh == Some(smelt_core::config::RefreshStrategy::Batched) {
+        } else if metadata.is_partition_grain() {
             "incremental"
         } else {
             ""

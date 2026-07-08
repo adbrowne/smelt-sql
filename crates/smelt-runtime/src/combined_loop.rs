@@ -319,7 +319,12 @@ fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String) ->
         materialization,
         timeseries: emitted.timeseries_config.clone(),
         refresh: if emitted.incremental_config.is_some() {
-            Some(smelt_core::config::RefreshStrategy::Batched)
+            Some(smelt_core::config::RefreshStrategy::Incremental)
+        } else {
+            None
+        },
+        grain: if emitted.incremental_config.is_some() {
+            Some(smelt_core::config::Grain::Partition)
         } else {
             None
         },

@@ -11,7 +11,8 @@ def py_l4_488(project):
     return f"""
 ---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_time
   partition_column: event_date

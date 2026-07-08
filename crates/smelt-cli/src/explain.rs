@@ -154,10 +154,11 @@ pub fn build_explain_output(
                 generator_name: gn.clone(),
             });
 
-        // Emit `refresh: "keyed"` when the model is keyed; omit otherwise.
+        // Emit `refresh: "incremental"` when the model is keyed
+        // (`refresh: incremental` + `grain: key`); omit otherwise.
         let refresh = metadata
-            .and_then(|m| m.refresh.clone())
-            .filter(|r| *r == RefreshStrategy::Keyed);
+            .filter(|m| m.is_keyed())
+            .and_then(|m| m.refresh.clone());
 
         models.insert(
             model_name.clone(),
@@ -432,7 +433,8 @@ mod tests {
                     week_start: None,
                     assert_monotonic: false,
                 }),
-                refresh: Some(smelt_core::config::RefreshStrategy::Batched),
+                refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+                grain: Some(smelt_core::config::Grain::Partition),
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
@@ -534,7 +536,8 @@ mod tests {
                     week_start: None,
                     assert_monotonic: false,
                 }),
-                refresh: Some(smelt_core::config::RefreshStrategy::Batched),
+                refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+                grain: Some(smelt_core::config::Grain::Partition),
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
@@ -598,8 +601,9 @@ mod tests {
     }
 
     /// `smelt explain --json` must emit `"materialization": "table"` and
-    /// `"refresh": "keyed"` for a keyed model, and must NOT emit
-    /// `"cumulative_aggregate"` anywhere in the materialization field.
+    /// `"refresh": "incremental"` for a keyed model (`refresh: incremental`
+    /// and `grain: key`), and must NOT emit `"cumulative_aggregate"` anywhere
+    /// in the materialization field.
     ///
     /// Spec oracle: `docs/specs/cli.md` §"`smelt explain --json` output schema".
     #[test]
@@ -614,7 +618,8 @@ mod tests {
         );
         model.metadata = Some(Box::new(ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Keyed),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Key),
             ..Default::default()
         }));
 
@@ -634,19 +639,19 @@ mod tests {
             "keyed model materialization must be 'table', not anything else"
         );
 
-        // The `refresh` field must be `Some(Keyed)`.
+        // The `refresh` field must be `Some(Incremental)`.
         assert_eq!(
             model_entry.refresh,
-            Some(RefreshStrategy::Keyed),
-            "keyed model must have refresh: Some(Keyed)"
+            Some(RefreshStrategy::Incremental),
+            "keyed model must have refresh: Some(Incremental)"
         );
 
-        // Verify the JSON serialization: must emit `"refresh": "keyed"`
+        // Verify the JSON serialization: must emit `"refresh": "incremental"`
         // and `"materialization": "table"`, must NOT contain `"cumulative_aggregate"`.
         let json = serde_json::to_string_pretty(&output).unwrap();
         assert!(
-            json.contains("\"refresh\": \"keyed\""),
-            "JSON must contain '\"refresh\": \"keyed\"'; got:\n{json}"
+            json.contains("\"refresh\": \"incremental\""),
+            "JSON must contain '\"refresh\": \"incremental\"'; got:\n{json}"
         );
         assert!(
             json.contains("\"materialization\": \"table\""),

@@ -447,6 +447,8 @@ impl Backend {
                 DbCode::PipeUnknownOperator => "pipe-unknown-operator",
                 DbCode::PipeOperatorUnsupported => "pipe-operator-unsupported",
                 DbCode::PipeStageMalformed => "pipe-stage-malformed",
+                DbCode::GrainRequiredForIncremental => "grain-required-for-incremental",
+                DbCode::GrainRequiresIncremental => "grain-requires-incremental",
             };
             NumberOrString::String(code_str.to_string())
         });

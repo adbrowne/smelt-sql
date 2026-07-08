@@ -169,8 +169,8 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
         message
     );
     assert!(
-        message.contains("use `refresh: keyed`"),
-        "expected the hard error to point at `refresh: keyed`, got: {}",
+        message.contains("use `refresh: incremental` with `grain: key`"),
+        "expected the hard error to point at `refresh: incremental` + `grain: key`, got: {}",
         message
     );
 }

@@ -95,7 +95,8 @@ timeseries:
   event_time_column: d
   partition_column: d
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   unique_key: [acct_id]
 ---

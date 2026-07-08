@@ -102,7 +102,8 @@ timeseries:
   event_time_column: transaction_date
   partition_column: transaction_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 ---
 WITH cur AS (
     SELECT transaction_date, user_id, transaction_ts

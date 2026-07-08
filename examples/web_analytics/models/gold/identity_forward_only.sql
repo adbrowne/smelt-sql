@@ -1,6 +1,7 @@
 ---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: session_start_date
   partition_column: session_start_date

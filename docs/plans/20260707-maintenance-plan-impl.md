@@ -65,7 +65,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| MP1   | pending  |        |      |
+| MP1   | done     | (pending push) | 2026-07-08 |
 | MP2   | pending  |        |      |
 | MP3   | pending  |        |      |
 | MP4   | pending  |        |      |

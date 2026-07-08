@@ -211,13 +211,23 @@ pub struct ModelMetadata {
     /// Refresh axis: how stored output is recomputed across runs.
     ///
     /// `None` / `Some(Full)` — default full rebuild from scratch.
-    /// `Some(Keyed)` — keyed merge loop.
-    /// Opt-in: `materialization: table` + `refresh: keyed`.
+    /// `Some(Incremental)` — smelt runs the derived maintenance plan each
+    /// run; requires a sibling `grain:` (see [`ModelMetadata::grain`]).
+    /// Opt-in: `materialization: table` + `refresh: incremental` +
+    /// `grain: key` (the former `refresh: keyed`).
     ///
     /// See `docs/specs/models.md` §"Refresh axis" and
     /// `docs/specs/keyed_models.md` §Surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
+
+    /// Declared grain (`partition` | `key` | `key_per_partition`) — the
+    /// output shape and row identity for a `refresh: incremental` model.
+    /// Required whenever `refresh: incremental` is set; rejected (hard
+    /// error, see [`validate_timeseries`]) otherwise. See
+    /// `docs/specs/models.md` §"Refresh axis".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<crate::config::Grain>,
 
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
@@ -251,10 +261,23 @@ pub struct ModelMetadata {
 impl ModelMetadata {
     /// Returns `true` when this model uses the keyed merge loop.
     ///
-    /// The opt-in is `materialization: table` + `refresh: keyed`.
+    /// The opt-in is `materialization: table` + `refresh: incremental` +
+    /// `grain: key` (the former `refresh: keyed`).
     /// Every keyed detection site must route through this predicate.
     pub fn is_keyed(&self) -> bool {
-        self.refresh == Some(RefreshStrategy::Keyed)
+        self.refresh == Some(RefreshStrategy::Incremental)
+            && self.grain == Some(crate::config::Grain::Key)
+    }
+
+    /// Returns `true` when this model uses the partition-grain window-forward
+    /// refresh loop.
+    ///
+    /// The opt-in is `materialization: table` + `refresh: incremental` +
+    /// `grain: partition` (the former `refresh: batched`).
+    /// Every partition-grain detection site must route through this predicate.
+    pub fn is_partition_grain(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::Incremental)
+            && self.grain == Some(crate::config::Grain::Partition)
     }
 
     /// Returns `true` when this model delegates freshness to a backend's
@@ -370,13 +393,14 @@ pub enum MetadataError {
     #[error("KeyedForbidsTimeseries: keyed models must not declare a `timeseries:` block — the keyed output has no partition column; the rule reads the partition shape from the driving source")]
     KeyedForbidsTimeseries,
 
-    /// A model declares `refresh: keyed` (or another keyed-output mode)
-    /// and a `batched:` block.
-    #[error("KeyedForbidsBatched: keyed and batched are different refresh strategies with different equivalence contracts — pick one (see docs/specs/keyed_models.md)")]
+    /// A model declares `refresh: incremental` + `grain: key` (or another
+    /// keyed-output mode) and a `batched:` block.
+    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/keyed_models.md)")]
     KeyedForbidsBatched,
 
-    /// A model declares a `batched:` block without `refresh: batched`.
-    #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: batched` — add `refresh: batched` or remove the `batched:` block")]
+    /// A model declares a `batched:` block without `refresh: incremental` +
+    /// `grain: partition`.
+    #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
     BatchedRequiresRefreshBatched,
 
     /// A model declares `refresh: materialized_view` and a `timeseries:` block.
@@ -405,6 +429,19 @@ pub enum MetadataError {
     /// absent from the model's SQL body.
     #[error("MalformedBoundedDomain: {message}")]
     MalformedBoundedDomain { message: String },
+
+    /// A model declares `refresh: incremental` without a sibling `grain:`
+    /// declaration. `grain:` is required whenever `refresh: incremental` is
+    /// set — it declares the output's row identity/shape
+    /// (`docs/specs/models.md` §"Refresh axis").
+    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`")]
+    GrainRequiredForIncremental,
+
+    /// A model declares `grain:` without `refresh: incremental`. `grain:` is
+    /// only meaningful alongside `refresh: incremental`
+    /// (`docs/specs/models.md` §"Refresh axis").
+    #[error("GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key")]
+    GrainRequiresIncremental,
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -426,7 +463,7 @@ fn frontmatter_has_generates(source: &str) -> bool {
     false
 }
 
-/// Validate `timeseries:`, `refresh: batched`, and `batched:` constraints on
+/// Validate `refresh:`/`grain:`, `timeseries:`, and `batched:` constraints on
 /// parsed metadata.
 ///
 /// Pure function — operates only on the already-parsed `ModelMetadata` and the
@@ -434,8 +471,10 @@ fn frontmatter_has_generates(source: &str) -> bool {
 /// constraint violation found, or `Ok(())` when all constraints pass.
 ///
 /// Rules checked (per `models.md` §"Constraint violations", `timeseries.md` §Semantics):
-/// - `refresh: batched` without `timeseries:` → `TimeseriesRequiredForBatched`
-/// - `batched:` block without `refresh: batched` → `BatchedRequiresRefreshBatched`
+/// - `refresh: incremental` without `grain:` → `GrainRequiredForIncremental`
+/// - `grain:` without `refresh: incremental` → `GrainRequiresIncremental`
+/// - `refresh: incremental` + `grain: partition` without `timeseries:` → `TimeseriesRequiredForBatched`
+/// - `batched:` block without `refresh: incremental` + `grain: partition` → `BatchedRequiresRefreshBatched`
 /// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
 /// - Legacy nested form (`event_time_column` inside `batched:`) was removed;
 ///   its presence in the YAML block now produces a YAML parse error (unknown field)
@@ -445,9 +484,21 @@ fn frontmatter_has_generates(source: &str) -> bool {
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
+    // Rule: grain: requires refresh: incremental, and vice versa — the two
+    // keys are declared together (`docs/specs/models.md` §"Refresh axis").
+    match (&metadata.refresh, &metadata.grain) {
+        (Some(RefreshStrategy::Incremental), None) => {
+            return Err(MetadataError::GrainRequiredForIncremental);
+        }
+        (refresh, Some(_)) if *refresh != Some(RefreshStrategy::Incremental) => {
+            return Err(MetadataError::GrainRequiresIncremental);
+        }
+        _ => {}
+    }
+
     // Rule: keyed forbids batched: — enforced here so the diagnostic
     // fires alongside the other materialization-block constraints.
-    // Triggered by `refresh: keyed`.
+    // Triggered by `refresh: incremental` + `grain: key`.
     if metadata.is_keyed() && metadata.batched.is_some() {
         return Err(MetadataError::KeyedForbidsBatched);
     }
@@ -471,24 +522,26 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         return Err(MetadataError::MaterializedViewForbidsTimeseries);
     }
 
-    // `refresh: keyed` on a non-stored materialization:
+    // `refresh: incremental` + `grain: key` on a non-stored materialization:
     // - ephemeral: hard error — there is no persisted output to merge into.
     //   Mirrors the existing `ephemeral` + `incremental:` hard-error treatment.
     // - view: advisory warning only — config is ignored; mirrors `view + incremental`.
-    if metadata.refresh == Some(RefreshStrategy::Keyed) {
+    if metadata.is_keyed() {
         if let Some(mat) = &metadata.materialization {
             match mat {
                 Materialization::Ephemeral => {
                     return Err(MetadataError::MalformedTimeseries {
-                        message: "ephemeral models cannot use refresh: keyed \
-                                  (ephemeral models have no persisted output to merge into)"
+                        message: "ephemeral models cannot use refresh: incremental + \
+                                  grain: key (ephemeral models have no persisted output \
+                                  to merge into)"
                             .to_string(),
                     });
                 }
                 Materialization::View => {
                     tracing::warn!(
-                        "model has `refresh: keyed` but `materialization: view` — \
-                         the refresh config is ignored for non-table materializations"
+                        "model has `refresh: incremental` + `grain: key` but \
+                         `materialization: view` — the refresh config is ignored for \
+                         non-table materializations"
                     );
                     // Not an error — fall through.
                 }
@@ -497,13 +550,15 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
-    // Rule: batched: block without refresh: batched → BatchedRequiresRefreshBatched
-    if metadata.batched.is_some() && metadata.refresh != Some(RefreshStrategy::Batched) {
+    // Rule: batched: block without refresh: incremental + grain: partition →
+    // BatchedRequiresRefreshBatched
+    if metadata.batched.is_some() && !metadata.is_partition_grain() {
         return Err(MetadataError::BatchedRequiresRefreshBatched);
     }
 
-    // Rule: refresh: batched without timeseries: → TimeseriesRequiredForBatched
-    if metadata.refresh == Some(RefreshStrategy::Batched) && metadata.timeseries.is_none() {
+    // Rule: refresh: incremental + grain: partition without timeseries: →
+    // TimeseriesRequiredForBatched
+    if metadata.is_partition_grain() && metadata.timeseries.is_none() {
         return Err(MetadataError::TimeseriesRequiredForBatched);
     }
 
@@ -930,10 +985,11 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // `materialization: cumulative_aggregate` and `materialization:
         // materialized_view` are also checked here to give a clear migration
         // error — `cumulative_aggregate` was removed (use `materialization:
-        // table` + `refresh: keyed` instead); `materialized_view` was
-        // relocated from the storage axis to the refresh axis (use `refresh:
+        // table` + `refresh: incremental` + `grain: key` instead); `materialized_view`
+        // was relocated from the storage axis to the refresh axis (use `refresh:
         // materialized_view` instead). `incremental:` is checked for the same
-        // reason — the block was retired; use `refresh: batched` + `batched:` instead.
+        // reason — the block was retired; use `refresh: incremental` + `grain: partition`
+        // + `batched:` instead.
         for (key, value) in validated_map.iter() {
             let key_str = key.as_str().unwrap_or("");
             if key_str == "reuse" {
@@ -958,8 +1014,9 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 ));
             } else if key_str == "incremental" {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
-                    "the `incremental:` block has been removed — use `refresh: batched` + \
-                     an optional `batched:` block instead (see docs/specs/batched_models.md)",
+                    "the `incremental:` block has been removed — use `refresh: incremental` + \
+                     `grain: partition` + an optional `batched:` block instead (see \
+                     docs/specs/batched_models.md)",
                 )));
             // `refresh: cumulative` is a hard error pointing at the renamed
             // value, not a silently-stripped unknown value — the resilient
@@ -983,6 +1040,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
                 fallback.remove(serde_yaml::Value::String("batched".to_string()));
                 fallback.remove(serde_yaml::Value::String("refresh".to_string()));
+                fallback.remove(serde_yaml::Value::String("grain".to_string()));
                 serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
             }
         }
@@ -1077,8 +1135,9 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     ));
                 } else if key_str == "incremental" {
                     return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
-                        "the `incremental:` block has been removed — use `refresh: batched` + \
-                         an optional `batched:` block instead (see docs/specs/batched_models.md)",
+                        "the `incremental:` block has been removed — use `refresh: incremental` + \
+                         `grain: partition` + an optional `batched:` block instead (see \
+                         docs/specs/batched_models.md)",
                     )));
                 }
             }
@@ -1090,6 +1149,7 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
                     fallback.remove(serde_yaml::Value::String("batched".to_string()));
                     fallback.remove(serde_yaml::Value::String("refresh".to_string()));
+                    fallback.remove(serde_yaml::Value::String("grain".to_string()));
                     serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
                 }
             }
@@ -1205,7 +1265,8 @@ SELECT * FROM users"#;
         let source = r#"---
 name: daily_revenue
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
@@ -1222,7 +1283,8 @@ GROUP BY 1"#;
                 assert_eq!(metadata.name, Some("daily_revenue".to_string()));
                 assert_eq!(metadata.materialization, Some(Materialization::Table));
                 assert_eq!(metadata.tags, vec!["revenue", "core"]);
-                assert_eq!(metadata.refresh, Some(RefreshStrategy::Batched));
+                assert_eq!(metadata.refresh, Some(RefreshStrategy::Incremental));
+                assert_eq!(metadata.grain, Some(crate::config::Grain::Partition));
 
                 let timeseries = metadata.timeseries.unwrap();
                 assert_eq!(timeseries.event_time_column, "transaction_timestamp");
@@ -1759,7 +1821,8 @@ FROM smelt.orders_raw"#;
         // Build a ModelMetadata with refresh: batched but no timeseries
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(RefreshStrategy::Batched),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT event_date FROM foo")
@@ -1802,7 +1865,8 @@ FROM smelt.orders_raw"#;
     fn test_nondeterministic_columns_rejects_event_time_column() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(RefreshStrategy::Batched),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -1833,7 +1897,8 @@ FROM smelt.orders_raw"#;
     fn test_nondeterministic_columns_rejects_partition_column() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(RefreshStrategy::Batched),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -1864,7 +1929,8 @@ FROM smelt.orders_raw"#;
     fn test_nondeterministic_columns_rejects_unique_key_column() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(RefreshStrategy::Batched),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -1895,7 +1961,8 @@ FROM smelt.orders_raw"#;
     fn test_nondeterministic_columns_accepts_payload_column() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(RefreshStrategy::Batched),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "order_ts".to_string(),
                 partition_column: "order_date".to_string(),
@@ -2073,7 +2140,7 @@ FROM smelt.orders_raw"#;
     }
 
     /// A `.sql` file declaring the retired `incremental:` block is a hard error
-    /// naming `refresh: batched` as the replacement (models.md hard-cut).
+    /// naming `refresh: incremental` + `grain:` as the replacement (models.md hard-cut).
     #[test]
     fn test_incremental_block_is_hard_cut() {
         let source = r#"---
@@ -2090,8 +2157,8 @@ SELECT dt FROM foo"#;
             .expect_err("declaring the retired `incremental:` block must hard-error");
         let message = err.to_string();
         assert!(
-            message.contains("refresh: batched"),
-            "error message must name refresh: batched as the replacement; got: {}",
+            message.contains("refresh: incremental") && message.contains("grain:"),
+            "error message must name refresh: incremental + grain: as the replacement; got: {}",
             message
         );
     }
@@ -2104,7 +2171,8 @@ SELECT dt FROM foo"#;
     fn test_legacy_nested_form_errors() {
         let source = r#"---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 batched:
   event_time_column: ts
   partition_column: dt
@@ -2206,12 +2274,14 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// `materialization: table` + `refresh: keyed` parses cleanly.
+    /// `materialization: table` + `refresh: incremental` + `grain: key`
+    /// parses cleanly (the former `refresh: keyed`).
     #[test]
     fn test_refresh_keyed_frontmatter_parses() {
         let source = r#"---
 materialization: table
-refresh: keyed
+refresh: incremental
+grain: key
 ---
 SELECT device_id, user_id, COUNT(*) AS event_count
 FROM smelt.events
@@ -2226,8 +2296,9 @@ GROUP BY device_id, user_id"#;
                 );
                 assert_eq!(
                     metadata.refresh,
-                    Some(crate::config::RefreshStrategy::Keyed)
+                    Some(crate::config::RefreshStrategy::Incremental)
                 );
+                assert_eq!(metadata.grain, Some(crate::config::Grain::Key));
                 assert!(metadata.timeseries.is_none());
                 assert!(metadata.batched.is_none());
             }
@@ -2241,7 +2312,8 @@ GROUP BY device_id, user_id"#;
     fn test_keyed_forbids_timeseries() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(crate::config::RefreshStrategy::Keyed),
+            refresh: Some(crate::config::RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Key),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "ts".to_string(),
                 partition_column: "dt".to_string(),
@@ -2266,7 +2338,8 @@ GROUP BY device_id, user_id"#;
     fn test_keyed_forbids_batched() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(crate::config::RefreshStrategy::Keyed),
+            refresh: Some(crate::config::RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Key),
             batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],

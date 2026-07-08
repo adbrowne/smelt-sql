@@ -6,7 +6,8 @@ def py_l3_353(project):
     return """
 ---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_time
   partition_column: event_date

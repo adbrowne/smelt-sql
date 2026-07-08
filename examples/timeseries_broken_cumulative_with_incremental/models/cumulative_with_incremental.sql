@@ -1,6 +1,7 @@
 ---
 materialization: table
-refresh: keyed
+refresh: incremental
+grain: key
 batched: {}
 ---
 SELECT device_id, COUNT(*) AS event_count

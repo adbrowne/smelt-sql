@@ -87,7 +87,8 @@ timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: {granularity}
-refresh: batched
+refresh: incremental
+grain: partition
 ---
 SELECT
     DATE_TRUNC('day', transaction_timestamp) AS revenue_date,

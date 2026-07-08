@@ -655,6 +655,14 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedBoundedDomain: {message}"
     MalformedBoundedDomain,
+    /// A model declares `refresh: incremental` without a sibling `grain:`.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`"
+    GrainRequiredForIncremental,
+    /// A model declares `grain:` without `refresh: incremental`.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key"
+    GrainRequiresIncremental,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or

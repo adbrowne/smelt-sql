@@ -810,6 +810,7 @@ mod tests {
                     materialization: None,
                     timeseries: None,
                     refresh: None,
+                    grain: None,
                     batched: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,

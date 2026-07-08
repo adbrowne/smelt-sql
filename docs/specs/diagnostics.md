@@ -102,10 +102,12 @@ Owned by `docs/specs/timeseries.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: batched` but has no `timeseries:` block. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
 | `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
 | `MalformedBoundedDomain` | Error | A `bounded_domain:` declaration is structurally invalid: a non-positive `max_cardinality` (an absent cap is already a YAML parse error, since the field is required), an empty `column`, or a `column` absent from the model's SQL body. |
+| `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` without a sibling `grain:` declaration. |
+| `GrainRequiresIncremental` | Error | A model declares `grain:` without `refresh: incremental`. |
 
 ---
 
