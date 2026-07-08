@@ -99,12 +99,10 @@ maintenance:
 
 ### The plan matrix
 
-The plan factors the output columns by **shared mutation-sensitivity**: for each column, which
-sources' *post-creation* deltas can change its value. A reference to the row's own immutable
-skeleton at creation time contributes no sensitivity. Columns with identical sensitivity sets
-form one **column group**; a projection mutation-sensitive to two sources merges their groups
-(fail-closed — in the degenerate limit one group covers the table and the plan collapses to a
-whole-model story). Creation is shared by every column (all columns of a new row are computed
+The plan factors the output columns into **column groups** by shared mutation-sensitivity
+(`model_properties.md` §"Per-column mutation-sensitivity / column provenance" — the proof and its
+degenerate-collapse rule are defined there; this spec consumes the resulting groups as the plan's
+column axis). Creation is shared by every column (all columns of a new row are computed
 together); mutation is what partitions them.
 
 Each `(group × trigger)` cell picks a corner of the 2×2 of **read scope** (delta+state vs the
@@ -127,21 +125,22 @@ an unrecognised construct refuses, never defaults). The obligations, each with i
 
 1. **Replayable input** (recompute family) — the source is re-readable at its current processed
    set; declared posture, `sources.md`.
-2. **Faithful fold** (fold family) — the delta stream *partitions* the input (append-only or a
-   retraction-free feed; declared + tripwired), and the combiner's fold over any sub-multiset
-   equals the batch aggregate (derived from the combiner class). These are independent
-   conditions; a replayable feed carrying retractions into a non-invertible combiner passes the
-   first and fails the second.
+2. **Faithful fold** (fold family) — the fold's two independent conditions (source posture ×
+   combiner algebra) hold (`model_properties.md` §"Faithful-fold conditions"); a replayable feed
+   carrying retractions into a non-invertible combiner passes the first condition and fails the
+   second, and either failure alone refuses the fold family for this cell.
 3. **Combiner algebra class** — derived, fail-closed (`model_properties.md` discriminants); a
    holistic or unrecognised combiner leaves only the recompute family.
 4. **Bounded reach** — the cell's scan bound `(clock_col, before, after)` per source is derived
-   from an explicit predicate on that source's partition column, or declared-and-checked; absent
+   (`model_properties.md` §"Unified bound / reach derivation") or declared-and-checked; absent
    both, full-input techniques only (`MaintenanceReachNotDerivable` when the trigger requires a
    bound).
-5. **Bounded footprint** (targeted writes) — the reflection of the scan bound maps an input delta
-   to a bounded set of output addresses; a trajectory column's unbounded forward footprint fails
-   this (`MaintenanceUnboundedFootprint`).
-6. **Well-defined groups** — the mutation-sensitivity partition is computable; degenerate
+5. **Bounded footprint** (targeted writes) — the write-scope reflection of the scan bound is
+   bounded (`model_properties.md` §"Footprint reflection / bounded write footprint"); a
+   trajectory column's unbounded forward footprint fails this
+   (`MaintenanceUnboundedFootprint`).
+6. **Well-defined groups** — the mutation-sensitivity partition is computable
+   (`model_properties.md` §"Per-column mutation-sensitivity / column provenance"); degenerate
    collapse is surfaced, never silent.
 
 **Interchangeability and choice.** Two techniques may serve one cell interchangeably iff, at a
@@ -157,36 +156,35 @@ fixed `S` — this is how per-cell choice stays inside validator-not-chooser.
 
 ### Partition-local maintenance (the K8 guardrail)
 
-A cell is **partition-local in source `i`** when its scan clamp projects onto a bounded interval
-of every read source's partition column *and* its footprint projects onto a bounded interval of
-the output's. The verdict is derived per `(cell × source)`; the emitted maintenance SQL must
-carry the partition predicate on **both** the scan and the merge/overwrite target (a bound stated
-only on a non-partition column is one the storage layer cannot prune by). A **cross-axis** source
-(its partition column is not the output's) is linked only by an explicit, derivable predicate on
-its partition column — smelt must not guess how an undeclared timestamp relates to a partition
-column, and the zero-margin fallback of "no predicate found" is the absence of a link, not a
-zero-cost one. Under the default `scan_bounds` (`require: partition_local`, `on_violation:
-error`), a non-local cell refuses (`MaintenanceScanUnbounded`) unless the source carries
-`allow_full_scan: true`; `max_lookback` additionally refuses a derived span wider than the
+A cell's per-`(cell × source)` locality verdict is the **partition-locality projection**
+(`model_properties.md` §"Partition-locality projection" — the proof, including the cross-axis
+predicate requirement, is defined there). This section owns only the policy consuming that
+verdict: the emitted maintenance SQL must carry the partition predicate on **both** the scan and
+the merge/overwrite target (a bound stated only on a non-partition column is one the storage
+layer cannot prune by). Under the default `scan_bounds` (`require: partition_local`,
+`on_violation: error`), a non-local cell refuses (`MaintenanceScanUnbounded`) unless the source
+carries `allow_full_scan: true`; `max_lookback` additionally refuses a derived span wider than the
 operator's stated expectation. The guardrail never modifies a clamp.
 
 ### The definition-change trigger
 
 A model gaining output fields is a trigger of its own kind: the added group's processed-input
 vector is `∅` over every existing region, and its backfill advances `∅ → current`, touching only
-the new group. Rules:
+the new group. The classification of an added field —
+`SkeletonAdd` / `PureBackfill` / `UpstreamRederive` — is the **definition-change column
+classification** proof (`model_properties.md` §"Definition-change column classification"); this
+section owns only the plan-level policy each classification maps to:
 
-- A field added in a **skeleton** position (identity / grouping / dedup / ordering) is a **grain
-  change**, refused as a column backfill (`MaintenanceSkeletonColumnAdded`) — the honest plan is
-  a recompute, effectively a new model.
-- A payload field lands in the 2×2's **targeted-write column** by what it reads: a pure function
-  of stored columns backfills as an in-place `UPDATE` (no upstream read, admitted only under the
-  additive-only model-diff proof); a field re-deriving from upstream backfills as a column-scoped
-  `MERGE`, keyed where the source is keyed, inheriting each read source's partition-locality
-  verdict unchanged.
-- Fields added together factor by shared mutation-sensitivity, one backfill op per group. The
-  backfill of a newly-added group is **always full-input**, even for a column whose ongoing
-  algebra folds — there is no prior state of that column to fold onto.
+- `SkeletonAdd` (identity / grouping / dedup / ordering) is a **grain change**, refused as a
+  column backfill (`MaintenanceSkeletonColumnAdded`) — the honest plan is a recompute,
+  effectively a new model.
+- `PureBackfill` lands in the 2×2's **targeted-write column** as an in-place `UPDATE` (no
+  upstream read); `UpstreamRederive` lands there as a column-scoped `MERGE`, keyed where the
+  source is keyed, inheriting each read source's partition-locality verdict unchanged.
+- Fields added together factor by shared mutation-sensitivity (`model_properties.md` §"Per-column
+  mutation-sensitivity / column provenance"), one backfill op per group. The backfill of a
+  newly-added group is **always full-input**, even for a column whose ongoing algebra folds —
+  there is no prior state of that column to fold onto.
 - **Group convergence**: a field co-sensitive with an *existing* group still instantiates at `∅`
   and forms its own catch-up group; mid-catch-up, a delta folds into the sibling group but is
   refused on the new group's unbackfilled regions (the never-fold-ahead-of-the-entry rule). The
@@ -347,15 +345,20 @@ disagree; one per node cannot). Deeper rationale:
   G-12 (`crates/smelt-cli/tests/property_discovery/g_12_keyed_merge_reprocessed_window.rs`;
   ledger entry in `docs/research/property-discovery/ledger.md`). The fix is the ledger's
   fold-refusal operation, not a spot check.
-- **The three hardest derivations are unbuilt** and hand-supplied in the tracer:
-  mutation-sensitivity column grouping, skeleton-role extraction, and cross-model payload/column
-  provenance (the latter also gates column-group-scoped dirt, which today coarsens to
-  whole-partition — safe, over-running). `09-spec-readiness.md` §2.
+- **The seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
+  per-column mutation-sensitivity/column provenance, skeleton-role extraction, footprint
+  reflection, partition-locality projection, faithful-fold conditions, the grain-alignment check
+  (the tracer takes edge-declared grains instead — a shortcut ratified away by P3), and
+  definition-change column classification. Column-group-scoped dirt, gated by provenance, today
+  coarsens to whole-partition — safe, over-running. Hour granularity is declared surface
+  (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are deferred.
+  Full verdict definitions: `model_properties.md` §Surface "Derived proofs" (the `not-yet` rows).
+  Build order and code placement: `docs/plans/20260707-maintenance-plan-impl.md` phases MP4
+  (mutation-sensitivity/provenance, skeleton-role), MP5 (footprint reflection,
+  partition-locality), MP6 (faithful-fold, grain-alignment), and MP14 (definition-change
+  classification). `09-spec-readiness.md` §2.
 - **The ledger substrate is the degenerate case**: `smelt-state`'s interval store is
   frontier-only and per-model; per-delta grading and `(region × group)` keying do not exist.
-- **Grain checking is unbuilt**; the tracer takes edge-declared grains (a shortcut ratified away
-  by P3). Hour granularity is declared surface (`timeseries.granularity`) but the propagation
-  layer is day-ordinal; sub-day axes are deferred.
 - **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed
   dirt-sets and time-unrolled self-edges are designed (`10-dependency-propagation.md` §6, S12)
   and unbuilt.
