@@ -12,10 +12,18 @@
 //! derivation (`source_bounds::derive_model_bounds`) by injecting the filter
 //! by hand — exactly the bug class this loop hunts (design N1).
 //!
-//! Lives in `smelt-cli`'s test target (not `smelt-db`'s) because Link C needs
-//! `smelt-runtime::execute_project` + the DuckDB backend, and `smelt-runtime`
-//! depends on `smelt-db` — a Link-C harness in `smelt-db`'s tests would close a
-//! dev-dependency cycle. `smelt-cli` already depends on both, no cycle.
+//! Lives in `smelt-cli`'s test target because Link C needs
+//! `smelt-runtime::execute_project` + `smelt_db::Database` (to stage the Salsa
+//! workspace `execute_project` expects) + the DuckDB backend, and `smelt-cli`
+//! already depends on all three, so no new dependency-graph plumbing was
+//! needed. This is a research-expedience placement, not a forced Cargo
+//! cycle: `smelt-runtime` already normal-depends on `smelt-db`, so this
+//! harness would compile cycle-free under `smelt-runtime/tests/` too. The
+//! real future cycle risk is a planned `smelt-maintenance-testkit` graduation
+//! crate becoming a shared dev-dependency of *both* `smelt-db`'s and
+//! `smelt-runtime`'s test trees
+//! (`docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md`
+//! §3, M3).
 //!
 //! Mirrors the plumbing pattern already proven in
 //! `crates/smelt-runtime/tests/execute_parity.rs`, generalised into a reusable

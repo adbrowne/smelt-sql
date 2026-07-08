@@ -379,9 +379,13 @@ disagree; one per node cannot). Deeper rationale:
   `crates/smelt-runtime/src/{cumulative,maintenance_driver,dimension_horizon_merge,transformer,backfill}.rs`
   (today's technique executors and clamps); `crates/smelt-state/src/intervals.rs` (the degenerate
   ledger); `crates/smelt-backend/src/lib.rs` (technique primitives).
-- **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation}.rs`;
-  `crates/smelt-cli/tests/property_discovery/{tracer_maintenance,tracer_evolution,tracer_propagation,g_12_keyed_merge_reprocessed_window}.rs`
-  (equivalence oracles and the G-12 pin).
+- **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation}.rs`
+  (pure derivation-side assertions); `crates/smelt-runtime/tests/{tracer_maintenance,tracer_evolution,tracer_propagation}.rs`
+  (the DuckDB equivalence oracles — moved from `smelt-cli` 2026-07-08, since they only depend on
+  `smelt_logical::maintenance::*` + `duckdb`, both already available to `smelt-runtime`);
+  `crates/smelt-cli/tests/property_discovery/g_12_keyed_merge_reprocessed_window.rs` (the G-12 pin,
+  which stays in `smelt-cli` because it drives the real `execute_project` pipeline via
+  `link_c_harness.rs`).
 - **User docs**: none yet (see Known Divergences).
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260704-model-updates-fundamentals.md` (the L1+L2 substrate),

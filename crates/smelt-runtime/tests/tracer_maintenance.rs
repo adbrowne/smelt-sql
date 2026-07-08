@@ -13,6 +13,15 @@
 //! the same primitive every Link-C cell diffs against. The plan derivation
 //! is asserted per cell (corner/technique) before its SQL runs, so a shape
 //! whose admission regresses fails here before the equivalence check does.
+//!
+//! Lives in `smelt-runtime/tests/` (moved from the `smelt-cli` property-
+//! discovery tree): it only calls `smelt_logical::maintenance::*` against a
+//! raw in-memory DuckDB connection, with no dependency on `smelt-cli` or
+//! `execute_project` — `smelt-runtime` already carries both `smelt-logical`
+//! and `duckdb` as dependencies, so this needed no new plumbing
+//! (`docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md`).
+
+mod oracle;
 
 use std::collections::BTreeSet;
 
@@ -27,7 +36,7 @@ use smelt_logical::maintenance::{
 };
 use smelt_types::SqlFunction;
 
-use crate::oracle::multiset_equal;
+use oracle::multiset_equal;
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()

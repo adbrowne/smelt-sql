@@ -9,12 +9,22 @@
 - **Related specs**: `docs/specs/architecture.md` (layered single-ownership, run pipeline parity,
   Salsa purity, fail-loud), `docs/specs/model_maintenance.md`, `docs/specs/model_transforms.md`
 
-The research loop deliberately put its harness in `smelt-cli`'s test tree. That was the right
-*research* location (it needed `execute_project` + a real DuckDB backend without creating a
-`smelt-runtime → smelt-db` dev-dependency cycle) and is the wrong *production* location for
-everything except the harness itself. This doc surveys where the relevant machinery actually lives
-today, then proposes the production home for each piece of the framework in
-[01-framework.md](01-framework.md), constrained by the architectural invariants in `CLAUDE.md`.
+The research loop deliberately put its harness in `smelt-cli`'s test tree, because `smelt-cli`
+already depended on both `smelt-runtime` (for `execute_project` + a real DuckDB backend) and
+`smelt-db` (to stage the Salsa workspace `execute_project` expects), so the harness
+(`link_c_harness.rs`) required zero new dependency-graph plumbing there. That reasoning does not
+hold for the plan's own DuckDB "equivalence oracle" tests (`tracer_evolution.rs`,
+`tracer_maintenance.rs`, `tracer_propagation.rs`): they call only `smelt_logical::maintenance::*`
+against a raw DuckDB connection, never `execute_project` or `link_c_harness`, and `smelt-runtime`
+already carries both `smelt-logical` and `duckdb` as dependencies — so they live in
+`crates/smelt-runtime/tests/` (moved 2026-07-08; a genuine `smelt-runtime → smelt-db` dev-dependency
+cycle was never the constraint for *them*). `link_c_harness.rs` itself, and the cells built on it
+(`g_12` and friends), stay in `smelt-cli`'s test tree — moving them is a separate call, since a
+future `smelt-maintenance-testkit` graduation crate (§3, M3) shared as a dev-dependency of *both*
+`smelt-db`'s and `smelt-runtime`'s test trees is where a real cycle risk would first appear. This
+doc surveys where the relevant machinery actually lives today, then proposes the production home
+for each piece of the framework in [01-framework.md](01-framework.md), constrained by the
+architectural invariants in `CLAUDE.md`.
 
 ---
 

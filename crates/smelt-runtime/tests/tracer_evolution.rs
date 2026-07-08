@@ -8,6 +8,15 @@
 //! multiset-equal to a full refresh of the same version. A wrongly-derived
 //! window (too narrow after the expression-delimitation fix, or too wide
 //! before it) fails the oracle, not just an assertion.
+//!
+//! Lives in `smelt-runtime/tests/` (moved from the `smelt-cli` property-
+//! discovery tree): it only calls `smelt_logical::maintenance::*` against a
+//! raw in-memory DuckDB connection, with no dependency on `smelt-cli` or
+//! `execute_project` — `smelt-runtime` already carries both `smelt-logical`
+//! and `duckdb` as dependencies, so this needed no new plumbing
+//! (`docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md`).
+
+mod oracle;
 
 use duckdb::Connection;
 
@@ -20,7 +29,7 @@ use smelt_logical::maintenance::{
     Trigger,
 };
 
-use crate::oracle::multiset_equal;
+use oracle::multiset_equal;
 
 fn strings(items: &[&str]) -> Vec<String> {
     items.iter().map(|s| s.to_string()).collect()

@@ -32,6 +32,8 @@ mod sc_4_stacked_frames;
 mod sc_6_fd_over_union;
 mod sc_7_cte_body_admission;
 mod smoke;
-mod tracer_evolution;
-mod tracer_maintenance;
-mod tracer_propagation;
+
+// tracer_evolution/tracer_maintenance/tracer_propagation moved to
+// `smelt-runtime/tests/` — they only depend on `duckdb` +
+// `smelt_logical::maintenance::*`, not on this crate's `link_c_harness`
+// (see `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md`).
