@@ -16,7 +16,8 @@ smelt is a data transformation framework that separates **logical transformation
 ---
 name: daily_revenue
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: order_date
   partition_column: order_date

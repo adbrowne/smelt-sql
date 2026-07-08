@@ -91,7 +91,8 @@ smelt parses and understands your SQL semantically. Configuration goes in YAML f
 -- smelt
 ---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -138,10 +139,10 @@ Source
 :   A `.yml` file in `sources/` declaring an external table that smelt does not manage. Referenced via `smelt.<path>` like any other entity (e.g., `smelt.sources.raw.events` for `sources/raw/events.yml`). smelt validates schema correctness but does not create or modify source tables.
 
 Materialization
-:   How a model's results are persisted in the database: `table` (full rebuild), `view` (virtual), `ephemeral` (inlined into downstream queries), or `materialized_view`.
+:   How a model's results are stored: `table` (persisted), `view` (virtual, re-evaluated on read), or `ephemeral` (inlined into downstream queries).
 
-Incremental
-:   A materialization strategy that processes only new or changed data instead of rebuilding the entire table. smelt determines incrementalization safety automatically.
+Refresh
+:   How a stored `table`'s output is kept current across runs — the `refresh:` axis. `full` (default) rebuilds from scratch; `incremental` keeps the table current by running the derived maintenance plan (and requires a sibling `grain:` declaration); `materialized_view` delegates freshness to the backend's own native incremental-view maintenance. smelt determines incrementalization safety automatically.
 
 Seed
 :   A CSV file in `seeds/` that is loaded into the database as a table. Useful for lookup data, mappings, and small reference tables.

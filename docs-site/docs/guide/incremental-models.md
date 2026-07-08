@@ -14,20 +14,22 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-Incremental behavior is configured by selecting `refresh: batched`, plus one required frontmatter block:
+Incremental behavior is configured by selecting `refresh: incremental` + `grain: partition`, plus one required frontmatter block:
 
-- **`refresh: batched`** opts the model into incremental (batched) execution. It implies a stored `table` — you do not also declare `materialization: table`.
+- **`refresh: incremental`** opts the model into the derived maintenance plan. It implies a stored `table` — you do not also declare `materialization: table`.
+- **`grain: partition`** declares that a stored row is one row of a complete, partition-addressed table — the shape this guide covers. (`grain: key` is a different shape; see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md).)
 - **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
 - **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`).
 
-`timeseries:` is required when `refresh: batched` is set. Declaring `refresh: batched` without `timeseries:` is a validation error (`TimeseriesRequiredForBatched`). A `batched:` block without `refresh: batched` is also a validation error.
+`timeseries:` is required when `refresh: incremental` + `grain: partition` is set. Declaring `refresh: incremental` + `grain: partition` without `timeseries:` is a validation error (`TimeseriesRequiredForBatched`). A `batched:` block without `refresh: incremental` is also a validation error.
 
 ### Frontmatter example
 
 ```sql
 ---
 materialization: table
-refresh: batched
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
@@ -44,7 +46,7 @@ WHERE transaction_timestamp IS NOT NULL
 GROUP BY 1, 2
 ```
 
-`refresh: batched` opts the model into incremental execution; `timeseries:` declares the time dimension.
+`refresh: incremental` + `grain: partition` opts the model into incremental execution; `timeseries:` declares the time dimension.
 
 ### smelt.yml example
 
@@ -52,7 +54,8 @@ GROUP BY 1, 2
 models:
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
@@ -166,7 +169,8 @@ ORDER BY 1, 2
 models:
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
@@ -251,7 +255,8 @@ Some `event_time`/partition-column expressions cannot be proven monotone by stat
 models:
   joined_daily:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: partition_key
       partition_column: partition_key
@@ -278,7 +283,8 @@ The non-deterministic-function check can be relaxed per column instead of disabl
 models:
   audit_stamped:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: event_time
       partition_column: event_date
@@ -316,7 +322,8 @@ If you understand the implications and the pattern is safe in your specific case
 models:
   my_model:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: event_time
       partition_column: event_date
@@ -533,7 +540,8 @@ timeseries:
   event_time_column: event_ts
   partition_column: event_date
   granularity: day
-refresh: batched
+refresh: incremental
+grain: partition
 horizon_ceiling: '30 days'
 ---
 SELECT
@@ -567,7 +575,7 @@ Batching provides two benefits:
 
 ## Self-referential (ordered) models
 
-A batched model may read its own prior partitions — a running balance, a partition-by-partition state machine — by referencing itself (`smelt.<its own path>`) in its SQL. This stays a partitioned `batched` table; it does not become `refresh: cumulative`.
+A `grain: partition` model may read its own prior partitions — a running balance, a partition-by-partition state machine — by referencing itself (`smelt.<its own path>`) in its SQL. This stays a partitioned `grain: partition` table; it does not become `grain: key`.
 
 Whether a backfill may build its windows in parallel or must build them strictly in temporal order is derived from the model's dependency graph, never declared:
 
@@ -658,16 +666,16 @@ smelt supports multiple strategies for how data is updated. The strategy is chos
 | `append` | Append-only workloads | INSERT only, no deletion |
 | `insert_overwrite` | Backend-specific optimization | Overwrite entire partitions atomically |
 
-UPSERT (`MERGE`) is **not** an incremental strategy — it is the backend primitive used by the [`cumulative_aggregate` materialization](materializations.md#cumulative_aggregate), which is a separate sibling rule with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `cumulative_aggregate`, not `incremental`.
+UPSERT (`MERGE`) is **not** a `grain: partition` strategy — it is the backend primitive used by `refresh: incremental` + [`grain: key`](../reference/cumulative-aggregate.md), which is a separate sibling shape with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `grain: key`, not `grain: partition`.
 
-## Incremental vs cumulative
+## grain: partition vs grain: key
 
-`incremental` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `cumulative_aggregate` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
+`grain: partition` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `grain: key` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
 
-- Use `incremental` when the answer to "what did this partition produce?" is well-defined and stable.
-- Use `cumulative_aggregate` when the answer is "what's the running total per key?".
+- Use `grain: partition` when the answer to "what did this partition produce?" is well-defined and stable.
+- Use `grain: key` when the answer is "what's the running total per key?".
 
-See the [materializations guide](materializations.md#incremental-vs-cumulative_aggregate) for a side-by-side comparison.
+See the [materializations guide](materializations.md#grain-partition-vs-grain-key) for a side-by-side comparison.
 
 ## Schema evolution
 
@@ -681,6 +689,6 @@ When an incremental model's output schema changes (columns added, types widened,
 ## Further reading
 
 - [Materializations](materializations.md) for an overview of all materialization types
-- [cumulative_aggregate](materializations.md#cumulative_aggregate) for cumulative state (one row per key)
+- [grain: key](../reference/cumulative-aggregate.md) for key-grain running state (one row per key)
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs

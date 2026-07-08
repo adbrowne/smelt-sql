@@ -164,7 +164,7 @@ smelt run --auto
 
 Rebuild a target model and all its upstream dependencies for a specified time range. Useful for backfilling historical data or repairing a specific model and everything it depends on.
 
-`smelt backbuild` handles both incremental and cumulative aggregate models uniformly. For incremental models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: cumulative` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the cumulative table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
+`smelt backbuild` handles both `grain: partition` and `grain: key` incremental models uniformly. For `grain: partition` models, it applies the DELETE+INSERT (or append/insert-overwrite) strategy over the requested window. For `refresh: incremental` + `grain: key` table models, it dispatches the per-partition merge loop: each partition in the window is merged into the key-grain table without discarding earlier partitions, so accumulated state from outside the requested window is preserved.
 
 **Usage:**
 

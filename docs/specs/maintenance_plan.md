@@ -371,9 +371,13 @@ disagree; one per node cannot). Deeper rationale:
   names are removed outright per ratified decision 5; shape profiles replace them); until it
   lands, mode specs still read as strategy peers. A proposed `on_column_add:
   backfill | leave_null | recompute` policy knob is noted, not yet surface.
-- **User docs do not exist yet** for this feature; the `docs-site/` pages land with the
-  implementation plan, seeded from the worked example catalogue
-  (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`).
+- **User docs describe the trichotomy + grain surface, not yet the plan itself.** The
+  `docs-site/` pages consistently describe `refresh: full | incremental | materialized_view`
+  and `grain: partition | key | key_per_partition`, seeded from the worked example catalogue
+  (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`). What they do
+  not yet cover — because the underlying surface doesn't exist yet — is the maintenance plan
+  itself: the `maintenance:` frontmatter block, `smelt explain`'s cell/clamp/ledger output,
+  `--since-upstream`, `--include-upstreams`, and `smelt bakeoff`.
 
 ## References
 
@@ -389,7 +393,10 @@ disagree; one per node cannot). Deeper rationale:
   `crates/smelt-cli/tests/property_discovery/g_12_keyed_merge_reprocessed_window.rs` (the G-12 pin,
   which stays in `smelt-cli` because it drives the real `execute_project` pipeline via
   `link_c_harness.rs`).
-- **User docs**: none yet (see Known Divergences).
+- **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
+  `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
+  describe the trichotomy + grain surface; the plan itself (the `maintenance:` block, `smelt explain`,
+  the propagation CLI) is not yet user-documented (see Known Divergences).
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260704-model-updates-fundamentals.md` (the L1+L2 substrate),
   `docs/plans/20260705-property-discovery-loop.md` (the empirical engine).

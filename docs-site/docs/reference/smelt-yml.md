@@ -107,7 +107,7 @@ The `default_materialization` field and per-model `materialization` field accept
 
 Test files are identified by a `smelt.test` declaration in the SQL file, not by a materialization value. See [Testing](../guide/testing.md) for details.
 
-A keyed/running aggregate table is opted in with `materialization: table` + `refresh: keyed` — see [Materializations](../guide/materializations.md#keyed) for details.
+A key-grain running-state table is opted in with `materialization: table` + `refresh: incremental` + `grain: key` — see [Materializations](../guide/materializations.md#refresh-axis) for details.
 
 **Precedence for materialization resolution:**
 
@@ -130,7 +130,8 @@ models:
     materialization: <type>
     tags: [<tag>, ...]
     target: <target_name>
-    refresh: batched
+    refresh: incremental
+    grain: partition
     batched:
       # batched fields...
 ```
@@ -142,9 +143,10 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `timeseries` | object | no | | Time-dimension declaration for batched/cumulative models (see [Timeseries Configuration](#timeseries-configuration)) |
-| `refresh` | string | no | `full` | Refresh axis: `full`, `batched`, or `cumulative` |
-| `batched` | object | no | | Batched materialization configuration, valid only with `refresh: batched` (see [Batched Configuration](#incremental-configuration)) |
+| `timeseries` | object | no | | Time-dimension declaration for `grain: partition` / `grain: key_per_partition` models, or key-temporal-locality-admitted `grain: key` models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
+| `grain` | string | no | | Required with `refresh: incremental`: `partition`, `key`, or `key_per_partition` |
+| `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -155,13 +157,14 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: batched` models (cumulative aggregates do not declare `timeseries:`). The `timeseries:` and `batched:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models (bare `grain: key` models do not declare `timeseries:` unless key temporal locality is established). The `timeseries:` and `batched:` keys are siblings, not nested.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
@@ -186,7 +189,8 @@ Example with weekly granularity:
 models:
   weekly_rollup:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: event_ts
       partition_column: week_start_date
@@ -196,13 +200,14 @@ models:
 
 ### Incremental Configuration
 
-Batched (incremental) refresh processes only new or changed data instead of rebuilding the entire table. Opt in with `refresh: batched`, which implies a stored `table`. A `timeseries:` block must also be present (see above); the `batched:` block itself is optional.
+`refresh: incremental` + `grain: partition` processes only new or changed data instead of rebuilding the entire table. This implies a stored `table`. A `timeseries:` block must also be present (see above); the `batched:` block itself is optional.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
@@ -243,13 +248,13 @@ Smelt validates model configurations and reports errors or warnings:
 
 **Errors (block execution):**
 
-- Ephemeral models cannot have batched configuration
+- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `batched:` block
 - Ephemeral models cannot have a target override
 
 **Warnings (printed to stderr):**
 
-- View models with batched config (batched refresh only applies to tables)
-- Materialized view models with batched config (materialized views are refreshed atomically)
+- View models with `refresh:` set (the refresh axis only applies to stored tables)
+- `refresh: materialized_view` models with a `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
 
 ---
 
@@ -301,10 +306,11 @@ models:
   transactions:
     materialization: table
 
-  # Batched model — timeseries: and batched: are sibling keys
+  # Incremental model (grain: partition) — timeseries: and batched: are sibling keys
   daily_revenue:
     materialization: table
-    refresh: batched
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
