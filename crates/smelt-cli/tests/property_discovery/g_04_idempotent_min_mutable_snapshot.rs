@@ -42,7 +42,7 @@ fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {
         .collect();
     // Declares `mutation_profile: mutable` — same world-fact as SC-2.
     let source_yml = format!(
-        "description: property-discovery source.\nmutation_profile: mutable\ncolumns:\n{cols}"
+        "description: property-discovery source.\nmutation_profile: mutable_snapshot\ncolumns:\n{cols}"
     );
     std::fs::write(
         project_dir.join(format!("models/sources/{}.yml", shape.source)),

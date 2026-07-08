@@ -40,6 +40,9 @@ fn source_info(segments: &[&str], columns: &[(&str, DataType)]) -> SourceInfo {
         timeseries: None,
         mutation_profile: None,
         source_lateness: None,
+        watermark: None,
+        unique_key: None,
+        retention: None,
     }
 }
 

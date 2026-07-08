@@ -52,7 +52,7 @@ fn stage_project(shape: &MultiSourceModelShape, project_dir: &Path, db_path: &Pa
         // undeclared (append-only default) — only the dim's mutability is
         // under test.
         let mutation_block = if src.name == "users" {
-            "mutation_profile: mutable\n"
+            "mutation_profile: mutable_snapshot\n"
         } else {
             ""
         };

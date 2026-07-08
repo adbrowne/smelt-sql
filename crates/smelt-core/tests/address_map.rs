@@ -51,6 +51,9 @@ fn make_source(segments: &[&str], path: &str) -> SourceInfo {
         timeseries: None,
         mutation_profile: None,
         source_lateness: None,
+        watermark: None,
+        unique_key: None,
+        retention: None,
     }
 }
 

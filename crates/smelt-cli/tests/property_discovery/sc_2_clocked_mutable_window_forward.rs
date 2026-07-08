@@ -46,7 +46,7 @@ fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {
     // per `input_delta.rs`'s own doc comment; a clocked source must declare
     // `mutable` to reach the branch this cell targets.
     let source_yml = format!(
-        "description: property-discovery source.\nmutation_profile: mutable\ncolumns:\n{cols}"
+        "description: property-discovery source.\nmutation_profile: mutable_snapshot\ncolumns:\n{cols}"
     );
     std::fs::write(
         project_dir.join(format!("models/sources/{}.yml", shape.source)),

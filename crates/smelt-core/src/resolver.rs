@@ -645,6 +645,9 @@ mod tests {
             timeseries: None,
             mutation_profile: None,
             source_lateness: None,
+            watermark: None,
+            unique_key: None,
+            retention: None,
         };
 
         let collisions = compute_emitted_name_collisions(&[&m], &[], &[src], "main");

@@ -58,7 +58,7 @@ impl SourceShape {
     pub fn from_source_info(info: &smelt_core::sources::SourceInfo) -> Self {
         SourceShape {
             has_clock: info.timeseries.is_some(),
-            mutation_profile: info.mutation_profile.map(Into::into),
+            mutation_profile: info.mutation_profile.as_ref().map(|p| p.kind.into()),
         }
     }
 }
@@ -180,8 +180,12 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            mutation_profile,
+            mutation_profile: mutation_profile
+                .map(smelt_core::sources::SourceMutationProfile::from_kind),
             source_lateness: None,
+            watermark: None,
+            unique_key: None,
+            retention: None,
         }
     }
 

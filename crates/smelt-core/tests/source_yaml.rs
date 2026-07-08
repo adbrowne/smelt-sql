@@ -542,7 +542,10 @@ source_lateness: '2 hours'
     .unwrap();
 
     let info = parse_source_yaml(&dir.join("events.yml")).unwrap();
-    assert_eq!(info.mutation_profile, Some(MutationProfile::ChangeFeed));
+    assert_eq!(
+        info.mutation_profile.as_ref().map(|p| p.kind),
+        Some(MutationProfile::ChangeFeed)
+    );
     let lateness = info
         .source_lateness
         .expect("source_lateness must deserialize");
