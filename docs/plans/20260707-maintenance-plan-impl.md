@@ -69,7 +69,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP2   | done     | `e58a9de6` | 2026-07-08 |
 | MP3   | done     | `db2da533` | 2026-07-08 |
 | MP4   | done     | `bf0db5d4` | 2026-07-08 |
-| MP5   | pending  |        |      |
+| MP5   | done     | `16acc036` | 2026-07-08 |
 | MP6   | pending  |        |      |
 | MP7   | pending  |        |      |
 | MP8   | pending  |        |      |

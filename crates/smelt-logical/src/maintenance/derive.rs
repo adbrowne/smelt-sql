@@ -15,8 +15,30 @@ use super::{
     PlanCell, Refusal, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::discriminants::combiner_discriminants;
+use crate::analysis::input_delta::{
+    input_delta_discovery, InputDeltaKind, MutationProfile as DeltaMutationProfile, SourceShape,
+};
 use crate::analysis::model_diff::ModelDiff;
 use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult, Seconds};
+
+/// The [`SourceShape`] [`input_delta_discovery`] reads for `facts`: a
+/// clocked source's own partition column stands in for
+/// `SourceShape::has_clock` (`SourceFacts::partition_col`'s doc comment: "the
+/// source's partition column, when it is clocked"), and the plan-layer
+/// [`MutationProfile`] maps onto the analysis-layer one 1:1 (v0 has no
+/// `ChangeFeed` source in the plan layer yet — `sources.md`'s structured
+/// `mutation_profile` kind is consumed at the `MutationProfile::AppendOnly`/
+/// `MutableSnapshot` granularity here; a `change_feed` source is out of scope
+/// for this phase, per `maintenance_plan.md` §Known Divergences).
+fn source_shape(facts: &SourceFacts) -> SourceShape {
+    SourceShape {
+        has_clock: facts.partition_col.is_some(),
+        mutation_profile: Some(match facts.mutation {
+            MutationProfile::AppendOnly => DeltaMutationProfile::AppendOnly,
+            MutationProfile::MutableSnapshot => DeltaMutationProfile::Mutable,
+        }),
+    }
+}
 
 /// Caller-supplied fold admission input for a keyed-grain model: which key
 /// the fold addresses and which columns fold additively under `combiner`.
@@ -188,24 +210,93 @@ fn derive_new_data(
                 });
                 return;
             };
-            // Faithful-fold admission: the delta stream must partition the
-            // input (append-only) and the combiner must be a monoid whose
-            // fold equals the batch aggregate. Fail closed on either.
+            // Per-cell admission obligation 2 (`maintenance_plan.md`
+            // §"Per-cell admission"): the faithful fold's two INDEPENDENT
+            // conditions — source posture (does the delta stream partition
+            // the input, i.e. is it retraction-free) and combiner algebra
+            // (can a retracted contribution be undone) — either failing
+            // alone refuses the fold family for this cell
+            // (`model_properties.md` §"Faithful-fold conditions"). Obligation
+            // 3 (combiner algebra class) is checked independently of source
+            // posture: a holistic/unrecognised combiner refuses regardless of
+            // how clean the source is, and leaves only the recompute family
+            // admissible for this cell (no fold cell is synthesized in v0 —
+            // `derive_backfill`/a declared `full` refresh is that family's
+            // representative today; wiring the fallback as an alternate
+            // technique inside the same cell is deferred, since v0 admits at
+            // most one technique per cell).
             let disc = combiner_discriminants(fold.combiner, false);
-            if facts.mutation != MutationProfile::AppendOnly {
-                plan.refusals.push(Refusal::NoAdmissibleTechnique {
-                    trigger: format!("{trigger:?}"),
-                    why: format!(
-                        "fold over '{source}' is not faithful: the source is not append-only"
-                    ),
-                });
+
+            // Obligation 2, source-posture half: `input_delta_discovery` is
+            // the SC-2 tripwire's (`docs/research/property-discovery/
+            // ledger.md`) production consumer. A clocked `Mutable` source's
+            // `WindowForward` discovery only proves *how new rows are found*
+            // — it has no branch for an in-place update to an
+            // already-processed partition, so it can never by itself widen a
+            // source to "retraction-free". The declared `MutationProfile`
+            // remains the sole source of that fact (never derived from
+            // discovery kind alone) — this is the explicit
+            // `MutationProfile::Mutable` guard the (now-deleted) dead-code
+            // tripwire required of its first production caller.
+            let discovery = input_delta_discovery(source_shape(facts));
+            let carries_retractions = facts.mutation != MutationProfile::AppendOnly;
+            if carries_retractions {
+                if discovery == InputDeltaKind::WindowForward {
+                    // The blind spot the (now-deleted) dead-code tripwire
+                    // required a human sign-off before wiring: a clocked
+                    // Mutable source's discovery kind is WindowForward, but
+                    // that kind only proves how *new* rows are found — it has
+                    // no branch for an in-place update to an already-scanned
+                    // partition. A window-forward incremental read would
+                    // never re-visit that partition at all, so the retracted
+                    // contribution is not merely un-undoable, it is silently
+                    // invisible to the next run. Name this specific blind
+                    // spot distinctly from the unclocked case below, where a
+                    // full re-scan at least *sees* the change (SC-2,
+                    // `docs/research/property-discovery/ledger.md`).
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why: format!(
+                            "fold over '{source}' fails the faithful-fold source-posture \
+                             condition: the source is not append-only, and input-delta \
+                             discovery classifies it as window-forward (clocked) — a \
+                             window-forward incremental read only visits new partitions, \
+                             so an in-place update to an already-processed partition would \
+                             go entirely unseen by the next run, not merely un-undoable; no \
+                             un-fold mechanism exists to undo an already-folded contribution \
+                             either, so this refuses the fold family whether or not combiner \
+                             {:?} is itself a monoid — the two faithful-fold conditions are \
+                             independent and either alone refuses",
+                            fold.combiner
+                        ),
+                    });
+                } else {
+                    plan.refusals.push(Refusal::NoAdmissibleTechnique {
+                        trigger: format!("{trigger:?}"),
+                        why: format!(
+                            "fold over '{source}' fails the faithful-fold source-posture \
+                             condition: the source is not append-only and may carry \
+                             retractions (input-delta discovery = {discovery:?}); no un-fold \
+                             mechanism exists to undo an already-folded contribution, so this \
+                             refuses the fold family whether or not combiner {:?} is itself a \
+                             monoid — the two faithful-fold conditions are independent and \
+                             either alone refuses",
+                            fold.combiner
+                        ),
+                    });
+                }
                 return;
             }
+
+            // Obligation 3: combiner algebra class, checked independently of
+            // the (already-passed) source-posture condition above.
             if !disc.is_monoid {
                 plan.refusals.push(Refusal::NoAdmissibleTechnique {
                     trigger: format!("{trigger:?}"),
                     why: format!(
-                        "combiner {:?} is not a monoid — no delta+state read exists",
+                        "combiner {:?} is holistic or unrecognised (not a monoid) — no \
+                         delta+state read exists; only the recompute family (a full \
+                         rebuild) can serve this cell",
                         fold.combiner
                     ),
                 });

@@ -4257,6 +4257,7 @@ dependencies = [
 name = "smelt-logical"
 version = "0.3.2"
 dependencies = [
+ "duckdb",
  "serde",
  "serde_yaml",
  "smelt-core",

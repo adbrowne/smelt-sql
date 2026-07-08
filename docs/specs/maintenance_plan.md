@@ -334,11 +334,17 @@ disagree; one per node cannot). Deeper rationale:
 
 ## Known Divergences / Open Questions
 
-- **The plan is specified-and-unwired.** A v0 of the datatype, derivation, emission, and both
-  propagation directions exists as a tracer (`crates/smelt-logical/src/maintenance/`), exercised
-  by the tracer test suites and the property-discovery DuckDB legs, but nothing in production
-  consumes it: `resolve_strategy` still returns a constant, diagnostics/`smelt explain`/the CLI
-  flags do not exist. Migration ordering: `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6).
+- **The plan is derived-and-unconsumed.** `derive_maintenance_plan`
+  (`crates/smelt-logical/src/maintenance/derive.rs`) is production code, not a tracer: full
+  per-cell admission (`§"Per-cell admission"` obligations 1–6, including the faithful-fold
+  obligation's two independent conditions and the holistic-combiner cutoff), partition-locality
+  verdicts, and the per-cell guarantee ledger fields are derived rather than hand-supplied, and
+  `input_delta_discovery` (`model_properties.md`'s input-consumption proof stage) is a consumed
+  admission input rather than dead code. What still does not exist is a caller: no Salsa query,
+  diagnostic, `smelt explain`, or CLI flag reads the derived plan yet, and `resolve_strategy`
+  still returns a constant — the plan and real execution remain two disconnected systems until a
+  consumer lands. Migration ordering:
+  `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6).
 - **Never-fold-twice is specified and unenforced** — a **confirmed live violation**: the keyed
   `cumulative_aggregate`/`merge_into` run path re-folds an already-merged window and
   double-counts (no watermark/ledger consultation exists). Pinned by property-discovery cell
