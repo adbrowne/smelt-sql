@@ -1,12 +1,14 @@
 Resume the smelt autonomy loop with fresh context. Each iteration does exactly ONE unit of work and emits exactly one sentinel. You choose the work by a fixed PRIORITY: ready remediation first, scanning only when no remediation is ready.
 
 SETUP (every iteration):
+0. If this prompt ends with a WRAPPER PRE-SCAN HINT naming a sub-plan and phase, verify it with ONE targeted read of that sub-plan's Progress table (plus its per-phase routine section) and skip steps 1-2 entirely — do NOT read the full master plan. Only fall back to steps 1-2 if the hint is absent or the table disagrees with it (the tables always win).
 1. Read `.claude/active-plan` for the `master_plan` path (currently docs/plans/20260704-model-updates.md — a pure feature backlog with no probe rows; when no registry sub-plan is READY, go straight to MASTER_EXHAUSTED so a human can scaffold the next group's sub-plan). Always trust the path in `.claude/active-plan`, not this parenthetical.
 2. Read the master plan's "## Spawned sub-plans (remediation)" registry table.
 
 PRIORITY 1 — READY REMEDIATION (do this before any scanning):
 3. A sub-plan is READY when BOTH hold: (a) its registry-table Status is NOT `done`, and (b) its own Progress-tracking table has at least one `pending` row (a row that is neither `done` nor `blocked`). Consider sub-plans top-to-bottom in the registry; the first READY one is this iteration's target.
 4. If a READY sub-plan exists, execute the next `pending` phase of THAT sub-plan, following the sub-plan's OWN per-phase routine and design decisions (it is self-contained: pre-flight → spec increment only if the row lists one → /smelt:implement red-green with implementer + reviewer, spec as oracle → verification gates → set the row to `done` → commit + push with the phase's commit message).
+   TOKEN DISCIPLINE: run the standard gate as ONE call — `bash .claude/scripts/verify-phase.sh` — never as separate fmt/clippy/test invocations. Brief subagents by file+section REFERENCE (they read the plan/spec sections themselves); never paste plan phases, spec sections, or diffs into subagent prompts, and have the reviewer run its own `git diff` against the sha you give it. Delegate code-location searches to an Explore agent (synchronous) instead of grepping large files into your own context.
    - If that was the sub-plan's LAST pending phase (no `pending` rows remain after it), also flip the sub-plan's Status to `done (<today>)` in the master registry table and commit that with the phase.
    - Emit <<PHASE_COMPLETE>> (or <<PHASE_BLOCKED>> per the block rule below).
 
