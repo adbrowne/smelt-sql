@@ -77,7 +77,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP10  | done     | `0a1cab1f` | 2026-07-10 |
 | MP11  | done     | `7f13b3b0` | 2026-07-10 |
 | MP12  | done     | `6f97578f` | 2026-07-10 |
-| MP13  | pending  |        |      |
+| MP13  | blocked  |        |      |
 | MP14  | pending  |        |      |
 | MP15  | pending  |        |      |
 | MP16  | pending  |        |      |
@@ -541,6 +541,16 @@ the refusal diagnostic and are annotated with the catalogue id so later work fli
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+## Blocked phases
+
+Append-only log.
+
+**2026-07-10 — MP13 (`smelt bakeoff` CLI):** the ladder half of MP13 (`crates/smelt-logical/src/maintenance/choice.rs` — `ChosenTechnique`, `resolve_cell_choice`, the override ladder, `ChoiceRefusal`) is implemented and green (`cargo test -p smelt-logical --test maintenance_choice`: `technique_pin_bypasses_cost_model_but_not_admission`, `ladder_narrower_scope_wins`). The `smelt bakeoff <model> [--cells ...] [--pin]` CLI half cannot proceed without design decisions the plan text doesn't answer:
+  1. **No plumbing exists to force-execute one named technique against a scratch schema/table.** `execute_project` (`crates/smelt-runtime/src/execute.rs`) only runs the whole compiled model through its own internal technique resolution (`maintenance_driver.rs`'s `resolve_cell_technique`/`resolve_incremental_strategy`); there is no injectable "run technique X, targeting schema Y" parameter anywhere in the runtime, and `ExecuteRequest.dry_run` only produces a `PlanSummary` without running SQL. Bakeoff needs new executor plumbing (extracting a target-schema parameter into `execute_column_scoped_merge`/`execute_column_scoped_merge_full` and whatever region-recompute path the batch loop uses) — a nontrivial `smelt-runtime` API change outside what "measuring admissible techniques over a representative window" specifies.
+  2. **`--pin` has no round-trip precedent.** Nothing in the codebase writes a YAML frontmatter block back into a `.sql` file today. `smelt_logical::types::Frontmatter` (used by `explain.rs`) is `Deserialize`-only and has no `maintenance` field; the real `ModelMetadata` (`smelt-core/src/metadata.rs`) round-trips via serde but naively re-serializing risks destroying hand-authored YAML comments/ordering/unrelated keys. The plan doesn't say whether `--pin` may reformat the whole frontmatter block or must patch it minimally in place.
+  3. **The CLI test can't drive `bakeoff` in-process today.** `crates/smelt-cli/src/main.rs` declares `mod commands;` (private), so `crates/smelt-cli/tests/bakeoff.rs` (the phase's named TDD target) cannot call a command's `run()` directly the way `crates/smelt-cli/tests/property_discovery/*.rs` calls `LinkCProject`/`execute_project` — it would need either `pub(crate) mod commands` plus a testable library entrypoint, or a subprocess test in the `e2e/` style (which can't easily assert on measured-cost internals without parsing stdout).
+  Options: (A) scope this iteration of MP13 down to landing the ladder only (already done) and split `smelt bakeoff` into its own follow-up phase once a human has resolved the three questions above; (B) resolve all three inline as part of MP13 (would need reviewer sign-off on the new `smelt-runtime` scratch-schema API and the frontmatter round-trip strategy before proceeding, per "Fail-loud discipline"/API-surface conventions). Recommendation: A — `choice.rs` is self-contained, tested, and unblocks nothing else waiting on it being merged into `mod.rs`; `bakeoff` is a genuinely separate CLI feature with its own runtime-API and file-mutation design surface worth a dedicated review pass rather than folding into this phase's red-green loop.
 
 ## Verification
 
