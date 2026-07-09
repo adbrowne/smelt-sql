@@ -658,6 +658,20 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
+    /// `merge_into` (below) issues `MERGE ... WHEN MATCHED THEN UPDATE SET
+    /// *`, which requires `source_sql`'s projection to carry every target
+    /// column (DuckDB errors on a column-count mismatch, it does not
+    /// silently subset by name) — so a column-scoped `MERGE` caller
+    /// (`crate::maintenance_driver::execute_column_scoped_merge` in
+    /// `smelt-runtime`) must project the FULL target row, carrying every
+    /// column outside the re-derived group through unchanged from the
+    /// existing target state. `SET *` then only changes the group's
+    /// columns' actual values, satisfying `Technique::ColumnScopedMerge`'s
+    /// contract without a second, column-list-aware MERGE primitive.
+    fn supports_column_scoped_merge(&self) -> bool {
+        true
+    }
+
     async fn merge_into(
         &self,
         schema: &str,

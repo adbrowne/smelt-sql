@@ -334,28 +334,67 @@ disagree; one per node cannot). Deeper rationale:
 
 ## Known Divergences / Open Questions
 
-- **The plan has its first consumer: diagnostics, not yet `smelt explain` or execution.**
-  `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) is production
-  code, not a tracer: full per-cell admission (`§"Per-cell admission"` obligations 1–6,
-  including the faithful-fold obligation's two independent conditions and the holistic-combiner
-  cutoff), partition-locality verdicts, and the per-cell guarantee ledger fields are derived
-  rather than hand-supplied, and `input_delta_discovery` (`model_properties.md`'s
-  input-consumption proof stage) is a consumed admission input rather than dead code. A thin
-  `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`) assembles a
-  model's referenced sources, declared output shape, and `maintenance:`/`columns.<c>.contract`
-  frontmatter, calls the pure derivation, and folds two of the six `Maintenance*` diagnostics —
-  `MaintenanceNoAdmissibleTechnique` and `MaintenanceScanUnbounded` — into `file_diagnostics()`
-  (see `diagnostics.md` §Known divergences for the remaining four). What still does not exist:
-  `smelt explain` (or any other CLI surface) reads the derived plan, `resolve_strategy` still
-  returns a constant, and the `maintenance.cells[].prefer`/`.technique` override ladder and
+- **The plan has three live consumers: diagnostics, `smelt explain`, and one execution
+  technique.** `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) is
+  production code, not a tracer: full per-cell admission (`§"Per-cell admission"` obligations
+  1–6, including the faithful-fold obligation's two independent conditions and the
+  holistic-combiner cutoff), partition-locality verdicts, and the per-cell guarantee ledger
+  fields are derived rather than hand-supplied, and `input_delta_discovery`
+  (`model_properties.md`'s input-consumption proof stage) is a consumed admission input rather
+  than dead code. A thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/
+  maintenance.rs`) assembles a model's referenced sources, declared output shape, and
+  `maintenance:`/`columns.<c>.contract` frontmatter, calls the pure derivation, and folds two of
+  the six `Maintenance*` diagnostics — `MaintenanceNoAdmissibleTechnique` and
+  `MaintenanceScanUnbounded` — into `file_diagnostics()` (see `diagnostics.md` §Known
+  divergences for the remaining four). `smelt explain <model>` reads the same derivation (via
+  the non-Salsa `maintenance_plan_report`) and prints every cell's trigger, corner, technique,
+  locality verdict, and scan clamps. On the execution side, the creation trigger's write
+  strategy is read off the derived plan instead of a hardcoded constant (`smelt-runtime::
+  maintenance_driver::resolve_incremental_strategy`), and the column-scoped `MERGE` technique
+  is live and callable behind admission: `resolve_cell_technique` turns an admitted cell + the
+  `maintenance.cells[].technique` hard pin + a backend capability gate
+  (`Backend::supports_column_scoped_merge`) into an executable choice — a pin naming a cell the
+  plan did not admit, or a capability gap on the backend, refuses rather than silently falling
+  back — and `execute_column_scoped_merge` performs the targeted `MERGE` against a real backend.
+  The regular incremental run loop (`smelt-runtime::execute_project`) dispatches into the
+  column-scoped `MERGE` automatically on every run once the plan admits a mutation cell for one
+  of the model's `explicitly_mutable` sources AND the target table already exists — no explicit
+  "a mutation happened" signal is required to reach the technique; `resolve_live_column_scoped_cell`
+  re-derives the same plan every run and the batch loop reads its verdict (exercised end-to-end
+  in `crates/smelt-runtime/tests/technique_lowering.rs::column_scoped_merge_e2e` against the
+  real `examples/timeseries/models/daily_events_enriched.sql` fact+dimension fixture, which
+  drives the accepted-full-scan corner below). Two distinct physical corners exist for a live
+  cell, chosen by `maintenance_driver::decide_column_merge_dispatch` from the cell's
+  `partition_local` verdict: the accepted-full-scan corner (`PartitionLocal::No`, an unclocked
+  dimension the operator declared `allow_full_scan` for) is the one currently reachable from any
+  shipped example — `execute_column_scoped_merge_full` merges the model's own re-derivation of
+  the batch window with no additional clamp. The horizon-clamped corner (`PartitionLocal::Yes`,
+  a genuine derived `ScanClamp`, F15's `execute_column_scoped_merge`/`dimension_horizon_merge`,
+  further gated on a provably one-to-one join contribution via
+  `maintenance_driver::dimension_join_contribution`) is wired into the SAME dispatch path and
+  proven end-to-end against a real backend
+  (`crates/smelt-runtime/tests/technique_lowering.rs::yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouched`),
+  but is not yet reachable through any real workspace: `derive_model_maintenance_plan`'s own
+  trigger-list construction (`crates/smelt-db/src/queries/maintenance.rs`) only ever emits a
+  `Trigger::UpstreamMutation` for a source with no declared `timeseries` (an unclocked lookup) —
+  a clocked mutable source's own scan-bound derivation is deferred, so no real fixture can
+  currently derive `PartitionLocal::Yes` for that trigger regardless of how the runtime
+  dispatches on it (`crates/smelt-runtime/tests/technique_lowering.rs::real_fixture_daily_events_status_would_admit_partition_local_yes_cell`
+  proves the fixture and underlying derivation are correctly shaped for the moment that gate
+  lifts). What still does not exist for either corner: nothing yet distinguishes "an upstream
+  mutation genuinely happened since the last run" from "this run happens to re-derive the same
+  values" — the dispatch fires on every run unconditionally once its preconditions hold; a
+  cheaper, change-aware trigger is forward propagation's job (`smelt run --since-upstream`,
+  unbuilt). The `defaults.prefer`/`cells[].prefer` soft-bias ladder and
   `scan_bounds.on_violation: warn` are parsed but not yet consumed (every refusal maps to an
-  Error today) — the plan and real execution remain two disconnected systems until a lowering
-  consumer lands. The `Trigger::UpstreamMutation` cell the query derives is scoped to
-  `MutableSnapshot` sources only; an `AppendOnly` source's own aggregate-window sensitivity
-  (real per `model_properties.md`'s mutation-sensitivity proof) has no post-creation mutation of
-  its own to trigger a cell for, so no `UpstreamMutation` trigger is constructed for it — the
+  Error today; the cost model between two admissible techniques is also unbuilt). The
+  `Trigger::UpstreamMutation` cell the query derives is scoped to `MutableSnapshot` sources
+  only; an `AppendOnly` source's own aggregate-window sensitivity (real per
+  `model_properties.md`'s mutation-sensitivity proof) has no post-creation mutation of its own
+  to trigger a cell for, so no `UpstreamMutation` trigger is constructed for it — the
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
-  `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6).
+  `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
+  `docs/plans/20260707-maintenance-plan-impl.md`.
 - **Never-fold-twice is specified and unenforced** — a **confirmed live violation**: the keyed
   `cumulative_aggregate`/`merge_into` run path re-folds an already-merged window and
   double-counts (no watermark/ledger consultation exists). Pinned by property-discovery cell

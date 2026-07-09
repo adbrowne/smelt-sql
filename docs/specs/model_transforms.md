@@ -280,9 +280,22 @@ by `docs/plans/20260704-model-updates.md` (design:
   are unbuilt); dimension-driven horizon-bounded MERGE
   (`crates/smelt-runtime/src/dimension_horizon_merge.rs::dimension_horizon_merge`),
   which clamps a dimension batch's recompute `SELECT` to `[conv_ts − H,
-  conv_ts]` and hands it to `Backend::merge_into`, licensed by a monotone
-  join contribution (`join_contribution_monotone`) and a bounded horizon `H`
-  (the forward `after` reach from `derive_model_bounds`).
+  conv_ts]`, licensed by a monotone join contribution
+  (`join_contribution_monotone`) and a bounded horizon `H` (the forward
+  `after` reach from `derive_model_bounds`) — and is now actually handed to
+  `Backend::merge_into` by a caller: `crates/smelt-runtime/src/
+  maintenance_driver.rs::execute_column_scoped_merge` is the physical
+  executor for a `Technique::ColumnScopedMerge` plan cell whose scan
+  locality is a genuine derived clamp (`PartitionLocal::Yes`), reached
+  through `maintenance_driver::decide_column_merge_dispatch` in the regular
+  incremental run loop (`smelt-runtime::execute_project`) — the SAME
+  automatic, per-run dispatch path the accepted-full-scan corner
+  (`PartitionLocal::No`, `execute_column_scoped_merge_full`) already uses in
+  production. A plan cell the derivation did not admit, a backend that does
+  not advertise `Backend::supports_column_scoped_merge`, or an unproven
+  join contribution never reaches either executor. `maintenance_plan.md`
+  §Known Divergences has the caller-side detail, including which corner is
+  reachable from a real workspace fixture today.
 - ~~The output clamp is injected at the model's own SELECT level.~~ Resolved:
   the clamp is applied to a wrapping projection over the model's output schema
   (§"Source-filter pushdown + the two clamps"), which closes both defects of
@@ -300,11 +313,15 @@ by `docs/plans/20260704-model-updates.md` (design:
   storage exists yet — every technique today behaves as if it always folds
   cleanly); the keyed column-scoped-`MERGE` half of definition-change
   field-backfill and its `MaintenanceSkeletonColumnAdded` refusal. Generic
-  column-scoped merge is **built** as a mechanism only through its existing
-  named instance (dimension-driven horizon MERGE); it has not yet been
-  generalised into a standalone entry point a new consumer can call directly.
-  Idempotent re-scan vs delta probe is partial (input-delta discovery is
-  partial).
+  column-scoped merge has a standalone, admission-gated entry point today
+  (`maintenance_driver::resolve_cell_technique`/`decide_column_merge_dispatch`
+  + `maintenance_driver::execute_column_scoped_merge`, `maintenance_plan.md`
+  §Known Divergences), but only one producer of the `dimension_batch_sql`
+  it executes — the dimension-driven horizon MERGE's clamped `SELECT`; a
+  second named instance (e.g. the keyed column-scoped-`MERGE` half of
+  field-backfill above) would reuse the same executor but still needs its
+  own `dimension_batch_sql` producer written. Idempotent re-scan vs delta
+  probe is partial (input-delta discovery is partial).
 - **Hidden decomposed state + presentation view is built as a mechanism**
   (`crates/smelt-logical/src/analysis/decomposed_state.rs`
   `decompose_to_state`): given a decomposable combiner (F4) it derives the

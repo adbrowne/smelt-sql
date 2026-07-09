@@ -243,6 +243,25 @@ pub trait Backend: Send + Sync {
         IncrementalStrategy::DeleteInsert
     }
 
+    /// Whether this backend can execute a column-scoped `MERGE` — the
+    /// physical primitive behind `smelt_logical::maintenance::Technique::
+    /// ColumnScopedMerge` (`docs/specs/model_transforms.md` §"Dimension-
+    /// driven horizon-bounded MERGE").
+    ///
+    /// Default: refuses. This is a genuine backend-capability gate, not a
+    /// policy choice — a backend that cannot run a targeted `MERGE` must
+    /// drop the technique from admission **at plan time**
+    /// (`smelt-runtime`'s `maintenance_driver::resolve_cell_technique`
+    /// consults this before treating a `ColumnScopedMerge` cell as live),
+    /// never surface a runtime surprise after the plan already chose it. A
+    /// backend that can execute `merge_into` against a source projection
+    /// that carries the full target row (recomputing only the cell's
+    /// column group, passing every other column through unchanged from the
+    /// existing state) should override this to `true`.
+    fn supports_column_scoped_merge(&self) -> bool {
+        false
+    }
+
     /// Delete rows in a half-open partition range `[start, end)`.
     ///
     /// Emits `DELETE FROM table WHERE column >= start AND column < end`.

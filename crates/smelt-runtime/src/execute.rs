@@ -903,7 +903,7 @@ pub async fn execute_project(
 
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
             Some(inc_plan) => {
-                let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
+                let backend_default_strategy = backend.resolve_strategy(&inc_plan.config);
 
                 // Build source bound map once per model for source-filter pushdown (BUG-073).
                 // The model SQL is the same for every batch — compute once and reuse.
@@ -924,6 +924,120 @@ pub async fn execute_project(
                     .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
                     .collect();
                 let sql_for_bounds = smelt_parser::strip_frontmatter(&plan.sql);
+
+                // MP11 (`maintenance_plan.md` §"Per-cell admission"): read the
+                // creation trigger's write strategy off the derived
+                // `MaintenancePlan` rather than a hardcoded constant.
+                // `SourceFacts` are assembled with the same bare-name
+                // convention `smelt-db::maintenance_plan`'s Salsa query uses
+                // (`SourceFacts::name` strips the `sources.` breadcrumb) so
+                // trigger names agree with `derive_column_groups`'
+                // `mutation_sensitivity` keys. `allow_full_scan: true` is
+                // safe here regardless of the model's real
+                // `maintenance.scan_bounds` declaration: the creation
+                // trigger's `Grain::Partition` arm (`derive_new_data`) always
+                // admits `Technique::DeleteInsert` unconditionally — no
+                // admission check reads `allow_full_scan` on that path — so
+                // this can't spuriously widen what actually executes.
+                let maint_source_facts: Vec<smelt_logical::maintenance::SourceFacts> = plan
+                    .model_file
+                    .refs
+                    .iter()
+                    .filter_map(|r| {
+                        let segs = r.smelt_ref.to_path();
+                        let info = source_infos.iter().find(|s| s.address_segments == segs)?;
+                        // Bare name: strip only a leading `sources` breadcrumb
+                        // (matching `smelt-db::maintenance_plan`'s
+                        // `stripped.strip_prefix("sources.")` exactly) — NOT
+                        // just the last segment, which would collapse a
+                        // multi-level address like `sources.raw.users` down
+                        // to `users` and disagree with `SourceFacts::name`
+                        // elsewhere (`scan_bounds.per_source` keys,
+                        // `derive_column_groups`'s `mutation_sensitivity`).
+                        let bare = match segs.split_first() {
+                            Some((first, rest)) if first == "sources" => rest.join("."),
+                            _ => segs.join("."),
+                        };
+                        Some(smelt_db::queries::maintenance::source_facts(
+                            &bare,
+                            Some(info),
+                            true,
+                        ))
+                    })
+                    .collect();
+                // `explicitly_mutable` names sources whose OWN source YAML
+                // declares `mutation_profile: mutable_snapshot` — checked
+                // against `source_infos`' raw `mutation_profile` field
+                // directly, NOT `maint_source_facts`' already-defaulted
+                // `mutation` field above. `source_facts()` fails closed to
+                // `MutableSnapshot` for an UNDECLARED source too (the
+                // stricter posture for admission purposes elsewhere in this
+                // function); filtering on that defaulted field here would
+                // treat every undeclared, unclocked source (e.g. a plain
+                // `refresh: incremental` model's own append-only-by-default
+                // upstream) as "explicitly mutable", spuriously admitting a
+                // `Trigger::UpstreamMutation` cell
+                // `derive_model_maintenance_plan` never intended to derive
+                // for it (see that function's own doc comment: "explicitly
+                // declares... not merely the fail-closed default"). Mirrors
+                // `crates/smelt-runtime/tests/technique_lowering.rs`'s
+                // `real_fixture_examples_timeseries_admits_column_scoped_merge_cell`.
+                let explicitly_mutable: std::collections::HashSet<String> = plan
+                    .model_file
+                    .refs
+                    .iter()
+                    .filter_map(|r| {
+                        let segs = r.smelt_ref.to_path();
+                        let info = source_infos.iter().find(|s| s.address_segments == segs)?;
+                        let mutable = info.mutation_profile.as_ref().is_some_and(|m| {
+                            m.kind == smelt_core::sources::MutationProfile::Mutable
+                        });
+                        if !mutable {
+                            return None;
+                        }
+                        let bare = match segs.split_first() {
+                            Some((first, rest)) if first == "sources" => rest.join("."),
+                            _ => segs.join("."),
+                        };
+                        Some(bare)
+                    })
+                    .collect();
+                let resolved_strategy = match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => crate::maintenance_driver::resolve_incremental_strategy(
+                        &sql_for_bounds,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        backend_default_strategy.clone(),
+                    ),
+                    None => backend_default_strategy,
+                };
+
+                // MP11 (`maintenance_plan.md` §"Per-cell admission"): consult
+                // the SAME derived `MaintenancePlan` for a live
+                // `ColumnScopedMerge` cell on one of the model's
+                // explicitly-mutable dimension sources. When one resolves
+                // live, the batch loop below dispatches to a column-scoped
+                // `MERGE` instead of the default region-recompute path — "the
+                // driver loop becomes the per-cell technique executor"
+                // (`docs/plans/20260707-maintenance-plan-impl.md` Phase
+                // MP11). Deciding WHETHER a mutation actually happened this
+                // run (forward propagation / scheduling) is MP15's job; this
+                // only asks which technique the plan admits for the trigger,
+                // exactly like `resolve_incremental_strategy` above does for
+                // the creation trigger.
+                let column_scoped_cell = plan.model_file.metadata.as_deref().and_then(|metadata| {
+                    crate::maintenance_driver::resolve_live_column_scoped_cell(
+                        &sql_for_bounds,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        backend.supports_column_scoped_merge(),
+                    )
+                });
+
                 let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
                     source_timeseries
                         .iter()
@@ -945,6 +1059,93 @@ pub async fn execute_project(
                 for warning in &horizon_warnings {
                     warn!("model '{}': {warning}", plan.name);
                 }
+
+                let mut used_column_scoped_merge = false;
+
+                // Which physical corner (if any) THIS run's batches should
+                // dispatch through instead of the default
+                // `execute_model_incremental` (DELETE+INSERT) call — decided
+                // once per run, then applied per batch below so the WRITE
+                // stays scoped to the SAME `[start, end)` window a plain
+                // incremental run would already touch.
+                //
+                // `Corner::ColumnMerge` is "full-input read, targeted write";
+                // `derive_model_maintenance_plan` derives two distinct shapes
+                // of it for an `UpstreamMutation` trigger
+                // (`maintenance_plan.md` §"Per-cell admission"):
+                // - `PartitionLocal::No` (accepted full scan, the operator
+                //   declared `allow_full_scan`): no horizon to clamp the
+                //   WRITE to, so it stays targeted by the run's own batch
+                //   window plus the `unique_key` MERGE semantics —
+                //   `execute_column_scoped_merge_full`.
+                // - `PartitionLocal::Yes` (a genuine derived `ScanClamp`):
+                //   the horizon-clamped corner F15 was built for —
+                //   `execute_column_scoped_merge`/`dimension_horizon_merge`
+                //   additionally clamp the dimension batch to
+                //   `[conv_ts − H, conv_ts]` on the model's own partition
+                //   axis, licensed only when the mutated dimension's join
+                //   contribution is provably monotone
+                //   (`maintenance_driver::dimension_join_contribution`).
+                //
+                // A forward-only advance whose window never revisits an
+                // already-processed partition still leaves that partition
+                // exactly as untouched as the default DELETE+INSERT path
+                // would have left it; only the technique used to write the
+                // requested window differs.
+                let column_merge_dispatch: Option<crate::maintenance_driver::ColumnMergeDispatch> =
+                    match column_scoped_cell.as_ref() {
+                        Some((source, cell)) => {
+                            let table_exists = backend
+                                .table_exists(schema, &plan.model_file.db_name_owned())
+                                .await
+                                .unwrap_or(false);
+                            // The join-contribution proof is only meaningful
+                            // (and only computed) for the `PartitionLocal::Yes`
+                            // corner — the accepted-full-scan corner has no
+                            // such precondition.
+                            let contribution = if matches!(
+                                cell.partition_local,
+                                smelt_logical::maintenance::PartitionLocal::Yes
+                            ) {
+                                // The mutated dimension's own declared
+                                // `unique_key` (`sources.md` §"Row identity")
+                                // — never `SourceFacts`' always-empty
+                                // `unique_key` field (`smelt-db`'s
+                                // `source_facts()` does not populate it
+                                // yet), read straight off the
+                                // already-resolved `source_infos`.
+                                let dimension_unique_key: Vec<String> = source_infos
+                                    .iter()
+                                    .find(|info| {
+                                        let segs = &info.address_segments;
+                                        let bare = match segs.split_first() {
+                                            Some((first, rest)) if first == "sources" => {
+                                                rest.join(".")
+                                            }
+                                            _ => segs.join("."),
+                                        };
+                                        &bare == source
+                                    })
+                                    .and_then(|info| info.unique_key.clone())
+                                    .unwrap_or_default();
+                                crate::maintenance_driver::dimension_join_contribution(
+                                    &sql_for_bounds,
+                                    source,
+                                    &dimension_unique_key,
+                                )
+                            } else {
+                                smelt_logical::analysis::join_shape::ContributionVerdict::Monotone
+                            };
+                            crate::maintenance_driver::decide_column_merge_dispatch(
+                                cell,
+                                source,
+                                table_exists,
+                                !inc_plan.config.unique_key.is_empty(),
+                                &contribution,
+                            )
+                        }
+                        None => None,
+                    };
 
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
@@ -1053,23 +1254,85 @@ pub async fn execute_project(
                         end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
 
-                    let strategy = MaterializationStrategy::Incremental {
-                        partition,
-                        strategy: resolved_strategy.clone(),
-                        unique_key: inc_plan.config.unique_key.clone(),
-                    };
+                    let exec_result = if let Some(dispatch) = column_merge_dispatch.as_ref() {
+                        // MP11 (`maintenance_plan.md` §"Per-cell admission"):
+                        // the live `UpstreamMutation` cell resolved to
+                        // `Technique::ColumnScopedMerge` — `compiled.sql` is
+                        // ALREADY filtered to this batch's `run_range`
+                        // (`inject_time_filter`/`inject_source_filters`
+                        // above), so `MERGE`ing it in on `unique_key` keeps
+                        // the write scoped to exactly the window a
+                        // DELETE+INSERT would have touched, but as a keyed
+                        // `MERGE` — the driver loop becoming the per-cell
+                        // technique executor.
+                        used_column_scoped_merge = true;
+                        match dispatch {
+                            crate::maintenance_driver::ColumnMergeDispatch::Full => {
+                                crate::maintenance_driver::execute_column_scoped_merge_full(
+                                    backend,
+                                    schema,
+                                    &plan.model_file.db_name_owned(),
+                                    &inc_plan.config.unique_key,
+                                    &compiled.sql,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?
+                            }
+                            crate::maintenance_driver::ColumnMergeDispatch::Clamped(scan) => {
+                                let batch_width_days = (batch.partition_end - batch.partition_start)
+                                    .num_days()
+                                    .max(0)
+                                    as u64;
+                                let batch_width =
+                                    smelt_logical::analysis::source_bounds::Seconds::days(
+                                        batch_width_days,
+                                    );
+                                let bound = crate::maintenance_driver::widen_horizon_for_batch(
+                                    scan,
+                                    batch_width,
+                                );
+                                // The mutated dimension's join contribution
+                                // was already proven monotone when
+                                // `column_merge_dispatch` was computed above
+                                // (`dimension_join_contribution`) — this is
+                                // not a second, independent re-derivation.
+                                let contribution =
+                                    smelt_logical::analysis::join_shape::ContributionVerdict::Monotone;
+                                let conv_ts = batch.partition_end.format("%Y-%m-%d").to_string();
+                                crate::maintenance_driver::execute_column_scoped_merge(
+                                    backend,
+                                    schema,
+                                    &plan.model_file.db_name_owned(),
+                                    &inc_plan.config.unique_key,
+                                    &contribution,
+                                    &bound,
+                                    &inc_plan.timeseries.partition_column,
+                                    &conv_ts,
+                                    &compiled.sql,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?
+                            }
+                        }
+                    } else {
+                        let strategy = MaterializationStrategy::Incremental {
+                            partition,
+                            strategy: resolved_strategy.clone(),
+                            unique_key: inc_plan.config.unique_key.clone(),
+                        };
 
-                    let exec_result = backend
-                        .execute_model_incremental(
-                            schema,
-                            &plan.model_file.db_name_owned(),
-                            &compiled.sql,
-                            Materialization::Table,
-                            strategy,
-                            false,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        backend
+                            .execute_model_incremental(
+                                schema,
+                                &plan.model_file.db_name_owned(),
+                                &compiled.sql,
+                                Materialization::Table,
+                                strategy,
+                                false,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                    };
 
                     total_rows += exec_result.row_count;
                     total_rows_overall += exec_result.row_count;
@@ -1093,10 +1356,15 @@ pub async fn execute_project(
                     ),
                     _ => (String::new(), String::new()),
                 };
+                let strategy_label = if used_column_scoped_merge {
+                    "column_scoped_merge".to_string()
+                } else {
+                    format!("{:?}", resolved_strategy).to_lowercase()
+                };
                 manifest.models.insert(
                     plan.name.clone(),
                     ModelRunRecord {
-                        strategy: format!("{:?}", resolved_strategy).to_lowercase(),
+                        strategy: strategy_label,
                         time_range: Some(TimeRangeRecord {
                             start: start_str.clone(),
                             end: end_str.clone(),
@@ -1108,7 +1376,13 @@ pub async fn execute_project(
                     },
                 );
 
-                // Update interval store
+                // Update interval store. A column-scoped MERGE (MP11) still
+                // writes exactly the `[start_str, end_str)` run window each
+                // batch was already scoped to (`compiled.sql` carries the
+                // same `inject_time_filter`/`inject_source_filters` clamp a
+                // DELETE+INSERT batch would have used) — only the physical
+                // write technique differs, so the interval store's record
+                // stays accurate regardless of which technique wrote it.
                 if let Ok(mut interval_store) = file_store.load_intervals() {
                     let model_hash = compute_model_hash(&plan.sql);
                     let intervals = interval_store.get_or_create(&plan.name, &model_hash);
@@ -1119,20 +1393,22 @@ pub async fn execute_project(
                 // Reconciliation ledger: this batch loop performed a region
                 // recompute of `[start_str, end_str)` (DELETE the write
                 // window, INSERT its recompute — write window = output
-                // window). `docs/specs/maintenance_plan.md` §"The
-                // reconciliation ledger": a region recompute resets every
-                // intersecting entry to exactly the input it read. No
-                // derived `MaintenancePlan` reaches this call site yet (see
-                // `maintenance_plan.md` §Known Divergences — the plan and
-                // real execution remain two disconnected systems until a
-                // lowering consumer lands), so this records the whole-row
-                // group `{*}` (matching
+                // window; or, for a column-scoped MERGE cell, MERGE that
+                // SAME window's freshly-recomputed rows in by `unique_key` —
+                // the row VALUES are still a from-scratch recompute of the
+                // window, only the physical write op differs).
+                // `docs/specs/maintenance_plan.md` §"The reconciliation
+                // ledger": a region recompute resets every intersecting
+                // entry to exactly the input it read. This records the
+                // whole-row group `{*}` (matching
                 // `smelt_logical::maintenance::PlanCell::group`'s
                 // whole-row-trigger convention) read from a single nominal
                 // `self` input, watermarked to the region's own end. This
                 // subsumes `IntervalStore`'s role for the region-recompute
                 // shape without regressing it — both stores are written
-                // side by side.
+                // side by side. Per-cell (not whole-row) ledger grading for
+                // the column-scoped-merge technique is MP12's job
+                // (`maintenance_plan.md` §"The reconciliation ledger").
                 if !start_str.is_empty() && !end_str.is_empty() {
                     if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
                         let region = Region::new(start_str.clone(), end_str.clone());

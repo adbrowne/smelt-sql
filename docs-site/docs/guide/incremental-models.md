@@ -668,6 +668,47 @@ smelt supports multiple strategies for how data is updated. The strategy is chos
 
 UPSERT (`MERGE`) is **not** a `grain: partition` strategy — it is the backend primitive used by `refresh: incremental` + [`grain: key`](../reference/cumulative-aggregate.md), which is a separate sibling shape with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `grain: key`, not `grain: partition`.
 
+## Enrichment joins and dimension updates
+
+A `grain: partition` model that joins a fact source to a dimension table (a `smelt.ref()`/`smelt.sources.*` with no `timeseries:` block) is enrichment: every fact row carries a copy of whatever the dimension held at compute time. When a dimension row changes later — a user renamed, a product recategorized — the fact rows that joined against it are stale until that partition is recomputed.
+
+smelt derives a **maintenance plan** for every `refresh: incremental` model: a matrix of what to do for each group of output columns under each kind of change. For an enrichment join, the columns that came from the dimension form their own group, distinct from the columns that came from the fact table — because a dimension update only ever needs to touch the dimension-derived columns, never the fact-derived ones. Run `smelt explain <model>` to see the derived plan:
+
+```
+$ smelt explain daily_events_enriched
+Maintenance plan: daily_events_enriched
+
+Cells (4):
+  - group {*} on trigger NewData { source: "raw.events" }
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      ...
+  - group {user_name} on trigger UpstreamMutation { source: "raw.users" }
+      corner:    ColumnMerge
+      technique: ColumnScopedMerge
+      ...
+```
+
+The `UpstreamMutation` cell for `raw.users` shows that a dimension change only needs a **column-scoped `MERGE`** touching `{user_name}` — not a rebuild of the whole partition. Declare the dimension's mutability explicitly on its source YAML so smelt derives this cell instead of assuming worst-case immutability:
+
+```yaml
+# models/sources/raw/users.yml
+mutation_profile:
+  kind: mutable_snapshot
+```
+
+An unclocked dimension source has no partition column to bound a scan by, so admitting the mutation cell requires accepting a full read of it — name that acceptance on the model that reads it:
+
+```yaml
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.users:
+        allow_full_scan: true
+```
+
+Once the cell is admitted (and the target table already exists), `smelt run` dispatches through the column-scoped `MERGE` automatically on every run over the fact table's own event-time window — no separate "a dimension changed" signal is required. What's not built yet is a *cheaper, change-aware* trigger: `smelt run` cannot tell whether the dimension actually changed since the last run, so it re-derives the `MERGE` on every run rather than skipping one where nothing upstream moved (forward propagation, `smelt run --since-upstream`, unbuilt). If the plan hasn't admitted a cell for your model yet (an unbounded scan, a missing `mutation_profile` declaration, or a backend without column-scoped `MERGE` support), the run falls back to the region-recompute technique (`DELETE`+`INSERT`), which re-reads the dimension's current contents and is always correct, just not column-scoped. `smelt explain` is the way to see today which of your models already have a targeted-write cell derived and ready.
+
 ## grain: partition vs grain: key
 
 `grain: partition` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `grain: key` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
