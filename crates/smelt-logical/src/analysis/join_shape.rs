@@ -26,19 +26,23 @@ pub enum Cardinality {
     OneToMany,
 }
 
-/// Declares which columns are known to uniquely identify a row of a given
-/// source — the fact a catalog/PK declaration would otherwise supply.
+/// Declares which column-sets are known to uniquely identify a row of a
+/// given source — the fact a catalog/PK declaration would otherwise supply.
 /// `smelt-logical` has no catalog access (layering rule), so callers inject
 /// these facts the same way `source_bounds::BoundContext` injects partition
 /// columns. A source absent from the map has no declared unique key; a join
-/// against it can only be proven `OneToOne` via a `USING`/`ON` equality that
-/// matches a declared key.
+/// against it can only be proven `OneToOne` via a `USING`/`ON` equality whose
+/// matched columns are a superset of (i.e. cover every column of) at least
+/// one declared key-set — a single-column key as well as a genuine COMPOSITE
+/// key (e.g. `(user_id, dt)`, jointly but not individually unique) are both
+/// expressible: a single-column key is just a key-set of size one.
 #[derive(Debug, Default)]
 pub struct JoinContext {
     /// Source name (or alias, whichever the join condition qualifies columns
-    /// with) -> the set of columns each of which alone uniquely identifies a
-    /// row of that source.
-    pub unique_keys: HashMap<String, HashSet<String>>,
+    /// with) -> the declared key-sets for that source. Each inner set is one
+    /// declared key (its columns are jointly, not necessarily individually,
+    /// unique); a source may have more than one declared key-set.
+    pub unique_keys: HashMap<String, Vec<HashSet<String>>>,
 }
 
 impl JoinContext {
@@ -46,20 +50,37 @@ impl JoinContext {
         Self::default()
     }
 
-    pub fn with_unique_key(mut self, source: &str, column: &str) -> Self {
+    /// Declare that `column` alone uniquely identifies a row of `source` —
+    /// convenience sugar for a 1-column composite key.
+    pub fn with_unique_key(self, source: &str, column: &str) -> Self {
+        self.with_composite_unique_key(source, &[column])
+    }
+
+    /// Declare that `columns`, taken together, uniquely identify a row of
+    /// `source` (a composite key: the columns need not be individually
+    /// unique, only jointly so).
+    pub fn with_composite_unique_key(mut self, source: &str, columns: &[&str]) -> Self {
         self.unique_keys
             .entry(source.to_string())
             .or_default()
-            .insert(column.to_string());
+            .push(columns.iter().map(|c| c.to_string()).collect());
         self
     }
 }
 
 /// Prove the cardinality of `join` against `ctx`'s declared unique keys.
 ///
+/// A join is proven `OneToOne` when the equi-join's matched columns for the
+/// joined table are a SUPERSET of (contain every column of) at least one
+/// declared key-set for that source — this covers both single-column keys
+/// and genuine composite keys. Matching only a strict SUBSET of a declared
+/// composite key does NOT prove one-to-one: that is the key hazard this
+/// function fails closed on.
+///
 /// Fail-closed: a `CROSS JOIN` (no key at all), a join with no condition, or
-/// an equality condition that does not match a declared unique key all yield
-/// `OneToMany` — the conservative verdict is never optimistically skipped.
+/// an equality condition that does not fully cover any declared key-set all
+/// yield `OneToMany` — the conservative verdict is never optimistically
+/// skipped.
 pub fn fan_out(join: &JoinClause, ctx: &JoinContext) -> Cardinality {
     if matches!(join.join_type(), Some(JoinType::Cross)) {
         return Cardinality::OneToMany;
@@ -73,18 +94,20 @@ pub fn fan_out(join: &JoinClause, ctx: &JoinContext) -> Cardinality {
         return Cardinality::OneToMany;
     };
 
-    let equality_columns =
-        equality_columns_for_table(&condition, alias.as_deref(), base_name.as_deref());
-    let is_unique = equality_columns.iter().any(|col| {
-        [alias.as_deref(), base_name.as_deref()]
+    let equality_columns: HashSet<String> =
+        equality_columns_for_table(&condition, alias.as_deref(), base_name.as_deref())
             .into_iter()
-            .flatten()
-            .any(|name| {
-                ctx.unique_keys
-                    .get(name)
-                    .is_some_and(|keys| keys.contains(col))
+            .collect();
+    let is_unique = [alias.as_deref(), base_name.as_deref()]
+        .into_iter()
+        .flatten()
+        .any(|name| {
+            ctx.unique_keys.get(name).is_some_and(|key_sets| {
+                key_sets
+                    .iter()
+                    .any(|key_set| key_set.is_subset(&equality_columns))
             })
-    });
+        });
 
     if is_unique {
         Cardinality::OneToOne
@@ -119,7 +142,15 @@ fn collect_equality_columns(
     base_name: Option<&str>,
     out: &mut Vec<String>,
 ) {
-    let Some(bin) = expr.as_binary() else {
+    // `Expr::as_binary()` prefers descending into a nested `BinaryExpr` child
+    // over self-casting; for a chained `AND` (>2 top-level equalities) that
+    // means the natural left-associative parse — a `BinaryExpr` node whose
+    // own children are themselves `BinaryExpr`s — mis-resolves to the
+    // innermost leaf instead of the current AND node. Self-cast first so a
+    // 3+ term `AND` chain still recurses through every level.
+    let Some(bin) =
+        smelt_parser::BinaryExpr::cast(expr.syntax().clone()).or_else(|| expr.as_binary())
+    else {
         return;
     };
     let Some(op) = bin.operator() else {

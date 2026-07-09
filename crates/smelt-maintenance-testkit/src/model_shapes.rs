@@ -819,8 +819,87 @@ JOIN user_tiers t ON e.user_id = t.user_id
 
 // ── Cells below are stubs the loop fills in as it reaches them. Each returns a
 //    ModelShape; keep them here so the tested scope stays in one file. ──
-//
-// G-10  join fan-out on a COMPOSITE unique key · append-only.
+
+/// `G-10`: join fan-out on a COMPOSITE unique key, append-only
+/// (`docs/research/property-discovery/catalog.md` cell `G-10`;
+/// `docs/plans/20260707-maintenance-plan-impl.md` Phase MP10). `facts` is a
+/// timeseries source joined to `dims`, a plain lookup source declared unique
+/// only on the PAIR `(user_id, dt)` — neither `user_id` nor `dt` alone is
+/// unique in `dims` (every `user_id` repeats across several `dt`s, and every
+/// `dt` repeats across several `user_id`s), but the composite `(user_id, dt)`
+/// equi-join is genuinely one-to-one (mirrors the ground truth proved by the
+/// disposable proptest `crates/smelt-db/tests/proptests/maintenance_link_b_composite_key_fan_out.rs`).
+/// The model declares `batched: unique_key: [d, user_id, dt]`; `dims` is a
+/// plain lookup (no `timeseries:` block) so it needs the same
+/// `maintenance: scan_bounds: per_source: dims: allow_full_scan: true`
+/// override `join_enrichment_mutable_dimension` (`G-05`) uses for its
+/// undeclared-clock dimension source.
+pub fn join_composite_key_fan_out() -> MultiSourceModelShape {
+    MultiSourceModelShape {
+        name: "facts_enriched",
+        sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: incremental
+grain: partition
+batched:
+  unique_key: [d, user_id, dt]
+maintenance:
+  scan_bounds:
+    per_source:
+      dims:
+        allow_full_scan: true
+---
+SELECT f.d, f.user_id, f.dt, f.val, dm.payload
+FROM smelt.sources.facts f
+JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
+"#,
+        sources: &[
+            MultiSourceSpec {
+                name: "facts",
+                columns: &[
+                    SourceColumn {
+                        name: "d",
+                        ty: "DATE",
+                    },
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "dt",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "val",
+                        ty: "DOUBLE",
+                    },
+                ],
+                timeseries: Some(("d", "d")),
+            },
+            MultiSourceSpec {
+                name: "dims",
+                columns: &[
+                    SourceColumn {
+                        name: "user_id",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "dt",
+                        ty: "BIGINT",
+                    },
+                    SourceColumn {
+                        name: "payload",
+                        ty: "BIGINT",
+                    },
+                ],
+                timeseries: None,
+            },
+        ],
+    }
+}
 
 /// `SC-4`: **stacked bounded `RANGE` frames across CTE layers**
 /// (`docs/research/20260707-property-bounded-reach.md` §5/§7, catalog cell
