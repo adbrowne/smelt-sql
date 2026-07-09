@@ -468,6 +468,21 @@ ${hint}}" 2>&1 | tee "${log}"
   # this a single stray line makes jq abort before the result envelope, yielding
   # a spurious no_result_envelope pause instead of the real "no sentinel" path.
   final_result="$(jq -Rr 'fromjson? | select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
+  api_error_status="$(jq -Rr 'fromjson? | select(.type == "result") | .api_error_status // empty' "${log}" 2>/dev/null | tail -1)"
+
+  # Session/usage-limit hit (HTTP 429, or the "You've hit your session
+  # limit · resets <time>" message the CLI prints instead of any sentinel).
+  # This is NOT a crash — the account is simply out of budget until the
+  # window resets. Classify it distinctly from no_sentinel/claude_nonzero so
+  # the forever-wrapper never counts it toward its crash-loop (fast-fail)
+  # guard; it must always retry, no matter how many times in a row it
+  # recurs while waiting out the reset window.
+  if [ "${api_error_status}" = "429" ] \
+     || printf '%s' "${final_result}" | grep -qiE 'session limit|usage limit'; then
+    echo "===== session/usage limit hit (429) — not a crash, will retry later ====="
+    exit_reason="session_limit"
+    break
+  fi
 
   if [ -z "${final_result}" ]; then
     echo "===== Could not extract final .result from log — pausing loop ====="
@@ -522,10 +537,12 @@ echo "Logs in: ${LOG_DIR}"
 
 # Exit codes: 0 = master backlog done; 2 = needs a human (master exhausted —
 # next cluster needs a sub-plan scaffolded); 3 = graceful stop requested (do
-# not restart); 1 = infra failure / max-iter.
+# not restart); 4 = session/usage limit hit (always retry, never a fast-fail);
+# 1 = infra failure / max-iter.
 case "${exit_reason}" in
   all_done) exit 0 ;;
   master_exhausted) exit 2 ;;
   stopped_by_flag) exit 3 ;;
+  session_limit) exit 4 ;;
   *) exit 1 ;;
 esac

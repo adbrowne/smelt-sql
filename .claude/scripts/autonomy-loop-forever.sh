@@ -28,6 +28,15 @@ while true; do
         3)  # Graceful stop requested (.claude/autonomy.stop). Honour it.
             echo "[autonomy-loop-forever] graceful stop requested (exit 3) — not restarting." >&2
             exit 0 ;;
+        4)  # Session/usage limit hit. Expected, not a crash — the account is
+            # just out of budget until the window resets. Never counts toward
+            # the fast-fail crash-loop guard below (so it can recur any
+            # number of times in a row while waiting out the reset without
+            # tripping a permanent halt) and always retries.
+            fast_fails=0
+            echo "[autonomy-loop-forever] session/usage limit hit (exit 4); sleeping 10m before retry (not counted as a failure)" >&2
+            sleep 600
+            continue ;;
     esac
 
     if [ "$elapsed" -lt "$FAST_FAIL_SECS" ]; then
