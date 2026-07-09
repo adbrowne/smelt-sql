@@ -118,6 +118,12 @@ fold corner is contract-specific (it needs a combiner algebra — the ladder,
 `model_maintenance.md`). Where the interchangeability conditions below hold, a recompute of a
 region **supersedes** and resets what folds had written there.
 
+"Unconditionally valid" is a correctness claim, not an admission or cost claim — it holds even in
+the degenerate case where no partition bound exists and the region is the whole table (a
+whole-table recompute is exactly a region taken to its limit). Whether that degenerate recompute
+is *admitted* into the plan at all is a separate question, gated by the partition-locality
+guardrail: see **"Partition-local maintenance (the K8 guardrail)"** below.
+
 ### Per-cell admission
 
 A technique enters a cell's plan space only when all of its obligations discharge (fail-closed;
@@ -463,6 +469,37 @@ disagree; one per node cannot). Deeper rationale:
   not yet cover — because the underlying surface doesn't exist yet — is the maintenance plan
   itself: the `maintenance:` frontmatter block, `smelt explain`'s cell/clamp/ledger output,
   `--since-upstream`, `--include-upstreams`, and `smelt bakeoff`.
+
+## Future Extensions
+
+Ideas for widening the plan's admission space beyond what's decided above. Nothing here is
+surface — no `maintenance:` field, diagnostic, or technique described in this section may be
+relied on until it graduates into `§Surface`/`§Semantics` via its own spec diff and plan.
+
+- **Row-local column derivation.** A recurring real-world shape: a column whose value is a pure
+  function of *other columns already present in the same row* — a materialized date truncated
+  from a timestamp, a normalized (lower-cased, hyphen-separated) rendering of a GUID column, an
+  upper/lower-cased string column. When such a column is **added**, this is already the intended
+  shape of the `PureBackfill` verdict (`§"The definition-change trigger"`; classification proof
+  in `model_properties.md` §"Definition-change column classification"): per-column provenance
+  proves the new expression reads only already-stored columns, so the backfill is an in-place
+  `UPDATE` with no upstream read at all — no full-input recompute needed. That path is spec'd and
+  tracked as unbuilt in `§Known Divergences` above; it does not need a new idea, only an
+  implementation of `classify_definition_change`.
+  - **The open extension is the changed-column case, not the added-column case.** The
+    definition-change trigger only fires on a pure addition (the additive-only model-diff,
+    `model_properties.md` §"Additive-only model-diff vs semantic change"). Redefining an
+    *existing* column's expression — e.g. changing how the normalized GUID column is computed —
+    has no described plan-level treatment today; it falls to whatever a general model-definition
+    change does (unspecified here), which in practice means a full recompute even when the new
+    expression is, itself, a pure function of other unchanged stored columns in the same row.
+    A future extension could apply the same per-column-provenance test used for `PureBackfill`
+    to a **changed** column's new expression: if it proves pure-function-of-stored-columns, admit
+    a targeted in-place `UPDATE` over the existing region instead of the region-recompute
+    fallback. This would need its own trigger (distinct from the additive-only definition-change
+    trigger), its own diagnostic naming for when the provenance test fails closed, and a decision
+    on how it composes with the reconciliation ledger (a redefinition invalidates the ledger's
+    provenance identity for that group even though no upstream delta occurred).
 
 ## References
 

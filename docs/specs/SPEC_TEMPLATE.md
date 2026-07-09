@@ -83,6 +83,18 @@ Where current implementation differs from intent, or where intent itself is unde
 - Open design questions with current best-known answer
 - Tensions with other specs (link to them)
 
+## Future Extensions
+
+*(Optional — omit if there's nothing speculative to record.)* Ideas for widening the feature's
+surface or admission space that are **not decided**, unlike `§Known Divergences` (which tracks a
+gap between decided intent and current implementation). Nothing in this section is surface, and
+none of it may be relied on or implemented against until it graduates into `§Surface`/`§Semantics`
+via its own spec diff and plan.
+
+- A candidate future capability, the concrete case that motivates it, and what's still open
+  (what new trigger/diagnostic/composition question it would raise)
+- Explicitly out of scope for now, and why now isn't the time
+
 ## References
 
 Concrete pointers — kept current, not historical.
