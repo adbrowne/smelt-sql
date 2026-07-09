@@ -19,7 +19,7 @@ use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
-use smelt_logical::maintenance::grouping::derive_column_groups;
+use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
     ColumnGroup, Grain as PlanGrain, MaintenancePlan, MutationProfile as PlanMutationProfile,
@@ -36,6 +36,16 @@ use smelt_types::SqlFunction;
 pub struct MaintenancePlanResult {
     pub plan: MaintenancePlan,
     pub column_groups: Vec<ColumnGroup>,
+    /// Every column whose provenance couldn't be resolved and whose
+    /// derivation fell back to the whole-model group
+    /// (`grouping::derive_column_groups`'s `GroupingResult::degenerate`).
+    /// Non-empty here is the only reliable signal of a genuine whole-model
+    /// collapse — `column_groups.len() == 1` alone is neither necessary nor
+    /// sufficient (a legitimately single-group model with 2+ mutable
+    /// sources is not degenerate; a degenerate collapse against a
+    /// single-source model still has `column_groups.len() == 1` with only
+    /// one source in `mutation_sensitivity`).
+    pub degenerate: Vec<DegenerateColumn>,
 }
 
 /// Build one [`SourceFacts`] from a resolved source declaration (`None` when
@@ -234,6 +244,7 @@ pub fn derive_model_maintenance_plan(
     Some(MaintenancePlanResult {
         plan,
         column_groups: grouping.groups,
+        degenerate: grouping.degenerate,
     })
 }
 

@@ -357,6 +357,11 @@ struct HistoryArgs {
 
 #[derive(Parser)]
 struct ExplainArgs {
+    /// Name of a single model to print the maintenance plan report for
+    /// (cells, clamps, locality verdicts, inbound edges). Omit to print the
+    /// whole-project dependency graph as before.
+    model_name: Option<String>,
+
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,

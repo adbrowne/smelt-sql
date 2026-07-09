@@ -1268,6 +1268,102 @@ pub fn maintenance_plan(
     ))
 }
 
+/// Plain (non-Salsa-tracked) counterpart of [`maintenance_plan`] that returns
+/// the *full* derived plan — cells, clamps, locality verdicts — rather than
+/// the Salsa-safe refusals-only projection. Used by `smelt explain <model>`
+/// (`maintenance_plan.md` §Surface "CLI"), a one-shot CLI report that has no
+/// need for Salsa's incremental caching and cannot use the tracked query
+/// because [`smelt_logical::maintenance::MaintenancePlan`] does not implement
+/// `PartialEq`/`Eq` (the Salsa tracked-return-value requirement the
+/// refusals-only [`crate::queries::maintenance::MaintenancePlanDiagnostics`]
+/// projection exists to satisfy instead).
+///
+/// Mirrors the exact input-assembly `maintenance_plan` performs above, but
+/// calls [`crate::queries::maintenance::derive_model_maintenance_plan`]
+/// directly. Still a Salsa-purity-respecting function: it only assembles
+/// inputs from Salsa accessors and calls pure derivation code — it never
+/// re-implements admission, locality, or ledger logic. Returns `None` for a
+/// model with no maintenance plan (not `refresh: incremental`, or no
+/// `grain:` declared).
+pub fn maintenance_plan_report(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Option<crate::queries::maintenance::MaintenancePlanResult> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return None;
+    };
+    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
+        || metadata.grain.is_none()
+    {
+        return None;
+    }
+    let path = file.path(db);
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    let sql_body = &text[sql_offset..];
+    let refs = smelt_logical::collect_path_refs(sql_body);
+    let source_refs: Vec<(String, Option<smelt_core::SourceInfo>)> = refs
+        .iter()
+        .filter_map(|r| {
+            let info = ref_source_info(db, workspace, project, r)?;
+            let stripped = r.strip_prefix("smelt.")?;
+            let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+            Some((bare.to_string(), Some(info)))
+        })
+        .collect();
+
+    let project_scan_bounds = project
+        .and_then(|p| {
+            smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
+                .ok()
+                .map(|(cfg, _)| cfg.maintenance)
+        })
+        .flatten()
+        .and_then(|m| m.scan_bounds);
+
+    let table = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let model_scan_bounds = metadata
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.scan_bounds.as_ref());
+    let sources = crate::queries::maintenance::build_source_facts(
+        &source_refs,
+        model_scan_bounds,
+        project_scan_bounds.as_ref(),
+    );
+    let explicitly_mutable: std::collections::HashSet<String> = source_refs
+        .iter()
+        .filter(|(_, info)| {
+            info.as_ref().is_some_and(|i| {
+                i.mutation_profile
+                    .as_ref()
+                    .is_some_and(|m| m.kind == smelt_core::sources::MutationProfile::Mutable)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    crate::queries::maintenance::derive_model_maintenance_plan(
+        sql_body,
+        &table,
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+    )
+}
+
 #[salsa::tracked]
 pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, file: SourceFile) {
     let path = file.path(db);

@@ -112,6 +112,27 @@ Three input shapes are accepted:
 
 **`smelt explain` excludes tests.** `smelt explain` (with or without `--json`) filters out all `smelt.test` declarations from its output via the test-kind predicate applied to every discovered entity. Tests never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
 
+### `smelt explain <model>` maintenance-plan report
+
+`smelt explain` accepts an optional positional model-name argument. When given, it prints that
+model's maintenance plan (`maintenance_plan.md` §Surface "The plan (derived, reported)") instead
+of the whole-project graph: every cell (its trigger, corner, technique, and `ledger_catch_up`
+flag), the derived per-source scan clamps, the per-source partition-locality verdict, any
+admission refusals, and the model's inbound edges (upstream dependencies). The report is
+read-only and plain text — it does not (yet) have a `--json` form. `--select` and `--json` are
+ignored when a model-name argument is given.
+
+A model with no maintenance plan (not `refresh: incremental`, or no `grain:` declared) prints a
+one-line notice rather than an error, and exits `0`.
+
+When the plan's column-group derivation could not distinguish per-column provenance (an
+unqualified column ambiguous between two joined sources — `model_properties.md` §"Per-column
+mutation-sensitivity / column provenance"), the report calls out the resulting whole-model
+collapse in plain language rather than printing an indistinguishable single-group plan.
+
+Omitting the model-name argument keeps the existing whole-project graph behavior described below,
+unchanged.
+
 ### `smelt explain --json` output schema
 
 ```json
@@ -347,7 +368,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **No project-wide compile-only flag (TB-3).** `smelt build --dry-run` does not exist; `smelt build --show-plan` requires a positional model-file argument. There is no single command to compile every model and show the plan without executing. Two candidate resolutions: (1) extend `--show-plan` to accept no positional argument for project-wide output, or (2) add `smelt build --dry-run` mirroring `smelt run --dry-run` semantics across the seed→run lifecycle.
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
 - **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
-- **The maintenance CLI surface is specified but not wired into the CLI parser.** `maintenance_plan.md` §"CLI" specifies `smelt explain <model>`'s plan report (cells, clamps, locality, guarantee ledger, edges), `smelt run --since-upstream` (forward propagation from recorded per-source deltas), `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution), and `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`). None of these accept the flags or emit the report described there yet; tracked in `docs/plans/20260707-maintenance-plan-impl.md` phases MP7, MP13, MP15, MP16.
+- **Most of the maintenance CLI surface is specified but not wired into the CLI parser.** `maintenance_plan.md` §"CLI" specifies `smelt run --since-upstream` (forward propagation from recorded per-source deltas), `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution), and `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`). None of these accept the flags or emit the report described there yet; tracked in `docs/plans/20260707-maintenance-plan-impl.md` phases MP13, MP15, MP16. `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
 - **Generator-emitted model `origin` field in `smelt explain --json` is landed.** The `origin` field in §"`smelt explain --json` output schema" surfaces generator emissions distinctly from hand-authored models (per `meta_language.md` §"Multi-model production"). The `ModelOriginKind::Generated { generator_file, generator_name }` enum in `smelt-core/src/origin.rs` is the production type; `ExplainModel.origin` and `CatalogModel.origin` carry it. The `generator_file:<path>` selector parses via `SelectionMethod::GeneratorFile` and resolves against the `emitted_models()` survivor set. The `smelt docs generate` Markdown renderer includes a `**Source**:` line for emitted models. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References

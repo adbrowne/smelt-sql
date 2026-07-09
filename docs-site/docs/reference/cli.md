@@ -773,18 +773,30 @@ Output model graph and configuration as JSON for orchestrator integration. Produ
 **Usage:**
 
 ```
-smelt explain [OPTIONS]
+smelt explain [MODEL_NAME] [OPTIONS]
 ```
+
+**Arguments:**
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `MODEL_NAME` | string, optional | Name of a single model to print the maintenance-plan report for instead of the whole-project graph. |
 
 **Flags:**
 
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
-| `--json` | | bool | `false` | Output as JSON (required for machine consumption) |
-| `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. |
+| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given. |
+| `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. Ignored when `MODEL_NAME` is given. |
 
-The output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
+Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
+
+With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
+cell (trigger, corner, technique), the `ledger_catch_up` flag, the derived per-source scan
+clamps, each source's partition-locality verdict, any admission refusals, and the model's inbound
+edges. This only applies to incremental models (`refresh: incremental` with a `grain:` declared)
+— other models print a one-line notice instead.
 
 **Examples:**
 
@@ -800,6 +812,32 @@ smelt explain --select +marts.daily_revenue --json
 
 # Using scope shorthand
 smelt --scope marts explain --select +daily_revenue --json
+
+# Print one incremental model's maintenance plan
+smelt explain daily_events
+```
+
+```text
+$ smelt explain daily_events
+Maintenance plan: daily_events
+
+Cells (2):
+  - group {*} on trigger NewData { source: "raw.events" }
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      ledger_catch_up: false
+      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+      scan clamps: (none)
+  - group {*} on trigger Backfill
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      ledger_catch_up: false
+      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+      scan clamps: (none)
+
+Refusals: (none)
+
+Inbound edges: (none)
 ```
 
 ---

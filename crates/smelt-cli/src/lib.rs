@@ -27,8 +27,9 @@ pub use config::{
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
 pub use explain::{
-    build_explain_output, build_physical_explain, ExplainIncremental, ExplainModel, ExplainOutput,
-    ExplainPhysical, ExplainPhysicalNode, SourceBoundJson,
+    build_explain_output, build_maintenance_plan_report, build_physical_explain,
+    ExplainIncremental, ExplainModel, ExplainOutput, ExplainPhysical, ExplainPhysicalNode,
+    SourceBoundJson,
 };
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use python::discover_python_models;

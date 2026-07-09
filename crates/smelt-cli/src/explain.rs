@@ -95,6 +95,110 @@ fn is_self_origin(origins: &[String]) -> bool {
     origins.len() == 1
 }
 
+/// Build the plain-text `smelt explain <model>` maintenance-plan report
+/// (`maintenance_plan.md` §Surface "CLI": "prints the plan (cells, clamps,
+/// locality, guarantee ledger, edges)"). Pure string-builder — no I/O — so it
+/// is directly unit-testable; the caller only `println!`s the result.
+///
+/// `result` is the plan derived by `smelt_db::maintenance_plan_report`
+/// (already-derived data; this function never re-derives admission,
+/// locality, or ledger logic). `upstream` is the model's inbound edges
+/// (`DependencyGraph::get_upstream`), and `model_name` is its canonical path.
+pub fn build_maintenance_plan_report(
+    model_name: &str,
+    result: &smelt_db::queries::maintenance::MaintenancePlanResult,
+    upstream: &[String],
+) -> String {
+    use smelt_logical::maintenance::PartitionLocal;
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Maintenance plan: {}", model_name);
+    let _ = writeln!(out);
+
+    // Whole-model collapse: a column's provenance couldn't be resolved and
+    // the derivation fell back to the whole-model group. `degenerate` is the
+    // authoritative signal for this — non-empty exactly when
+    // `grouping::derive_column_groups` had to give up on per-column
+    // provenance (`maintenance_grouping.rs::degenerate_collapse_is_surfaced`).
+    // `column_groups.len() == 1` alone is not a reliable proxy: a
+    // legitimately single-group model spanning 2+ mutable sources is not
+    // degenerate, and a genuine collapse against a single-source model still
+    // has exactly one group with one source in `mutation_sensitivity`.
+    if !result.degenerate.is_empty() {
+        let _ = writeln!(
+            out,
+            "Note: {} column(s) could not distinguish per-column provenance and \
+             collapsed to a single column group — this model's maintenance plan \
+             treats those columns as mutation-sensitive to every listed source:",
+            result.degenerate.len(),
+        );
+        for d in &result.degenerate {
+            let _ = writeln!(out, "  - {}: {}", d.column, d.reason);
+        }
+        let _ = writeln!(out);
+    }
+
+    if result.plan.cells.is_empty() {
+        let _ = writeln!(out, "Cells: (none)");
+    } else {
+        let _ = writeln!(out, "Cells ({}):", result.plan.cells.len());
+        for cell in &result.plan.cells {
+            let _ = writeln!(
+                out,
+                "  - group {} on trigger {:?}",
+                cell.group, cell.trigger
+            );
+            let _ = writeln!(out, "      corner:    {:?}", cell.corner);
+            let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
+            match &cell.partition_local {
+                PartitionLocal::Yes => {
+                    let _ = writeln!(out, "      locality:  partition_local");
+                }
+                PartitionLocal::No { source, why } => {
+                    let _ = writeln!(
+                        out,
+                        "      locality:  NOT partition_local (source: {}, why: {})",
+                        source, why
+                    );
+                }
+            }
+            if cell.scans.is_empty() {
+                let _ = writeln!(out, "      scan clamps: (none)");
+            } else {
+                let _ = writeln!(out, "      scan clamps:");
+                for scan in &cell.scans {
+                    let _ = writeln!(
+                        out,
+                        "        - source={} column={} before={:?} after={:?}",
+                        scan.source, scan.column, scan.before, scan.after
+                    );
+                }
+            }
+        }
+    }
+    let _ = writeln!(out);
+
+    if result.plan.refusals.is_empty() {
+        let _ = writeln!(out, "Refusals: (none)");
+    } else {
+        let _ = writeln!(out, "Refusals ({}):", result.plan.refusals.len());
+        for refusal in &result.plan.refusals {
+            let _ = writeln!(out, "  - {:?}", refusal);
+        }
+    }
+    let _ = writeln!(out);
+
+    if upstream.is_empty() {
+        let _ = writeln!(out, "Inbound edges: (none)");
+    } else {
+        let _ = writeln!(out, "Inbound edges: {}", upstream.join(", "));
+    }
+
+    out
+}
+
 /// Build the explain output from the dependency graph and config.
 ///
 /// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
