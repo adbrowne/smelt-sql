@@ -19,6 +19,7 @@ use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
+use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
@@ -323,6 +324,15 @@ pub enum MaintenanceRefusal {
 pub struct MaintenancePlanDiagnostics {
     pub refusals: Vec<MaintenanceRefusal>,
     pub cell_column_group_violations: Vec<String>,
+    /// The declared-`timeseries.granularity`-vs-derived-grouping check
+    /// (`maintenance_plan.md` §Design "Grain is declared"), when the model
+    /// declares a `timeseries:` block and a mismatch was positively
+    /// derived. `None` when the model has no `timeseries:` block, the
+    /// projection couldn't be located, or its shape didn't resolve to a
+    /// known grid unit (undecidable, not a positive disproof) —
+    /// [`smelt_logical::maintenance::granularity::check_declared_granularity`]'s
+    /// own fail-open posture.
+    pub granularity_mismatch: Option<GranularityMismatch>,
 }
 
 /// Assemble inputs (resolved source facts, declared output shape,
@@ -357,10 +367,17 @@ pub fn maintenance_plan_diagnostics(
         })
         .map(|(name, _)| name.clone())
         .collect();
+    let granularity_mismatch = metadata
+        .timeseries
+        .as_ref()
+        .and_then(|ts| check_declared_granularity(sql, &ts.partition_column, ts.granularity));
     let Some(result) =
         derive_model_maintenance_plan(sql, table, metadata, &sources, &explicitly_mutable)
     else {
-        return MaintenancePlanDiagnostics::default();
+        return MaintenancePlanDiagnostics {
+            granularity_mismatch,
+            ..Default::default()
+        };
     };
     let refusals = result
         .plan
@@ -393,6 +410,7 @@ pub fn maintenance_plan_diagnostics(
     MaintenancePlanDiagnostics {
         refusals,
         cell_column_group_violations,
+        granularity_mismatch,
     }
 }
 

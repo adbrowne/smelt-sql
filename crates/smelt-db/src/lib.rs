@@ -1063,6 +1063,20 @@ fn cte_ref_outside_test_diagnostics(
     diags
 }
 
+/// Lowercase display of a `Granularity` for diagnostic messages (matches the
+/// wire/frontmatter spelling, e.g. `granularity: day`).
+fn granularity_lower(g: smelt_core::Granularity) -> &'static str {
+    use smelt_core::Granularity as G;
+    match g {
+        G::Hour => "hour",
+        G::Day => "day",
+        G::Week => "week",
+        G::Month => "month",
+        G::Quarter => "quarter",
+        G::Year => "year",
+    }
+}
+
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
 /// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
 /// (`architecture.md` §"Planner scope").
@@ -1870,6 +1884,21 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: violation.clone(),
                 range: rowan::TextRange::empty(body_start),
                 code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        if let Some(mismatch) = &plan_diags.granularity_mismatch {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "declared timeseries.granularity ({}) is contradicted by the model's own \
+                     partition-column grouping, which derives to {}",
+                    granularity_lower(mismatch.declared),
+                    granularity_lower(mismatch.actual),
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceGranularityMismatch),
                 data: None,
             })
             .accumulate(db);

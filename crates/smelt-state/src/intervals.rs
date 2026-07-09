@@ -52,72 +52,7 @@ impl ModelIntervals {
 
     /// Find gaps in coverage within [query_start, query_end).
     pub fn find_gaps(&self, query_start: &str, query_end: &str) -> Vec<Gap> {
-        let qs = match NaiveDate::parse_from_str(query_start, "%Y-%m-%d") {
-            Ok(d) => d,
-            Err(_) => return vec![],
-        };
-        let qe = match NaiveDate::parse_from_str(query_end, "%Y-%m-%d") {
-            Ok(d) => d,
-            Err(_) => return vec![],
-        };
-
-        if qs >= qe {
-            return vec![];
-        }
-
-        let mut gaps = Vec::new();
-        let mut cursor = qs;
-
-        for interval in &self.covered_intervals {
-            let is = match NaiveDate::parse_from_str(&interval.start, "%Y-%m-%d") {
-                Ok(d) => d,
-                Err(_) => {
-                    warn!(
-                        "malformed interval start date '{}', skipping",
-                        interval.start
-                    );
-                    continue;
-                }
-            };
-            let ie = match NaiveDate::parse_from_str(&interval.end, "%Y-%m-%d") {
-                Ok(d) => d,
-                Err(_) => {
-                    warn!("malformed interval end date '{}', skipping", interval.end);
-                    continue;
-                }
-            };
-
-            // Skip intervals entirely before cursor
-            if ie <= cursor {
-                continue;
-            }
-
-            // Gap between cursor and start of this interval
-            if is > cursor {
-                let gap_end = is.min(qe);
-                if cursor < gap_end {
-                    gaps.push(Gap {
-                        start: cursor,
-                        end: gap_end,
-                    });
-                }
-            }
-
-            cursor = cursor.max(ie);
-            if cursor >= qe {
-                break;
-            }
-        }
-
-        // Gap after last interval
-        if cursor < qe {
-            gaps.push(Gap {
-                start: cursor,
-                end: qe,
-            });
-        }
-
-        gaps
+        find_gaps_in(&self.covered_intervals, query_start, query_end)
     }
 
     /// Get the earliest covered date, if any.
@@ -136,29 +71,7 @@ impl ModelIntervals {
 
     /// Sort and merge overlapping/adjacent intervals.
     fn merge_intervals(&mut self) {
-        if self.covered_intervals.len() <= 1 {
-            return;
-        }
-
-        // Lexicographic sort is correct for ISO 8601 date strings (YYYY-MM-DD).
-        self.covered_intervals.sort_by(|a, b| a.start.cmp(&b.start));
-
-        let mut merged = Vec::with_capacity(self.covered_intervals.len());
-        let mut current = self.covered_intervals[0].clone();
-
-        for interval in &self.covered_intervals[1..] {
-            // Overlap or adjacent: current.end >= interval.start
-            if current.end >= interval.start {
-                if interval.end > current.end {
-                    current.end = interval.end.clone();
-                }
-            } else {
-                merged.push(current);
-                current = interval.clone();
-            }
-        }
-        merged.push(current);
-        self.covered_intervals = merged;
+        merge_intervals_in(&mut self.covered_intervals);
     }
 
     /// Invalidate all intervals (e.g., when model hash changes).
@@ -188,6 +101,115 @@ impl IntervalStore {
     pub fn get(&self, model_name: &str) -> Option<&ModelIntervals> {
         self.models.get(model_name)
     }
+}
+
+/// Sort and merge overlapping/adjacent intervals in place.
+///
+/// Free function so [`crate::landed_deltas`] can reuse the exact same
+/// merge semantics `ModelIntervals` uses, without needing a
+/// `ModelIntervals`-shaped wrapper (source landing has no `model_hash`
+/// invalidation concept).
+pub fn merge_intervals_in(intervals: &mut Vec<Interval>) {
+    if intervals.len() <= 1 {
+        return;
+    }
+
+    // Lexicographic sort is correct for ISO 8601 date strings (YYYY-MM-DD).
+    intervals.sort_by(|a, b| a.start.cmp(&b.start));
+
+    let mut merged = Vec::with_capacity(intervals.len());
+    let mut current = intervals[0].clone();
+
+    for interval in &intervals[1..] {
+        // Overlap or adjacent: current.end >= interval.start
+        if current.end >= interval.start {
+            if interval.end > current.end {
+                current.end = interval.end.clone();
+            }
+        } else {
+            merged.push(current);
+            current = interval.clone();
+        }
+    }
+    merged.push(current);
+    *intervals = merged;
+}
+
+/// Find gaps in `intervals`' coverage within `[query_start, query_end)`.
+///
+/// Free function underlying [`ModelIntervals::find_gaps`], reused by
+/// [`crate::landed_deltas`] to compute the append-only **interval diff**: the
+/// sub-intervals of a newly-landed range not already reflected in prior
+/// coverage (`docs/specs/sources.md` §"World-facts admission consumes":
+/// "for an append-only clocked source it is the interval diff of processed
+/// partitions").
+pub fn find_gaps_in(intervals: &[Interval], query_start: &str, query_end: &str) -> Vec<Gap> {
+    let qs = match NaiveDate::parse_from_str(query_start, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+    let qe = match NaiveDate::parse_from_str(query_end, "%Y-%m-%d") {
+        Ok(d) => d,
+        Err(_) => return vec![],
+    };
+
+    if qs >= qe {
+        return vec![];
+    }
+
+    let mut gaps = Vec::new();
+    let mut cursor = qs;
+
+    for interval in intervals {
+        let is = match NaiveDate::parse_from_str(&interval.start, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => {
+                warn!(
+                    "malformed interval start date '{}', skipping",
+                    interval.start
+                );
+                continue;
+            }
+        };
+        let ie = match NaiveDate::parse_from_str(&interval.end, "%Y-%m-%d") {
+            Ok(d) => d,
+            Err(_) => {
+                warn!("malformed interval end date '{}', skipping", interval.end);
+                continue;
+            }
+        };
+
+        // Skip intervals entirely before cursor
+        if ie <= cursor {
+            continue;
+        }
+
+        // Gap between cursor and start of this interval
+        if is > cursor {
+            let gap_end = is.min(qe);
+            if cursor < gap_end {
+                gaps.push(Gap {
+                    start: cursor,
+                    end: gap_end,
+                });
+            }
+        }
+
+        cursor = cursor.max(ie);
+        if cursor >= qe {
+            break;
+        }
+    }
+
+    // Gap after last interval
+    if cursor < qe {
+        gaps.push(Gap {
+            start: cursor,
+            end: qe,
+        });
+    }
+
+    gaps
 }
 
 /// Compute a SHA-256 hash of model SQL content.

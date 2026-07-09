@@ -834,6 +834,15 @@ pub enum DiagnosticCode {
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
+    /// Emitted (Error) when a model's declared `timeseries.granularity`
+    /// disagrees with the truncation/grid unit its own `partition_column`
+    /// SELECT-list projection actually derives to (e.g. declaring `day`
+    /// while the SQL groups on `date_trunc('hour', …)`) —
+    /// (`maintenance_plan.md` §Design "Grain is declared": the graph
+    /// layer's edge grain is the declaration, never derived, but the
+    /// classifier checks the declaration against the SQL's own grouping).
+    /// Anchored at the model SQL body start.
+    MaintenanceGranularityMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions

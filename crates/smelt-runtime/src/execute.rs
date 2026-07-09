@@ -27,6 +27,7 @@ use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
+use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
 use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
@@ -1388,6 +1389,47 @@ pub async fn execute_project(
                     let intervals = interval_store.get_or_create(&plan.name, &model_hash);
                     intervals.record_interval(&start_str, &end_str);
                     let _ = file_store.save_intervals(&interval_store);
+                }
+
+                // Per-source landed-delta recording (P10 v1: `docs/specs/sources.md`
+                // §"World-facts admission consumes"): for every source this
+                // model consumed (`maint_source_facts`, already resolved
+                // above against `source_infos` with the same bare-name
+                // convention `smelt-db::maintenance_plan` uses), record that
+                // `[start_str, end_str)` — this run's own window, the v1
+                // proxy for "what landed" — is now reflected on that
+                // source's own partition axis. An append-only clocked
+                // source (`partition_col: Some(_)`, `mutation: AppendOnly`)
+                // is interval-diffed against prior coverage; a mutable
+                // snapshot or unclocked source (`partition_col: None`) has
+                // no interval representation and always resolves to
+                // `LandedDelta::WholeTable` — never a silent no-op
+                // (`maintenance_plan.md` §"Forward propagation").
+                if !start_str.is_empty() && !end_str.is_empty() {
+                    if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
+                        for sf in &maint_source_facts {
+                            let posture = if sf.partition_col.is_none() {
+                                SourceMutationPosture::Unclocked
+                            } else {
+                                match sf.mutation {
+                                    smelt_logical::maintenance::MutationProfile::AppendOnly => {
+                                        SourceMutationPosture::AppendOnly
+                                    }
+                                    smelt_logical::maintenance::MutationProfile::MutableSnapshot => {
+                                        SourceMutationPosture::MutableSnapshot
+                                    }
+                                }
+                            };
+                            record_landing(
+                                &mut landed_deltas,
+                                &sf.name,
+                                posture,
+                                &start_str,
+                                &end_str,
+                            );
+                        }
+                        let _ = file_store.save_landed_deltas(&landed_deltas);
+                    }
                 }
 
                 // Reconciliation ledger: this batch loop performed a region

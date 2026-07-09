@@ -28,6 +28,7 @@
 pub mod choice;
 pub mod derive;
 pub mod emit;
+pub mod granularity;
 pub mod grouping;
 pub mod propagate;
 pub mod skeleton;

@@ -78,7 +78,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP11  | done     | `7f13b3b0` | 2026-07-10 |
 | MP12  | done     | `6f97578f` | 2026-07-10 |
 | MP13  | done (bakeoff CLI deferred — see docs/ROADMAP.md §10) | `d8948bf5` | 2026-07-10 |
-| MP14  | pending  |        |      |
+| MP14  | done     | `PENDING_SHA` | 2026-07-10 |
 | MP15  | pending  |        |      |
 | MP16  | pending  |        |      |
 | MP17  | pending  |        |      |

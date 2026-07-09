@@ -395,24 +395,29 @@ disagree; one per node cannot). Deeper rationale:
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Five of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
-  footprint reflection, partition-locality projection, faithful-fold conditions, the
-  grain-alignment check (the tracer takes edge-declared grains instead — a shortcut ratified away
-  by P3), and definition-change column classification. Column-group-scoped dirt, gated by
-  provenance, today coarsens to whole-partition — safe, over-running. Hour granularity is declared
-  surface (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are
-  deferred. **Per-column mutation-sensitivity/column provenance and skeleton-role extraction are
-  built**, as leaf classifiers over a model's own single top-level `SELECT` scope
-  (`crates/smelt-logical/src/maintenance/grouping.rs`, `.../skeleton.rs`): a model composed
-  through a CTE, set operation, derived-table `FROM` item, or an unqualified reference ambiguous
-  among more than one joined source is outside what either classifier resolves, and both fail
-  closed on such a shape — mutation-sensitivity grouping collapses every non-skeleton column into
-  one group sensitive to every declared source rather than guessing, and the caller may still
-  hand-supply `ColumnGroup`/`skeleton_columns` for a shape wider than this. Full verdict
-  definitions: `model_properties.md` §Surface "Derived proofs" (the `not-yet` rows). Build order
-  and code placement: `docs/plans/20260707-maintenance-plan-impl.md` phases MP5 (footprint
-  reflection, partition-locality), MP6 (faithful-fold, grain-alignment), and MP14
-  (definition-change classification). `09-spec-readiness.md` §2.
+- **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
+  footprint reflection, partition-locality projection, faithful-fold conditions, and
+  definition-change column classification. Column-group-scoped dirt, gated by provenance, today
+  coarsens to whole-partition — safe, over-running. Hour granularity is declared surface
+  (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are deferred.
+  **Per-column mutation-sensitivity/column provenance, skeleton-role extraction, and the
+  grain-alignment check are built**, as leaf classifiers over a model's own single top-level
+  `SELECT` scope (`crates/smelt-logical/src/maintenance/grouping.rs`, `.../skeleton.rs`,
+  `.../granularity.rs`): a model composed through a CTE, set operation, derived-table `FROM` item,
+  or an unqualified reference ambiguous among more than one joined source is outside what any of
+  the three classifiers resolves, and all fail closed on such a shape — mutation-sensitivity
+  grouping collapses every non-skeleton column into one group sensitive to every declared source
+  rather than guessing, and the caller may still hand-supply `ColumnGroup`/`skeleton_columns` for a
+  shape wider than this. The grain-alignment check itself only *checks* the declaration against the
+  model's own derived truncation/grouping unit (widen-never-narrow: a declaration coarser than or
+  equal to the derived unit is a safe widen, never flagged; strictly finer is refused,
+  `MaintenanceGranularityMismatch`) — the graph layer's edges still take the declaration directly,
+  never derive it (P3 stands; the check only narrows how much a wrong declaration can go
+  unnoticed). Full verdict definitions: `model_properties.md` §Surface "Derived proofs" (the
+  `not-yet` rows). Build order and code placement: `docs/plans/20260707-maintenance-plan-impl.md`
+  phases MP5 (footprint reflection, partition-locality), MP6 (faithful-fold), and MP14
+  (grain-alignment check). Definition-change column classification remains unbuilt.
+  `09-spec-readiness.md` §2.
 - **The ledger has two storage substrates, one per grading.** `smelt-state`'s
   `smelt_state::reconciliation` module implements the `(output-region × column-group)` keying,
   the two storage gradings (additive groups keep delta identities; idempotent groups keep a
@@ -437,9 +442,14 @@ disagree; one per node cannot). Deeper rationale:
 - **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed
   dirt-sets and time-unrolled self-edges are designed (`10-dependency-propagation.md` §6, S12)
   and unbuilt.
-- **Delta detection** is committed as an interface (per-source partition-interval deltas recorded
-  in the state store); the v1 mechanism is append-only landing/interval diff only — CDF offsets
-  and snapshot diffing follow per `mutation_profile` (P10).
+- **Delta detection** is built for v1: per-source partition-interval deltas are recorded in the
+  state store (`smelt_state::landed_deltas`), keyed by source address — an append-only clocked
+  source's landing is interval-diffed against prior coverage; a `mutable_snapshot` or unclocked
+  source always resolves to the whole-table delta. `change_feed` offset-based delta detection and
+  snapshot diffing are not yet built — every source still resolves through the
+  append-only-or-whole-table path regardless of a declared `change_feed` profile (P10). Nothing yet
+  consumes the recorded deltas — the graph layer's forward propagation (`smelt run
+  --since-upstream`) is the first consumer, unbuilt.
 - **Straddle attribution without locality** (a per-key footprint chaining across history) is
   scoped out of the ledger's v1: locality-or-explicit-footprint only (01 §8's own caveat).
 - **`models.md`'s refresh-axis rewrite is pending** (the `batched`/`keyed`/`versioned` strategy
