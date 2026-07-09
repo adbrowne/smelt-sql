@@ -26,9 +26,9 @@
 
 use std::path::Path;
 
-use crate::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
-use crate::model_shapes::{left_join_late_right_side, MultiSourceModelShape};
-use crate::oracle::multiset_equal;
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
+use smelt_maintenance_testkit::model_shapes::{left_join_late_right_side, MultiSourceModelShape};
+use smelt_maintenance_testkit::oracle::multiset_equal;
 
 fn stage_project(shape: &MultiSourceModelShape, project_dir: &Path, db_path: &Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();

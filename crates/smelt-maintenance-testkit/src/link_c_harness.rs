@@ -1,5 +1,3 @@
-//! `EXPERIMENTAL(property-discovery): disposable`
-//!
 //! Link-C in-process harness (`docs/research/20260705-property-discovery-loop.md`
 //! §2.3, §3a; `docs/plans/20260705-property-discovery-loop.md` phase B / cell
 //! `P0-1`). Drives smelt's REAL run pipeline — `smelt_runtime::execute_project`,
@@ -12,16 +10,10 @@
 //! derivation (`source_bounds::derive_model_bounds`) by injecting the filter
 //! by hand — exactly the bug class this loop hunts (design N1).
 //!
-//! Lives in `smelt-cli`'s test target because Link C needs
-//! `smelt-runtime::execute_project` + `smelt_db::Database` (to stage the Salsa
-//! workspace `execute_project` expects) + the DuckDB backend, and `smelt-cli`
-//! already depends on all three, so no new dependency-graph plumbing was
-//! needed. This is a research-expedience placement, not a forced Cargo
-//! cycle: `smelt-runtime` already normal-depends on `smelt-db`, so this
-//! harness would compile cycle-free under `smelt-runtime/tests/` too. The
-//! real future cycle risk is a planned `smelt-maintenance-testkit` graduation
-//! crate becoming a shared dev-dependency of *both* `smelt-db`'s and
-//! `smelt-runtime`'s test trees
+//! Graduated out of `smelt-cli`'s test target into this standalone dev-only
+//! crate so it can be a shared dev-dependency of any consumer's test tree
+//! (`smelt-cli`, and `smelt-runtime` where no dependency cycle results)
+//! without duplicating the harness
 //! (`docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md`
 //! §3, M3).
 //!

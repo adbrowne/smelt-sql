@@ -1,5 +1,3 @@
-//! `EXPERIMENTAL(property-discovery): disposable`
-//!
 //! Cell `P0-2` (`docs/research/20260705-property-discovery-loop.md` §3b;
 //! `docs/plans/20260705-property-discovery-loop.md` phase C). The run-schedule
 //! generator: a proptest **value** — not just a strategy over abstract shapes,

@@ -32,9 +32,9 @@
 
 use std::path::Path;
 
-use crate::link_c_harness::{base_request, LinkCProject};
-use crate::model_shapes::{running_balance_self_ref, ModelShape};
-use crate::oracle::multiset_equal;
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
+use smelt_maintenance_testkit::model_shapes::{running_balance_self_ref, ModelShape};
+use smelt_maintenance_testkit::oracle::multiset_equal;
 
 fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();

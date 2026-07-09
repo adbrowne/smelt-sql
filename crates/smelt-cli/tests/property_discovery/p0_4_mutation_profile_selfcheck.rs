@@ -16,7 +16,7 @@
 use chrono::NaiveDate;
 use proptest::prelude::*;
 
-use crate::run_schedule::{
+use smelt_maintenance_testkit::run_schedule::{
     arb_mutable_schedule, arb_schedule, check_profile, MutationProfile, RunSchedule, ScheduleStep,
 };
 

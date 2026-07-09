@@ -413,9 +413,16 @@ disagree; one per node cannot). Deeper rationale:
   (pure derivation-side assertions); `crates/smelt-runtime/tests/{tracer_maintenance,tracer_evolution,tracer_propagation}.rs`
   (the DuckDB equivalence oracles — moved from `smelt-cli` 2026-07-08, since they only depend on
   `smelt_logical::maintenance::*` + `duckdb`, both already available to `smelt-runtime`);
-  `crates/smelt-cli/tests/property_discovery/g_12_keyed_merge_reprocessed_window.rs` (the G-12 pin,
-  which stays in `smelt-cli` because it drives the real `execute_project` pipeline via
-  `link_c_harness.rs`).
+  `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
+  harness — the real-run-pipeline driver, the model-shape catalogue, the multiset-equality oracle,
+  and the mutation-aware run-schedule generator/driver — wired as a dev-dependency of `smelt-cli`);
+  `cargo test -p smelt-cli --test property_discovery` is the standing equivalence gate: it runs the
+  Link-C schedule suite over the full model-shape catalogue against a real DuckDB backend on every
+  `cargo test`, asserting emitted maintenance output equals a full refresh over adversarial
+  append/lateness/mutation schedules. The per-cell probe modules under
+  `crates/smelt-cli/tests/property_discovery/` that consume the testkit crate remain disposable
+  research probes (see `.claude/scripts/property-experimental-gate.sh`); only the shared harness
+  graduated.
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
   describe the trichotomy + grain surface; the plan itself (the `maintenance:` block, `smelt explain`,

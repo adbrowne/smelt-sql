@@ -4,13 +4,14 @@
 //! `EXPERIMENTAL(property-discovery): disposable`. See
 //! `docs/research/20260705-property-discovery-loop.md` (design) and
 //! `docs/plans/20260705-property-discovery-loop.md` (plan). This target hosts
-//! the in-process real-planner harness (`link_c_harness`), the single model-SQL
-//! catalogue (`model_shapes`), and one module per resolved catalog cell.
-
-mod link_c_harness;
-mod model_shapes;
-mod oracle;
-mod run_schedule;
+//! one module per resolved catalog cell, each a disposable probe built on
+//! top of the graduated `smelt-maintenance-testkit` dev-dependency crate:
+//! the in-process real-planner harness
+//! (`smelt_maintenance_testkit::link_c_harness`), the single model-SQL
+//! catalogue (`smelt_maintenance_testkit::model_shapes`), the Link-C oracle
+//! (`smelt_maintenance_testkit::oracle`), and the run-schedule
+//! generator/driver (`smelt_maintenance_testkit::run_schedule`) — see
+//! `docs/specs/maintenance_plan.md` §References → Tests.
 
 mod g_01_additive_agg_append_only;
 mod g_02_additive_agg_redelivery;

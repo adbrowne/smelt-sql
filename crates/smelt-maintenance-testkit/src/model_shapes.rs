@@ -1,5 +1,3 @@
-//! `EXPERIMENTAL(property-discovery): disposable`
-//!
 //! **The single readable catalogue of every model shape the property-discovery
 //! loop tests.** One function per catalog construct, returning the model's
 //! frontmatter + SQL as a string. This is the answer to "where is the generator

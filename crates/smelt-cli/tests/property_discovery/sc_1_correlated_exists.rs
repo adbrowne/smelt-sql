@@ -19,8 +19,10 @@
 
 use std::path::Path;
 
-use crate::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
-use crate::model_shapes::{correlated_exists_attribution, MultiSourceModelShape};
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
+use smelt_maintenance_testkit::model_shapes::{
+    correlated_exists_attribution, MultiSourceModelShape,
+};
 
 fn stage_project(shape: &MultiSourceModelShape, project_dir: &Path, db_path: &Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();

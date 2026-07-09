@@ -14,9 +14,11 @@
 
 use chrono::NaiveDate;
 
-use crate::link_c_harness::LinkCProject;
-use crate::model_shapes::{batched_passthrough, ModelShape};
-use crate::run_schedule::{snapshot, EventRow, RunScheduleDriver, ScheduleStep};
+use smelt_maintenance_testkit::link_c_harness::LinkCProject;
+use smelt_maintenance_testkit::model_shapes::{batched_passthrough, ModelShape};
+use smelt_maintenance_testkit::run_schedule::{
+    snapshot, EventRow, RunScheduleDriver, ScheduleStep,
+};
 
 fn stage_project(shape: &ModelShape, project_dir: &std::path::Path, db_path: &std::path::Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
@@ -90,7 +92,7 @@ async fn step_k_snapshot_differs_from_pre_populated_after_late_append() {
         id: 99,
         val: 99.0,
     };
-    let schedule = crate::run_schedule::RunSchedule(vec![
+    let schedule = smelt_maintenance_testkit::run_schedule::RunSchedule(vec![
         ScheduleStep::AdvanceWindowAndRun {
             start: day1,
             end: day2,

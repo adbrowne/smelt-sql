@@ -10,8 +10,8 @@
 
 use std::path::Path;
 
-use crate::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
-use crate::model_shapes::{batched_passthrough, ModelShape};
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
+use smelt_maintenance_testkit::model_shapes::{batched_passthrough, ModelShape};
 
 /// Stage a project directory from a `ModelShape`: the model file, the source
 /// yml, and smelt.yml pointing at the temp DuckDB.

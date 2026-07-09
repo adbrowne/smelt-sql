@@ -1,5 +1,3 @@
-//! `EXPERIMENTAL(property-discovery): disposable`
-//!
 //! Cell `P0-3` (`docs/research/20260705-property-discovery-loop.md` §2.3, §3b;
 //! `docs/plans/20260705-property-discovery-loop.md` phase C, acceptance (ii)).
 //!

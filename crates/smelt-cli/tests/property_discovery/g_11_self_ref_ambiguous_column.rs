@@ -31,8 +31,8 @@
 //! documented direct self-join form executes, and its first window produces
 //! the correct running balance.
 
-use crate::link_c_harness::{base_request, LinkCProject};
-use crate::model_shapes::{running_balance_self_ref_direct_join, ModelShape};
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
+use smelt_maintenance_testkit::model_shapes::{running_balance_self_ref_direct_join, ModelShape};
 
 fn stage_project(shape: &ModelShape, project_dir: &std::path::Path, db_path: &std::path::Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();

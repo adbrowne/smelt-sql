@@ -23,7 +23,7 @@
 //!    truth, and fails loudly the day the refusal (or a real ledger check)
 //!    lands, at which point its second arm flips to asserting the refusal.
 
-use crate::link_c_harness::{base_request, LinkCProject};
+use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
 
 fn stage_keyed_project(project_dir: &std::path::Path, db_path: &std::path::Path) {
     std::fs::create_dir_all(project_dir.join("models")).unwrap();

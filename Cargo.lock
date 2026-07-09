@@ -4145,6 +4145,7 @@ dependencies = [
  "smelt-db",
  "smelt-dialect",
  "smelt-logical",
+ "smelt-maintenance-testkit",
  "smelt-parser",
  "smelt-planner",
  "smelt-runtime",
@@ -4286,6 +4287,23 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "walkdir",
+]
+
+[[package]]
+name = "smelt-maintenance-testkit"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "duckdb",
+ "proptest",
+ "smelt-backend",
+ "smelt-backend-duckdb",
+ "smelt-core",
+ "smelt-db",
+ "smelt-runtime",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]

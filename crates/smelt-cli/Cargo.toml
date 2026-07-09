@@ -71,6 +71,7 @@ line-index.workspace = true
 [dev-dependencies]
 tempfile = "3.8"
 proptest = { workspace = true }
+smelt-maintenance-testkit = { path = "../smelt-maintenance-testkit" }
 
 [features]
 default = ["duckdb"]
