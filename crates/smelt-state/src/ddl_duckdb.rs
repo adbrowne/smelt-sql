@@ -309,6 +309,99 @@ fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String 
     parts.join(".")
 }
 
+// ── Warehouse-resident per-delta reconciliation ledger (MP12) ──────────────
+//
+// `docs/specs/maintenance_plan.md` §"The reconciliation ledger": an
+// **additive**-graded group's storage must record delta identities, not just
+// a frontier watermark, because re-folding one double-counts. The ledger
+// table generated here is that storage for the keyed `merge_into` fold path
+// (`crates/smelt-runtime/src/maintenance_driver.rs`): its `PRIMARY KEY` over
+// `(model_name, grp, input_name, delta_id)` **is** the never-fold-twice key,
+// so the caller's paired `INSERT` (this table) + fold/create action (the
+// model's own write) can run as one backend transaction and let the
+// constraint itself refuse a repeat — no separate, racy existence check is
+// load-bearing for correctness (a `SELECT`-based existence check is still
+// generated below for backends that cannot wrap both statements in one
+// transaction; see `smelt_backend::Backend::fold_ledger_delta`'s default).
+//
+// Idempotent-graded groups never call any of these — a warehouse ledger
+// table only exists for a project once an additive-fold cell has actually
+// folded (`docs/specs/maintenance_plan.md` §Constraints; review checklist
+// "no warehouse tables for idempotent-only plans").
+
+/// Table name for the warehouse-resident per-delta reconciliation ledger.
+pub const LEDGER_TABLE_NAME: &str = "_smelt_ledger";
+
+/// DDL creating the ledger table if it does not already exist. Idempotent —
+/// safe to run before every fold.
+pub fn generate_ledger_table_ddl(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\
+         model_name VARCHAR NOT NULL, \
+         grp VARCHAR NOT NULL, \
+         input_name VARCHAR NOT NULL, \
+         delta_id VARCHAR NOT NULL, \
+         region_start VARCHAR NOT NULL, \
+         region_end VARCHAR NOT NULL, \
+         PRIMARY KEY (model_name, grp, input_name, delta_id))",
+        quote_identifier(schema),
+        LEDGER_TABLE_NAME,
+    )
+}
+
+/// `INSERT` recording one delta identity as folded for `(model, group,
+/// input)`. Violates the table's `PRIMARY KEY` — the never-fold-twice key —
+/// iff `delta_id` is already reflected.
+#[allow(clippy::too_many_arguments)]
+pub fn generate_ledger_insert_sql(
+    schema: &str,
+    model: &str,
+    group: &str,
+    input: &str,
+    delta_id: &str,
+    region_start: &str,
+    region_end: &str,
+) -> String {
+    format!(
+        "INSERT INTO {}.{} (model_name, grp, input_name, delta_id, region_start, region_end) \
+         VALUES ('{}', '{}', '{}', '{}', '{}', '{}')",
+        quote_identifier(schema),
+        LEDGER_TABLE_NAME,
+        escape_sql_literal(model),
+        escape_sql_literal(group),
+        escape_sql_literal(input),
+        escape_sql_literal(delta_id),
+        escape_sql_literal(region_start),
+        escape_sql_literal(region_end),
+    )
+}
+
+/// Existence check for `(model, group, input, delta_id)` — the best-effort
+/// fallback `Backend::fold_ledger_delta` default uses on a backend that
+/// cannot wrap the insert and the fold action in one native transaction.
+pub fn generate_ledger_exists_sql(
+    schema: &str,
+    model: &str,
+    group: &str,
+    input: &str,
+    delta_id: &str,
+) -> String {
+    format!(
+        "SELECT 1 FROM {}.{} WHERE model_name = '{}' AND grp = '{}' AND input_name = '{}' \
+         AND delta_id = '{}' LIMIT 1",
+        quote_identifier(schema),
+        LEDGER_TABLE_NAME,
+        escape_sql_literal(model),
+        escape_sql_literal(group),
+        escape_sql_literal(input),
+        escape_sql_literal(delta_id),
+    )
+}
+
+fn escape_sql_literal(s: &str) -> String {
+    s.replace('\'', "''")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -761,5 +854,57 @@ mod tests {
             "SQL keyword column name should be quoted, got: {}",
             stmts[0]
         );
+    }
+
+    // ── warehouse-resident per-delta ledger DDL/DML (MP12) ─────────────
+
+    #[test]
+    fn ledger_table_ddl_is_idempotent_and_keys_never_fold_twice() {
+        let ddl = generate_ledger_table_ddl("main");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_ledger"));
+        assert!(ddl.contains("PRIMARY KEY (model_name, grp, input_name, delta_id)"));
+    }
+
+    #[test]
+    fn ledger_insert_sql_carries_every_field() {
+        let sql = generate_ledger_insert_sql(
+            "main",
+            "device_stats",
+            "{*}",
+            "smelt.events",
+            "2026-01-01",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        assert!(sql.contains("INSERT INTO main._smelt_ledger"));
+        assert!(sql.contains("'device_stats'"));
+        assert!(sql.contains("'{*}'"));
+        assert!(sql.contains("'smelt.events'"));
+        assert!(sql.contains("'2026-01-01'"));
+        assert!(sql.contains("'2026-01-02'"));
+    }
+
+    #[test]
+    fn ledger_sql_escapes_single_quotes_in_values() {
+        let sql = generate_ledger_insert_sql(
+            "main",
+            "model's_name",
+            "{*}",
+            "smelt.events",
+            "d1",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        assert!(sql.contains("'model''s_name'"));
+    }
+
+    #[test]
+    fn ledger_exists_sql_filters_on_every_key_field() {
+        let sql =
+            generate_ledger_exists_sql("main", "device_stats", "{*}", "smelt.events", "2026-01-01");
+        assert!(sql.contains("model_name = 'device_stats'"));
+        assert!(sql.contains("grp = '{*}'"));
+        assert!(sql.contains("input_name = 'smelt.events'"));
+        assert!(sql.contains("delta_id = '2026-01-01'"));
     }
 }

@@ -4064,6 +4064,7 @@ dependencies = [
  "async-trait",
  "duckdb",
  "smelt-backend",
+ "smelt-state",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

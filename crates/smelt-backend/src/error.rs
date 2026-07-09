@@ -38,6 +38,15 @@ pub enum BackendError {
     #[error("Configuration error: {message}")]
     ConfigurationError { message: String },
 
+    /// A fold was refused because the delta is already reflected in the
+    /// warehouse-resident reconciliation ledger (never-fold-twice,
+    /// `docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    /// already reflected in the state"). Distinct from `ExecutionFailed` so
+    /// callers can surface a `KeyedReprocessedWindow`-shaped refusal instead
+    /// of a generic execution error.
+    #[error("delta already reflected in the reconciliation ledger: {message}")]
+    AlreadyReflected { message: String },
+
     /// Generic backend error.
     #[error("{0}")]
     Other(#[from] anyhow::Error),
@@ -72,6 +81,13 @@ impl BackendError {
         Self::UnsupportedFeature {
             dialect: dialect.into(),
             feature: feature.into(),
+        }
+    }
+
+    /// Create an already-reflected (never-fold-twice refusal) error.
+    pub fn already_reflected(message: impl Into<String>) -> Self {
+        Self::AlreadyReflected {
+            message: message.into(),
         }
     }
 

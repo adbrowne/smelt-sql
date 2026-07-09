@@ -12,16 +12,20 @@
 //!
 //! 1. **Frontier advance (HOLDS hypothesis):** disjoint windows folded in
 //!    temporal order equal a full refresh — the keyed fold's happy path.
-//! 2. **Reprocessed window (the ledger obligation):** re-running an
-//!    already-merged window must never fold the same delta twice
+//! 2. **Reprocessed window (the ledger obligation, ENFORCED):** re-running
+//!    an already-merged window must never fold the same delta twice
 //!    (`01-framework.md` §4: "never fold a delta already reflected in the
-//!    state"; `keyed_models.md` specs the `KeyedReprocessedWindow` refusal).
-//!    **Hypothesis: VIOLATED today.** `crates/smelt-runtime/src/cumulative.rs`
-//!    step 2 is an admitted placeholder — "For now we do *not* check
-//!    existence here" — so the run path re-folds and double-counts. This
-//!    cell pins the actual behaviour so the spec work starts from empirical
-//!    truth, and fails loudly the day the refusal (or a real ledger check)
-//!    lands, at which point its second arm flips to asserting the refusal.
+//!    state"; `keyed_models.md` §"Reprocessing" specs the
+//!    `KeyedReprocessedWindow` refusal). MP12
+//!    (`docs/plans/20260707-maintenance-plan-impl.md`) wired the
+//!    warehouse-resident reconciliation ledger
+//!    (`crates/smelt-state/src/ddl_duckdb.rs`'s `generate_ledger_*`
+//!    builders, folded transactionally with the merge via
+//!    `Backend::fold_ledger_delta` in
+//!    `crates/smelt-runtime/src/maintenance_driver.rs`) into the keyed
+//!    `merge_into` path (`crates/smelt-runtime/src/cumulative.rs`), closing
+//!    the violation this cell used to pin
+//!    (`docs/research/property-discovery/ledger.md` G-12 row).
 
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
 
@@ -84,14 +88,13 @@ fn device_count(db_path: &std::path::Path, device_id: i32) -> i64 {
 
 /// Arm 1 — frontier advance: disjoint windows folded in order equal the
 /// full refresh (device 1: Jan-1 contributes 2, Jan-2 contributes 1 → 3).
-/// Arm 2 — reprocessed window: re-running Jan-1 double-folds today
-/// (device 1: 3 → 5), because the run path has no ledger / no
-/// `KeyedReprocessedWindow` refusal. The double-count assertion is the
-/// probe: it pins the live violation, and its failure is the signal that a
-/// real never-fold-twice check landed (flip this arm to assert refusal or
-/// unchanged state then).
+/// Arm 2 — reprocessed window: re-running Jan-1 is now REFUSED — the
+/// warehouse-resident reconciliation ledger (MP12) recognises Jan-1's
+/// delta identity as already reflected and refuses the run before it can
+/// double-fold, leaving device 1's count unchanged at 3
+/// (`docs/research/property-discovery/ledger.md` G-12 row).
 #[tokio::test]
-async fn keyed_merge_frontier_holds_but_reprocessed_window_double_folds() {
+async fn keyed_merge_frontier_holds_and_reprocessed_window_is_refused() {
     let tmp = tempfile::TempDir::new().expect("tempdir");
     let project_dir = tmp.path().to_path_buf();
     let db_path = project_dir.join("dev.duckdb");
@@ -117,31 +120,28 @@ async fn keyed_merge_frontier_holds_but_reprocessed_window_double_folds() {
     );
 
     // Arm 2: re-run the already-merged Jan-1 window. The spec'd behaviour
-    // (`keyed_models.md` §Reprocessing) is a refusal; the live path has no
-    // ledger and re-folds.
+    // (`keyed_models.md` §"Reprocessing") is a refusal, and the ledger now
+    // enforces it: the never-fold-twice check refuses before any double
+    // count can land.
     let mut r3 = base_request("dev");
     r3.start = Some("2026-01-01".to_string());
     r3.end = Some("2026-01-02".to_string());
     let rerun = project.run_quiet("run-3", r3).await;
 
-    match rerun {
-        Err(err) => {
-            // The refusal landed — record it and flip this arm.
-            panic!(
-                "reprocessed window was REFUSED — the never-fold-twice check has landed; \
-                 update cell G-12's second arm to pin the refusal and close the ledger \
-                 entry. Error: {err:#}"
-            );
-        }
-        Ok(_) => {
-            let count = device_count(&db_path, 1);
-            assert_eq!(
-                count, 5,
-                "CONFIRMED live ledger violation (pinned): re-folding the already-merged \
-                 Jan-1 window double-counts device 1 (3 + 2 = 5). If this assertion fails \
-                 with count == 3, an idempotence/ledger check landed silently — update \
-                 this cell and the ledger."
-            );
-        }
-    }
+    let err = rerun.expect_err(
+        "reprocessed window must be REFUSED — never-fold-twice (docs/specs/keyed_models.md \
+         §Reprocessing, ledger entry G-12); if this now succeeds, the ledger's fold-refusal \
+         regressed",
+    );
+    let message = format!("{err:#}");
+    assert!(
+        message.contains("already reflected"),
+        "refusal must name the never-fold-twice reason, got: {message}"
+    );
+
+    assert_eq!(
+        device_count(&db_path, 1),
+        3,
+        "refused run must leave the target state unchanged — no double count"
+    );
 }

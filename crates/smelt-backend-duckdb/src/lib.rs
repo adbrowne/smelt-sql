@@ -737,6 +737,72 @@ impl Backend for DuckDbBackend {
         .await
         .map_err(|e| BackendError::Other(e.into()))?
     }
+
+    /// Real transactional override (`docs/specs/maintenance_plan.md`
+    /// §Constraints "Never fold a delta already reflected in the state"):
+    /// `insert_sql` (the ledger's `PRIMARY KEY`-guarded record of this
+    /// delta identity) and `action_sql` (the fold itself) run inside one
+    /// `duckdb::Transaction` — either both commit or neither does, so a
+    /// crash between the two can never leave the ledger claiming a fold
+    /// that never happened, or vice versa. `ensure_sql` (idempotent
+    /// `CREATE TABLE IF NOT EXISTS`) runs first, outside that transaction —
+    /// safe standalone, and keeps DuckDB's DDL-vs-constraint-check
+    /// interaction out of the transaction that actually needs atomicity.
+    /// A repeat delta violates the ledger table's own `PRIMARY KEY`;
+    /// `Transaction`'s default `DropBehavior::Rollback` undoes the failed
+    /// insert attempt for free, so `action_sql` never runs a second time —
+    /// no check-then-act race across the write.
+    async fn fold_ledger_delta(
+        &self,
+        ensure_sql: &str,
+        insert_sql: &str,
+        _exists_sql: &str,
+        action_sql: &str,
+    ) -> Result<(), BackendError> {
+        let ensure_sql = ensure_sql.to_string();
+        let insert_sql = insert_sql.to_string();
+        let action_sql = action_sql.to_string();
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
+
+            conn.execute(&ensure_sql, [])
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+
+            let tx = conn
+                .transaction()
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+
+            if let Err(e) = tx.execute(&insert_sql, []) {
+                let message = e.to_string();
+                if is_constraint_violation(&message) {
+                    // `tx` rolls back on drop (default `DropBehavior::Rollback`):
+                    // the failed insert never lands, and `action_sql` below
+                    // never runs.
+                    return Err(BackendError::already_reflected(message));
+                }
+                return Err(BackendError::execution_failed("ledger", message));
+            }
+
+            tx.execute(&action_sql, [])
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+
+            tx.commit()
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
+}
+
+/// Whether a DuckDB error message reports a constraint violation (`PRIMARY
+/// KEY`/`UNIQUE`) rather than some other execution failure. DuckDB's error
+/// text for this case reliably contains "constraint" (e.g. "Constraint
+/// Error: Duplicate key ... violates primary key constraint").
+fn is_constraint_violation(message: &str) -> bool {
+    message.to_lowercase().contains("constraint")
 }
 
 #[cfg(test)]
@@ -1152,6 +1218,139 @@ mod tests {
             jan1_count, 2,
             "the two 2024-01-01 rows deleted mid-transaction must be restored"
         );
+    }
+
+    // ── fold_ledger_delta: warehouse-resident per-delta ledger (MP12) ────
+    // (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    // already reflected in the state" — the DuckDB override must run the
+    // ledger insert and the paired fold action as one transaction.)
+
+    fn ledger_sql(
+        model: &str,
+        delta_id: &str,
+        action_sql: &str,
+    ) -> (String, String, String, String) {
+        let ensure_sql = smelt_state::ddl_duckdb::generate_ledger_table_ddl("main");
+        let insert_sql = smelt_state::ddl_duckdb::generate_ledger_insert_sql(
+            "main",
+            model,
+            "{*}",
+            "smelt.events",
+            delta_id,
+            "2026-01-01",
+            "2026-01-02",
+        );
+        let exists_sql = smelt_state::ddl_duckdb::generate_ledger_exists_sql(
+            "main",
+            model,
+            "{*}",
+            "smelt.events",
+            delta_id,
+        );
+        (ensure_sql, insert_sql, exists_sql, action_sql.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_fold_ledger_delta_commits_ledger_and_action_together() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (n INTEGER)")
+            .await
+            .unwrap();
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-01",
+            "INSERT INTO main.device_stats VALUES (1)",
+        );
+
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("first fold commits");
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(count, 1, "the paired action ran and committed");
+    }
+
+    #[tokio::test]
+    async fn test_fold_ledger_delta_refuses_repeat_and_never_reruns_action() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (n INTEGER)")
+            .await
+            .unwrap();
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-01",
+            "INSERT INTO main.device_stats VALUES (1)",
+        );
+
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("first fold commits");
+
+        // A repeat of the exact same delta identity — the ledger's PRIMARY
+        // KEY refuses inside the transaction, and the paired action must
+        // not run a second time (no check-then-act race across the write).
+        let result = backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await;
+
+        assert!(
+            matches!(result, Err(BackendError::AlreadyReflected { .. })),
+            "repeat delta must surface AlreadyReflected, got: {:?}",
+            result
+        );
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(
+            count, 1,
+            "the paired action must not run a second time once the ledger insert was refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fold_ledger_delta_distinct_deltas_both_apply() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (n INTEGER)")
+            .await
+            .unwrap();
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-01",
+            "INSERT INTO main.device_stats VALUES (1)",
+        );
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("first delta folds");
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-02",
+            "INSERT INTO main.device_stats VALUES (2)",
+        );
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("a distinct delta identity is not refused");
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(count, 2, "both distinct deltas' actions ran");
     }
 
     /// `resolve_strategy` is no longer a dispatching function — it always

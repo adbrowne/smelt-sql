@@ -1069,34 +1069,41 @@ Block schema:
 
 ---
 
-## G-12 — `cumulative_aggregate` × keyed additive fold × `merge_into` (the live targeted-write path) — 2026-07-07
+## G-12 — `cumulative_aggregate` × keyed additive fold × `merge_into` (the live targeted-write path) — 2026-07-07, closed 2026-07-10 (MP12)
 
 - construct: keyed additive fold (`refresh: keyed`, `COUNT(*) GROUP BY device_id`) over an
   append-only driving source, dispatched by `execute_project` through
   `crates/smelt-runtime/src/cumulative.rs::execute_cumulative_aggregate` →
-  `maintenance_driver::run_windowed_keyed_maintenance` → `Backend::merge_into` — the only live
-  path where a generalized-ledger obligation can actually be violated
+  `maintenance_driver::run_windowed_keyed_maintenance` → `Backend::fold_ledger_delta` — the only
+  live path where a generalized-ledger obligation can actually be violated
   (`09-spec-readiness.md` §3 item 1; previously entirely unprobed).
 - verdict, arm 1 (frontier advance): **HOLDS** — disjoint windows folded in temporal order
   through the real run path equal a full refresh (Jan-1 fold 2 + Jan-2 fold 1 = 3).
-- verdict, arm 2 (reprocessed window): **CONFIRMED VIOLATION (live)** — re-running the
-  already-merged Jan-1 window **double-folds** (3 → 5). The never-fold-a-delta-twice
-  obligation (`01-framework.md` §4; `keyed_models.md` §Reprocessing specs a
-  `KeyedReprocessedWindow` refusal) is not enforced on the run path:
-  `cumulative.rs` step 2 is an admitted placeholder — "For now we do *not* check existence
-  here" — there is no watermark/ledger consultation before the merge loop.
-- production files/functions changed: none — the missing check is exactly the generalized
-  reconciliation ledger's fold operation (`01-framework.md` §8, "refuse if the delta is
-  already in the entry's processed set"), which is framework machinery (M4/M6 of
-  `08-code-placement.md`), not a mechanical fix. The cell pins today's behaviour so the spec
-  work starts from empirical truth; the pinning assertion fails loudly the day a refusal or
-  idempotence check lands (flip the arm then).
+- verdict, arm 2 (reprocessed window): **originally CONFIRMED VIOLATION (live)** — re-running the
+  already-merged Jan-1 window used to double-fold (3 → 5); the never-fold-a-delta-twice
+  obligation (`01-framework.md` §4; `keyed_models.md` §Reprocessing's `KeyedReprocessedWindow`
+  refusal) was unenforced on the run path. **Now ENFORCED**: MP12
+  (`docs/plans/20260707-maintenance-plan-impl.md`) wired a warehouse-resident per-delta ledger
+  table (`smelt_state::ddl_duckdb::generate_ledger_table_ddl`/`generate_ledger_insert_sql`,
+  transactional with the fold via `Backend::fold_ledger_delta`) into
+  `run_windowed_keyed_maintenance`'s create-or-merge step; a repeat of Jan-1's delta identity
+  violates the ledger table's own `PRIMARY KEY` and refuses the run before any double count can
+  land — device 1's count stays at 3.
+- production files/functions changed: `crates/smelt-state/src/ddl_duckdb.rs`
+  (`generate_ledger_table_ddl`/`generate_ledger_insert_sql`/`generate_ledger_exists_sql`),
+  `crates/smelt-backend/src/{lib.rs,error.rs}` (`Backend::fold_ledger_delta` default,
+  `BackendError::AlreadyReflected`), `crates/smelt-backend-duckdb/src/lib.rs` (transactional
+  override), `crates/smelt-runtime/src/{maintenance_driver.rs,cumulative.rs}`
+  (`WindowedKeyedRule::ledger_grade`/`ledger_input`, the ledger-guarded step loop).
 - evidence: `smelt-cli::tests::property_discovery::g_12_keyed_merge_reprocessed_window::
-  keyed_merge_frontier_holds_but_reprocessed_window_double_folds` (both arms asserted through
-  `execute_project`).
+  keyed_merge_frontier_holds_and_reprocessed_window_is_refused` (both arms asserted through
+  `execute_project`; arm 2 now asserts the refusal and the unchanged count).
+  `crates/smelt-state/tests/reconciliation.rs::per_delta_grade_lives_in_warehouse` and
+  `crates/smelt-backend-duckdb/src/lib.rs`'s `test_fold_ledger_delta_*` tests cover the
+  transactional guarantee directly against a real DuckDB connection.
 - Coverage caveat (design §2.1 N4): deterministic 3-run schedule (fold, fold, re-fold) — the
-  violation is mechanism-level (no ledger consultation exists), not data-dependent; adversarial
-  value schedules add nothing until a ledger exists to stress.
+  fix is mechanism-level (a ledger table + a transactional trait method), not data-dependent;
+  adversarial value schedules add nothing new here.
 
 ---
 

@@ -14,14 +14,17 @@
 
 use crate::transformer::TimeRange;
 use anyhow::{bail, Context, Result};
-use smelt_backend::{Backend, ExecutionResult, IncrementalStrategy};
+use smelt_backend::{Backend, BackendError, ExecutionResult, IncrementalStrategy};
 use smelt_core::config::{CellTechnique, Granularity};
+use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::{
     MaintenancePlan, PartitionLocal, PlanCell, ScanClamp, SourceFacts, Technique, Trigger,
 };
+use smelt_state::ddl_duckdb;
+use smelt_state::reconciliation::Grade;
 use std::collections::HashSet;
 use std::time::Instant;
 use tracing::debug;
@@ -78,6 +81,15 @@ pub fn driving_steps(
     Ok(steps)
 }
 
+/// The reconciliation ledger's whole-row group key for the keyed
+/// windowed-maintenance driver (`docs/specs/maintenance_plan.md` §"The
+/// reconciliation ledger"). Per-column-group ledger grading for this driver
+/// is future narrowing, not correctness-required for MP12: grading the
+/// whole cell `Additive` whenever *any* aggregator column is additive is
+/// conservative (a merge is refused on repeat even for an idempotent column
+/// mixed into the same cell) but never unsafe.
+const LEDGER_WHOLE_ROW_GROUP: &str = "{*}";
+
 /// A rule pluggable into the windowed-keyed-maintenance driver. `keyed`'s
 /// direct-monoid families are the first named implementor (`crate::cumulative`);
 /// the other keyed column families compose the same driver later.
@@ -91,6 +103,25 @@ pub trait WindowedKeyedRule: Send + Sync {
     /// Build the `MERGE INTO` statement combining `schema.table`'s existing
     /// state with one step's compiled delta SQL.
     fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String;
+
+    /// The reconciliation ledger's storage grading for this rule's cell
+    /// (`docs/specs/maintenance_plan.md` §"The reconciliation ledger" —
+    /// "Storage is graded by algebra"). `Grade::Additive` requires
+    /// warehouse-resident delta-identity tracking and never-fold-twice
+    /// refusal (MP12); `Grade::Idempotent` needs neither — re-folding a
+    /// window is harmless, so no warehouse ledger table is ever created for
+    /// an idempotent-only cell. Defaults to `Grade::Idempotent` (no ledger
+    /// enforcement) for a rule that doesn't opt in.
+    fn ledger_grade(&self) -> Grade {
+        Grade::Idempotent
+    }
+
+    /// The ledger's `input` key for this rule's deltas — the driving
+    /// source's name. Only consulted when [`Self::ledger_grade`] is
+    /// `Grade::Additive`.
+    fn ledger_input(&self) -> &str {
+        ""
+    }
 }
 
 /// Run the windowed-keyed-maintenance loop: `classify` already happened (its
@@ -100,6 +131,19 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// otherwise.
 ///
 /// Fails closed before any backend call if `rule.refuse()` fires.
+///
+/// **Never-fold-twice (MP12).** When `rule.ledger_grade()` is
+/// `Grade::Additive`, every step's create-or-merge action is guarded by the
+/// warehouse-resident reconciliation ledger
+/// (`docs/specs/maintenance_plan.md` §"The reconciliation ledger" and
+/// §Constraints "Never fold a delta already reflected in the state"): the
+/// step's own partition value is its delta identity, folded transactionally
+/// with the action via [`Backend::fold_ledger_delta`]. A step whose delta is
+/// already reflected — a reprocessed window — refuses the run with a
+/// `KeyedReprocessedWindow`-shaped error
+/// (`docs/specs/keyed_models.md` §"Reprocessing") instead of silently
+/// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
+/// warehouse table is ever created for them.
 pub async fn run_windowed_keyed_maintenance(
     backend: &dyn Backend,
     model_name: &str,
@@ -119,6 +163,7 @@ pub async fn run_windowed_keyed_maintenance(
 
     let start = Instant::now();
     let mut total_rows = 0;
+    let grade = rule.ledger_grade();
 
     for (idx, step) in steps.iter().enumerate() {
         let delta_sql = compile_step(step)
@@ -126,41 +171,111 @@ pub async fn run_windowed_keyed_maintenance(
 
         let table_exists = backend.table_exists(schema, table).await.unwrap_or(false);
 
-        if !table_exists {
-            backend
-                .create_table_as(schema, table, &delta_sql)
-                .await
-                .map_err(|e| {
-                    anyhow::anyhow!(
-                        "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
-                        model_name,
-                        delta_sql,
-                        e
-                    )
-                })?;
-            debug!(
-                "  partition {} ({}/{}) created target table",
-                step.partition_value,
-                idx + 1,
-                steps.len()
-            );
+        let action_sql = if !table_exists {
+            format!("CREATE TABLE {}.{} AS {}", schema, table, delta_sql)
         } else {
-            let merge_sql = rule.merge_sql(schema, table, &delta_sql);
-            backend.execute_sql(&merge_sql).await.map_err(|e| {
-                anyhow::anyhow!(
-                    "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+            rule.merge_sql(schema, table, &delta_sql)
+        };
+
+        match grade {
+            Grade::Additive => {
+                // `smelt_state::ddl_duckdb` is the only ledger DDL/DML
+                // dialect implemented today (MP12); fail loudly rather than
+                // handing another backend DuckDB-flavored SQL it cannot run
+                // (`CLAUDE.md` §"Fail-loud discipline").
+                if backend.dialect() != SqlDialect::DuckDB {
+                    bail!(
+                        "{}",
+                        BackendError::unsupported(
+                            backend.dialect().name(),
+                            "additive-fold windowed-keyed maintenance ledger (never-fold-twice)",
+                        )
+                    );
+                }
+
+                let ensure_sql = ddl_duckdb::generate_ledger_table_ddl(schema);
+                let insert_sql = ddl_duckdb::generate_ledger_insert_sql(
+                    schema,
                     model_name,
-                    merge_sql,
-                    e
-                )
-            })?;
-            debug!(
-                "  partition {} ({}/{}) merged",
-                step.partition_value,
-                idx + 1,
-                steps.len()
-            );
+                    LEDGER_WHOLE_ROW_GROUP,
+                    rule.ledger_input(),
+                    &step.partition_value,
+                    &step.range.start,
+                    &step.range.end,
+                );
+                let exists_sql = ddl_duckdb::generate_ledger_exists_sql(
+                    schema,
+                    model_name,
+                    LEDGER_WHOLE_ROW_GROUP,
+                    rule.ledger_input(),
+                    &step.partition_value,
+                );
+
+                match backend
+                    .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+                    .await
+                {
+                    Ok(()) => {}
+                    Err(BackendError::AlreadyReflected { message }) => {
+                        bail!(
+                            "windowed-keyed-maintenance driver refused model '{}': partition \
+                             {} from input '{}' is already reflected in the reconciliation \
+                             ledger (never-fold-twice — docs/specs/keyed_models.md \
+                             §Reprocessing). {}. Mitigations: drop the target table and re-run \
+                             for a full rebuild, or perform a manual cascade rebuild.",
+                            model_name,
+                            step.partition_value,
+                            rule.ledger_input(),
+                            message
+                        );
+                    }
+                    Err(e) => {
+                        bail!(
+                            "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                            model_name,
+                            action_sql,
+                            e
+                        );
+                    }
+                }
+            }
+            Grade::Idempotent => {
+                if !table_exists {
+                    backend
+                        .create_table_as(schema, table, &delta_sql)
+                        .await
+                        .map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                                model_name,
+                                delta_sql,
+                                e
+                            )
+                        })?;
+                } else {
+                    backend.execute_sql(&action_sql).await.map_err(|e| {
+                        anyhow::anyhow!(
+                            "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                            model_name,
+                            action_sql,
+                            e
+                        )
+                    })?;
+                }
+            }
         }
+
+        debug!(
+            "  partition {} ({}/{}) {}",
+            step.partition_value,
+            idx + 1,
+            steps.len(),
+            if !table_exists {
+                "created target table"
+            } else {
+                "merged"
+            }
+        );
 
         total_rows = backend.get_row_count(schema, table).await.unwrap_or(0);
     }
@@ -645,10 +760,20 @@ mod tests {
     /// An in-memory fake backend that records every call it receives so the
     /// driver's classify → step → pushdown → create-or-merge sequencing can
     /// be exercised without a real database.
-    #[derive(Default)]
     struct RecordingBackend {
         table_exists: Mutex<bool>,
         calls: Mutex<Vec<String>>,
+        dialect: SqlDialect,
+    }
+
+    impl Default for RecordingBackend {
+        fn default() -> Self {
+            RecordingBackend {
+                table_exists: Mutex::new(false),
+                calls: Mutex::new(Vec::new()),
+                dialect: SqlDialect::DuckDB,
+            }
+        }
     }
 
     #[async_trait]
@@ -716,7 +841,7 @@ mod tests {
             Ok(())
         }
         fn dialect(&self) -> SqlDialect {
-            SqlDialect::DuckDB
+            self.dialect
         }
         fn capabilities(&self) -> BackendCapabilities {
             BackendCapabilities::duckdb()
@@ -778,6 +903,26 @@ mod tests {
         }
     }
 
+    /// Same as [`SumRule`] but opts into `Grade::Additive` ledger grading
+    /// (MP12) — exercises the driver's never-fold-twice wiring without a
+    /// real backend.
+    struct SumRuleAdditive;
+
+    impl WindowedKeyedRule for SumRuleAdditive {
+        fn refuse(&self) -> Option<String> {
+            None
+        }
+        fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String {
+            format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
+        }
+        fn ledger_grade(&self) -> Grade {
+            Grade::Additive
+        }
+        fn ledger_input(&self) -> &str {
+            "smelt.events"
+        }
+    }
+
     #[tokio::test]
     async fn refuses_before_any_backend_call() {
         let backend = RecordingBackend::default();
@@ -834,6 +979,89 @@ mod tests {
         assert!(calls[1].contains("2024-01-02"));
         assert!(calls[2].starts_with("execute_sql: MERGE INTO main.t"));
         assert!(calls[2].contains("2024-01-03"));
+    }
+
+    /// MP12: an `Additive`-graded rule routes every step's create-or-merge
+    /// action through `Backend::fold_ledger_delta` instead of the plain
+    /// `create_table_as`/`execute_sql` path — the never-fold-twice wiring
+    /// is reached even without a real database (`RecordingBackend` falls
+    /// back to `fold_ledger_delta`'s generic default, which itself calls
+    /// `execute_sql` for the ledger DDL/DML and the fold action).
+    #[tokio::test]
+    async fn additive_grade_routes_through_ledger_fold() {
+        let backend = RecordingBackend::default();
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRuleAdditive,
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+        )
+        .await
+        .unwrap();
+
+        let calls = backend.calls.lock().unwrap();
+        // The default `fold_ledger_delta` fallback issues ensure + exists +
+        // insert + action, all via `execute_sql` — never `create_table_as`,
+        // since the ledger-guarded action string carries its own `CREATE
+        // TABLE ... AS` text for the create branch.
+        assert!(
+            calls.iter().any(|c| c.contains("_smelt_ledger")),
+            "the ledger table DDL/DML must be issued: {:?}",
+            calls
+        );
+        assert!(
+            calls.iter().any(|c| c.contains("CREATE TABLE main.t AS")),
+            "the create branch's action must run through the ledger fold: {:?}",
+            calls
+        );
+    }
+
+    /// MP12: the ledger DDL/DML is DuckDB-flavored SQL
+    /// (`smelt_state::ddl_duckdb`). An `Additive`-graded rule on a non-DuckDB
+    /// backend must fail loudly instead of handing that backend SQL it
+    /// cannot run (`CLAUDE.md` §"Fail-loud discipline").
+    #[tokio::test]
+    async fn additive_grade_on_non_duckdb_backend_fails_loud() {
+        let backend = RecordingBackend {
+            dialect: SqlDialect::SparkSQL,
+            ..Default::default()
+        };
+        let steps = driving_steps("2024-01-01", "2024-01-02", &Granularity::Day).unwrap();
+        let err = run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &SumRuleAdditive,
+            |step| {
+                Ok(format!(
+                    "SELECT * FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+        )
+        .await
+        .unwrap_err();
+
+        assert!(
+            backend.calls.lock().unwrap().is_empty(),
+            "no SQL must be issued once the dialect guard refuses"
+        );
+        let message = format!("{err:#}");
+        assert!(
+            message.contains("Spark SQL"),
+            "error must name the unsupported dialect: {message}"
+        );
     }
 
     fn yes_cell(scan: ScanClamp) -> PlanCell {

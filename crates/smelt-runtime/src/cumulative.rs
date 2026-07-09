@@ -20,9 +20,10 @@ use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
 use smelt_planner::{
-    classify_cumulative, combiner_for, AggregatorColumn, CumulativeClassification, KeyedDiagnostic,
-    SourceTimeseriesMap,
+    classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
+    CumulativeClassification, KeyedDiagnostic, SourceTimeseriesMap,
 };
+use smelt_state::reconciliation::Grade;
 use std::collections::HashMap;
 use tracing::info;
 
@@ -47,6 +48,31 @@ impl WindowedKeyedRule for CumulativeClassification {
 
     fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String {
         build_cumulative_merge_sql(schema, table, delta_sql, self)
+    }
+
+    /// `Grade::Additive` iff any aggregator column's cross-partition
+    /// combiner is `Sum` — an additive fold double-counts on a repeat merge
+    /// (`docs/specs/maintenance_plan.md` §"The reconciliation ledger" —
+    /// "Storage is graded by algebra"). The remaining catalogued combiners
+    /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`) are the
+    /// extremal/lattice family and grade `Idempotent`. Mixing an additive
+    /// column with idempotent ones in the same cell still grades the whole
+    /// cell `Additive` — conservative (never unsafe), per
+    /// `WindowedKeyedRule::ledger_grade`'s doc comment.
+    fn ledger_grade(&self) -> Grade {
+        let any_additive = self
+            .aggregator_columns
+            .iter()
+            .any(|col| matches!(col.cross_partition_combiner, CrossPartitionCombiner::Sum));
+        if any_additive {
+            Grade::Additive
+        } else {
+            Grade::Idempotent
+        }
+    }
+
+    fn ledger_input(&self) -> &str {
+        &self.driving_source.name
     }
 }
 
@@ -86,29 +112,22 @@ pub async fn execute_cumulative_aggregate(
         model_name, driving_source_name
     );
 
-    // 2. Refuse reprocessing: if the target table already exists, the run
-    //    window must be append-only (no overlap with already-merged
-    //    partitions). v1 policy: if the table exists, refuse the run unless
-    //    explicitly opted in via `--full-refresh` (which truncates first).
-    //
-    //    The fine-grained "exactly which partitions are stale" check needs
-    //    persistent state (Known Divergences in the spec). v1 is conservative
-    //    and matches the spec's §"Reprocessing semantics" — refuse on any
-    //    overlap with existing data; the operator falls back to a full
-    //    refresh.
-    //
-    //    This conservative behaviour is also implemented as "table doesn't
-    //    exist => normal merge loop; table exists => refuse" rather than
-    //    "table exists => silently rebuild". The full-refresh opt-in is
-    //    handled by the caller (run.rs) by dropping the table before the
-    //    keyed path is dispatched, so by the time we reach here the
-    //    table either does not exist or is being appended to by an
-    //    operator who has accepted the implicit double-count risk.
-    //
-    //    For now we do *not* check existence here — the run.rs caller is
-    //    responsible for managing full-refresh semantics. This block is a
-    //    placeholder for future stricter checks once we have a watermark
-    //    store.
+    // 2. Refuse reprocessing (MP12): the windowed-keyed-maintenance driver
+    //    (step 3 below) grades this classification's cell via
+    //    `WindowedKeyedRule::ledger_grade` above. For an `Additive`-graded
+    //    cell — at least one `SUM`-family aggregator column — every step's
+    //    create-or-merge action is folded through the warehouse-resident
+    //    reconciliation ledger (`docs/specs/maintenance_plan.md` §"The
+    //    reconciliation ledger"), transactionally with the write
+    //    (`Backend::fold_ledger_delta`); a step whose delta identity (its
+    //    own partition value) is already reflected refuses the run instead
+    //    of double-counting (`docs/specs/keyed_models.md` §"Reprocessing" —
+    //    `KeyedReprocessedWindow`). An `Idempotent`-graded cell (no
+    //    additive column) needs no ledger — re-merging a window is
+    //    harmless — and no warehouse ledger table is ever created for it.
+    //    The operator's escape hatch for a genuine reprocess remains
+    //    dropping the target table before re-running (full rebuild) or a
+    //    manual cascade rebuild.
 
     // 3. Step over the driving source's partitions in temporal order via the
     //    mode-agnostic windowed-keyed-maintenance driver.

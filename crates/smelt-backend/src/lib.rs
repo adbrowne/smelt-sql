@@ -330,6 +330,51 @@ pub trait Backend: Send + Sync {
         partition: &PartitionRange,
     ) -> Result<(), BackendError>;
 
+    /// Fold one delta identity into the warehouse-resident per-delta
+    /// reconciliation ledger and run `action_sql` (a `CREATE TABLE ... AS`
+    /// or `MERGE INTO` statement), refusing — without running `action_sql`
+    /// — if the delta is already reflected
+    /// (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    /// already reflected in the state").
+    ///
+    /// `ensure_sql` creates the ledger table if it does not already exist
+    /// (idempotent DDL); `insert_sql` records the delta identity and
+    /// violates the ledger table's `PRIMARY KEY` iff it is already present;
+    /// `exists_sql` is a `SELECT`-based existence check for backends that
+    /// cannot wrap `insert_sql` and `action_sql` in one native transaction.
+    /// All four strings come from `smelt_state::ddl_duckdb` (or the
+    /// matching Spark builder) — this trait does not depend on
+    /// `smelt-state` itself, only executes the SQL text a caller with that
+    /// dependency built.
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `exists_sql`, then `insert_sql` + `action_sql`
+    /// as separate statements) for any backend that does not override it —
+    /// the same precedent as [`Backend::delete_and_insert_transactional`]'s
+    /// default. A backend that can wrap `insert_sql` and `action_sql` in a
+    /// native transaction (DuckDB) should override this so a repeat delta
+    /// is refused by the ledger table's own constraint inside that
+    /// transaction — no check-then-act race across the write.
+    async fn fold_ledger_delta(
+        &self,
+        ensure_sql: &str,
+        insert_sql: &str,
+        exists_sql: &str,
+        action_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        let rows = self.execute_sql(exists_sql).await?;
+        let already_reflected = rows.iter().any(|batch| batch.num_rows() > 0);
+        if already_reflected {
+            return Err(BackendError::already_reflected(
+                "delta already reflected in the reconciliation ledger (best-effort existence check)",
+            ));
+        }
+        self.execute_sql(insert_sql).await?;
+        self.execute_sql(action_sql).await?;
+        Ok(())
+    }
+
     /// Create a materialized view from a SQL query.
     ///
     /// Default implementation falls back to `create_table_as` with a warning.

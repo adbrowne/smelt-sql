@@ -3,6 +3,9 @@
 //! `(output-region × column-group)` entries, graded storage, and the two
 //! operations — fold-precondition + recompute-reset.
 
+use smelt_state::ddl_duckdb::{
+    generate_ledger_exists_sql, generate_ledger_insert_sql, generate_ledger_table_ddl,
+};
 use smelt_state::file_store::FileStore;
 use smelt_state::reconciliation::{Grade, Processed, ReconciliationLedger, Region};
 use std::collections::{BTreeMap, BTreeSet};
@@ -194,6 +197,94 @@ fn reconciliation_store_roundtrips_through_file_store() {
             "orders".to_string(),
             BTreeSet::from(["d1".to_string()])
         )]))
+    );
+}
+
+/// MP12 — additive-graded storage for the keyed `merge_into` fold path is
+/// **warehouse-resident**, not the `.smelt/` JSON file the rest of this
+/// suite exercises, specifically because it must be transactional with the
+/// backend write it guards (a JSON file write cannot commit atomically with
+/// a DuckDB transaction). This test drives the real DDL/DML text
+/// `smelt_state::ddl_duckdb` generates against a real DuckDB connection —
+/// no `smelt-backend` dependency needed, since the generation is pure and
+/// the transaction is plain DuckDB SQL — and asserts the never-fold-twice
+/// property holds transactionally: the ledger insert and the paired
+/// "fold action" it guards commit or roll back together, and a repeat of
+/// the same delta identity is refused by the table's own `PRIMARY KEY`
+/// constraint before the paired action ever runs a second time.
+#[test]
+fn per_delta_grade_lives_in_warehouse() {
+    let dir = TempDir::new().unwrap();
+    let db_path = dir.path().join("ledger_test.duckdb");
+    let mut conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main; CREATE TABLE main.device_stats (n INTEGER);",
+    )
+    .expect("create target table");
+
+    // The ledger table is created transactionally with the fold — first
+    // call sees no table at all.
+    let ddl = generate_ledger_table_ddl("main");
+    conn.execute(&ddl, []).expect("create ledger table");
+
+    let insert_sql = generate_ledger_insert_sql(
+        "main",
+        "device_stats",
+        "{*}",
+        "smelt.events",
+        "2026-01-01",
+        "2026-01-01",
+        "2026-01-02",
+    );
+    let action_sql = "INSERT INTO main.device_stats VALUES (1)";
+
+    // First fold: insert the delta identity and perform the paired action
+    // as one transaction.
+    {
+        let tx = conn.transaction().expect("begin tx");
+        tx.execute(&insert_sql, []).expect("ledger insert");
+        tx.execute(action_sql, []).expect("paired action");
+        tx.commit().expect("commit");
+    }
+
+    let count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM main.device_stats", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(count, 1, "first fold's paired action committed");
+
+    // A repeat of the SAME delta identity: the ledger insert violates the
+    // table's PRIMARY KEY before the paired action ever runs again, and
+    // rolling the transaction back leaves the target untouched — the
+    // never-fold-twice property, enforced by the warehouse table itself,
+    // not a separate application-level check that could race the write.
+    {
+        let tx = conn.transaction().expect("begin tx");
+        let insert_result = tx.execute(&insert_sql, []);
+        assert!(
+            insert_result.is_err(),
+            "repeat delta identity must violate the ledger's PRIMARY KEY"
+        );
+        // Transaction rolls back on drop without an explicit commit — the
+        // paired action must never run once the ledger insert failed.
+    }
+
+    let count_after: i64 = conn
+        .query_row("SELECT COUNT(*) FROM main.device_stats", [], |r| r.get(0))
+        .unwrap();
+    assert_eq!(
+        count_after, 1,
+        "reprocessed window refused: the paired action did not run a second time"
+    );
+
+    // Existence check (the best-effort fallback path other backends use)
+    // also finds the already-folded delta.
+    let exists_sql =
+        generate_ledger_exists_sql("main", "device_stats", "{*}", "smelt.events", "2026-01-01");
+    let mut stmt = conn.prepare(&exists_sql).expect("prepare exists check");
+    let mut rows = stmt.query([]).expect("query exists check");
+    assert!(
+        rows.next().unwrap().is_some(),
+        "existence check finds the already-folded delta identity"
     );
 }
 
