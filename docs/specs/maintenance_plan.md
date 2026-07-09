@@ -380,8 +380,18 @@ disagree; one per node cannot). Deeper rationale:
   and code placement: `docs/plans/20260707-maintenance-plan-impl.md` phases MP5 (footprint
   reflection, partition-locality), MP6 (faithful-fold, grain-alignment), and MP14
   (definition-change classification). `09-spec-readiness.md` §2.
-- **The ledger substrate is the degenerate case**: `smelt-state`'s interval store is
-  frontier-only and per-model; per-delta grading and `(region × group)` keying do not exist.
+- **The ledger substrate exists but has one caller.** `smelt-state`'s reconciliation ledger
+  (`smelt_state::reconciliation`) implements the `(output-region × column-group)` keying, the two
+  storage gradings (additive groups keep delta identities; idempotent groups keep a frontier
+  watermark), and both operations — fold-precondition-checked combine, and recompute-reset, which
+  replaces every entry intersecting a recomputed region with exactly the input that recompute
+  read. It is exposed to and written by the runtime at the same point the legacy per-model
+  frontier-only interval store (`smelt_state::intervals`) is written, without regressing that
+  store's own behaviour. The only production call site today is a region recompute (the
+  DELETE+INSERT batched technique writes a recompute-reset entry per window under the whole-row
+  group); no run path yet performs a genuine keyed fold through the ledger's fold operation, so
+  the never-fold-twice violation on the keyed merge path noted below is unchanged by the ledger's
+  existence — wiring fold into that path is still open.
 - **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed
   dirt-sets and time-unrolled self-edges are designed (`10-dependency-propagation.md` §6, S12)
   and unbuilt.

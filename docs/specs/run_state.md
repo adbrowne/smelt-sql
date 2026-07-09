@@ -21,9 +21,10 @@ All run state lives under a single project-local `.smelt/` root (gitignored in e
 
 ```
 .smelt/
-  runs/<run_id>.json      # one run manifest per execution
-  intervals.json          # cumulative interval coverage across runs
-  schemas/<model>.json    # deployed schema snapshot per model (see schema_evolution.md)
+  runs/<run_id>.json        # one run manifest per execution
+  intervals.json            # cumulative interval coverage across runs
+  reconciliation.json       # reconciliation ledger, per plan-managed model (see maintenance_plan.md)
+  schemas/<model>.json      # deployed schema snapshot per model (see schema_evolution.md)
 ```
 
 State files are never written outside `.smelt/`. A `state.mode: stateless` project does not require this directory to exist.
@@ -64,7 +65,7 @@ Under `state.mode: environments`, run state additionally records, per model: the
 
 ### Relationship to the reconciliation ledger
 
-The run-state intervals this spec owns and the maintenance plan's **reconciliation ledger** — the `(output-region × column-group)` bookkeeping that records each region-group's processed-input vector, frontier watermarks for idempotent groups, and delta identities for additive groups (`maintenance_plan.md` §"The reconciliation ledger") — are **not the same mechanism and do not substitute for each other**. Run-state intervals are project-wide observability: they exist to answer "what has this project run, and where are the gaps" for humans and tooling, and a project may run at `state.mode: stateless` and forgo them entirely. The reconciliation ledger is **required correctness structure** for every `grain: key` (and `key_per_partition`) model maintained under a derived plan — it exists whenever the plan does, independent of `state.mode`, because it is what lets a fold-family technique detect a re-run (never fold a delta already in the entry's processed set) and lets a crashed run resume exactly. Neither reads the other: the reconciliation ledger is per-model and backend-resident, keyed by `(region × column-group)`; the interval ledger here is project-wide observability state under `.smelt/`. This spec also owns the **per-source landed-delta record** that forward propagation consumes (`sources.md` §"Landed-delta intervals (derived, recorded)"; `maintenance_plan.md` §"The graph layer") — which partition intervals of a source landed, keyed by source address, recorded in run state alongside the interval ledger, not in the reconciliation ledger. A project could run `state.mode: stateless` with `grain: key` models and still get correct, ledger-enforced reprocessing refusal — the reconciliation ledger's presence is a property of the *plan*, not of the project's state posture. This spec continues to own the run-state **storage and serialisation** (`.smelt/` layout, manifest format, run IDs, landed-delta intervals); the reconciliation ledger's structure, grading, and operations are owned by `maintenance_plan.md`.
+The run-state intervals this spec owns and the maintenance plan's **reconciliation ledger** — the `(output-region × column-group)` bookkeeping that records each region-group's processed-input vector, frontier watermarks for idempotent groups, and delta identities for additive groups (`maintenance_plan.md` §"The reconciliation ledger") — are **not the same mechanism and do not substitute for each other**. Run-state intervals are project-wide observability: they exist to answer "what has this project run, and where are the gaps" for humans and tooling, and a project may run at `state.mode: stateless` and forgo them entirely. The reconciliation ledger is **required correctness structure** for every `grain: key` (and `key_per_partition`) model maintained under a derived plan — it exists whenever the plan does, independent of `state.mode`, because it is what lets a fold-family technique detect a re-run (never fold a delta already in the entry's processed set) and lets a crashed run resume exactly. Neither reads the other: the reconciliation ledger is per-model, keyed by `(region × column-group)`, and today stored under `.smelt/reconciliation.json` for both storage gradings; an additive group's delta-identity grade is intended to move to warehouse-resident state, transactional with the fold, once a genuine keyed-fold execution path consumes it (`maintenance_plan.md` §"The reconciliation ledger", §Known Divergences). The interval ledger here is project-wide observability state, also under `.smelt/`. This spec also owns the **per-source landed-delta record** that forward propagation consumes (`sources.md` §"Landed-delta intervals (derived, recorded)"; `maintenance_plan.md` §"The graph layer") — which partition intervals of a source landed, keyed by source address, recorded in run state alongside the interval ledger, not in the reconciliation ledger. A project could run `state.mode: stateless` with `grain: key` models and still get correct, ledger-enforced reprocessing refusal — the reconciliation ledger's presence is a property of the *plan*, not of the project's state posture. This spec continues to own the run-state **storage and serialisation** (`.smelt/` layout, manifest format, run IDs, landed-delta intervals); the reconciliation ledger's structure, grading, and operations are owned by `maintenance_plan.md`.
 
 ## Semantics
 
@@ -85,7 +86,7 @@ The run-state intervals this spec owns and the maintenance plan's **reconciliati
 ## Constraints & Invariants
 
 - **Stateless requires no `.smelt/`.** Enabling no state posture must leave a project's on-disk footprint and behaviour exactly as today.
-- **Fixed layout.** State is confined to `.smelt/runs/`, `.smelt/intervals.json`, and `.smelt/schemas/`. New artifact kinds extend this layout under `.smelt/`, never outside it.
+- **Fixed layout.** State is confined to `.smelt/runs/`, `.smelt/intervals.json`, `.smelt/reconciliation.json`, and `.smelt/schemas/`. New artifact kinds extend this layout under `.smelt/`, never outside it.
 - **Forward-compatible manifests.** Stored JSON must remain readable by later smelt versions; new fields are optional/defaulted.
 - **No stored-hash dependence for reuse.** Reuse correctness must not depend on a previously stored fingerprint value; it is always recomputed.
 
@@ -100,7 +101,7 @@ The run-state intervals this spec owns and the maintenance plan's **reconciliati
 
 ## References
 
-- **Code**: `crates/smelt-state/src/lib.rs` (`RunManifest`, `ModelRunRecord`, `TimeRangeRecord`, `generate_run_id`), `src/file_store.rs` (`.smelt/` reader/writer), `src/intervals.rs` (`IntervalStore`), `src/schema_tracking.rs` (`DeployedSchema`), `src/history.rs` (history queries)
+- **Code**: `crates/smelt-state/src/lib.rs` (`RunManifest`, `ModelRunRecord`, `TimeRangeRecord`, `generate_run_id`), `src/file_store.rs` (`.smelt/` reader/writer), `src/intervals.rs` (`IntervalStore`), `src/reconciliation.rs` (`ReconciliationLedger`, `ReconciliationStore`), `src/schema_tracking.rs` (`DeployedSchema`), `src/history.rs` (history queries)
 - **Tests**: `crates/smelt-state/tests/`
 - **User docs**: none yet (CLI surfaces `smelt status` / `smelt history` over this state — see `cli.md`)
 - **Plans (history)**: none yet — predecessor research is `docs/research/20260601-virtual-environments.md`

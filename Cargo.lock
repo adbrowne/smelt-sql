@@ -4385,13 +4385,16 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
+ "duckdb",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "smelt-dialect",
+ "smelt-maintenance-testkit",
  "smelt-types",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

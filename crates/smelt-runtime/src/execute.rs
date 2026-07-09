@@ -27,6 +27,7 @@ use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
+use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
 use crate::compile::build_source_bound_map;
@@ -1113,6 +1114,37 @@ pub async fn execute_project(
                     let intervals = interval_store.get_or_create(&plan.name, &model_hash);
                     intervals.record_interval(&start_str, &end_str);
                     let _ = file_store.save_intervals(&interval_store);
+                }
+
+                // Reconciliation ledger: this batch loop performed a region
+                // recompute of `[start_str, end_str)` (DELETE the write
+                // window, INSERT its recompute — write window = output
+                // window). `docs/specs/maintenance_plan.md` §"The
+                // reconciliation ledger": a region recompute resets every
+                // intersecting entry to exactly the input it read. No
+                // derived `MaintenancePlan` reaches this call site yet (see
+                // `maintenance_plan.md` §Known Divergences — the plan and
+                // real execution remain two disconnected systems until a
+                // lowering consumer lands), so this records the whole-row
+                // group `{*}` (matching
+                // `smelt_logical::maintenance::PlanCell::group`'s
+                // whole-row-trigger convention) read from a single nominal
+                // `self` input, watermarked to the region's own end. This
+                // subsumes `IntervalStore`'s role for the region-recompute
+                // shape without regressing it — both stores are written
+                // side by side.
+                if !start_str.is_empty() && !end_str.is_empty() {
+                    if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
+                        let region = Region::new(start_str.clone(), end_str.clone());
+                        let mut read = std::collections::BTreeMap::new();
+                        read.insert("self".to_string(), end_str.clone());
+                        reconciliation.get_or_create(&plan.name).recompute_reset(
+                            &region,
+                            "{*}",
+                            Processed::Frontier(read),
+                        );
+                        let _ = file_store.save_reconciliation_store(&reconciliation);
+                    }
                 }
 
                 Ok(())

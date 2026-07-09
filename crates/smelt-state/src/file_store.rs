@@ -1,4 +1,5 @@
 use crate::intervals::IntervalStore;
+use crate::reconciliation::ReconciliationStore;
 use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
 use crate::RunManifest;
@@ -36,6 +37,10 @@ impl FileStore {
 
     fn intervals_path(&self) -> PathBuf {
         self.state_dir.join("intervals.json")
+    }
+
+    fn reconciliation_path(&self) -> PathBuf {
+        self.state_dir.join("reconciliation.json")
     }
 
     fn snapshots_path(&self) -> PathBuf {
@@ -140,6 +145,34 @@ impl FileStore {
             .with_context(|| "Failed to serialize interval store")?;
         std::fs::write(&path, json)
             .with_context(|| format!("Failed to write intervals: {:?}", path))?;
+        Ok(())
+    }
+
+    // --- Reconciliation Ledger ---
+
+    /// Load the reconciliation ledger store from disk (one ledger per
+    /// model). Returns default if the file doesn't exist — a model with no
+    /// ledger has never had a plan-managed fold/recompute recorded.
+    pub fn load_reconciliation_store(&self) -> Result<ReconciliationStore> {
+        let path = self.reconciliation_path();
+        if !path.exists() {
+            return Ok(ReconciliationStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read reconciliation ledger: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse reconciliation ledger: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the reconciliation ledger store to disk.
+    pub fn save_reconciliation_store(&self, store: &ReconciliationStore) -> Result<()> {
+        self.init()?;
+        let path = self.reconciliation_path();
+        let json = serde_json::to_string_pretty(store)
+            .with_context(|| "Failed to serialize reconciliation ledger")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("Failed to write reconciliation ledger: {:?}", path))?;
         Ok(())
     }
 
