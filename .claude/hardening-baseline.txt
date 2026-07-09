@@ -37,7 +37,7 @@ smelt-dialect unwrap 0
 smelt-fingerprint expect 0
 smelt-fingerprint println 0
 smelt-fingerprint unwrap 1
-smelt-logical expect 1
+smelt-logical expect 3
 smelt-logical println 0
 smelt-logical unwrap 1
 smelt-lsp expect 1
