@@ -80,7 +80,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP12  | done     | `6f97578f` | 2026-07-10 |
 | MP13  | done (bakeoff CLI deferred — see docs/ROADMAP.md §10) | `d8948bf5` | 2026-07-10 |
 | MP14  | done     | `00544764` | 2026-07-10 |
-| MP15  | done     | `PENDING_SHA` | 2026-07-10 |
+| MP15  | done     | `4413d46a` | 2026-07-10 |
 | MP16  | pending (unblocked 2026-07-10 — no longer pre-conditioned on automatic delta detection, see Blocked phases) |        |      |
 | MP17  | pending  |        |      |
 
