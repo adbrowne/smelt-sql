@@ -49,6 +49,7 @@ fn test_config() -> Config {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     }
 }
 

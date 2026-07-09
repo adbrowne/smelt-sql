@@ -334,16 +334,27 @@ disagree; one per node cannot). Deeper rationale:
 
 ## Known Divergences / Open Questions
 
-- **The plan is derived-and-unconsumed.** `derive_maintenance_plan`
-  (`crates/smelt-logical/src/maintenance/derive.rs`) is production code, not a tracer: full
-  per-cell admission (`§"Per-cell admission"` obligations 1–6, including the faithful-fold
-  obligation's two independent conditions and the holistic-combiner cutoff), partition-locality
-  verdicts, and the per-cell guarantee ledger fields are derived rather than hand-supplied, and
-  `input_delta_discovery` (`model_properties.md`'s input-consumption proof stage) is a consumed
-  admission input rather than dead code. What still does not exist is a caller: no Salsa query,
-  diagnostic, `smelt explain`, or CLI flag reads the derived plan yet, and `resolve_strategy`
-  still returns a constant — the plan and real execution remain two disconnected systems until a
-  consumer lands. Migration ordering:
+- **The plan has its first consumer: diagnostics, not yet `smelt explain` or execution.**
+  `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) is production
+  code, not a tracer: full per-cell admission (`§"Per-cell admission"` obligations 1–6,
+  including the faithful-fold obligation's two independent conditions and the holistic-combiner
+  cutoff), partition-locality verdicts, and the per-cell guarantee ledger fields are derived
+  rather than hand-supplied, and `input_delta_discovery` (`model_properties.md`'s
+  input-consumption proof stage) is a consumed admission input rather than dead code. A thin
+  `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`) assembles a
+  model's referenced sources, declared output shape, and `maintenance:`/`columns.<c>.contract`
+  frontmatter, calls the pure derivation, and folds two of the six `Maintenance*` diagnostics —
+  `MaintenanceNoAdmissibleTechnique` and `MaintenanceScanUnbounded` — into `file_diagnostics()`
+  (see `diagnostics.md` §Known divergences for the remaining four). What still does not exist:
+  `smelt explain` (or any other CLI surface) reads the derived plan, `resolve_strategy` still
+  returns a constant, and the `maintenance.cells[].prefer`/`.technique` override ladder and
+  `scan_bounds.on_violation: warn` are parsed but not yet consumed (every refusal maps to an
+  Error today) — the plan and real execution remain two disconnected systems until a lowering
+  consumer lands. The `Trigger::UpstreamMutation` cell the query derives is scoped to
+  `MutableSnapshot` sources only; an `AppendOnly` source's own aggregate-window sensitivity
+  (real per `model_properties.md`'s mutation-sensitivity proof) has no post-creation mutation of
+  its own to trigger a cell for, so no `UpstreamMutation` trigger is constructed for it — the
+  `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6).
 - **Never-fold-twice is specified and unenforced** — a **confirmed live violation**: the keyed
   `cumulative_aggregate`/`merge_into` run path re-folds an already-merged window and

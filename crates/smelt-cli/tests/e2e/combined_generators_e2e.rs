@@ -65,6 +65,7 @@ fn minimal_config(paths: Vec<String>) -> Config {
         models: HashMap::new(),
         python: None,
         state: Default::default(),
+        maintenance: None,
     }
 }
 

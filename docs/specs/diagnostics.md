@@ -456,7 +456,7 @@ Owned by `docs/specs/maintenance_plan.md`.
 
 ## Known divergences
 
-- **The `Maintenance*` family is specified and unimplemented.** No `DiagnosticCode` enum variant exists yet for any of the six codes above — the plan they cover (`crates/smelt-logical/src/maintenance/`) is a tracer with no production consumer, so nothing emits them today. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **Four of the six `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique` and `MaintenanceScanUnbounded` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
 
 ## Open questions
 

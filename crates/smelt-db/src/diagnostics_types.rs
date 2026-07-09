@@ -820,6 +820,20 @@ pub enum DiagnosticCode {
     /// Message: `malformed '<kw>' pipe stage`.
     /// Anchored at the stage span.
     PipeStageMalformed,
+    /// Emitted when no maintenance technique survives a plan cell's
+    /// admission (`maintenance_plan.md` §"Per-cell admission"). Names the
+    /// cell's trigger and why every candidate technique was refused —
+    /// includes the `maintenance.cells[]` two-group column-span error (a
+    /// cell whose declared `columns` span more than one derived column
+    /// group can never address a single coherent cell). Anchored at the
+    /// model SQL body start.
+    MaintenanceNoAdmissibleTechnique,
+    /// Emitted (the K8 guardrail) when a derived scan or write footprint
+    /// cannot be partition-bounded and no `allow_full_scan` acceptance was
+    /// declared for that source (`maintenance_plan.md` §"Partition-local
+    /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
+    /// start.
+    MaintenanceScanUnbounded,
 }
 
 /// Structured metadata attached to diagnostics for code actions

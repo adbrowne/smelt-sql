@@ -49,6 +49,7 @@ fn make_config() -> Arc<Config> {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     })
 }
 

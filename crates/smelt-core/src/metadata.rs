@@ -105,6 +105,28 @@ pub struct ColumnMetadata {
     /// Used in UPDATE statements after ALTER TABLE ADD COLUMN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backfill: Option<String>,
+
+    /// The column's equivalence contract (default `exact`). `plausible`
+    /// admits non-determinism in a payload column; barred from every
+    /// skeleton position, with cross-model fail-loud propagation. See
+    /// `docs/specs/models.md` §"`columns:` — column metadata" and
+    /// `docs/specs/maintenance_plan.md` §Surface "The plan (derived,
+    /// reported)" (the guarantee ledger's equivalence-contract axis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<Contract>,
+}
+
+/// A column's declared equivalence contract (`columns.<c>.contract`).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Contract {
+    /// Bit-preserving across a technique change at a fixed processed-input
+    /// set (the default).
+    #[default]
+    Exact,
+    /// Admits non-determinism in a payload column. Barred from every
+    /// skeleton position (identity/grouping/dedup/ordering).
+    Plausible,
 }
 
 /// Author override hatches for virtual-environment reuse (D-46).
@@ -256,6 +278,12 @@ pub struct ModelMetadata {
     /// interval parser — no new interval grammar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub horizon_ceiling: Option<crate::config::DataLatency>,
+
+    /// Per-cell technique preferences/pins and the scan-locality guardrail
+    /// (`defaults.prefer`, `cells[]`, `scan_bounds`). See
+    /// `docs/specs/maintenance_plan.md` §Surface "Frontmatter".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<crate::config::MaintenanceConfig>,
 }
 
 impl ModelMetadata {

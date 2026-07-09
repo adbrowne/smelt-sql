@@ -81,6 +81,7 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
     ("functional_dependencies", &[DeclarationKind::Model]),
     ("bounded_domain", &[DeclarationKind::Model]),
     ("horizon_ceiling", &[DeclarationKind::Model]),
+    ("maintenance", &[DeclarationKind::Model]),
     // Function/extern-only keys (match the fields of FunctionProperties).
     (
         "deterministic",

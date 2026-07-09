@@ -7,8 +7,21 @@ timeseries:
   assert_monotonic: true
 refresh: incremental
 grain: partition
+maintenance:
+  scan_bounds:
+    per_source:
+      lookup:
+        allow_full_scan: true
 ---
 
+-- `lookup`'s own `snapshot_key` partition column is not `partition_key` (the
+-- output axis) and no predicate links them, so the enrichment join's
+-- `{attribute}` mutation-sensitive group cannot be partition-bounded; the
+-- `maintenance.scan_bounds.per_source.lookup.allow_full_scan: true`
+-- declaration above accepts that full-table cost rather than refusing
+-- (`docs/specs/maintenance_plan.md` §Semantics "Partition-local maintenance
+-- (the K8 guardrail)").
+--
 -- `ABS(...)` is a real, recognized SQL function (so type inference is
 -- unaffected), but it is opaque to the static monotonicity classifier — no
 -- rule in `smelt-logical::analysis::monotonicity` recognizes it, so without

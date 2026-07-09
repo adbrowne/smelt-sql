@@ -214,6 +214,7 @@ mod tests {
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         };
 
         let (change_tx, _) = broadcast::channel(16);

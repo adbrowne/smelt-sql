@@ -81,6 +81,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         functional_dependencies: Vec::new(),
         bounded_domain: None,
         horizon_ceiling: None,
+        maintenance: None,
     });
 
     // Virtual path: generator_file path with the model name appended as

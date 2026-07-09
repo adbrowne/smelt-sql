@@ -1131,6 +1131,120 @@ fn broken_workspace_diagnostics_still_fire() {
     }
 }
 
+/// MP6 TDD: `examples/broken/models/maintenance_scan_unbounded.sql` — a
+/// `grain: partition` model whose `enrichment_category` group is mutation-
+/// sensitive to an unclocked `maintenance_enrichment` source with no
+/// `allow_full_scan` acceptance — produces exactly one
+/// `MaintenanceScanUnbounded` diagnostic, anchored at that file, and no
+/// `MaintenanceScanUnbounded`/`MaintenanceNoAdmissibleTechnique` diagnostic
+/// fires from any other file in the shared `examples/broken/` workspace.
+///
+/// Spec: `docs/specs/maintenance_plan.md` §Semantics "Partition-local
+/// maintenance (the K8 guardrail)".
+#[test]
+fn broken_workspace_maintenance_scan_unbounded() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, DiagnosticCode, Workspace};
+
+    const MAINTENANCE_CODES: &[DiagnosticCode] = &[
+        DiagnosticCode::MaintenanceScanUnbounded,
+        DiagnosticCode::MaintenanceNoAdmissibleTechnique,
+    ];
+    let expected_file = "models/maintenance_scan_unbounded.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel.replace('\\', "/").ends_with(expected_file);
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !d
+                .code
+                .as_ref()
+                .is_some_and(|c| MAINTENANCE_CODES.contains(c))
+            {
+                continue;
+            }
+            if is_target {
+                target.push(d.clone());
+            } else {
+                other.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !d
+                .0
+                .code
+                .as_ref()
+                .is_some_and(|c| MAINTENANCE_CODES.contains(c))
+            {
+                continue;
+            }
+            if is_target {
+                target.push(d.0.clone());
+            } else {
+                other.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "expected zero maintenance diagnostics from files other than '{expected_file}', got {}:\n  {}",
+        other.len(),
+        other
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target.len(),
+        1,
+        "expected exactly 1 maintenance diagnostic from '{expected_file}', got {}:\n  {}",
+        target.len(),
+        target
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        target[0].code,
+        Some(DiagnosticCode::MaintenanceScanUnbounded)
+    );
+}
+
 // ===== Phase D (meta-language) TDD tests =====
 //
 // Layout mirrors Phase C: one clean workspace + one broken workspace per diagnostic code.

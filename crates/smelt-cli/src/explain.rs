@@ -407,6 +407,7 @@ mod tests {
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         }
     }
 

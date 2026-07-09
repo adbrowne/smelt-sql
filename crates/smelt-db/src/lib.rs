@@ -1163,6 +1163,111 @@ fn ref_timeseries_config(
     }
 }
 
+/// Resolve `ref_str` to its [`smelt_core::SourceInfo`] when it addresses a
+/// declared source — `None` when the ref doesn't resolve, or resolves to
+/// something other than a source (a model, seed, function). Sibling of
+/// [`ref_timeseries_config`], reused by [`maintenance_plan`] to build the
+/// [`smelt_logical::maintenance::SourceFacts`] the plan derivation reads.
+fn ref_source_info(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: Option<ProjectInput>,
+    ref_str: &str,
+) -> Option<smelt_core::SourceInfo> {
+    let segments: Vec<String> = ref_str
+        .strip_prefix("smelt.")?
+        .split('.')
+        .map(|s| s.to_string())
+        .collect();
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    if resolved.kind != RefKind::Source {
+        return None;
+    }
+    let project = project?;
+    project_sources(db, project)
+        .iter()
+        .find(|s| s.address_segments == segments)
+        .cloned()
+}
+
+/// Thin Salsa wrapper around
+/// `smelt_logical::maintenance::derive::derive_maintenance_plan`
+/// (`maintenance_plan.md` §Surface "The plan (derived, reported)"): gathers
+/// `file`'s referenced sources and declared `maintenance:`/`grain:`
+/// frontmatter, then calls
+/// [`crate::queries::maintenance::maintenance_plan_diagnostics`] (pure) to
+/// derive the plan and map its admission refusals onto a Salsa-safe
+/// return shape. Returns the default (empty) result for a model with no
+/// maintenance plan (not `refresh: incremental`, or no frontmatter at all).
+#[salsa::tracked]
+pub fn maintenance_plan(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<crate::queries::maintenance::MaintenancePlanDiagnostics> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return Arc::new(Default::default());
+    };
+    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
+        || metadata.grain.is_none()
+    {
+        return Arc::new(Default::default());
+    }
+    let path = file.path(db);
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    let sql_body = &text[sql_offset..];
+    let refs = smelt_logical::collect_path_refs(sql_body);
+    let source_refs: Vec<(String, Option<smelt_core::SourceInfo>)> = refs
+        .iter()
+        .filter_map(|r| {
+            let info = ref_source_info(db, workspace, project, r)?;
+            // `SourceFacts::name` is the *bare* source name — the address
+            // with the leading `sources` breadcrumb stripped
+            // (`crate::maintenance::grouping` resolves a FROM alias's
+            // `smelt.<path>` the same way, stripping `sources.` before
+            // matching against `SourceFacts.name`; see
+            // `maintenance_plan_admission.rs`'s fixtures, which name
+            // sources bare — e.g. `"payments"` for `FROM
+            // smelt.sources.payments`). Keeping this stripping in one place
+            // (here) keeps the trigger/`scan_bounds.per_source` keys and the
+            // grouping-derived `mutation_sensitivity` keys in agreement.
+            let stripped = r.strip_prefix("smelt.")?;
+            let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+            Some((bare.to_string(), Some(info)))
+        })
+        .collect();
+
+    let project_scan_bounds = project
+        .and_then(|p| {
+            smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
+                .ok()
+                .map(|(cfg, _)| cfg.maintenance)
+        })
+        .flatten()
+        .and_then(|m| m.scan_bounds);
+
+    let table = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
+        sql_body,
+        &table,
+        &metadata,
+        &source_refs,
+        project_scan_bounds.as_ref(),
+    ))
+}
+
 #[salsa::tracked]
 pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, file: SourceFile) {
     let path = file.path(db);
@@ -1630,6 +1735,48 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 })
                 .accumulate(db);
             }
+        }
+
+        // Maintenance-plan diagnostics (`maintenance_plan.md` §Diagnostics):
+        // fold the derived plan's admission refusals and the
+        // `maintenance.cells[]` column-group-span check onto the
+        // `Maintenance*` codes. `maintenance_plan` is the thin Salsa query —
+        // this block only maps its (already-derived) result onto
+        // diagnostics, never re-derives the plan itself.
+        let plan_diags = maintenance_plan(db, workspace, file);
+        let body_start = rowan::TextSize::from(sql_offset as u32);
+        for refusal in &plan_diags.refusals {
+            let (code, message) = match refusal {
+                crate::queries::maintenance::MaintenanceRefusal::ScanUnbounded { source, why } => (
+                    DiagnosticCode::MaintenanceScanUnbounded,
+                    format!("maintenance scan over '{source}' cannot be partition-bounded: {why}"),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::NoAdmissibleTechnique {
+                    trigger,
+                    why,
+                } => (
+                    DiagnosticCode::MaintenanceNoAdmissibleTechnique,
+                    format!("no maintenance technique admits trigger {trigger}: {why}"),
+                ),
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message,
+                range: rowan::TextRange::empty(body_start),
+                code: Some(code),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for violation in &plan_diags.cell_column_group_violations {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: violation.clone(),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
         }
     }
 

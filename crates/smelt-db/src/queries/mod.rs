@@ -21,6 +21,7 @@ pub mod check_types;
 pub mod function_diagnostics;
 pub mod functions;
 pub mod loader;
+pub mod maintenance;
 pub mod monotonicity;
 pub mod parse;
 pub mod project;

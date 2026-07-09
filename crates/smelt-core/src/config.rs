@@ -242,6 +242,11 @@ pub struct Config {
     /// corresponding snapshot/reuse machinery.
     #[serde(default)]
     pub state: StateConfig,
+    /// Project-level `maintenance:` baseline (today only `scan_bounds`) —
+    /// the default every model's own `maintenance.scan_bounds` refines.
+    /// See [`ProjectMaintenanceConfig`].
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<ProjectMaintenanceConfig>,
 }
 
 /// Opt-in state posture for virtual environments (D-47).
@@ -685,6 +690,152 @@ pub struct BatchedConfig {
     /// Safety overrides for patterns that may diverge on partial data
     #[serde(default)]
     pub safety_overrides: BatchedSafetyOverrides,
+}
+
+/// The `maintenance:` block (`maintenance_plan.md` §Surface "Frontmatter"):
+/// per-cell technique preferences/pins and the scan-locality guardrail.
+/// Almost every model sets none of it — the plan derives cells, clamps, and
+/// locality verdicts on its own; this block only *constrains* the derived
+/// plan (a soft bias, a hard pin, or a refusal guardrail), never chooses a
+/// strategy the derivation didn't already admit.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceConfig {
+    /// Per-model soft default technique preference (`auto` = cost model).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub defaults: Option<MaintenanceDefaults>,
+    /// Per-cell overrides, keyed by the columns + trigger they address.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub cells: Vec<MaintenanceCellConfig>,
+    /// The partition-locality guardrail (the K8 default: `require:
+    /// partition_local`, `on_violation: error`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_bounds: Option<ScanBoundsConfig>,
+}
+
+/// `maintenance.defaults` — the per-model soft technique bias.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceDefaults {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer: Option<TechniquePreference>,
+}
+
+/// A soft/hard technique bias value — shared by `defaults.prefer` and
+/// `cells[].prefer`. `technique:` pins (bypassing the cost model) reuse
+/// [`CellTechnique`] instead, since it additionally admits
+/// `rederive_columns`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TechniquePreference {
+    Fold,
+    Recompute,
+    /// The cost model decides (the default when `defaults.prefer` is absent).
+    Auto,
+}
+
+/// One `maintenance.cells[]` entry: a per-`(columns × trigger)` override.
+/// `columns` naming members of more than one derived column group is an
+/// error — it would silently re-partition the plan
+/// (`maintenance_plan.md` §Surface "Frontmatter").
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct MaintenanceCellConfig {
+    /// Names any member of the derived column group this cell addresses.
+    pub columns: Vec<String>,
+    /// The trigger this cell handles: a `<source-address>` or the literal
+    /// `backfill`.
+    pub on: String,
+    /// Soft bias — the cost model may still choose a different admissible
+    /// technique.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub prefer: Option<TechniquePreference>,
+    /// Hard pin — bypasses the cost model, but never bypasses admission (a
+    /// pin naming an unadmitted technique is an error, not an override).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub technique: Option<CellTechnique>,
+}
+
+/// `maintenance.cells[].technique` — the hard-pin value set (a superset of
+/// [`TechniquePreference`]: `rederive_columns` is only meaningful as an
+/// explicit pin, never a soft bias).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CellTechnique {
+    Fold,
+    Recompute,
+    RederiveColumns,
+}
+
+/// The partition-locality guardrail (`maintenance_plan.md` §Semantics "The
+/// K8 guardrail"). A project-level block in `smelt.yml` sets the baseline;
+/// a per-model block refines it (narrower wins, exactly like the technique
+/// ladder). Check-only: never modifies a derived clamp, only refuses (or
+/// warns) when the derived plan exceeds the stated expectation.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ScanBoundsConfig {
+    /// Default (when absent): `partition_local`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub require: Option<ScanBoundsRequire>,
+    /// Default (when absent): `error`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on_violation: Option<ScanBoundsViolation>,
+    #[serde(default, skip_serializing_if = "HashMap::is_empty")]
+    pub per_source: HashMap<String, PerSourceScanBounds>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanBoundsRequire {
+    PartitionLocal,
+    None,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScanBoundsViolation {
+    Error,
+    Warn,
+}
+
+/// A named per-source acceptance/ceiling under `maintenance.scan_bounds`.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct PerSourceScanBounds {
+    /// Ceiling on the derived scan span for this source. Parsed but not yet
+    /// checked against the derived clamp (`maintenance_plan.md` §Known
+    /// Divergences) — reserved for a future phase.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub max_lookback: Option<String>,
+    /// Named acceptance of a full read of this source.
+    #[serde(default)]
+    pub allow_full_scan: bool,
+}
+
+impl ScanBoundsConfig {
+    /// The effective `require` policy, defaulting to `partition_local`.
+    pub fn require(&self) -> ScanBoundsRequire {
+        self.require.unwrap_or(ScanBoundsRequire::PartitionLocal)
+    }
+
+    /// Whether `source_address` is named with `allow_full_scan: true`.
+    pub fn allow_full_scan(&self, source_address: &str) -> bool {
+        self.per_source
+            .get(source_address)
+            .is_some_and(|p| p.allow_full_scan)
+    }
+}
+
+/// Project-level `maintenance:` block in `smelt.yml` — today only the
+/// `scan_bounds` baseline (`maintenance_plan.md` §Surface "Frontmatter":
+/// "A project-level default in `smelt.yml` sets the baseline; per-model
+/// blocks refine it").
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct ProjectMaintenanceConfig {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub scan_bounds: Option<ScanBoundsConfig>,
 }
 
 /// Parse the `unstable_schema:` flag from the text of a `smelt.yml` file.
@@ -1785,6 +1936,7 @@ models:
             python: None,
             target: None,
             state: StateConfig::default(),
+            maintenance: None,
         };
 
         let mut metadata = HashMap::new();
@@ -1818,6 +1970,7 @@ models:
             python: None,
             target: None,
             state: StateConfig::default(),
+            maintenance: None,
         };
 
         let mut metadata = HashMap::new();
@@ -1936,6 +2089,7 @@ targets:
             python: None,
             target: None,
             state: StateConfig::default(),
+            maintenance: None,
         };
 
         let mut metadata = HashMap::new();

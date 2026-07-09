@@ -449,6 +449,8 @@ impl Backend {
                 DbCode::PipeStageMalformed => "pipe-stage-malformed",
                 DbCode::GrainRequiredForIncremental => "grain-required-for-incremental",
                 DbCode::GrainRequiresIncremental => "grain-requires-incremental",
+                DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
+                DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -969,6 +971,7 @@ impl Backend {
                     python: None,
                     target: None,
                     state: Default::default(),
+                    maintenance: None,
                 });
             build_python_context(&all_files, &config, &project_root)
         };

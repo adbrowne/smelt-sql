@@ -269,6 +269,7 @@ mod tests {
                 python: None,
                 target: None,
                 state: Default::default(),
+                maintenance: None,
             }),
             sources: Arc::new(None),
             graph: Arc::new(tokio::sync::Mutex::new(graph)),

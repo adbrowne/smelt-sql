@@ -184,6 +184,11 @@ refresh: incremental
 grain: partition
 batched:
   unique_key: [d]
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
 ---
 SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
 "#,
@@ -310,6 +315,11 @@ refresh: incremental
 grain: partition
 batched:
   unique_key: [d]
+maintenance:
+  scan_bounds:
+    per_source:
+      events:
+        allow_full_scan: true
 ---
 SELECT d, MIN(val) AS min_val FROM smelt.sources.events GROUP BY d
 "#,
@@ -354,6 +364,11 @@ refresh: incremental
 grain: partition
 batched:
   unique_key: [d, user_id]
+maintenance:
+  scan_bounds:
+    per_source:
+      users:
+        allow_full_scan: true
 ---
 SELECT e.d, e.user_id, e.val, u.tier
 FROM smelt.sources.events e

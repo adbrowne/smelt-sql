@@ -90,6 +90,7 @@ pub fn load_workspace(project_root: &Path) -> LoadedWorkspace {
         python: None,
         target: None,
         state: StateConfig::default(),
+        maintenance: None,
     });
 
     // Sources: read sources.yml / sources.yaml if present.

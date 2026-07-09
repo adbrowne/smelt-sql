@@ -53,6 +53,7 @@ fn duckdb_config_and_target() -> (Config, Target) {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     };
     (config, target)
 }
