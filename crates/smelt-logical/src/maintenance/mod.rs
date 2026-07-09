@@ -25,6 +25,7 @@
 //! Nothing here is wired into diagnostics, planning, or execution; the module
 //! is pure data + pure functions (Salsa-purity compatible by construction).
 
+pub mod choice;
 pub mod derive;
 pub mod emit;
 pub mod grouping;
