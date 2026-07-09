@@ -57,6 +57,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 - Sub-day propagation grain; keyed-grain dirt-sets; time-unrolled self-edges in the graph (designed, refusing fail-loud — `maintenance_plan.md` §Known Divergences; revisit after this plan).
 - Straddle attribution without locality (ledger v1 is locality-or-explicit-footprint by spec).
 - CDF/snapshot-diff delta detection (v1 is append-only interval diff per P10; `change_feed` admission arms land but their delta *detection* trails).
+- Automatic, watermark-diffed `--since-upstream` (a persisted per-source "last propagated through" watermark in `smelt-state`, diffed each invocation) — `--since-upstream` in this plan takes the delta explicitly via `--source`/`--landed` (Known Divergence → `maintenance_plan.md` §Future Extensions "Automatic, watermark-diffed `--since-upstream`").
 - Backend-derived source facts (Known Divergence → `multi_backend.md`).
 - The `on_column_add:` policy knob (noted-not-surface in `models.md`).
 - Re-cut shape-profile compositions from the superseded L4 sub-plans (versioned SCD-2 executor, native-IVM delegation) — re-scaffolded from evidence after this plan lands the plan machinery.
@@ -79,8 +80,8 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP12  | done     | `6f97578f` | 2026-07-10 |
 | MP13  | done (bakeoff CLI deferred — see docs/ROADMAP.md §10) | `d8948bf5` | 2026-07-10 |
 | MP14  | done     | `00544764` | 2026-07-10 |
-| MP15  | blocked (delta-source design decision — see Blocked phases) |        | 2026-07-10 |
-| MP16  | blocked (pre-condition MP15 unresolved — see Blocked phases) |        | 2026-07-10 |
+| MP15  | pending (unblocked 2026-07-10 — delta-source decided as explicit CLI flags, see Blocked phases) |        |      |
+| MP16  | pending (unblocked 2026-07-10 — no longer pre-conditioned on automatic delta detection, see Blocked phases) |        |      |
 | MP17  | pending  |        |      |
 
 ---
@@ -452,18 +453,22 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 
 ### Phase MP15: Forward propagation — `smelt run --since-upstream`
 
-**Goal.** The graph layer's forward direction live (`maintenance_plan.md` §"The graph layer"): topological dirt reflection through per-edge clamps with outward grain ceiling, per-edge dirt keying the trigger cell, per-model dirt for consumers; `smelt run --since-upstream` prints the dirty set then runs exactly the propagated per-edge regions. Cyclic/self-referential/keyed-grain nodes refuse (`MaintenanceGraphUnsupportedNode`).
+**Goal.** The graph layer's forward direction live (`maintenance_plan.md` §"The graph layer"): topological dirt reflection through per-edge clamps with outward grain ceiling, per-edge dirt keying the trigger cell, per-model dirt for consumers. Delta *source* is explicit: `smelt run --since-upstream --source <address> --landed <start>..<end>` (repeatable) takes the caller-declared per-source deltas directly — no automatic recorded-state diffing (`maintenance_plan.md` §CLI, §Known Divergences "Delta detection for `--since-upstream` is explicit, not automatic, for v1"; the automatic watermark-diffed form is §Future Extensions, out of scope here). Prints the dirty set then runs exactly the propagated per-edge regions. Cyclic/self-referential/keyed-grain nodes refuse (`MaintenanceGraphUnsupportedNode`).
 
 **Pre-conditions.** MP11, MP14.
 
 **TDD tests to write first.**
 - Promote `crates/smelt-logical/tests/maintenance_tracer_propagation.rs` scenarios (S1–S12 minus refused ones) from tracer-fed to production-path.
-- `crates/smelt-cli/tests/since_upstream.rs::runs_exactly_the_propagated_regions` — two sources landing in one tick drive different cells over different regions of one model (P4); partitions outside the dirty set never scheduled (assert via reporter).
+- `crates/smelt-cli/tests/since_upstream.rs::runs_exactly_the_propagated_regions` — two `--source`/`--landed` deltas passed in one invocation drive different cells over different regions of one model (P4); partitions outside the dirty set never scheduled (assert via reporter).
 - `crates/smelt-cli/tests/since_upstream.rs::sufficiency_equals_full_refresh` — testkit equivalence after a propagated run.
 - `crates/smelt-cli/tests/since_upstream.rs::self_referential_node_refuses_fail_loud`
+- `crates/smelt-cli/tests/since_upstream.rs::source_without_landed_flag_propagates_nothing` — a source with no matching `--landed` interval contributes no dirt (no implicit whole-table or recorded-state fallback).
+- `crates/smelt-cli/tests/since_upstream.rs::malformed_landed_range_errors` — `--landed` without a matching `--source`, or a malformed interval, is a named CLI error, not a panic.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/maintenance/propagate.rs` (production promotion), `crates/smelt-runtime`, `crates/smelt-cli/src/commands/run*.rs`
+
+No `smelt-state` schema change: the per-source deltas come from the `--source`/`--landed` flags, not from a persisted watermark (that's the deferred automatic form).
 
 **Docs touched.** *Timeless.*
 - `docs/specs/cli.md`, docs-site (the scheduling story), `maintenance_plan.md` Known Divergences narrowed.
@@ -561,7 +566,11 @@ Append-only log.
   Options: (A) explicit CLI-supplied deltas (`--since-upstream --source <addr> --landed <start>..<end>`, repeatable); no new persisted state; an external poller is responsible for telling smelt what changed; matches the phase's stated Critical Files exactly (no `smelt-state` schema change) and the spec's own "a cron tick is only the poller" framing. (B) a new persisted per-source watermark in `smelt-state`, diffed against `covered_intervals` automatically each invocation — closer to a fully automatic `--since-upstream` with no flags, but requires touching `smelt-state` (outside this phase's Critical Files, needs scope sign-off) and still doesn't solve how a raw, never-modeled source's freshness would be discovered. (C) live backend source-freshness queries — explicitly out of scope; `maintenance_plan.md` Known Divergences already defers "backend-derived source facts" to `multi_backend.md`, and no such capability exists in `smelt-backend*` today. Recommendation: A — smallest, matches Critical Files, still exercises the real propagation math (graph assembly, per-edge regions, refusal paths, `execute_project` looped once per `(model, region)`); B can layer on top later without changing `propagate.rs`'s or the CLI's shape.
   Tree restored clean (an implementer subagent left two stray, unrelated edits to `docs/specs/maintenance_plan.md` and `docs/specs/SPEC_TEMPLATE.md` — a "Future Extensions" section — while exploring; both were reverted with `git checkout --` before this entry was recorded, since they were out of this phase's scope and not requested).
 
-**2026-07-10 — MP16 (backward resolution, `smelt build --period --include-upstreams`):** blocked without any code written. MP16's own Pre-conditions line names MP15 directly ("MP15 (shared edge objects)") and its Critical Files list `crates/smelt-logical/src/maintenance/propagate.rs` — the same module MP15 was to promote from tracer-fed to production. MP16's adjointness test (`forward(backward(P)) ⊇ P`) is meaningless without a production `forward` to test against; MP15 is still blocked on the unresolved `--since-upstream` delta-source design decision recorded above (2026-07-10). Building the backward direction first, against no shared production edge object, would mean inventing a second one-off edge representation now and reconciling it with whatever MP15 eventually lands — directly contradicting this phase's own review checklist ("One edge object, two directions (no second clamp implementation)"). No new option to add here; this is a pass-through block on MP15's still-open decision. Recommendation: resolve MP15 (pick option A/B/C above) first; MP16 unblocks automatically once `propagate.rs`'s production edge object exists.
+**2026-07-10 — resolved (human decision): option A.** `--since-upstream` takes the per-source delta explicitly (`--source <address> --landed <start>..<end>`, repeatable); no `smelt-state` schema change, no independent recorded-state diffing. Landed in `docs/specs/maintenance_plan.md` §CLI, §Known Divergences ("Delta detection for `--since-upstream` is explicit, not automatic, for v1"), and §Future Extensions (the deferred automatic watermark-diffed form, option B, layers on top later without changing `propagate.rs` or the CLI shape); mirrored in `docs/specs/cli.md`'s maintenance-CLI-surface divergence entry. Option C (live backend source-freshness queries) stays out of scope, noted in the same Future Extensions entry. MP15's Goal and TDD tests above are updated to the explicit-flag form. MP15's Progress-tracking row is `pending` again.
+
+**2026-07-10 — MP16 (backward resolution, `smelt build --period --include-upstreams`):** was blocked without any code written. MP16's own Pre-conditions line names MP15 directly ("MP15 (shared edge objects)") and its Critical Files list `crates/smelt-logical/src/maintenance/propagate.rs` — the same module MP15 was to promote from tracer-fed to production. MP16's adjointness test (`forward(backward(P)) ⊇ P`) is meaningless without a production `forward` to test against; MP15 was still blocked on the unresolved `--since-upstream` delta-source design decision recorded above (2026-07-10). Building the backward direction first, against no shared production edge object, would mean inventing a second one-off edge representation now and reconciling it with whatever MP15 eventually lands — directly contradicting this phase's own review checklist ("One edge object, two directions (no second clamp implementation)"). No new option was needed here; it was a pass-through block on MP15's decision.
+
+**2026-07-10 — resolved (pass-through): MP15 decided, MP16's own mechanism was never in question.** `smelt build --period --include-upstreams` was already explicit in the spec before this decision — the runner supplies the target period directly (`docs/specs/maintenance_plan.md` §CLI); backward resolution never needed to *discover* what changed upstream, only to resolve required ancestor slices for a caller-given period. MP16's block was solely the shared-edge-object pre-condition on MP15, which is now unblocked by the option-A decision above. MP16's Progress-tracking row is `pending` again, its Pre-conditions line ("MP15 (shared edge objects)") unchanged and now satisfiable once MP15 lands.
 
 ## Verification
 

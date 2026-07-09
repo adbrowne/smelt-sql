@@ -74,8 +74,12 @@ maintenance:
 ### CLI
 
 - `smelt explain <model>` — prints the plan (cells, clamps, locality, guarantee ledger, edges).
-- `smelt run --since-upstream` — forward propagation: compute per-source deltas from the recorded
-  state, run exactly the propagated per-edge regions with their trigger cells. Opt-in; the
+- `smelt run --since-upstream --source <address> --landed <start>..<end>` (`--source`/`--landed`
+  repeatable, one pair per source) — forward propagation: the runner (or an external poller)
+  declares what landed for each source since it last propagated; the graph reflects those
+  declared per-source deltas through the edges and runs exactly the propagated per-edge regions
+  with their trigger cells. No per-invocation delta is computed automatically — a source named
+  without a matching `--landed` delta propagates nothing for that invocation. Opt-in; the
   intended default posture once trusted. Prints the dirty set before acting.
 - `smelt build <model> --period <start>..<end> --include-upstreams` — backward resolution: print
   the per-ancestor required slices and build order; optionally execute the bounded build.
@@ -448,14 +452,19 @@ disagree; one per node cannot). Deeper rationale:
 - **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed
   dirt-sets and time-unrolled self-edges are designed (`10-dependency-propagation.md` §6, S12)
   and unbuilt.
-- **Delta detection** is built for v1: per-source partition-interval deltas are recorded in the
-  state store (`smelt_state::landed_deltas`), keyed by source address — an append-only clocked
-  source's landing is interval-diffed against prior coverage; a `mutable_snapshot` or unclocked
-  source always resolves to the whole-table delta. `change_feed` offset-based delta detection and
-  snapshot diffing are not yet built — every source still resolves through the
-  append-only-or-whole-table path regardless of a declared `change_feed` profile (P10). Nothing yet
-  consumes the recorded deltas — the graph layer's forward propagation (`smelt run
-  --since-upstream`) is the first consumer, unbuilt.
+- **Delta detection for `--since-upstream` is explicit, not automatic, for v1.** The runner (or an
+  external poller) supplies each source's landed delta directly on the command line
+  (`--source <address> --landed <start>..<end>`, §CLI); the graph layer reflects exactly the
+  supplied intervals through the edges. No persisted "last propagated through" watermark exists,
+  and no invocation independently diffs a source's current coverage against a prior propagation to
+  discover its own delta — a second `--since-upstream` call has no way to know what changed unless
+  the caller tells it. This sidesteps `smelt_state::landed_deltas` (built for v1 as a byproduct of
+  an ordinary model run — an append-only clocked source's landing is interval-diffed against prior
+  coverage; a `mutable_snapshot` or unclocked source always resolves to the whole-table delta) and
+  `change_feed` offset-based delta detection and snapshot diffing (not yet built), neither of which
+  the graph layer consumes today. An automatic, watermark-diffed `--since-upstream` with no
+  required flags is a possible future extension (§Future Extensions) once a persisted per-source
+  watermark lands in `smelt-state`; the explicit form does not block on it.
 - **Straddle attribution without locality** (a per-key footprint chaining across history) is
   scoped out of the ledger's v1: locality-or-explicit-footprint only (01 §8's own caveat).
 - **`models.md`'s refresh-axis rewrite is pending** (the `batched`/`keyed`/`versioned` strategy
@@ -469,6 +478,43 @@ disagree; one per node cannot). Deeper rationale:
   not yet cover — because the underlying surface doesn't exist yet — is the maintenance plan
   itself: the `maintenance:` frontmatter block, `smelt explain`'s cell/clamp/ledger output,
   `--since-upstream`, `--include-upstreams`, and `smelt bakeoff`.
+- **A group merged across two mutable inputs has no group-merge-provenance policy.** Per-cell
+  admission today checks obligations 4/5 (bounded reach/footprint) the same way regardless of
+  whether a column group's `mutation_sensitivity` set came from ONE input or several — a
+  partition-aligned multi-input merge (e.g. `orders.amount * fx_rates.rate`, both mutable,
+  joined on the output's own partition column) is admitted as a targeted `ColumnScopedMerge`
+  exactly like a single-input mutable dimension enrichment would be. A stricter
+  "partition-local ≠ foldable" policy — forcing region recompute whenever a group's
+  provenance spans more than one mutation-sensitive input, even when the read/write happen to
+  be individually bounded — is undecided and unbuilt; pinned by
+  `crates/smelt-logical/tests/maintenance_coverage_matrix.rs::ex12_multi_input_merge_degenerates_to_recompute`.
+- **The trigger-list builder's `explicitly_mutable` scoping misses `change_feed`-declared
+  sources entirely, not just clocked ones.** `derive_model_maintenance_plan`
+  (`crates/smelt-db/src/queries/maintenance.rs`) only constructs an `UpstreamMutation` trigger
+  for a source that is BOTH unclocked AND declares `mutation_profile: mutable_snapshot`
+  literally — `change_feed` maps to the stricter `MutableSnapshot` posture for *admission*
+  purposes (`source_facts`) but does not satisfy this literal-declaration check, so a
+  `change_feed` source (clocked or not) never gets a mutation cell constructed at all, the
+  same "no cell to even refuse" gap an append-only enrichment source has (the
+  `Trigger::UpstreamMutation` scoping divergence recorded above). Pinned by
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs::ex08_unclocked_change_feed_dimension_scan_unbounded`;
+  when a source's own posture (not just its admission fallback) IS threaded through
+  (`crates/smelt-logical/tests/maintenance_coverage_matrix.rs::ex14_change_feed_sum_recompute_only`,
+  `::ex26_change_feed_latest_writer_recompute_only` construct this directly at the pure-
+  derivation level), only full-input re-derivation is admitted — never an invertible-retraction
+  or order-monotone-overwrite fold — because no live fold machinery consumes a change feed's
+  delta shape yet.
+- **`INTERSECT`/`EXCEPT` are unclassified set operations.** `model_properties.md` §Known
+  Divergences already records that set-op distribution classifies `UNION ALL` only; this spec
+  records the maintenance-plan-level consequence directly: an `INTERSECT`/`EXCEPT` composition
+  falls through to the whole-model mutation-sensitivity collapse (same as any unrecognised
+  shape), so every admitted cell is `DeleteInsert` region recompute regardless of source
+  property — pinned by
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs::ex41_ex42_intersect_except_refuse_today`.
+  A future set-op distribution proof covering `INTERSECT`/`EXCEPT` would need its own
+  per-arm-cardinality reasoning (unlike `UNION ALL`'s multiset-union, an `INTERSECT`/`EXCEPT`
+  row's presence in the output depends on BOTH arms simultaneously, so no single arm's delta
+  alone determines a row's fate) before any targeted technique could ever be admitted for it.
 
 ## Future Extensions
 
@@ -501,6 +547,19 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     on how it composes with the reconciliation ledger (a redefinition invalidates the ledger's
     provenance identity for that group even though no upstream delta occurred).
 
+- **Automatic, watermark-diffed `--since-upstream`.** Today `--since-upstream` requires the caller
+  to supply each source's landed delta explicitly (`§CLI`, `§Known Divergences`). A future
+  extension persists a per-source "last propagated through" watermark in `smelt-state` and diffs
+  it against the source's current `covered_intervals` on every invocation, so a bare
+  `--since-upstream` with no `--source`/`--landed` flags discovers its own delta. This still does
+  not solve a raw, never-modeled source's freshness (no `covered_intervals` exists for something
+  smelt has never landed) — that remains live backend source-freshness querying, out of scope here
+  (no such capability exists in `smelt-backend*` today; sources declare posture in `sources.md`
+  rather than being polled for it). The explicit-flag form and the automatic form are not
+  exclusive: the automatic form would compute the same `--landed` intervals the explicit form
+  takes directly, so it can layer on top without changing the graph layer or the CLI surface
+  described in `§CLI`.
+
 ## References
 
 - **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit,propagate}.rs` (tracer v0);
@@ -521,7 +580,12 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   append/lateness/mutation schedules. The per-cell probe modules under
   `crates/smelt-cli/tests/property_discovery/` that consume the testkit crate remain disposable
   research probes (see `.claude/scripts/property-experimental-gate.sh`); only the shared harness
-  graduated.
+  graduated. `cargo test -p smelt-logical --test maintenance_coverage_matrix ::
+  coverage_matrix_is_inhabited` is the standing inventory gate over the research example
+  catalogue's coverage matrix (`docs/research/20260705-refresh-as-maintenance-plan/
+  07-example-catalogue.md` §"Coverage matrix"): every inhabited `(construct × source-property)`
+  cell must have at least one registered shape or pure-derivation assertion — adding a matrix
+  cell without a matching registry entry fails the test, by construction (additive-only).
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
   describe the trichotomy + grain surface; the plan itself (the `maintenance:` block, `smelt explain`,
