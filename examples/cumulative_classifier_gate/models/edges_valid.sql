@@ -1,6 +1,7 @@
 ---
 materialization: table
-refresh: cumulative
+refresh: incremental
+grain: key
 ---
 SELECT
     device_id,

@@ -6,7 +6,7 @@
 //!
 //! References: docs/specs/sources.md §"Source YAML shape" and §"Filesystem layout"
 
-use crate::config::TimeseriesConfig;
+use crate::config::{DataLatency, TimeseriesConfig};
 use crate::discovery::ModelDiscovery;
 use crate::resolver::WorkspaceLoadError;
 use serde::Deserialize;
@@ -53,6 +53,129 @@ impl SourceNameOverride {
     }
 }
 
+/// A source's declared mutation profile kind — the one non-derivable
+/// world-fact on the input-consumption axis (`docs/specs/models.md`
+/// §"Input-consumption axis"; `docs/specs/model_properties.md` §"Catalogued
+/// inputs"). Undeclared (`SourceInfo.mutation_profile == None`) is the
+/// conservative default: `smelt-logical`'s input-delta discovery (F9) treats
+/// an unclocked source with no declared profile as `mutable` and falls back
+/// to a whole-relation snapshot-diff rather than an optimistic delta that
+/// could silently drop rows.
+///
+/// The YAML wire name for `Mutable` is `mutable_snapshot` (`sources.md`
+/// §"`mutation_profile` — the structured block": the rename says *what a
+/// read observes* — a snapshot — which is exactly the fact that refuses
+/// folding). The Rust variant name stays `Mutable` so existing
+/// `smelt-logical` pattern matches on this type by Rust name are unaffected.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum MutationProfile {
+    /// Rows are only ever appended, never updated or deleted in place.
+    AppendOnly,
+    /// Rows may be updated or deleted in place — only a full re-scan sees
+    /// every change. Wire name: `mutable_snapshot`.
+    #[serde(rename = "mutable_snapshot")]
+    Mutable,
+    /// The source itself exposes a change-data feed (CDC/CDF): a run can read
+    /// only the rows that changed since the last run.
+    ChangeFeed,
+}
+
+impl MutationProfile {
+    /// The wire/YAML spelling of this kind, used in error messages.
+    fn wire_name(self) -> &'static str {
+        match self {
+            MutationProfile::AppendOnly => "append_only",
+            MutationProfile::Mutable => "mutable_snapshot",
+            MutationProfile::ChangeFeed => "change_feed",
+        }
+    }
+}
+
+/// Whether a delivered row of an `append_only` source may be redelivered.
+/// Sub-fact of [`SourceMutationProfile`] (`sources.md` §"`mutation_profile` —
+/// the structured block"). Default: `AtLeastOnce` (the conservative
+/// posture — a lazy declaration never licenses a cheaper technique than its
+/// most conservative value would, per `sources.md` Constraint 9).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Redelivery {
+    /// Each row arrives exactly once.
+    None,
+    /// A delivered row may arrive again (the conservative default).
+    #[default]
+    AtLeastOnce,
+}
+
+/// The delivery-contract recurrence bound: every pair of rows sharing `key`
+/// lies within `window` of each other on the event-time axis. Valid under
+/// any `mutation_profile.kind` (`sources.md` §"`mutation_profile` — the
+/// structured block"). Consumed by key temporal locality
+/// (`keyed_models.md`); always runtime-checked, never trusted
+/// (`KeyedRecurrenceBoundViolated`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyRecurrence {
+    /// Key column(s) the recurrence bound applies to (composite-valued).
+    pub key: Vec<String>,
+    /// The recurrence window on the event-time axis.
+    pub window: DataLatency,
+}
+
+/// The structured `mutation_profile` block (`sources.md` §"`mutation_profile`
+/// — the structured block"): a `kind` plus the sub-facts admission consumes.
+/// Bare-string shorthand (`mutation_profile: append_only`) normalizes to
+/// `SourceMutationProfile { kind, ..conservative defaults }` — there is no
+/// separate internal representation for the shorthand form.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SourceMutationProfile {
+    /// `append_only | mutable_snapshot | change_feed`.
+    pub kind: MutationProfile,
+    /// `append_only` sub-fact: how far behind the clock a row can arrive.
+    /// Also populated from the top-level `source_lateness:` alias
+    /// (`sources.md`'s `source_lateness` row) when the block itself does
+    /// not declare `lateness:`.
+    pub lateness: Option<DataLatency>,
+    /// `append_only` sub-fact: whether a delivered row may be redelivered.
+    /// Default: [`Redelivery::AtLeastOnce`].
+    pub redelivery: Redelivery,
+    /// `change_feed` sub-fact: does the feed carry deletes/updates as
+    /// retraction events? Default: `true` (the conservative posture).
+    pub retractions: bool,
+    /// `change_feed` sub-fact: is the feed ordered by its offset column?
+    pub ordered: Option<bool>,
+    /// `change_feed` sub-fact: stable per-delta identity column(s) — the
+    /// dedup key of the ledger's never-fold-twice obligation.
+    pub delta_identity: Option<Vec<String>>,
+    /// Delivery-contract recurrence bound, valid under any `kind`.
+    pub key_recurrence: Option<KeyRecurrence>,
+}
+
+impl SourceMutationProfile {
+    /// The bare-string-shorthand normalization: `{ kind, ..conservative
+    /// defaults }`.
+    pub fn from_kind(kind: MutationProfile) -> Self {
+        SourceMutationProfile {
+            kind,
+            lateness: None,
+            redelivery: Redelivery::default(),
+            retractions: true,
+            ordered: None,
+            delta_identity: None,
+            key_recurrence: None,
+        }
+    }
+}
+
+/// Where a source's pipeline publishes a completeness marker
+/// (`sources.md`'s `watermark:` row).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Watermark {
+    /// `<schema.table.column>` or bare `column` naming the completeness
+    /// marker.
+    pub complete_through: String,
+}
+
 /// Information about a single source discovered from a per-entity `.yml` file.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SourceInfo {
@@ -77,6 +200,33 @@ pub struct SourceInfo {
     /// Optional time dimension declaration. When present, the source is a
     /// pushdown target for incremental models that reference it.
     pub timeseries: Option<TimeseriesConfig>,
+    /// Declared mutation profile: kind (append-only / mutable-snapshot /
+    /// change-feed) plus its structured sub-facts. See
+    /// [`SourceMutationProfile`]. `None` is the undeclared/unknown case — the
+    /// fail-closed default consumed by `smelt-logical`'s input-delta
+    /// discovery (F9).
+    pub mutation_profile: Option<SourceMutationProfile>,
+    /// Declared source-lateness margin — the term of the reach split
+    /// (`docs/specs/model_properties.md` §"Unified bound/reach derivation").
+    /// Reuses [`DataLatency`]'s existing fail-loud interval parser; `None`
+    /// (absent) means no declared lateness margin (default 0). This is the
+    /// raw top-level `source_lateness:` key as written; when a
+    /// `mutation_profile:` block is also declared, this value is folded into
+    /// [`SourceMutationProfile::lateness`] as the alias (`sources.md`'s
+    /// `source_lateness` row) — declaring both is a `MalformedSource` error.
+    pub source_lateness: Option<DataLatency>,
+    /// Where the source's pipeline publishes a completeness marker
+    /// (`sources.md`'s `watermark:` row). Absent = derived watermark
+    /// (`max(partition_column)` processed so far).
+    pub watermark: Option<Watermark>,
+    /// Row identity of the source, composite-valued (a single declared
+    /// string normalizes to a one-element list). Licenses 1:1
+    /// join-cardinality proofs and dedup-free key-addressed merges.
+    /// Verified, never trusted (`sources.md` §Semantics "The trust rule").
+    pub unique_key: Option<Vec<String>>,
+    /// How far back the source can be re-read. Absent = assumed fully
+    /// replayable (`sources.md`'s trusted-replayable default).
+    pub retention: Option<DataLatency>,
 }
 
 impl SourceInfo {
@@ -156,6 +306,20 @@ pub enum SourceError {
 
     #[error("`name:` map key '{0}' names no declared target in smelt.yml")]
     InvalidTargetName(String),
+
+    #[error(
+        "both `source_lateness:` and `mutation_profile.lateness` are declared — declare lateness once (`source_lateness:` is an alias for `mutation_profile.lateness`)"
+    )]
+    LatenessDoubleDeclared,
+
+    #[error(
+        "`mutation_profile.{field}` is only valid for `kind: {expected_kind}`, but this source declares `kind: {actual_kind}`"
+    )]
+    MutationProfileSubFactWrongKind {
+        field: &'static str,
+        expected_kind: &'static str,
+        actual_kind: &'static str,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -189,6 +353,107 @@ struct RawSourceYaml {
     /// pushdown target for incremental models.
     #[serde(default)]
     timeseries: Option<TimeseriesConfig>,
+
+    /// Declared mutation profile — bare-string shorthand or the structured
+    /// block. See [`RawMutationProfile`].
+    #[serde(default)]
+    mutation_profile: Option<RawMutationProfile>,
+
+    /// Declared source-lateness margin — see [`DataLatency`]. Alias for
+    /// `mutation_profile.lateness`.
+    #[serde(default)]
+    source_lateness: Option<DataLatency>,
+
+    /// Where the source's pipeline publishes a completeness marker.
+    #[serde(default)]
+    watermark: Option<RawWatermark>,
+
+    /// Row identity of the source — single string or list, both accepted.
+    #[serde(default, deserialize_with = "opt_string_or_vec")]
+    unique_key: Option<Vec<String>>,
+
+    /// How far back the source can be re-read.
+    #[serde(default)]
+    retention: Option<DataLatency>,
+}
+
+/// `mutation_profile:` accepts either the bare-string shorthand
+/// (`mutation_profile: append_only`) or the structured block. Both forms
+/// normalize into one [`SourceMutationProfile`] in [`parse_source_yaml`] —
+/// there is no dual internal representation downstream of that
+/// normalization.
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum RawMutationProfile {
+    /// `mutation_profile: append_only` (or `mutable_snapshot` / `change_feed`).
+    Shorthand(MutationProfile),
+    /// The structured block with sub-facts.
+    Full(RawMutationProfileBlock),
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawMutationProfileBlock {
+    kind: MutationProfile,
+    #[serde(default)]
+    lateness: Option<DataLatency>,
+    #[serde(default)]
+    redelivery: Option<Redelivery>,
+    #[serde(default)]
+    retractions: Option<bool>,
+    #[serde(default)]
+    ordered: Option<bool>,
+    #[serde(default)]
+    delta_identity: Option<Vec<String>>,
+    #[serde(default)]
+    key_recurrence: Option<RawKeyRecurrence>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawKeyRecurrence {
+    #[serde(deserialize_with = "string_or_vec")]
+    key: Vec<String>,
+    window: DataLatency,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct RawWatermark {
+    complete_through: String,
+}
+
+/// A single string is sugar for a one-element list — the composite-valued
+/// convention shared by `unique_key:` and `mutation_profile.key_recurrence.key`
+/// (`sources.md` §"Design" "Composite `unique_key` from day one").
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum StringOrVec {
+    Single(String),
+    Multi(Vec<String>),
+}
+
+impl From<StringOrVec> for Vec<String> {
+    fn from(v: StringOrVec) -> Self {
+        match v {
+            StringOrVec::Single(s) => vec![s],
+            StringOrVec::Multi(v) => v,
+        }
+    }
+}
+
+fn string_or_vec<'de, D>(deserializer: D) -> Result<Vec<String>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    StringOrVec::deserialize(deserializer).map(Into::into)
+}
+
+fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    Option::<StringOrVec>::deserialize(deserializer).map(|opt| opt.map(Into::into))
 }
 
 #[derive(Deserialize)]
@@ -200,6 +465,91 @@ struct RawColumn {
     nullable: bool,
     #[serde(default)]
     description: Option<String>,
+}
+
+/// Normalize a raw `mutation_profile:` value (shorthand or structured block)
+/// plus the top-level `source_lateness:` alias into one [`SourceMutationProfile`].
+///
+/// Validates the trust-rule shape (`sources.md` §"Diagnostic codes"
+/// `MalformedSource` row): a sub-fact declared for the wrong `kind`, or both
+/// `source_lateness:` and `mutation_profile.lateness` declared.
+fn normalize_mutation_profile(
+    raw_profile: Option<RawMutationProfile>,
+    raw_source_lateness: &Option<DataLatency>,
+) -> Result<Option<SourceMutationProfile>, SourceError> {
+    let Some(raw_profile) = raw_profile else {
+        return Ok(None);
+    };
+
+    let mut profile = match raw_profile {
+        RawMutationProfile::Shorthand(kind) => SourceMutationProfile::from_kind(kind),
+        RawMutationProfile::Full(block) => {
+            let kind = block.kind;
+
+            if kind != MutationProfile::AppendOnly {
+                if block.lateness.is_some() {
+                    return Err(SourceError::MutationProfileSubFactWrongKind {
+                        field: "lateness",
+                        expected_kind: "append_only",
+                        actual_kind: kind.wire_name(),
+                    });
+                }
+                if block.redelivery.is_some() {
+                    return Err(SourceError::MutationProfileSubFactWrongKind {
+                        field: "redelivery",
+                        expected_kind: "append_only",
+                        actual_kind: kind.wire_name(),
+                    });
+                }
+            }
+
+            if kind != MutationProfile::ChangeFeed {
+                if block.retractions.is_some() {
+                    return Err(SourceError::MutationProfileSubFactWrongKind {
+                        field: "retractions",
+                        expected_kind: "change_feed",
+                        actual_kind: kind.wire_name(),
+                    });
+                }
+                if block.ordered.is_some() {
+                    return Err(SourceError::MutationProfileSubFactWrongKind {
+                        field: "ordered",
+                        expected_kind: "change_feed",
+                        actual_kind: kind.wire_name(),
+                    });
+                }
+                if block.delta_identity.is_some() {
+                    return Err(SourceError::MutationProfileSubFactWrongKind {
+                        field: "delta_identity",
+                        expected_kind: "change_feed",
+                        actual_kind: kind.wire_name(),
+                    });
+                }
+            }
+
+            SourceMutationProfile {
+                kind,
+                lateness: block.lateness,
+                redelivery: block.redelivery.unwrap_or_default(),
+                retractions: block.retractions.unwrap_or(true),
+                ordered: block.ordered,
+                delta_identity: block.delta_identity,
+                key_recurrence: block.key_recurrence.map(|kr| KeyRecurrence {
+                    key: kr.key,
+                    window: kr.window,
+                }),
+            }
+        }
+    };
+
+    if profile.lateness.is_some() && raw_source_lateness.is_some() {
+        return Err(SourceError::LatenessDoubleDeclared);
+    }
+    if profile.lateness.is_none() {
+        profile.lateness = raw_source_lateness.clone();
+    }
+
+    Ok(Some(profile))
 }
 
 fn default_nullable() -> bool {
@@ -291,6 +641,8 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
         .unwrap_or("")
         .to_string();
 
+    let mutation_profile = normalize_mutation_profile(raw.mutation_profile, &raw.source_lateness)?;
+
     Ok(SourceInfo {
         path: path.to_path_buf(),
         address_segments: vec![stem],
@@ -299,6 +651,13 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
         name_override: raw.name,
         tags: raw.tags,
         timeseries: raw.timeseries,
+        mutation_profile,
+        source_lateness: raw.source_lateness,
+        watermark: raw.watermark.map(|w| Watermark {
+            complete_through: w.complete_through,
+        }),
+        unique_key: raw.unique_key,
+        retention: raw.retention,
     })
 }
 
@@ -406,7 +765,6 @@ pub fn check_aggregate_sources_yml(project_root: &Path) -> Result<(), WorkspaceL
 // until they are also migrated in later phases.
 // ---------------------------------------------------------------------------
 
-use crate::config::DataLatency;
 use std::collections::HashMap;
 
 /// Sources configuration from the legacy aggregate sources.yml.

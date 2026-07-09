@@ -4,8 +4,8 @@ timeseries:
   event_time_column: event_ts
   partition_column: event_date
   granularity: day
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
 ---
 -- This model uses LAG without a RANGE BETWEEN INTERVAL clause.
 -- The planner cannot derive a temporal bound and must refuse it.

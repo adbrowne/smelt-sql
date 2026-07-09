@@ -395,12 +395,12 @@ discriminant = "dynamic"
 
 # ── smelt-db / type_inference/type_context ────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/type_context.rs:363"]
+["crates/smelt-db/src/type_inference/type_context.rs:379"]
 classification = "legitimate"
 reason = "opaque CTE bootstrap — CTE column types unknown at bootstrap time; Unknown is the correct placeholder"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/type_context.rs:687"]
+["crates/smelt-db/src/type_inference/type_context.rs:703"]
 classification = "legitimate"
 reason = "model column binding: non-Concrete SmeltType → Unknown; meta-type has no SQL scalar DataType"
 discriminant = "dynamic"

@@ -1,0 +1,6 @@
+description: Raw event stream backing the horizon_ceiling_comfortable example.
+columns:
+  - { name: event_id, type: INTEGER,   n: false }
+  - { name: user_id,  type: INTEGER,   n: true }
+  - { name: event_ts, type: TIMESTAMP, n: false }
+  - { name: amount,   type: DOUBLE,    n: true }

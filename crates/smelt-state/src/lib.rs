@@ -3,6 +3,7 @@ pub mod ddl_spark;
 pub mod file_store;
 pub mod history;
 pub mod intervals;
+pub mod reconciliation;
 pub mod schema_tracking;
 pub mod snapshot_store;
 

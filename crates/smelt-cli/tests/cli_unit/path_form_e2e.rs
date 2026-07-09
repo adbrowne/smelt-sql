@@ -56,6 +56,7 @@ fn config_with_targets(targets: HashMap<String, Target>) -> Config {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     }
 }
 

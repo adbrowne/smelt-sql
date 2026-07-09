@@ -94,7 +94,20 @@ impl DependencyGraph {
                     {
                         return None;
                     }
-                    Some(segs.join("."))
+                    let dep = segs.join(".");
+                    // A batched model may read its own prior partitions
+                    // (`smelt.<self>` — `docs/specs/batched_models.md`
+                    // §"Window independence and self-referential models").
+                    // That self-edge is not a topological dependency (the
+                    // model already exists by definition), so it must not
+                    // induce a cycle here; whether the self-reference
+                    // actually *converges* partition-by-partition is a
+                    // separate, later planner check
+                    // (`window_independence`/BL7), not this graph's concern.
+                    if dep == canonical {
+                        return None;
+                    }
+                    Some(dep)
                 })
                 .collect();
 
@@ -632,6 +645,23 @@ mod tests {
         assert!(err_msg.contains("Circular dependency"));
     }
 
+    /// A self-referencing model (`smelt.<self>`, e.g. a running-balance batched
+    /// model — `batched_models.md` §"Window independence and self-referential
+    /// models") must not be flagged as a circular dependency: the self-edge is
+    /// not a topological dependency, and whether it actually *converges*
+    /// partition-by-partition is a separate, later planner check (BL7), not
+    /// this graph's concern.
+    #[test]
+    fn test_self_reference_is_not_a_circular_dependency() {
+        let models = vec![make_model("A", vec!["A"])];
+
+        let graph = DependencyGraph::build(models, None).unwrap();
+        let order = graph
+            .execution_order()
+            .expect("a self-referencing model must not be treated as a cycle");
+        assert_eq!(order, vec!["A".to_string()]);
+    }
+
     #[test]
     fn test_undefined_reference() {
         // make_model wraps deps in ["models", dep], so the canonical dep key
@@ -779,7 +809,9 @@ mod tests {
                 ModelConfig {
                     materialization: None,
                     timeseries: None,
-                    incremental: None,
+                    refresh: None,
+                    grain: None,
+                    batched: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,
                     format: None,
@@ -812,6 +844,7 @@ mod tests {
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         }
     }
 

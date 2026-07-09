@@ -3,7 +3,7 @@ use anyhow::Result;
 use serde::Serialize;
 use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
-use smelt_core::{Granularity, IncrementalConfig, Materialization, ModelOriginKind};
+use smelt_core::{BatchedConfig, Granularity, Materialization, ModelOriginKind};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
 use std::collections::BTreeMap;
 
@@ -21,8 +21,8 @@ pub struct ExplainOutput {
 pub struct ExplainModel {
     pub dependencies: Vec<String>,
     pub materialization: Materialization,
-    /// Refresh axis: `"cumulative"` when the model uses the cumulative-aggregate
-    /// merge loop (`materialization: table` + `refresh: cumulative`). Omitted
+    /// Refresh axis: `"keyed"` when the model uses the keyed merge loop
+    /// (`materialization: table` + `refresh: keyed`). Omitted
     /// when the model uses the default full-refresh strategy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
@@ -95,6 +95,110 @@ fn is_self_origin(origins: &[String]) -> bool {
     origins.len() == 1
 }
 
+/// Build the plain-text `smelt explain <model>` maintenance-plan report
+/// (`maintenance_plan.md` §Surface "CLI": "prints the plan (cells, clamps,
+/// locality, guarantee ledger, edges)"). Pure string-builder — no I/O — so it
+/// is directly unit-testable; the caller only `println!`s the result.
+///
+/// `result` is the plan derived by `smelt_db::maintenance_plan_report`
+/// (already-derived data; this function never re-derives admission,
+/// locality, or ledger logic). `upstream` is the model's inbound edges
+/// (`DependencyGraph::get_upstream`), and `model_name` is its canonical path.
+pub fn build_maintenance_plan_report(
+    model_name: &str,
+    result: &smelt_db::queries::maintenance::MaintenancePlanResult,
+    upstream: &[String],
+) -> String {
+    use smelt_logical::maintenance::PartitionLocal;
+    use std::fmt::Write as _;
+
+    let mut out = String::new();
+    let _ = writeln!(out, "Maintenance plan: {}", model_name);
+    let _ = writeln!(out);
+
+    // Whole-model collapse: a column's provenance couldn't be resolved and
+    // the derivation fell back to the whole-model group. `degenerate` is the
+    // authoritative signal for this — non-empty exactly when
+    // `grouping::derive_column_groups` had to give up on per-column
+    // provenance (`maintenance_grouping.rs::degenerate_collapse_is_surfaced`).
+    // `column_groups.len() == 1` alone is not a reliable proxy: a
+    // legitimately single-group model spanning 2+ mutable sources is not
+    // degenerate, and a genuine collapse against a single-source model still
+    // has exactly one group with one source in `mutation_sensitivity`.
+    if !result.degenerate.is_empty() {
+        let _ = writeln!(
+            out,
+            "Note: {} column(s) could not distinguish per-column provenance and \
+             collapsed to a single column group — this model's maintenance plan \
+             treats those columns as mutation-sensitive to every listed source:",
+            result.degenerate.len(),
+        );
+        for d in &result.degenerate {
+            let _ = writeln!(out, "  - {}: {}", d.column, d.reason);
+        }
+        let _ = writeln!(out);
+    }
+
+    if result.plan.cells.is_empty() {
+        let _ = writeln!(out, "Cells: (none)");
+    } else {
+        let _ = writeln!(out, "Cells ({}):", result.plan.cells.len());
+        for cell in &result.plan.cells {
+            let _ = writeln!(
+                out,
+                "  - group {} on trigger {:?}",
+                cell.group, cell.trigger
+            );
+            let _ = writeln!(out, "      corner:    {:?}", cell.corner);
+            let _ = writeln!(out, "      technique: {:?}", cell.technique);
+            let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
+            match &cell.partition_local {
+                PartitionLocal::Yes => {
+                    let _ = writeln!(out, "      locality:  partition_local");
+                }
+                PartitionLocal::No { source, why } => {
+                    let _ = writeln!(
+                        out,
+                        "      locality:  NOT partition_local (source: {}, why: {})",
+                        source, why
+                    );
+                }
+            }
+            if cell.scans.is_empty() {
+                let _ = writeln!(out, "      scan clamps: (none)");
+            } else {
+                let _ = writeln!(out, "      scan clamps:");
+                for scan in &cell.scans {
+                    let _ = writeln!(
+                        out,
+                        "        - source={} column={} before={:?} after={:?}",
+                        scan.source, scan.column, scan.before, scan.after
+                    );
+                }
+            }
+        }
+    }
+    let _ = writeln!(out);
+
+    if result.plan.refusals.is_empty() {
+        let _ = writeln!(out, "Refusals: (none)");
+    } else {
+        let _ = writeln!(out, "Refusals ({}):", result.plan.refusals.len());
+        for refusal in &result.plan.refusals {
+            let _ = writeln!(out, "  - {:?}", refusal);
+        }
+    }
+    let _ = writeln!(out);
+
+    if upstream.is_empty() {
+        let _ = writeln!(out, "Inbound edges: (none)");
+    } else {
+        let _ = writeln!(out, "Inbound edges: {}", upstream.join(", "));
+    }
+
+    out
+}
+
 /// Build the explain output from the dependency graph and config.
 ///
 /// `origins` maps emitted model names to `(generator_file, generator_def_name)`.
@@ -115,8 +219,7 @@ pub fn build_explain_output(
         let materialization = config.get_materialization_with_metadata(model_name, metadata);
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -133,7 +236,7 @@ pub fn build_explain_output(
                     compute_batch_safety_label(model_name, &expanded_sql, model_file, &inc, &ts);
                 let source_bounds = compute_source_bounds(model_name, &expanded_sql, graph, config);
                 Some(ExplainIncremental {
-                    granularity: ts.granularity.clone(),
+                    granularity: ts.granularity,
                     partition_column: ts.partition_column.clone(),
                     event_time_column: ts.event_time_column.clone(),
                     unique_key: inc.unique_key.clone(),
@@ -155,10 +258,11 @@ pub fn build_explain_output(
                 generator_name: gn.clone(),
             });
 
-        // Emit `refresh: "cumulative"` when the model is cumulative; omit otherwise.
+        // Emit `refresh: "incremental"` when the model is keyed
+        // (`refresh: incremental` + `grain: key`); omit otherwise.
         let refresh = metadata
-            .and_then(|m| m.refresh.clone())
-            .filter(|r| *r == RefreshStrategy::Cumulative);
+            .filter(|m| m.is_keyed())
+            .and_then(|m| m.refresh.clone());
 
         models.insert(
             model_name.clone(),
@@ -212,7 +316,7 @@ pub fn build_physical_explain(
                 "incremental (partition: {}, granularity: {})",
                 partition_column, granularity
             ),
-            smelt_runtime::ModelStrategy::Cumulative => "cumulative_aggregate".to_string(),
+            smelt_runtime::ModelStrategy::Keyed => "cumulative_aggregate".to_string(),
             smelt_runtime::ModelStrategy::Ephemeral => "ephemeral".to_string(),
             smelt_runtime::ModelStrategy::Skipped { reason } => {
                 format!("skipped ({})", reason)
@@ -315,7 +419,7 @@ fn compute_batch_safety_label(
     name: &str,
     sql: &str,
     model_file: &ModelFile,
-    inc: &IncrementalConfig,
+    inc: &BatchedConfig,
     ts: &TimeseriesConfig,
 ) -> String {
     let model_info = ModelInfo {
@@ -407,13 +511,14 @@ mod tests {
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         }
     }
 
     #[test]
     fn test_batch_safety_uses_expanded_function_body() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{Granularity, IncrementalConfig};
+        use smelt_core::{BatchedConfig, Granularity};
 
         // A model whose only lookback lives inside a `smelt.define` body must
         // classify as `bounded_safe` — but only when the explain path expands
@@ -431,10 +536,13 @@ mod tests {
                     partition_column: "d".to_string(),
                     granularity: Granularity::Day,
                     week_start: None,
+                    assert_monotonic: false,
                 }),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+                grain: Some(smelt_core::config::Grain::Partition),
+                batched: Some(BatchedConfig {
                     unique_key: vec![],
+                    nondeterministic_columns: vec![],
                     safety_overrides: Default::default(),
                 }),
                 tags: vec![],
@@ -512,7 +620,7 @@ mod tests {
     #[test]
     fn test_explain_with_incremental() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{Granularity, IncrementalConfig};
+        use smelt_core::{BatchedConfig, Granularity};
 
         let models = vec![
             make_model("orders", vec![], "SELECT * FROM raw_orders"),
@@ -531,10 +639,13 @@ mod tests {
                     partition_column: "order_date".to_string(),
                     granularity: Granularity::Day,
                     week_start: None,
+                    assert_monotonic: false,
                 }),
-                incremental: Some(IncrementalConfig {
-                    enabled: true,
+                refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+                grain: Some(smelt_core::config::Grain::Partition),
+                batched: Some(BatchedConfig {
                     unique_key: vec![],
+                    nondeterministic_columns: vec![],
                     safety_overrides: Default::default(),
                 }),
                 tags: vec!["revenue".to_string(), "daily".to_string()],
@@ -595,12 +706,13 @@ mod tests {
     }
 
     /// `smelt explain --json` must emit `"materialization": "table"` and
-    /// `"refresh": "cumulative"` for a cumulative model, and must NOT emit
-    /// `"cumulative_aggregate"` anywhere in the materialization field.
+    /// `"refresh": "incremental"` for a keyed model (`refresh: incremental`
+    /// and `grain: key`), and must NOT emit `"cumulative_aggregate"` anywhere
+    /// in the materialization field.
     ///
     /// Spec oracle: `docs/specs/cli.md` §"`smelt explain --json` output schema".
     #[test]
-    fn explain_json_emits_refresh_cumulative_for_cumulative_model() {
+    fn explain_json_emits_refresh_keyed_for_keyed_model() {
         use crate::metadata::ModelMetadata;
         use smelt_core::config::RefreshStrategy;
 
@@ -611,7 +723,8 @@ mod tests {
         );
         model.metadata = Some(Box::new(ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Cumulative),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Key),
             ..Default::default()
         }));
 
@@ -628,22 +741,22 @@ mod tests {
         assert_eq!(
             model_entry.materialization,
             Materialization::Table,
-            "cumulative model materialization must be 'table', not anything else"
+            "keyed model materialization must be 'table', not anything else"
         );
 
-        // The `refresh` field must be `Some(Cumulative)`.
+        // The `refresh` field must be `Some(Incremental)`.
         assert_eq!(
             model_entry.refresh,
-            Some(RefreshStrategy::Cumulative),
-            "cumulative model must have refresh: Some(Cumulative)"
+            Some(RefreshStrategy::Incremental),
+            "keyed model must have refresh: Some(Incremental)"
         );
 
-        // Verify the JSON serialization: must emit `"refresh": "cumulative"`
+        // Verify the JSON serialization: must emit `"refresh": "incremental"`
         // and `"materialization": "table"`, must NOT contain `"cumulative_aggregate"`.
         let json = serde_json::to_string_pretty(&output).unwrap();
         assert!(
-            json.contains("\"refresh\": \"cumulative\""),
-            "JSON must contain '\"refresh\": \"cumulative\"'; got:\n{json}"
+            json.contains("\"refresh\": \"incremental\""),
+            "JSON must contain '\"refresh\": \"incremental\"'; got:\n{json}"
         );
         assert!(
             json.contains("\"materialization\": \"table\""),
@@ -655,7 +768,7 @@ mod tests {
         );
     }
 
-    /// A plain `materialization: table` model (no `refresh: cumulative`) must
+    /// A plain `materialization: table` model (no `refresh: keyed`) must
     /// NOT emit a `refresh` field in the JSON — the field is omitted for
     /// the default full-refresh strategy.
     #[test]

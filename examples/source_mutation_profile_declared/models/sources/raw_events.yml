@@ -1,0 +1,8 @@
+description: Raw event feed exposing a change-data feed; smelt reads only rows changed since the last run.
+mutation_profile: change_feed
+source_lateness: '2 hours'
+columns:
+  - { name: event_id, type: INTEGER,   nullable: false }
+  - { name: user_id,  type: INTEGER,   nullable: true }
+  - { name: event_ts, type: TIMESTAMP, nullable: false }
+  - { name: amount,   type: DOUBLE,    nullable: true }

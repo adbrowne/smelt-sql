@@ -71,13 +71,15 @@ pub fn rewrite(model: &ModelInfo) -> Option<Vec<ExecutionStep>> {
 
     for item in &analysis.items {
         match item {
-            SelectItemKind::GroupByKey { text, alias } => {
+            SelectItemKind::GroupByKey { text, alias, .. } => {
                 group_keys.push((text.clone(), alias.clone()));
             }
-            SelectItemKind::CountDistinct { argument, alias } => {
+            SelectItemKind::CountDistinct {
+                argument, alias, ..
+            } => {
                 count_distincts.push((argument.clone(), alias.clone()));
             }
-            SelectItemKind::OtherAggregate { text, alias } => {
+            SelectItemKind::OtherAggregate { text, alias, .. } => {
                 other_aggs.push((text.clone(), alias.clone()));
             }
         }

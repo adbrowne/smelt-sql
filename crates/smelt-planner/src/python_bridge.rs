@@ -45,7 +45,7 @@ fn model_info_to_py<'py>(py: Python<'py>, model: &ModelInfo) -> PyResult<Bound<'
     let types = py.import("smelt_sdk.types")?;
 
     // Timeseries config provides the incremental config that Python sees.
-    // IncrementalConfig (Rust) only carries unique_key + safety_overrides;
+    // BatchedConfig (Rust) only carries unique_key + safety_overrides;
     // partition_column / event_time_column / granularity live in TimeseriesConfig.
     let inc_config = match &model.timeseries_config {
         Some(ts) => {
@@ -98,15 +98,17 @@ fn analysis_to_py<'py>(py: Python<'py>, analysis: &SelectAnalysis) -> PyResult<B
     let items = PyList::empty(py);
     for item in &analysis.items {
         let py_item = match item {
-            SelectItemKind::CountDistinct { argument, alias } => {
+            SelectItemKind::CountDistinct {
+                argument, alias, ..
+            } => {
                 let cls = types.getattr("CountDistinct")?;
                 cls.call1((argument.as_str(), alias.as_str()))?
             }
-            SelectItemKind::OtherAggregate { text, alias } => {
+            SelectItemKind::OtherAggregate { text, alias, .. } => {
                 let cls = types.getattr("OtherAggregate")?;
                 cls.call1((text.as_str(), alias.as_str()))?
             }
-            SelectItemKind::GroupByKey { text, alias } => {
+            SelectItemKind::GroupByKey { text, alias, .. } => {
                 let cls = types.getattr("GroupByKey")?;
                 cls.call1((text.as_str(), alias.as_str()))?
             }
@@ -323,7 +325,7 @@ pub fn run_python_rules(models: &[&ModelInfo]) -> (Vec<Transformation>, Vec<Stri
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::types::{IncrementalConfig, TimeseriesConfig};
+    use crate::types::{BatchedConfig, TimeseriesConfig};
 
     #[test]
     fn test_discover_rules_without_packages() {
@@ -349,11 +351,12 @@ mod tests {
                     partition_column: "dt".to_string(),
                     granularity: crate::types::Granularity::Day,
                     week_start: None,
+                    assert_monotonic: false,
                 }),
-                incremental_config: Some(IncrementalConfig {
+                incremental_config: Some(BatchedConfig {
                     enabled: true,
                     unique_key: vec![],
-                    safety_overrides: crate::types::IncrementalSafetyOverrides::default(),
+                    safety_overrides: crate::types::BatchedSafetyOverrides::default(),
                 }),
             };
 

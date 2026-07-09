@@ -146,6 +146,7 @@ fn classification(aggregator_columns: Vec<AggregatorColumn>) -> CumulativeClassi
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             },
         },
     }
@@ -476,6 +477,7 @@ async fn bitwise_combiners_round_trip() {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             },
         },
     };

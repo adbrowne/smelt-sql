@@ -6,19 +6,26 @@
 //! CLI's `compute_incremental_windows` path, closing the gap that previously existed
 //! when `execute_project` used only `analyze_batch_safety`'s `context_days`.
 //!
-//! Also owns `validate_run_window_alignment` (moved from `smelt-cli::temporal`).
+//! Also owns `validate_run_window_alignment` (moved from `smelt-cli::temporal`)
+//! and `validate_run_window_against_partition_grid` (`g_run >= g_part`, BL5),
+//! both called from [`compute_incremental_windows`] so every real
+//! `smelt run`/`smelt backfill`/UI run enforces them — see
+//! `docs/specs/batched_models.md` §"Run window vs partition granularity".
+
+use std::collections::HashMap;
 
 use chrono::{Duration, NaiveDate};
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{Granularity, IncrementalConfig};
+use smelt_core::{BatchedConfig, Granularity};
+use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
 use smelt_planner::{
-    analyze_batch_safety, analyze_temporal_dependencies, compute_effective_window,
-    granularity_period_days, BatchSafety, ModelInfo,
+    analyze_temporal_dependencies, compute_effective_window, granularity_period_days, BatchSafety,
 };
 
 pub use smelt_planner::EffectiveWindow;
 
+use crate::compile::batch_safety_for_model;
 use crate::transformer::TimeRange;
 
 /// One batch in an incremental run.
@@ -53,50 +60,72 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 
 /// Compute incremental execution windows for an entire run range.
 ///
-/// Splits `full_range` into batches using `analyze_batch_safety` (unless overridden
-/// by `batch_size_days` or `per_partition`), then widens each batch's filter range
-/// by the effective temporal window (max of SQL-inferred lookback and `data_latency_days`).
+/// Splits `full_range` into batches using the F1 bound-based batch-safety
+/// roll-up (`compile::batch_safety_for_model`, unless overridden by
+/// `batch_size_days` or `per_partition`), then widens each batch's filter
+/// range by the effective temporal window (max of SQL-inferred lookback and
+/// `data_latency_days`).
+///
+/// `dep_timeseries` maps each upstream dependency that carries `timeseries:`
+/// to its `(address_segments, partition_column)` — see
+/// `compile::build_source_bound_map` for the exact shape/derivation. It
+/// drives the batch-safety classification; it does not affect filter
+/// widening (that stays SQL/`data_latency_days`-derived, untouched by BL2).
 ///
 /// `data_latency_days` should be resolved by the caller from the model's column
 /// metadata (`ColumnMetadata::data_latency` on the event-time column) or a
 /// sources configuration.
+///
+/// Returns `Err` (fail-closed, `batched_models.md` Constraint 10) when the
+/// batch-safety roll-up cannot classify the model (a `NotDerivable` source
+/// bound) — the caller must surface this as a hard refusal, never fall back
+/// to an approximate chunk shape.
+#[allow(clippy::too_many_arguments)]
 pub fn compute_incremental_windows(
     timeseries: &TimeseriesConfig,
-    inc_config: &IncrementalConfig,
+    _inc_config: &BatchedConfig,
     sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
     full_range: &TimeRange,
     batch_size_days: Option<u32>,
     per_partition: bool,
-) -> IncrementalWindows {
+) -> Result<IncrementalWindows, String> {
     let start_date = match parse_date(&full_range.start) {
         Ok(d) => d,
         Err(_) => {
-            return IncrementalWindows {
+            return Ok(IncrementalWindows {
                 batches: vec![],
                 effective_window: zero_effective_window(),
                 wide_batch_warning: None,
-            }
+            })
         }
     };
     let end_date = match parse_date(&full_range.end) {
         Ok(d) => d,
         Err(_) => {
-            return IncrementalWindows {
+            return Ok(IncrementalWindows {
                 batches: vec![],
                 effective_window: zero_effective_window(),
                 wide_batch_warning: None,
-            }
+            })
         }
     };
 
     if start_date >= end_date {
-        return IncrementalWindows {
+        return Ok(IncrementalWindows {
             batches: vec![],
             effective_window: zero_effective_window(),
             wide_batch_warning: None,
-        };
+        });
     }
+
+    // Fail-closed run-window validation (`batched_models.md` §"Run window vs
+    // partition granularity"): alignment to `timeseries.granularity`, then
+    // `g_run >= g_part` against the partition column's own derived grid unit.
+    // Must run before any batching/widening below — a misaligned or
+    // sub-`g_part` window is refused outright, never silently coarsened.
+    validate_run_window_against_partition_grid(sql, timeseries, start_date, end_date)?;
 
     // Analyze temporal dependencies to compute effective window.
     let stripped = smelt_parser::strip_frontmatter(sql);
@@ -116,15 +145,6 @@ pub fn compute_incremental_windows(
         effective_window.lookahead_days
     };
 
-    // Determine batch chunk size using analyze_batch_safety (respects SQL patterns).
-    let model_info = ModelInfo {
-        name: String::new(),
-        sql: sql.to_string(),
-        refs: vec![],
-        incremental_config: Some(inc_config.clone()),
-        timeseries_config: Some(timeseries.clone()),
-    };
-    let safety = analyze_batch_safety(&model_info);
     let granularity_period = granularity_days(&timeseries.granularity);
 
     let mut wide_batch_warning: Option<String> = None;
@@ -136,6 +156,11 @@ pub fn compute_incremental_windows(
     } else if let Some(override_days) = batch_size_days {
         override_days.max(1)
     } else {
+        // Determine batch chunk size from the F1 bound-based batch-safety
+        // roll-up (replaces the legacy text-based `analyze_batch_safety`).
+        // Fail-closed: propagate `Err` (a `NotDerivable` source) rather than
+        // approximating a chunk shape (`batched_models.md` Constraint 10).
+        let safety = batch_safety_for_model(&stripped, dep_timeseries)?;
         match &safety {
             BatchSafety::FullyBatchSafe => {
                 let total_days = (end_date - start_date).num_days() as u32;
@@ -187,11 +212,78 @@ pub fn compute_incremental_windows(
         batch_start = batch_end;
     }
 
-    IncrementalWindows {
+    Ok(IncrementalWindows {
         batches,
         effective_window,
         wide_batch_warning,
-    }
+    })
+}
+
+/// Compose F10's window-independence / ordered-execution verdict into the
+/// backfill chunker (BL7, `batched_models.md` §"Window independence and
+/// self-referential models").
+///
+/// `model_name` and `refs` identify a self-edge exactly as
+/// [`window_independence`] expects (`refs` is this model's own `smelt.ref()`
+/// list; a self-edge is `refs` containing `model_name`). Three outcomes:
+///
+/// - **`WindowIndependent`** (no self-edge, the default) — delegates to
+///   [`compute_incremental_windows`] unchanged; the model keeps its ordinary
+///   batch-safety-derived auto-chunking (or the caller's `per_partition`/
+///   `batch_size_days` override).
+/// - **`Ordered`** (a self-edge proven to converge partition-by-partition) —
+///   forces strictly-sequential single-partition-per-batch execution
+///   regardless of the batch-safety class *or* any `per_partition`/
+///   `batch_size_days` override: a self-referential window reads its own
+///   immediately-prior partition's committed output, so lumping multiple
+///   partitions into one wide batch (`FullyBatchSafe`/`BoundedSafe`'s
+///   multi-partition chunks) would read rows that do not exist yet — never
+///   safe to widen for an ordered model.
+/// - **`Refused`** — the self-edge does not provably converge (a forward
+///   read, an unbounded/whole-history scan, or an underivable bound) — `Err`,
+///   fail-closed, naming the non-convergent self-edge; never silently
+///   downgraded to `Ordered` or `WindowIndependent`.
+#[allow(clippy::too_many_arguments)]
+pub fn compute_incremental_windows_ordered(
+    model_name: &str,
+    refs: &[String],
+    timeseries: &TimeseriesConfig,
+    inc_config: &BatchedConfig,
+    sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+    data_latency_days: u32,
+    full_range: &TimeRange,
+    batch_size_days: Option<u32>,
+    per_partition: bool,
+) -> Result<IncrementalWindows, String> {
+    let stripped = smelt_parser::strip_frontmatter(sql);
+    let verdict = window_independence(
+        model_name,
+        refs,
+        Some(&timeseries.partition_column),
+        &stripped,
+    );
+
+    let forced_per_partition = match verdict {
+        WindowIndependence::Refused { reason } => {
+            return Err(format!(
+                "model '{model_name}' is not eligible for batched execution: {reason}"
+            ));
+        }
+        WindowIndependence::Ordered => true,
+        WindowIndependence::WindowIndependent => per_partition,
+    };
+
+    compute_incremental_windows(
+        timeseries,
+        inc_config,
+        sql,
+        dep_timeseries,
+        data_latency_days,
+        full_range,
+        batch_size_days,
+        forced_per_partition,
+    )
 }
 
 /// Validate that a run window `[start, end)` is aligned to the model's granularity.
@@ -303,6 +395,80 @@ pub fn validate_run_window_alignment(
             Ok(())
         }
     }
+}
+
+/// Derive the truncation/grid granularity (`g_part`) of `partition_column`'s
+/// SELECT-list projection expression in `sql`, if classifiable.
+///
+/// Locates the projection via `smelt_logical::analyze_select` (the shared
+/// select-item classifier — no second parse) and reads its truncation unit
+/// off the same structural monotonicity trace `trace_event_time` uses
+/// (`smelt_logical::analysis::monotonicity::classify_truncation_grid_unit`).
+/// Returns `None` — undecidable, not a positive disproof — when the
+/// projection can't be found or its shape doesn't resolve to a known grid
+/// unit; callers must fail open (skip the `g_run >= g_part` comparison) in
+/// that case, matching the trace's existing `Undecidable` posture.
+fn derive_partition_grid_unit(sql: &str, partition_column: &str) -> Option<Granularity> {
+    let analysis = smelt_logical::analyze_select(sql)?;
+    let expr = analysis.items.into_iter().find_map(|item| match item {
+        smelt_logical::SelectItemKind::CountDistinct { alias, expr, .. }
+        | smelt_logical::SelectItemKind::OtherAggregate { alias, expr, .. }
+        | smelt_logical::SelectItemKind::GroupByKey { alias, expr, .. }
+            if alias == partition_column =>
+        {
+            Some(expr)
+        }
+        _ => None,
+    })?;
+    smelt_logical::analysis::monotonicity::classify_truncation_grid_unit(&expr)
+}
+
+/// Validate the run window `[start, end)` against the model's derived
+/// partition granularity (`g_part`), in addition to the ordinary
+/// alignment-to-declared-granularity check ([`validate_run_window_alignment`]).
+///
+/// Two checks, in order:
+/// 1. The window aligns to `timeseries.granularity` boundaries (existing
+///    check, unconditional).
+/// 2. `timeseries.granularity` (`g_run`) is at least as coarse as the
+///    partition column's derived grid unit (`g_part`) — i.e. `g_run >=
+///    g_part` under `Granularity`'s increasing-coarseness ordering. When
+///    `g_part` can't be derived (an opaque projection, an unrecognised
+///    truncation unit), this second check is skipped — fail open, since an
+///    undecidable `g_part` is not a positive disproof.
+///
+/// Ships hard-validation only: a sub-`g_part` run window is rejected with a
+/// message naming the minimum window, never silently coarsened to fit
+/// (`batched_models.md` §"Run window vs partition granularity"; auto-coarsen
+/// is a deferred enhancement, see Known Divergences there).
+///
+/// Called from [`compute_incremental_windows`] — the single real driver both
+/// `smelt-cli` and `smelt-ui` runs go through (`execute_project`) — so both
+/// consumers get this refusal for free.
+pub fn validate_run_window_against_partition_grid(
+    sql: &str,
+    timeseries: &TimeseriesConfig,
+    start: NaiveDate,
+    end: NaiveDate,
+) -> Result<(), String> {
+    validate_run_window_alignment(start, end, &timeseries.granularity)?;
+
+    let Some(g_part) = derive_partition_grid_unit(sql, &timeseries.partition_column) else {
+        return Ok(());
+    };
+
+    if timeseries.granularity < g_part {
+        return Err(format!(
+            "run window granularity ({}) is finer than partition column '{}''s derived \
+             granularity ({}); the minimum run window for this model is one {}",
+            granularity_display(&timeseries.granularity),
+            timeseries.partition_column,
+            granularity_display(&g_part),
+            granularity_display(&g_part),
+        ));
+    }
+
+    Ok(())
 }
 
 /// Advance `current` by exactly one partition step for the given granularity.

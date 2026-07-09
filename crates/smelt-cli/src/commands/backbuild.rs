@@ -141,7 +141,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
 
     // backbuild always passes full_refresh: false — the upstream-closure
     // selector rebuilds upstream table models as full-refreshes (their default)
-    // while cumulative_aggregate models receive the per-partition merge loop.
+    // while keyed models receive the per-partition merge loop.
     let request = ExecuteRequest {
         target: args.target.clone(),
         select: upstream_selectors,

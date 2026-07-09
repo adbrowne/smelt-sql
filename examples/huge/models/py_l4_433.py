@@ -9,8 +9,8 @@ def py_l4_433(project):
     return """
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_time
   partition_column: event_date

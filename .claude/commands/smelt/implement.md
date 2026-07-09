@@ -18,8 +18,9 @@ A path to a plan file (e.g., `docs/plans/20260427-incremental_models.md`).
 ### Step 1: Load plan and spec
 
 1. Read the plan file completely.
-2. Read the spec referenced in the plan header (`docs/specs/<slug>.md`) completely. This is the oracle.
+2. Note the spec path referenced in the plan header (`docs/specs/<slug>.md`) — it is the oracle. Do **not** read it fully into your own context: the subagents read the sections they need themselves (see 3a/3b), and you only consult specific sections when adjudicating a disagreement. Keeping the spec out of the orchestrator context is deliberate — every token you hold is re-read on every subsequent turn by you, and duplicated into nothing; every token you *paste* into a subagent brief is paid twice more.
 3. Confirm the working tree is clean and you're on the tracking branch named in the plan header. If not, stop and ask.
+4. If you need to locate code (where a function lives, which crates consume an API) beyond what the phase's Critical-files list already states, delegate that to an **Explore** agent and keep only its conclusion — don't grep and read files into your own context.
 
 ### Step 2: Find the next phase
 
@@ -31,28 +32,24 @@ For each `pending` phase:
 
 #### 3a. Implementer subagent (red-green TDD)
 
-Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise — this command's own `model: opus` is for orchestration, not delegation). The brief must include:
+Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise — this command's own `model: opus` is for orchestration, not delegation). **Brief by reference, not by paste** — the subagent reads files itself; pasting the same content into the brief bills it once in your context and again in the subagent's. The brief must include:
 
-- The phase's section verbatim (Goal, Pre-conditions, TDD tests, Implementation shape, Critical files, Docs touched, Commit message).
-- The spec sections the phase implements (paste them, don't link only — the subagent has no other context).
-- The standing conventions from the plan's Execution prompt (red-green TDD, real-fixture tests, scope discipline, architectural invariants from `CLAUDE.md`).
-- An explicit instruction: write the listed TDD tests **as failing tests first**, then implement until green. Tree must be left passing:
-  - `cargo fmt --all -- --check`
-  - `cargo clippy --all-targets` (zero warnings)
-  - `cargo test`
-  - `cargo test -p smelt-cli --test example_diagnostics`
-- The list of files the subagent is **allowed to touch** (Critical files + Docs touched). Out-of-scope edits should be reported, not made.
-- **Timeless-oracle rule for spec/docs-site edits (CLAUDE.md).** The phase context you are pasting uses phase vocabulary — that vocabulary belongs to the *plan only*. When the implementer edits `docs/specs/<slug>.md` or `docs-site/docs/...`, those edits must describe the feature as if it has always existed: no `### Phase A — ...` headings, no `(Phase B)` inline labels, no `[deferred to Phase E1]` callouts in body sections. Surface/Semantics/Design entries describe behaviour. Implementation gaps go in the spec's **Known Divergences** in behavioural terms (with a plan-file link), not as plan-phase status notes in body sections. Code-comment edits follow the same rule: describe the code, not which plan phase introduced it.
+- A pointer to the phase: the plan path and the exact phase heading (e.g. `docs/plans/20260707-x.md` § "Phase SA6"). Instruct the subagent to read that section completely — Goal, Pre-conditions, TDD tests, Implementation shape, Critical files, Docs touched, Commit message — plus the plan's "Execution prompt" conventions section (red-green TDD, real-fixture tests, scope discipline, architectural invariants from `CLAUDE.md`).
+- A pointer to the spec sections the phase implements: the spec path and the section names (from the phase's Review checklist / your knowledge of the plan). The spec is the correctness oracle; the subagent must read those sections before writing tests.
+- An explicit instruction: write the listed TDD tests **as failing tests first**, then implement until green. Finish by running the bundled gate and leaving it green:
+  - `bash .claude/scripts/verify-phase.sh` (fmt + clippy zero-warnings + `cargo test` + example_diagnostics, failures-only output)
+- The allowed-files rule: only the phase's Critical files + Docs touched may be edited (the subagent reads the list from the phase section). Out-of-scope edits should be reported, not made.
+- **Timeless-oracle rule for spec/docs-site edits (CLAUDE.md).** The phase section the subagent reads uses phase vocabulary — that vocabulary belongs to the *plan only*. When the implementer edits `docs/specs/<slug>.md` or `docs-site/docs/...`, those edits must describe the feature as if it has always existed: no `### Phase A — ...` headings, no `(Phase B)` inline labels, no `[deferred to Phase E1]` callouts in body sections. Surface/Semantics/Design entries describe behaviour. Implementation gaps go in the spec's **Known Divergences** in behavioural terms (with a plan-file link), not as plan-phase status notes in body sections. Code-comment edits follow the same rule: describe the code, not which plan phase introduced it.
 
 Wait for the subagent to report. The expected report is: tests written, tests now green, all CI checks pass, commit ready (do **not** have the subagent commit — the main session commits in step 3d).
 
 #### 3b. Reviewer subagent (material findings only)
 
-Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise) as reviewer. Its brief:
+Spawn a fresh `general-purpose` subagent (use `model: sonnet` on the Agent tool unless the plan header says otherwise) as reviewer. Brief by reference here too — and in particular **do not run `git diff` yourself to paste it**; the diff would sit in your context for every remaining turn. Its brief:
 
-- The phase's Review checklist verbatim.
-- The spec sections the phase implements (paste them).
-- The full diff produced by the implementer: `git diff` against the last phase's commit (or against the plan's commit for Phase 1).
+- A pointer to the phase's Review checklist: plan path + phase heading (the reviewer reads it itself).
+- A pointer to the spec sections the phase implements (spec path + section names — the reviewer reads them itself).
+- The base ref to diff against: instruct the reviewer to run `git diff <last-phase-sha>..HEAD` itself (or against the plan's commit for Phase 1) and review that diff. Give it the sha, not the diff.
 - An instruction to report **only material findings**: correctness against spec, architectural invariants violated, missing TDD coverage, scope creep beyond the phase's stated files. Style nits and naming preferences are out of scope.
 - An explicit Timeless-oracle check: scan diffs to `docs/specs/` and `docs-site/` for `Phase [A-Z0-9]`, `(Phase X)`, `[deferred to Phase ...]`, `Phase 0 scaffold`, or other plan-vocabulary leakage in body sections. Flag each as a material finding (the rule lives in `CLAUDE.md`). Phase numbers are tolerated in **Known Divergences** when paired with a plan-file link; everywhere else in the spec/docs-site body, they are drift.
 

@@ -1,8 +1,8 @@
 ---
 materialization: table
 target: duckdb_local
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: session_date
   partition_column: metric_date

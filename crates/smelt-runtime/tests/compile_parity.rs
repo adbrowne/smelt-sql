@@ -49,6 +49,7 @@ fn test_config() -> Config {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     }
 }
 
@@ -160,7 +161,7 @@ fn test_expand_function_calls_reveals_inner_range_bound() {
     );
 
     // The deriver picks up the 1-day lookback from the expanded SQL.
-    let bounds = build_source_bound_map(&expanded, &dep_ts);
+    let (bounds, _warnings) = build_source_bound_map(&expanded, &dep_ts, None);
     let b = bounds
         .get("smelt.silver.events_parsed")
         .expect("bound entry for events_parsed");
@@ -170,7 +171,7 @@ fn test_expand_function_calls_reveals_inner_range_bound() {
     );
 
     // Control: WITHOUT expansion the inner bound is invisible (outer SQL only).
-    let bounds_outer = build_source_bound_map(sql, &dep_ts);
+    let (bounds_outer, _warnings) = build_source_bound_map(sql, &dep_ts, None);
     let before_outer = bounds_outer
         .get("smelt.silver.events_parsed")
         .map(|b| b.before_secs)

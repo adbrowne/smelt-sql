@@ -6,3 +6,9 @@ columns:
   type: VARCHAR
 - name: signup_date
   type: DATE
+# A dimension: rows may be renamed/corrected in place after creation. Declared
+# explicitly (not the fail-closed default) so `daily_events_enriched`'s
+# `UpstreamMutation` cell derives (`maintenance_plan.md` §"Per-cell
+# admission"; MP11's fact+dimension column-scoped-MERGE story).
+mutation_profile:
+  kind: mutable_snapshot

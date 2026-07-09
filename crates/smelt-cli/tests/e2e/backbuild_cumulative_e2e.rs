@@ -121,7 +121,8 @@ SELECT * FROM (
     // above) so the classifier can derive the driving-source relationship.
     let device_stats_sql = r#"---
 materialization: table
-refresh: cumulative
+refresh: incremental
+grain: key
 ---
 SELECT
     device_id,
@@ -240,7 +241,8 @@ SELECT * FROM (VALUES (DATE '2026-01-01', 1)) AS t(event_date, device_id)
 
     let device_stats_sql = r#"---
 materialization: table
-refresh: cumulative
+refresh: incremental
+grain: key
 ---
 SELECT device_id, COUNT(*) AS event_count
 FROM smelt.events
@@ -353,7 +355,8 @@ SELECT * FROM (
     // a synthetic `bucket` column derived from the amount to avoid that constraint.
     let device_summary_sql = r#"---
 materialization: table
-refresh: cumulative
+refresh: incremental
+grain: key
 ---
 SELECT
     amount AS bucket,

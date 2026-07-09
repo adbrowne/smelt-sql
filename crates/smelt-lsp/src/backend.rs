@@ -402,27 +402,31 @@ impl Backend {
                     "generator-body-forbids-model-reflection"
                 }
                 // Timeseries frontmatter validation diagnostic codes.
-                DbCode::TimeseriesRequiredForIncremental => "timeseries-required-for-incremental",
+                DbCode::TimeseriesRequiredForBatched => "timeseries-required-for-batched",
                 DbCode::MalformedTimeseries => "malformed-timeseries",
+                DbCode::MalformedFunctionalDependency => "malformed-functional-dependency",
+                DbCode::MalformedBoundedDomain => "malformed-bounded-domain",
                 // VALUES / CTE alias-column-list diagnostic codes.
                 DbCode::AliasColumnArityMismatch => "alias-column-arity-mismatch",
                 DbCode::EmptyValuesClause => "empty-values-clause",
-                // Planner-rule diagnostic codes (cumulative classifier,
-                // incremental batch-safety) surfaced via the uniform rule →
+                // Planner-rule diagnostic codes (keyed classifier,
+                // batched batch-safety) surfaced via the uniform rule →
                 // diagnostics interface.
-                DbCode::CumulativeRequiresGroupBy => "cumulative-requires-group-by",
-                DbCode::CumulativeUnknownAggregator => "cumulative-unknown-aggregator",
-                DbCode::CumulativeGroupByContainsPartitionColumn => {
-                    "cumulative-group-by-contains-partition-column"
+                DbCode::KeyedRequiresGroupBy => "keyed-requires-group-by",
+                DbCode::KeyedUnknownCombiner => "keyed-unknown-combiner",
+                DbCode::KeyedGroupByContainsPartitionColumn => {
+                    "keyed-group-by-contains-partition-column"
                 }
-                DbCode::CumulativeForbidsWindowFunctions => "cumulative-forbids-window-functions",
-                DbCode::CumulativeForbidsNondeterministic => "cumulative-forbids-nondeterministic",
-                DbCode::CumulativeNoDrivingSource => "cumulative-no-driving-source",
-                DbCode::CumulativeMultipleDrivingSources => "cumulative-multiple-driving-sources",
-                DbCode::CumulativeSqlNotParseable => "cumulative-sql-not-parseable",
-                DbCode::CumulativeForbidsTimeseries => "cumulative-forbids-timeseries",
-                DbCode::CumulativeForbidsIncremental => "cumulative-forbids-incremental",
-                DbCode::IncrementalNotBatchSafe => "incremental-not-batch-safe",
+                DbCode::KeyedForbidsWindowFunctions => "keyed-forbids-window-functions",
+                DbCode::KeyedForbidsNondeterministic => "keyed-forbids-nondeterministic",
+                DbCode::KeyedSnapshotPostureUnsupported => "keyed-snapshot-posture-unsupported",
+                DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
+                DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
+                DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
+                DbCode::KeyedForbidsBatched => "keyed-forbids-batched",
+                DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
+                DbCode::MaterializedViewForbidsBatched => "materialized-view-forbids-batched",
+                DbCode::BatchedNotSafe => "batched-not-safe",
                 // Multi-model section structure diagnostic codes.
                 DbCode::MalformedSectionDelimiter => "malformed-section-delimiter",
                 DbCode::UnclosedFrontmatter => "unclosed-frontmatter",
@@ -443,6 +447,10 @@ impl Backend {
                 DbCode::PipeUnknownOperator => "pipe-unknown-operator",
                 DbCode::PipeOperatorUnsupported => "pipe-operator-unsupported",
                 DbCode::PipeStageMalformed => "pipe-stage-malformed",
+                DbCode::GrainRequiredForIncremental => "grain-required-for-incremental",
+                DbCode::GrainRequiresIncremental => "grain-requires-incremental",
+                DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
+                DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
             };
             NumberOrString::String(code_str.to_string())
         });
@@ -963,6 +971,7 @@ impl Backend {
                     python: None,
                     target: None,
                     state: Default::default(),
+                    maintenance: None,
                 });
             build_python_context(&all_files, &config, &project_root)
         };

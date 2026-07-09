@@ -139,6 +139,27 @@ smelt.as_struct(<table-alias> [EXCEPT <col1>, <col2>, …])
 - Backend support is a capability gate — see `AsStructUnsupportedBackend` below. Compiles to the engine's native struct literal (`{f: v}` on DuckDB, `struct(v AS f)` on Spark).
 - v1 status — see Known Divergences.
 
+### Pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`)
+
+Three aggregate-position functions name the intent behind a key-grain column
+family (`keyed_models.md` §"The column-family catalogue") without adding any privileged
+treatment — each is an ordinary transparent function, defined with the same
+`smelt.define` machinery as a user-authored one, whose expansion is admitted on exactly
+the terms a hand-written call would be:
+
+| Call | Expands to | Column family |
+|---|---|---|
+| `smelt.latest(value, ordering)` | `MAX_BY(value, ordering)` | order-monotone overwrite |
+| `smelt.once(value)` | the once-write `COALESCE`-first-non-null canonical spelling | once-write (still requires the once-write provenance proof) |
+| `smelt.current(value)` | `ANY_VALUE(value)` | plain overwrite (snapshot-reconcile posture only) |
+
+Because these are transparent functions, the key-grain classifier sees the
+expanded body, not the call — `smelt.latest(status, updated_at)` classifies identically
+to a hand-written `MAX_BY(status, updated_at)`, and `smelt.once`/`smelt.current` are
+still gated by the once-write provenance proof and the snapshot-reconcile admission
+matrix respectively. They exist purely as the vocabulary the keyed-modelling guide
+teaches through; using the underlying aggregator directly is equivalent in every respect.
+
 ### Function-declaration frontmatter
 
 YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt.extern`:
@@ -153,7 +174,7 @@ YAML keys recognised on a frontmatter block preceding a `smelt.define` or `smelt
 | `provenance` | structured map (shape TBD) | absent | Declared column-provenance map. Gated behind `smelt.yml: unstable_schema: true`. |
 | `backends.<name>.emit` | string | declared name | (`smelt.extern` only) Backend-specific emitted name. |
 
-Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `incremental_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
+Model frontmatter keys (e.g. `materialization`, `incremental`) are catalogued in `models.md` / `batched_models.md` and the architecture spec — not duplicated here. The frontmatter parser is shared across all declaration kinds (model `SELECT`, `smelt.test`, `smelt.define`, and `smelt.extern`).
 
 ### Diagnostic codes
 
@@ -265,6 +286,7 @@ This section captures the load-bearing rationale behind the surface and semantic
 - **End-to-end `smelt build` execution of struct-returning function calls is restricted to DuckDB and to `.*` projection.** When a function returns `Expr<Struct<{…}>>` and is called in SELECT-list position, only `<call>.*` lowers to per-field projections today; single-field access (`<call>.field_name`) and Spark struct-literal lowering remain on the roadmap. See `docs/plans/20260519-functions-meta-gaps.md` Phase 3 for cross-engine codegen.
 - **Directory-scoped `smelt.define` uniqueness — implementation gap.** The normative rule (Constraint 4) is **directory-scoped**: two defines collide only when they share a name *in the same directory*, matching the path-derived `smelt.<path>` identity. The implementation today applies `DuplicateFunctionDefinition` **workspace-wide** (a stricter rule that also rejects same-leaf-name defines in different directories). Relaxing the check to directory scope is the remaining work; until then defines that the spec permits (same leaf name, different directories) are rejected.
 - **Diagnostic code ownership.** This spec owns the *semantics* of the diagnostic codes it lists — when each fires and what it anchors to. [`diagnostics.md`](diagnostics.md) is the cross-feature catalogue that indexes every code's severity and canonical trigger; the two must agree, with the owning feature spec governing semantics and `diagnostics.md` governing the catalogue row.
+- **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped.** Whether they ship as built-in `smelt.`-namespace functions (the default, provided the built-in registry can host transparent bodies) or as documented template snippets is settled alongside the `refresh: keyed` classifier union; the canonical once-write spelling `smelt.once` expands to is fixed at the same time. Tracked in `docs/plans/20260705-keyed-collapse.md` (Phase K6); normative content in `keyed_models.md` §Surface "The column-family catalogue" and §Known Divergences.
 
 ## References
 
@@ -293,7 +315,8 @@ This section captures the load-bearing rationale behind the surface and semantic
   - `docs/specs/scoping.md` — body-scope name resolution (parameters-first, no-overlap, splice contexts)
   - `docs/specs/gradual_typing.md` — Tier 1/2/3 checking model and error-tracing contract
   - `docs/specs/planner_integration.md` — how frontmatter properties feed planner rules
-  - `docs/specs/incremental_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
+  - `docs/specs/batched_models.md` — model-frontmatter keys (`materialization`, `incremental`); see §"Functions inside incremental bodies" for how transparent and opaque calls interact with per-model WHERE injection and batch-safety classification
+  - `docs/specs/keyed_models.md` — the `smelt.latest`/`smelt.once`/`smelt.current` pattern functions' column-family expansions and admission rules
 
 ### Research
 

@@ -62,8 +62,8 @@ const SQL_SIMPLE: &str = "SELECT 1 AS x, 2 AS y\n";
 /// rejects it unless `--allow-downgrade` is passed.
 const SQL_OVER_INCREMENTAL: &str = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date

@@ -1,0 +1,22 @@
+name: incremental_declared_monotonic
+version: 1
+
+# Fixture for the `timeseries.assert_monotonic` declared-monotonicity escape
+# hatch (docs/specs/model_properties.md §"Model-scoped declarations"): the
+# model's partition column is projected through a function the static
+# monotonicity classifier has no rule for, over the joined driving fact's own
+# partition column. Static analysis alone cannot prove an unrecognised
+# function is monotone (`NotTraceable{Undecidable}`); `assert_monotonic:
+# true` is the modeller's assertion that it is, admitting the join
+# driving-fact pushdown.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

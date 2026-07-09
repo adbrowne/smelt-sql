@@ -10,7 +10,7 @@ mod types;
 
 pub use error::BackendError;
 pub use smelt_core::config::{
-    Granularity, IncrementalConfig, IncrementalSafetyOverrides, IncrementalStrategy,
+    BatchedConfig, BatchedSafetyOverrides, Granularity, IncrementalStrategy,
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use types::{
@@ -130,22 +130,6 @@ pub trait Backend: Send + Sync {
                 self.drop_view_if_exists(schema, name).await?;
                 self.create_view_as(schema, name, sql).await?;
             }
-            Materialization::MaterializedView => {
-                if self.capabilities().supports_materialized_views {
-                    self.drop_table_if_exists(schema, name).await?;
-                    self.drop_view_if_exists(schema, name).await?;
-                    self.drop_materialized_view_if_exists(schema, name).await?;
-                    self.create_materialized_view_as(schema, name, sql).await?;
-                } else {
-                    warn!(
-                        "backend doesn't support materialized views, using table for '{}'",
-                        name
-                    );
-                    self.drop_view_if_exists(schema, name).await?;
-                    self.drop_table_if_exists(schema, name).await?;
-                    self.create_table_as(schema, name, sql).await?;
-                }
-            }
         }
 
         let duration = start.elapsed();
@@ -180,8 +164,8 @@ pub trait Backend: Send + Sync {
         let start = std::time::Instant::now();
 
         match (materialization, strategy) {
-            (Materialization::View | Materialization::MaterializedView, _) => {
-                // Views and materialized views can't be incremental — full refresh
+            (Materialization::View, _) => {
+                // Views can't be incremental — full refresh
                 self.execute_model(schema, name, sql, materialization, show_preview)
                     .await?;
                 // Return early to avoid double row count/preview
@@ -216,8 +200,8 @@ pub trait Backend: Send + Sync {
                     let _ = unique_key; // unused since the cumulative path owns merge_into
                     match inc_strategy {
                         IncrementalStrategy::DeleteInsert => {
-                            self.delete_partitions(schema, name, &partition).await?;
-                            self.insert_into_from_query(schema, name, sql).await?;
+                            self.delete_and_insert_transactional(schema, name, &partition, sql)
+                                .await?;
                         }
                         IncrementalStrategy::Append => {
                             self.insert_into_from_query(schema, name, sql).await?;
@@ -253,10 +237,29 @@ pub trait Backend: Send + Sync {
     /// longer an incremental strategy — it is the physical primitive of the
     /// `cumulative_aggregate` materialization (see
     /// `docs/specs/cumulative_aggregate.md`). The `unique_key` field on
-    /// `IncrementalConfig` is reserved for backends that may want to use it
+    /// `BatchedConfig` is reserved for backends that may want to use it
     /// for diagnostics or audit; it does not change strategy selection here.
-    fn resolve_strategy(&self, _config: &IncrementalConfig) -> IncrementalStrategy {
+    fn resolve_strategy(&self, _config: &BatchedConfig) -> IncrementalStrategy {
         IncrementalStrategy::DeleteInsert
+    }
+
+    /// Whether this backend can execute a column-scoped `MERGE` — the
+    /// physical primitive behind `smelt_logical::maintenance::Technique::
+    /// ColumnScopedMerge` (`docs/specs/model_transforms.md` §"Dimension-
+    /// driven horizon-bounded MERGE").
+    ///
+    /// Default: refuses. This is a genuine backend-capability gate, not a
+    /// policy choice — a backend that cannot run a targeted `MERGE` must
+    /// drop the technique from admission **at plan time**
+    /// (`smelt-runtime`'s `maintenance_driver::resolve_cell_technique`
+    /// consults this before treating a `ColumnScopedMerge` cell as live),
+    /// never surface a runtime surprise after the plan already chose it. A
+    /// backend that can execute `merge_into` against a source projection
+    /// that carries the full target row (recomputing only the cell's
+    /// column group, passing every other column through unchanged from the
+    /// existing state) should override this to `true`.
+    fn supports_column_scoped_merge(&self) -> bool {
+        false
     }
 
     /// Delete rows in a half-open partition range `[start, end)`.
@@ -280,6 +283,30 @@ pub trait Backend: Send + Sync {
         sql: &str,
     ) -> Result<(), BackendError>;
 
+    /// Delete a partition range and insert the replacement rows as **one**
+    /// backend transaction (`docs/specs/batched_models.md` §"First-run and
+    /// backfill" — "Each chunk's DELETE+INSERT is one backend transaction.
+    /// INSERT failure rolls back the chunk's DELETE; earlier committed
+    /// chunks do not roll back.").
+    ///
+    /// Default implementation preserves the pre-transactional behaviour
+    /// (two independent calls, no atomicity across them) for any backend
+    /// that does not override it — e.g. Spark Connect, whose execution model
+    /// does not offer a straightforward two-statement transaction wrapper
+    /// here. Backends that can wrap both statements in a native transaction
+    /// (DuckDB) should override this.
+    async fn delete_and_insert_transactional(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        self.delete_partitions(schema, name, partition).await?;
+        self.insert_into_from_query(schema, name, sql).await?;
+        Ok(())
+    }
+
     /// MERGE (upsert) rows using unique_key columns for matching.
     ///
     /// Matched rows are updated, unmatched rows are inserted.
@@ -302,6 +329,51 @@ pub trait Backend: Send + Sync {
         sql: &str,
         partition: &PartitionRange,
     ) -> Result<(), BackendError>;
+
+    /// Fold one delta identity into the warehouse-resident per-delta
+    /// reconciliation ledger and run `action_sql` (a `CREATE TABLE ... AS`
+    /// or `MERGE INTO` statement), refusing — without running `action_sql`
+    /// — if the delta is already reflected
+    /// (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    /// already reflected in the state").
+    ///
+    /// `ensure_sql` creates the ledger table if it does not already exist
+    /// (idempotent DDL); `insert_sql` records the delta identity and
+    /// violates the ledger table's `PRIMARY KEY` iff it is already present;
+    /// `exists_sql` is a `SELECT`-based existence check for backends that
+    /// cannot wrap `insert_sql` and `action_sql` in one native transaction.
+    /// All four strings come from `smelt_state::ddl_duckdb` (or the
+    /// matching Spark builder) — this trait does not depend on
+    /// `smelt-state` itself, only executes the SQL text a caller with that
+    /// dependency built.
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `exists_sql`, then `insert_sql` + `action_sql`
+    /// as separate statements) for any backend that does not override it —
+    /// the same precedent as [`Backend::delete_and_insert_transactional`]'s
+    /// default. A backend that can wrap `insert_sql` and `action_sql` in a
+    /// native transaction (DuckDB) should override this so a repeat delta
+    /// is refused by the ledger table's own constraint inside that
+    /// transaction — no check-then-act race across the write.
+    async fn fold_ledger_delta(
+        &self,
+        ensure_sql: &str,
+        insert_sql: &str,
+        exists_sql: &str,
+        action_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        let rows = self.execute_sql(exists_sql).await?;
+        let already_reflected = rows.iter().any(|batch| batch.num_rows() > 0);
+        if already_reflected {
+            return Err(BackendError::already_reflected(
+                "delta already reflected in the reconciliation ledger (best-effort existence check)",
+            ));
+        }
+        self.execute_sql(insert_sql).await?;
+        self.execute_sql(action_sql).await?;
+        Ok(())
+    }
 
     /// Create a materialized view from a SQL query.
     ///

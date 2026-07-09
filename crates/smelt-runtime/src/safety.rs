@@ -34,8 +34,7 @@ pub fn build_model_graph(
                 .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
             let incremental_config = config
                 .get_incremental_with_metadata(model_name, metadata)
-                .cloned()
-                .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+                .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
             let refs: Vec<String> = model
                 .refs
                 .iter()

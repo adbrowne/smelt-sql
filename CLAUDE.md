@@ -24,6 +24,8 @@ These rules constrain how the codebase evolves; the spec is the authoritative so
 - **Run pipeline parity (CLI ↔ UI)** — The compile + execute pipeline lives in exactly one place (`smelt-runtime`); CLI and UI both consume it via `execute_project(request, reporter)`. `smelt-runtime` internals (`SqlCompiler` constructors, `PrintContext` builders, emitter factories, `compile_with_sql`) are `pub(crate)`; a consumer can only obtain a `CompiledModel` through `execute_project` or `CompilerRegistry::get(...).compile_with_sql_and_ephemerals(...)`. Authoritative spec: [`docs/specs/architecture.md` §"Run pipeline parity rule (CLI ↔ UI)"](docs/specs/architecture.md#run-pipeline-parity-rule-cli--ui). Standing CI gate: `cargo test -p smelt-runtime --test execute_parity`.
 - **Diagnostic range encoding** — Diagnostics carry `rowan::TextRange` internally; conversion to `(line, column)` happens exactly once at the boundary, backed by `line_index::LineIndex`. Authoritative spec: [`docs/specs/architecture.md` §"Diagnostic range encoding rule"](docs/specs/architecture.md#diagnostic-range-encoding-rule).
 - **Layered single-ownership (`smelt-logical`)** — `smelt-db` has **no** production dependency on `smelt-planner`. The logical `Plan`/`LogicalNode` model, `RuleContext`, `detect_builtin_rules`, and the pure rule-data classifiers live in `smelt-logical` (above `smelt-core`/`smelt-parser`/`smelt-types`, below both `smelt-db` and `smelt-planner`). Rule *application* stays in `smelt-planner`. Structural assertion: `cargo tree -p smelt-db -i smelt-planner` shows no production path. Authoritative spec: [`docs/specs/architecture.md` §"Layered single-ownership"](docs/specs/architecture.md#layered-single-ownership).
+- **Property composition walk (`smelt-logical`)** — A composition-relevant model-property verdict (bound/reach, partition-alignment admission, the event-time monotonicity trace, grain/FD/determinism folding) is produced by the shared bottom-up walk in `analysis/walk.rs`, never by an ad hoc scan over the model's raw SQL text. A surviving non-walk scan is admissible only as a **leaf classifier** the walk invokes over one already-bounded node's own text, or as an **advisory heuristic** that never feeds admission or a derived bound — and must be classified as such in a doc comment. Authoritative spec: [`docs/specs/architecture.md` §"Property composition walk rule"](docs/specs/architecture.md#property-composition-walk-rule), [`docs/specs/model_properties.md` §Constraints "Composition happens in the walk, not in scans"](docs/specs/model_properties.md#constraints--invariants). Standing CI gate: `cargo test -p smelt-logical --test walk_coverage`.
+- **Maintenance-plan purity** — the maintenance plan (per-cell technique assignment, clamps, ledger grading, propagation edges) is pure data, derived once by pure functions in `smelt-logical`; consumers (`smelt-db` diagnostics, `smelt-planner` rule application, `smelt-runtime` lowering, the graph layer) never re-derive it. Upheld by convention today (the plan is a tracer with no production consumer yet); the structural gate lands with the production consumers. Authoritative spec: [`docs/specs/architecture.md` §"Constraints & Invariants"](docs/specs/architecture.md#constraints--invariants) item 12, [`docs/specs/maintenance_plan.md` §Constraints](docs/specs/maintenance_plan.md#constraints--invariants).
 - **Fail-loud discipline** — Every path that can encounter unrecognisable user input must emit a diagnostic rather than silently falling back to a default or `Unknown` value. Four CI gates enforce this; never lower them without a reviewer sign-off note in the commit:
   - **`unwrap`/`expect` ratchet** (`cargo test -p smelt-core --test hardening_budget::gate_detects_regression`) — per-crate production `unwrap` and `.expect("` counts must not exceed `.claude/hardening-baseline.txt`. New production `unwrap`/`expect` must be classified as infallible or converted to `Result`.
   - **`println!` gate** (`cargo test -p smelt-core --test hardening_budget::no_println_in_libraries`) — zero production `println!` in all library crates. Use `tracing::{debug,info,warn}` instead. Legitimate user-facing stdout in `smelt-cli`/`smelt-ui` is excluded.
@@ -104,6 +106,11 @@ cargo test
 
 # Verify example workspaces have no LSP diagnostics
 cargo test -p smelt-cli --test example_diagnostics
+
+# Standard pre-commit gate, bundled into ONE command (fmt + clippy + tests +
+# example_diagnostics, failures-only output). Prefer this over running the
+# four commands separately — it keeps agent transcripts small.
+bash .claude/scripts/verify-phase.sh          # add --fast to skip the full cargo test
 
 # Run the LSP server
 cargo run -p smelt-lsp
@@ -194,143 +201,19 @@ per-iteration cost after an autonomous run.
 
 ## Autonomy loop
 
-The autonomy loop drives the work headlessly. The work is **two-level**:
-`.claude/active-plan` names a `master_plan` (the top-level feature backlog —
-the feature sweep, whose bug ledger is the master to-do list) and an
-`active_subplan` (the focused remediation plan the loop is currently working).
-Each iteration spawns a fresh `claude --print`, finds the next `pending` phase
-of the active sub-plan (skipping `done`/`blocked` rows), executes it, and emits
-a sentinel the wrapper greps to decide what to do next:
+The autonomy loop drives plan work headlessly: each iteration spawns a fresh
+`claude --print`, executes the next `pending` phase of the active sub-plan
+(named via `.claude/active-plan`), and emits a sentinel
+(`<<PHASE_COMPLETE>>` / `<<PHASE_BLOCKED>>` / `<<SUBPLAN_ADVANCED>>` /
+`<<MASTER_EXHAUSTED>>` / `<<ALL_DONE>>`) that the wrapper
+(`.claude/scripts/autonomy-loop.sh`) dispatches on. Blocked phases are
+recorded and skipped, never stop-the-line.
 
-- `<<PHASE_COMPLETE>>` — phase committed; loop again.
-- `<<PHASE_BLOCKED>>` — **record and continue (no hard-stop)**. On a design
-  decision, an unrelated red baseline, or an implementation it can't land green,
-  the agent marks the phase row `blocked`, appends a dated entry to the
-  sub-plan's "## Blocked phases" section, commits, and the loop moves to the
-  next `pending` phase. Blocks are reviewed by a human later, not stop-the-line.
-- `<<SUBPLAN_ADVANCED>>` — the sub-plan is exhausted; the loop rolled up to the
-  master and advanced `active_subplan` to an existing sibling sub-plan with
-  pending work (conservative roll-up — it **never** scaffolds a new sub-plan or
-  authors specs autonomously).
-- `<<MASTER_EXHAUSTED>>` — sub-plan exhausted and no sibling sub-plan has pending
-  work; the loop stops and surfaces a master-level summary for a human to
-  scaffold the next sub-plan. (Exit code 2.)
-- `<<ALL_DONE>>` — master backlog fully remediated. (Exit code 0.)
-
-Legacy `<<PAUSE_FOR_HUMAN>>` is treated as `<<PHASE_BLOCKED>>` (record +
-continue). Only wrapper-level infra failures (merge conflict, dirty tree, claude
-crash, missing sentinel) halt the loop. The control loop runs on **Sonnet** by
-default (`MODEL=sonnet`; override with `MODEL=`). `autonomy-loop-forever.sh`
-wraps `autonomy-loop.sh` and restarts it after `MAX_ITERATIONS` or a crash.
-
-### How to run it (correctly)
-
-**Run it from a real terminal or a detached tmux/systemd unit — never from
-inside a Claude session, and never by asking Claude to launch it with Bash.**
-
-**Run it from the checkout whose branch you want it to advance — usually a
-git worktree, not the main repo root.** The loop is worktree-aware *by
-location*: `autonomy-loop.sh` derives `REPO_ROOT` as two levels up from the
-script's own path, and every `git merge origin/main` / commit / push acts on
-whatever working tree the script lives in. It also reads *that* tree's
-`.claude/active-plan`, prompt, and log config. So launch the copy of the
-script inside the checkout you want driven. For the current diagnostic-parity
-work that is the worktree
-`/home/andrew/smelt-sql/.claude/worktrees/test_features` (branch
-`worktree-test_features`) — running the main-repo copy at
-`/home/andrew/smelt-sql` would resolve `REPO_ROOT` to the main checkout (a
-different branch with a different active-plan) and push the wrong branch. The
-commands below use a `WT=` variable so you can point it at whichever checkout
-is correct.
-
-Why this matters: the loop *is* a chain of `claude --print` subprocesses. If
-you ask an interactive Claude session to `setsid nohup bash …` the loop, you
-nest a Claude session inside a Claude session, and the loop lives in the
-parent session's process group / cgroup. When the harness (or the
-auto-retry launcher) restarts or resumes that session, the whole tree is torn
-down — the loop receives SIGTERM and dies mid-iteration. (This is exactly how
-a launch on 2026-05-31 self-terminated: the wrapper logged `Interrupted by
-user` / `Terminated` the moment the parent session was resumed.)
-
-Correct invocations, in order of preference:
-
-```bash
-# Point this at the checkout you want the loop to drive (worktree for the
-# current diag-parity work; the main repo root only if that's where the
-# target branch + active-plan live):
-WT=/home/andrew/smelt-sql/.claude/worktrees/test_features
-
-# 1. Dedicated tmux window (recommended — survives your SSH session,
-#    matches the cgroup the memory sampler is written to watch):
-tmux new-session -d -s autonomy \
-  "cd $WT && bash .claude/scripts/autonomy-loop-forever.sh"
-tmux attach -t autonomy        # watch it; detach with Ctrl-b d
-
-# 2. Single bounded run (no auto-restart), foreground in a terminal:
-cd "$WT" && bash .claude/scripts/autonomy-loop.sh
-
-# 3. Fully detached from any login session via systemd-run:
-systemd-run --user --unit=smelt-autonomy --working-directory="$WT" \
-  bash "$WT/.claude/scripts/autonomy-loop-forever.sh"
-journalctl --user -u smelt-autonomy -f
-```
-
-Tunables (env vars): `MAX_ITERATIONS` (default 25), `PERMISSION_MODE`
-(default `bypassPermissions`), `MODEL` (default `sonnet`), `CARGO_BUILD_JOBS`
-(default 6 — caps link-time RSS spikes that previously tripped systemd-oomd),
-`ITER_MEMORY_MAX` / `ITER_MEMORY_HIGH` (default `32G` / `28G`).
-
-**Per-iteration memory isolation (infra hardening).** Each iteration's `claude`
-(and the cargo/smelt builds it spawns) runs inside its own transient
-`systemd-run --user --scope` bounded by `ITER_MEMORY_HIGH` (soft, reclaim) and
-`ITER_MEMORY_MAX` (hard). A runaway iteration is therefore killed **alone** by
-the kernel cgroup OOM-killer before systemd-oomd reaps a whole tmux pane on
-memory *pressure* (which it chooses by cgroup and can land on an unrelated
-session — the original collateral-kill bug). The scope also sets
-`ManagedOOMPreference=avoid` so oomd spares these capped, well-behaved scopes
-when some *other* process drives systemwide pressure. The supervisor stays
-outside the scope and restarts after a kill. On a host without `systemd-run`,
-or an older systemd that rejects a property, the script degrades (caps-only,
-then inline-uncapped) rather than failing. This complements the framework-side
-fix that bounds DuckDB's own `memory_limit` by default (see
-`docs/specs/smelt_yml.md` §Semantics — a single `smelt build` could otherwise
-consume ~80% of host RAM and tip the box into pressure;
-`docs/handoffs/2026-06-21-autonomy-loop-ooms.md`).
-
-Before launching, check nothing is already running and that the active plan
-is the one you want:
-
-```bash
-ps -eo pid,etime,args | grep -E 'bash .*autonomy-loop' | grep -v grep   # expect no output
-cat "$WT/.claude/active-plan"                                           # confirm in_repo_plan
-git -C "$WT" branch --show-current                                      # confirm the branch the loop will push
-```
-
-Note: a bare `ps … | grep autonomy-loop` will also match an interactive
-Claude session whose launch argument contains the script path (the
-auto-retry launcher runs `claude … start .claude/scripts/autonomy-loop-forever.sh`).
-Match `bash .*autonomy-loop` specifically so you don't false-positive on the
-session and skip a real launch.
-
-Logs land in `~/.claude/logs/diag-parity/iter-*.log` (per-iteration
-stdout+`.memory.log`); the forever-wrapper's own output goes wherever you
-redirect it. Stop it with `tmux kill-session -t autonomy` (or
-`systemctl --user stop smelt-autonomy`, or Ctrl-C in the foreground case).
-
-**Asking Claude to start it:** if you want *me* to kick it off, give me the
-prompt below. I will run it in a detached tmux session (option 1) so it
-survives this conversation, never with a bare backgrounded Bash call.
-
-> Start the autonomy loop in a **detached tmux session** named `autonomy`
-> by running `.claude/scripts/autonomy-loop-forever.sh` from **this
-> worktree** (the checkout you're currently in — `cd` into its root, do not
-> use the main repo path, since the loop pushes the branch of whatever
-> checkout it runs in). First confirm no `bash …autonomy-loop` process is
-> already running (a bare grep will match my own session — ignore that), and
-> echo the active plan and current branch from this checkout. Do **not**
-> launch it with `setsid`/`nohup`/`&` inside this session — it must outlive
-> this conversation. After starting, show me `tmux ls` and the first few
-> lines of the iteration log to confirm it's iterating.
+**Operator guide — how to launch/stop/tune it, memory isolation, logs,
+and the "ask Claude to start it" prompt — lives in
+[`docs/autonomy_loop.md`](docs/autonomy_loop.md).** Never launch the loop
+from inside a Claude session with a bare backgrounded Bash call; use a
+detached tmux session or systemd unit per that doc.
 
 ## Architecture
 
@@ -487,12 +370,10 @@ PROPTEST_CASES=1000 cargo test -p smelt-db --test nullability_property_tests pro
 4. Update LSP features if needed (diagnostics, goto-definition, etc.)
 5. Test with examples/test_workspace models
 6. **Run `cargo fmt --all` to format code**
-7. **Run `cargo clippy --all-targets` and fix all warnings**
-8. Run `cargo build` and `cargo test` to ensure everything compiles and passes
-9. **Run `cargo test -p smelt-cli --test example_diagnostics`** to verify examples have no diagnostics via the Salsa-direct path
-10. **Run `cargo test -p smelt-lsp --test example_workspaces`** to verify examples have no diagnostics via the real LSP backend (catches asymmetric-discovery bugs the Salsa-direct test misses)
-11. Update docs/ROADMAP.md with completion status and date
-12. **Commit** with descriptive message (includes ROADMAP.md update)
+7. **Run `bash .claude/scripts/verify-phase.sh`** — the bundled gate (fmt-check + clippy zero-warnings + `cargo test` + example_diagnostics) in one command with failures-only output
+8. **Run `cargo test -p smelt-lsp --test example_workspaces`** to verify examples have no diagnostics via the real LSP backend (catches asymmetric-discovery bugs the Salsa-direct test misses)
+9. Update docs/ROADMAP.md with completion status and date
+10. **Commit** with descriptive message (includes ROADMAP.md update)
 
 ### Before Ending a Conversation
 

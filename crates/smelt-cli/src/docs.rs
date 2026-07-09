@@ -42,8 +42,8 @@ pub struct CatalogModel {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub tags: Vec<String>,
     pub materialization: String,
-    /// Refresh axis: `"cumulative"` when the model uses the cumulative-aggregate
-    /// merge loop. Omitted when the model uses the default full-refresh strategy.
+    /// Refresh axis: `"keyed"` when the model uses the keyed merge loop.
+    /// Omitted when the model uses the default full-refresh strategy.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
     pub path: String,
@@ -258,8 +258,7 @@ pub fn build_catalog(
 
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -267,7 +266,7 @@ pub fn build_catalog(
 
         let incremental = match (inc_config, ts_config) {
             (Some(inc), Some(ts)) => Some(CatalogIncremental {
-                granularity: serde_json::to_value(&ts.granularity)
+                granularity: serde_json::to_value(ts.granularity)
                     .ok()
                     .and_then(|v| v.as_str().map(|s| s.to_string()))
                     .unwrap_or_else(|| "unknown".to_string()),
@@ -300,10 +299,11 @@ pub fn build_catalog(
 
         let tests_targeting = test_targets.get(model_name).cloned().unwrap_or_default();
 
-        // Emit `refresh: "cumulative"` when the model is cumulative; omit otherwise.
+        // Emit `refresh: "incremental"` when the model is keyed
+        // (`refresh: incremental` + `grain: key`); omit otherwise.
         let refresh = metadata
-            .and_then(|m| m.refresh.clone())
-            .filter(|r| *r == RefreshStrategy::Cumulative);
+            .filter(|m| m.is_keyed())
+            .and_then(|m| m.refresh.clone());
 
         models.insert(
             model_name.to_string(),

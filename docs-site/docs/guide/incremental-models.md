@@ -14,24 +14,26 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-Incremental behavior is configured using two frontmatter blocks:
+Incremental behavior is configured by selecting `refresh: incremental` + `grain: partition`, plus one required frontmatter block:
 
+- **`refresh: incremental`** opts the model into the derived maintenance plan. It implies a stored `table` — you do not also declare `materialization: table`.
+- **`grain: partition`** declares that a stored row is one row of a complete, partition-addressed table — the shape this guide covers. (`grain: key` is a different shape; see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md).)
 - **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
-- **`incremental:`** opts the model into incremental execution and carries strategy-specific keys.
+- **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`).
 
-Both blocks are required when running incrementally. Declaring `incremental:` without `timeseries:` is a validation error (`TimeseriesRequiredForIncremental`).
+`timeseries:` is required when `refresh: incremental` + `grain: partition` is set. Declaring `refresh: incremental` + `grain: partition` without `timeseries:` is a validation error (`TimeseriesRequiredForBatched`). A `batched:` block without `refresh: incremental` is also a validation error.
 
 ### Frontmatter example
 
 ```sql
 ---
 materialization: table
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: day
-incremental:
-  enabled: true
 ---
 
 SELECT
@@ -44,7 +46,7 @@ WHERE transaction_timestamp IS NOT NULL
 GROUP BY 1, 2
 ```
 
-`timeseries:` declares the time dimension; `incremental:` opts the model into incremental execution.
+`refresh: incremental` + `grain: partition` opts the model into incremental execution; `timeseries:` declares the time dimension.
 
 ### smelt.yml example
 
@@ -52,20 +54,20 @@ GROUP BY 1, 2
 models:
   daily_revenue:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
 ```
 
-### `incremental:` fields
+### `batched:` fields
 
 | Field | Required | Description |
 |---|---|---|
-| `enabled` | No | Defaults to `true`. Set to `false` to disable incremental processing. |
 | `unique_key` | No | List of columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
+| `nondeterministic_columns` | No | Output columns exempt from the determinism requirement (e.g. an `inserted_at = NOW()` audit stamp). See [Non-deterministic columns](#non-deterministic-columns). |
 | `safety_overrides` | No | Override safety checks for patterns that may behave differently on partial data. See [Safety analysis](#safety-analysis). |
 
 For the `timeseries:` fields (`event_time_column`, `partition_column`, `granularity`, `week_start`), see the [timeseries reference](../reference/timeseries.md).
@@ -98,6 +100,17 @@ The longer form `--event-time-start` and `--event-time-end` is also supported an
 
 !!! note
     Non-incremental models in the DAG are still executed normally. The time range only affects models with incremental configuration.
+
+### Run window granularity vs partition granularity
+
+The declared `granularity:` must be at least as coarse as the granularity actually produced by the model's `partition_column` expression. If `partition_column` is computed with `DATE_TRUNC('day', event_time)`, the model's real partition grid is daily, and `granularity: hour` is rejected even though the run window itself might otherwise look valid — an hourly run window doesn't correspond to a real partition boundary on a daily-partitioned model. The rejection names the minimum valid window:
+
+```
+run window granularity (hour) is finer than partition column 'event_date''s derived
+granularity (day); the minimum run window for this model is one day
+```
+
+Declaring `granularity: day` (or coarser, e.g. `week`) on the same model is valid — run-window size and partition granularity are otherwise independent, as long as the declared granularity is not finer than what the SQL actually produces. When smelt can't determine the partition column's actual granularity from the SQL (an opaque function call it doesn't recognize), this extra check is skipped and only the ordinary run-window alignment check applies — smelt never guesses or silently widens the window to compensate.
 
 ### Auto mode
 
@@ -156,12 +169,12 @@ ORDER BY 1, 2
 models:
   daily_revenue:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
 ```
 
 **Running it**:
@@ -187,11 +200,31 @@ smelt statically analyzes your SQL for patterns that can produce incorrect resul
 | Pattern | Why it is unsafe |
 |---|---|
 | Window functions with unbounded frames | A `ROW_NUMBER() OVER (ORDER BY ts)` computed on one day's data gives different results than the same function on the full dataset. |
-| HAVING with aggregates | `HAVING COUNT(*) > 10` may filter out groups that would pass if all data were present. |
-| LIMIT | `LIMIT 100` on partial data returns different rows than on the full table. |
+| HAVING with aggregates | `HAVING COUNT(*) > 10` may filter out groups that would pass if all data were present — **unless** the `GROUP BY` already groups by `partition_column` (see below). |
+| LIMIT | `LIMIT 100` on partial data returns different rows than on the full table. Always blocked — there is no group-alignment relaxation for it. |
 | Non-deterministic functions | `RANDOM()`, `NOW()`, and similar functions produce different results on each run. |
 | Subqueries | Subqueries may reference data outside the filtered time range. |
-| DISTINCT | `SELECT DISTINCT` on partial data may miss duplicates that span partition boundaries. |
+| DISTINCT | `SELECT DISTINCT` on partial data may miss duplicates that span partition boundaries — **unless** `partition_column` is projected in the same scope (see below). |
+
+### Group-aligned HAVING and DISTINCT
+
+`HAVING` and `DISTINCT` are admitted without a safety override when they are **group-aligned** to `partition_column`:
+
+- A `HAVING` clause is admitted when its own `GROUP BY` is a superset of `partition_column` — every group is already scoped to one partition, so a partial run and a full refresh see the same group composition within that partition.
+- A `SELECT DISTINCT` is admitted when `partition_column` is projected in the same scope — the dedup key is the whole row, so two rows can only collide when they share the same partition value.
+
+```sql
+-- Admitted without an override: GROUP BY includes partition_column (revenue_date).
+SELECT
+    transaction_timestamp::DATE as revenue_date,
+    user_id,
+    SUM(amount) as total_revenue
+FROM raw.transactions
+GROUP BY 1, 2
+HAVING SUM(amount) > 100
+```
+
+This alignment check runs per scope: in a model whose SQL is a `UNION ALL` of several branches, each branch's own `HAVING`/`DISTINCT` is checked against that branch's own `GROUP BY`/select list — a branch that is not itself aligned is refused by name even if another branch is aligned. `LIMIT` has no equivalent relaxation and is always blocked.
 
 ### When a model is refused
 
@@ -214,6 +247,73 @@ smelt run --event-time-start 2025-01-01 --event-time-end 2025-01-02 --allow-down
 
 With `--allow-downgrade` set, refused models fall back to a full-table refresh for this run. A warning is emitted for each downgraded model. This flag must be passed explicitly every time; it is not persisted anywhere. Using it regularly means the model is not actually running incrementally — fix the SQL instead.
 
+### Declaring monotonicity when smelt can't prove it
+
+Some `event_time`/partition-column expressions cannot be proven monotone by static analysis alone — most commonly a projection through a UDF or another opaque function call. By default smelt rejects the pushdown in that case (the safe, conservative default). If you know the expression is in fact monotone non-decreasing, set `assert_monotonic: true` on the `timeseries:` block:
+
+```yaml
+models:
+  joined_daily:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    timeseries:
+      event_time_column: partition_key
+      partition_column: partition_key
+      granularity: day
+      assert_monotonic: true
+```
+
+```sql
+SELECT
+    my_normalize_fn(f.partition_key) AS partition_key,
+    f.user_id,
+    g.attribute
+FROM smelt.sources.fact f
+JOIN smelt.sources.lookup g ON f.user_id = g.user_id
+```
+
+`assert_monotonic` only ever **widens** the pushdown decision — it never overrides a case smelt can already prove is *not* monotone. A constant/`NULL` seed, a row-nondeterministic function (`RANDOM()`, `UUID()`), a periodic or piecewise construct (`MOD`, `CASE`, `EXTRACT`), or an ambiguous/unresolvable column reference is still refused even with the declaration set — only an otherwise-unrecognised function call is admitted.
+
+### Non-deterministic columns
+
+The non-deterministic-function check can be relaxed per column instead of disabled entirely. List the output column in `batched.nondeterministic_columns` and the value is allowed to vary between runs — useful for audit stamps and surrogates such as `inserted_at = NOW()` or `batch_id = UUID()`:
+
+```yaml
+models:
+  audit_stamped:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    timeseries:
+      event_time_column: event_time
+      partition_column: event_date
+      granularity: day
+    batched:
+      nondeterministic_columns:
+        - inserted_at
+```
+
+```sql
+SELECT
+    event_date,
+    user_id,
+    COUNT(*) as event_count,
+    NOW() as inserted_at
+FROM smelt.sources.events
+GROUP BY 1, 2
+```
+
+The non-deterministic value must flow **directly** into a listed column — a bare `NOW() AS inserted_at` or `RANDOM() AS batch_id` in the SELECT list. Three positions are always rejected, regardless of the list:
+
+- the `event_time_column` or `partition_column` expression,
+- any `unique_key` column,
+- a row-set-membership or grouping position — `WHERE`, `HAVING`, `JOIN ... ON`, `DISTINCT`, `GROUP BY` keys, or a window's `PARTITION BY`/`ORDER BY`/frame.
+
+Listing one of these columns in `nondeterministic_columns` is a configuration error, since those columns must stay deterministic no matter what the model opts into.
+
+`NOW()`, `CURRENT_TIMESTAMP`, and `CURRENT_DATE` are frozen once per run, so a direct projection is admitted even when the target column is **not** listed — pinning already removes the variance the list exists to gate. `RANDOM()` and `UUID()` values differ row-to-row within the same run, so their target column must still be listed. If the analysis can't confidently attribute a non-deterministic call to a single output column (for example, it's nested inside a CTE or subquery), the model is rejected — use `safety_overrides.allow_nondeterministic` if you've verified the pattern is safe.
+
 ### Overriding safety checks
 
 If you understand the implications and the pattern is safe in your specific case, use `safety_overrides`:
@@ -222,12 +322,13 @@ If you understand the implications and the pattern is safe in your specific case
 models:
   my_model:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: event_time
       partition_column: event_date
       granularity: day
-    incremental:
-      enabled: true
+    batched:
       safety_overrides:
         allow_window_functions: true
         allow_having: true
@@ -266,6 +367,26 @@ SUM(amount) OVER (ORDER BY event_ts) AS running_total
 
 Use `safety_overrides.allow_window_functions: true` for windows that cannot be partition-aligned and that you have verified are safe in your specific context.
 
+### Bounded-`RANGE` cross-partition windows
+
+A window whose `PARTITION BY` keys do **not** include the model's `partition_column` is still admitted — without an override — when its frame is a bounded `RANGE BETWEEN INTERVAL '…' PRECEDING [AND …]` clause with no `UNBOUNDED` bound. The finite interval is a derivable lookback (or lookforward): the planner widens the *source* read to cover it, so the window is provably partition-local up to that bound even though `PARTITION BY` disagrees with the model's own partition column.
+
+This is what lets a sessionization model window `LAG`/`LEAD` by `device_id` (ordered by event time, framed to a bounded interval) while the model itself is partitioned by a derived `session_start_date`:
+
+```sql
+-- Admitted despite PARTITION BY device_id not matching partition_column session_start_date:
+-- the bounded 30-minute RANGE frame licenses a 30-minute widened source read.
+LAG(event_ts) OVER (
+    PARTITION BY device_id ORDER BY event_ts
+    RANGE BETWEEN INTERVAL '30 minutes' PRECEDING AND CURRENT ROW
+) AS prev_ts
+```
+
+The exception is narrow:
+
+- Only a `RANGE` frame qualifies — a `ROWS` or `GROUPS` frame with the same shape is **not** admitted this way (row/group counts do not translate into a time margin the source read can be widened by); a non-aligned `PARTITION BY` with a `ROWS`/`GROUPS` frame is refused as usual.
+- An `UNBOUNDED` bound on either side (`UNBOUNDED PRECEDING`, or `UNBOUNDED FOLLOWING`/a `FOLLOWING` bound with no `INTERVAL`) is **not** admitted — an unbounded reach in either direction is cumulative-across-history and forces `PerPartitionOnly` or refusal, the same as a non-partition-aligned window with no frame at all.
+
 ## Per-source lookback derivation
 
 For each upstream `smelt.<path>` reference in an incremental model body, the planner derives how far outside the run window that source must be read. This **bound** has the form `(before, after)`: read the source starting `before` seconds before the run start and ending `after` seconds after the run end.
@@ -292,6 +413,18 @@ The planner reads `INTERVAL '30 minutes' PRECEDING` and derives `before = PT30M`
 
 A bare `LAG(x) OVER (PARTITION BY id ORDER BY ts)` without a `RANGE BETWEEN` clause is **not derivable** — the planner cannot determine the lookback and will refuse the model at planning time. Rewrite it with an explicit `RANGE BETWEEN INTERVAL '…' PRECEDING` clause.
 
+**Forward reach (`after`).** The same frame can carry a `FOLLOWING` bound, read as the source's *lookforward* margin — the mirror of the `PRECEDING` case above, from the same walk:
+
+```sql
+LEAD(event_ts) OVER (
+    PARTITION BY device_id
+    ORDER BY event_ts
+    RANGE BETWEEN CURRENT ROW AND INTERVAL '2 hours' FOLLOWING
+) AS next_ts
+```
+
+The planner reads `INTERVAL '2 hours' FOLLOWING` and derives `after = PT2H`. An **unbounded** forward reach — `UNBOUNDED FOLLOWING`, or a `FOLLOWING` bound with no `INTERVAL` literal — is **not derivable**, mirroring the bare-`LAG`/`UNBOUNDED PRECEDING` refusal: the planner cannot bound how far forward the source must be read, so the model is refused at planning time rather than silently treated as zero-margin.
+
 ### Form B — explicit WHERE/JOIN interval filters
 
 When the model's WHERE clause or a JOIN condition contains an explicit `INTERVAL` offset on a source column, the interval becomes the source's bound:
@@ -305,6 +438,11 @@ WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1 day' AND m.partition_d
 -- Cross-column rebase: UTC timestamps into local-date partitions
 WHERE b.event_ts_utc BETWEEN m.event_date_local - INTERVAL '1 day'
                           AND m.event_date_local + INTERVAL '1 day'
+```
+
+```sql
+-- Forward-only reach: no backward offset, only a lookforward
+WHERE e.event_ts BETWEEN m.conversion_ts AND m.conversion_ts + INTERVAL '30 days'
 ```
 
 Both `BETWEEN` form and paired `>=` / `<` form are read:
@@ -376,9 +514,48 @@ WITH sessionized AS (
 
 Lookup sources (those without `timeseries:`) are never pushdown candidates — they are read in full each run. Pushdown is per-reference: a self-join on a timeseries source receives the same widened filter on each occurrence.
 
+**Below the outer SELECT.** Pushdown is not limited to a single top-level `FROM` clause. smelt traces whether the model's projected `event_time`/`partition_column` value is a monotone image of a real source's time column — a bare column, a truncation like `DATE_TRUNC`/`time_bucket`, a `CAST` to a temporal type, or a constant `INTERVAL` shift are all traceable; an arithmetic combination of two columns, `CASE`, `COALESCE`, or an unrecognised function are not. When that trace succeeds, the pushdown filter can relocate past constructs that would otherwise keep it stuck at the outer clamp:
+
+`partition_column` does not have to be a timestamp — an ever-increasing integer column (a sequence id, offset, or watermark) is monotone too, and the same trace recognises a constant integer shift over it (`batch_id + 1`, `batch_id - 1`) the same way it recognises a constant `INTERVAL` shift over a timestamp column. A non-monotone integer transform — `batch_id % n` (periodic) or `batch_id * n` (not a constant shift) — is rejected the same way a non-monotone temporal transform is, naming the construct in the diagnostic.
+
+- **`UNION ALL` branches** are traced independently, so a model that appends several timeseries sources still gets a pushdown filter on each source individually.
+- **Subquery and CTE bodies** that re-project the partition column get the filter pushed to the real underlying source inside the derived table, not just at the outer query.
+- **Joins** resolve which input is the "driving fact" (the one whose column the partition value traces back to) and window only that input — every other joined input (lookup tables, dimension joins) is read in full, so there is no risk of a lookup input being incorrectly time-filtered.
+
+When the trace cannot prove monotonicity for a construct — an ambiguous join input, a non-monotone re-projection — the model falls back to the always-correct outer clamp rather than guessing.
+
 Sources declared in per-entity source YAML files (with a `timeseries:` block — see [Sources guide](sources.md#time-dimension)) are automatically pushdown candidates for every downstream incremental model that reads them. No additional configuration is required on the incremental model.
 
 > **Current scope:** pushdown applies the bound derived from the **outer SQL body**. `smelt.define` function bodies are not yet expanded before bound derivation, so a source whose only INTERVAL pattern is inside a function body receives a partition-local (`PT0S`) filter. The exact run-window filter is still correct for correctness; it may read more data than necessary if the function body introduces a wider lookback. Full expansion-before-derivation is tracked in `docs/plans/20260521-incremental-timeseries-and-derived-bounds.md`.
+
+### Declaring a horizon ceiling (warning only)
+
+The **horizon** — the far edge of the maintained window, past which inputs are no longer read — is always **derived** from the model's own SQL (its lookback, window frames, and join contribution). smelt never trusts a declared horizon for the clamp itself: an under-estimate would silently drop rows that should have been rewritten.
+
+A modeller may still declare a `horizon_ceiling:` as a *warning* ceiling on how far that derived horizon is expected to reach:
+
+```sql
+---
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+refresh: incremental
+grain: partition
+horizon_ceiling: '30 days'
+---
+SELECT
+    event_date,
+    user_id,
+    SUM(amount) OVER (
+        PARTITION BY user_id
+        ORDER BY event_ts
+        RANGE BETWEEN INTERVAL '2 hours' PRECEDING AND CURRENT ROW
+    ) AS rolling_amount
+FROM smelt.events
+```
+
+Here the model's own `RANGE BETWEEN INTERVAL '2 hours'` frame derives a 2-hour horizon, comfortably inside the declared 30-day ceiling — no warning. If a future edit widened that frame past 30 days, smelt would emit a compile-time warning naming both the derived reach and the declared ceiling. Either way, **the clamp always uses the derived value** — the ceiling narrows nothing; it only tells you when the model's real reach has grown further than expected.
 
 ## Batching
 
@@ -395,6 +572,18 @@ Batching provides two benefits:
 
 - **Memory efficiency** -- Each batch processes a bounded amount of data.
 - **Progress tracking** -- If a run fails partway through, completed batches are recorded and will not be re-processed.
+
+## Self-referential (ordered) models
+
+A `grain: partition` model may read its own prior partitions — a running balance, a partition-by-partition state machine — by referencing itself (`smelt.<its own path>`) in its SQL. This stays a partitioned `grain: partition` table; it does not become `grain: key`.
+
+Whether a backfill may build its windows in parallel or must build them strictly in temporal order is derived from the model's dependency graph, never declared:
+
+- **No self-edge (the default).** Every window is a pure function of source rows in its own scan range, so a backfill may split into sub-ranges built in any order, including in parallel.
+- **A self-edge that provably converges partition-by-partition** (a backward-bounded read of the model's own prior output, e.g. `WHERE bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d`) forces the backfill to build **one partition per batch, strictly in temporal order** — regardless of the model's batch-safety class or any `--batch-size`/`--per-partition` override. A wide, multi-partition batch would read rows the self-reference expects but that have not been written yet.
+- **A self-edge that does not provably converge** (a forward read, or an unbounded/whole-history scan) is refused at planning time with a diagnostic naming the non-convergent self-reference — never silently built with the wrong ordering.
+
+Self-referential models have one bootstrap requirement the ordinary case does not: their target table must already exist before the first backfill batch runs. A model's very first partition cannot be created via `CREATE TABLE ... AS SELECT ...`, because that statement cannot resolve a reference to the table it is in the middle of creating. Seed the table with an opening row (dated one partition before the run window) before running the first backfill.
 
 ## Monitoring
 
@@ -477,16 +666,57 @@ smelt supports multiple strategies for how data is updated. The strategy is chos
 | `append` | Append-only workloads | INSERT only, no deletion |
 | `insert_overwrite` | Backend-specific optimization | Overwrite entire partitions atomically |
 
-UPSERT (`MERGE`) is **not** an incremental strategy — it is the backend primitive used by the [`cumulative_aggregate` materialization](materializations.md#cumulative_aggregate), which is a separate sibling rule with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `cumulative_aggregate`, not `incremental`.
+UPSERT (`MERGE`) is **not** a `grain: partition` strategy — it is the backend primitive used by `refresh: incremental` + [`grain: key`](../reference/cumulative-aggregate.md), which is a separate sibling shape with a different equivalence contract. If you want one row per `(unique_key)` collapsed across all source partitions, that's `grain: key`, not `grain: partition`.
 
-## Incremental vs cumulative
+## Enrichment joins and dimension updates
 
-`incremental` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `cumulative_aggregate` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
+A `grain: partition` model that joins a fact source to a dimension table (a `smelt.ref()`/`smelt.sources.*` with no `timeseries:` block) is enrichment: every fact row carries a copy of whatever the dimension held at compute time. When a dimension row changes later — a user renamed, a product recategorized — the fact rows that joined against it are stale until that partition is recomputed.
 
-- Use `incremental` when the answer to "what did this partition produce?" is well-defined and stable.
-- Use `cumulative_aggregate` when the answer is "what's the running total per key?".
+smelt derives a **maintenance plan** for every `refresh: incremental` model: a matrix of what to do for each group of output columns under each kind of change. For an enrichment join, the columns that came from the dimension form their own group, distinct from the columns that came from the fact table — because a dimension update only ever needs to touch the dimension-derived columns, never the fact-derived ones. Run `smelt explain <model>` to see the derived plan:
 
-See the [materializations guide](materializations.md#incremental-vs-cumulative_aggregate) for a side-by-side comparison.
+```
+$ smelt explain daily_events_enriched
+Maintenance plan: daily_events_enriched
+
+Cells (4):
+  - group {*} on trigger NewData { source: "raw.events" }
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      ...
+  - group {user_name} on trigger UpstreamMutation { source: "raw.users" }
+      corner:    ColumnMerge
+      technique: ColumnScopedMerge
+      ...
+```
+
+The `UpstreamMutation` cell for `raw.users` shows that a dimension change only needs a **column-scoped `MERGE`** touching `{user_name}` — not a rebuild of the whole partition. Declare the dimension's mutability explicitly on its source YAML so smelt derives this cell instead of assuming worst-case immutability:
+
+```yaml
+# models/sources/raw/users.yml
+mutation_profile:
+  kind: mutable_snapshot
+```
+
+An unclocked dimension source has no partition column to bound a scan by, so admitting the mutation cell requires accepting a full read of it — name that acceptance on the model that reads it:
+
+```yaml
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.users:
+        allow_full_scan: true
+```
+
+Once the cell is admitted (and the target table already exists), `smelt run` dispatches through the column-scoped `MERGE` automatically on every run over the fact table's own event-time window — no separate "a dimension changed" signal is required. What's not built yet is a *cheaper, change-aware* trigger: `smelt run` cannot tell whether the dimension actually changed since the last run, so it re-derives the `MERGE` on every run rather than skipping one where nothing upstream moved (forward propagation, `smelt run --since-upstream`, unbuilt). If the plan hasn't admitted a cell for your model yet (an unbounded scan, a missing `mutation_profile` declaration, or a backend without column-scoped `MERGE` support), the run falls back to the region-recompute technique (`DELETE`+`INSERT`), which re-reads the dimension's current contents and is always correct, just not column-scoped. `smelt explain` is the way to see today which of your models already have a targeted-write cell derived and ready.
+
+## grain: partition vs grain: key
+
+`grain: partition` produces a partitioned output where each partition's rows survive a `DELETE+INSERT` cycle without changing. `grain: key` collapses partitions into one row per `GROUP BY` key whose value reflects the combined state across history.
+
+- Use `grain: partition` when the answer to "what did this partition produce?" is well-defined and stable.
+- Use `grain: key` when the answer is "what's the running total per key?".
+
+See the [materializations guide](materializations.md#grain-partition-vs-grain-key) for a side-by-side comparison.
 
 ## Schema evolution
 
@@ -500,6 +730,6 @@ When an incremental model's output schema changes (columns added, types widened,
 ## Further reading
 
 - [Materializations](materializations.md) for an overview of all materialization types
-- [cumulative_aggregate](materializations.md#cumulative_aggregate) for cumulative state (one row per key)
+- [grain: key](../reference/cumulative-aggregate.md) for key-grain running state (one row per key)
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs

@@ -56,6 +56,7 @@ fn make_config_with_targets(targets: HashMap<String, Target>) -> Config {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     }
 }
 
@@ -122,7 +123,9 @@ fn test_logical_graph_cross_engine_edges() {
         ModelConfig {
             materialization: None,
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            grain: None,
+            batched: None,
             tags: vec![],
             target: Some("spark_local".to_string()),
             format: None,

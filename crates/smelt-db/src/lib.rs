@@ -111,10 +111,17 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::GeneratesMixedWithBareModel { .. } => None,
         // These variants only arise from validate_timeseries on the Ok(Single)
         // path — they are never returned by extract_file_metadata itself:
-        MetadataError::TimeseriesRequiredForIncremental => None,
+        MetadataError::TimeseriesRequiredForBatched => None,
         MetadataError::MalformedTimeseries { .. } => None,
-        MetadataError::CumulativeForbidsTimeseries => None,
-        MetadataError::CumulativeForbidsIncremental => None,
+        MetadataError::KeyedForbidsTimeseries => None,
+        MetadataError::KeyedForbidsBatched => None,
+        MetadataError::BatchedRequiresRefreshBatched => None,
+        MetadataError::MaterializedViewForbidsTimeseries => None,
+        MetadataError::MaterializedViewForbidsBatched => None,
+        MetadataError::MalformedFunctionalDependency { .. } => None,
+        MetadataError::MalformedBoundedDomain { .. } => None,
+        MetadataError::GrainRequiredForIncremental => None,
+        MetadataError::GrainRequiresIncremental => None,
     }
 }
 
@@ -271,6 +278,7 @@ pub use queries::loader::{
     loader_resolved_value_with_overlay, parse_smelt_type_from_field_annotation,
     smelt_record_declarations, LoaderCallSiteId, LoaderResolvedValue,
 };
+pub use queries::monotonicity::{gate_nullable_leaf, trace_event_time_checked};
 pub use queries::parse::{
     model_path_refs, model_sources, parse_file, parse_model, PathRefLocation,
 };
@@ -1061,17 +1069,17 @@ fn cte_ref_outside_test_diagnostics(
 fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCode {
     use smelt_logical::RuleDiagnosticCode as R;
     match code {
-        R::CumulativeRequiresGroupBy => DiagnosticCode::CumulativeRequiresGroupBy,
-        R::CumulativeUnknownAggregator => DiagnosticCode::CumulativeUnknownAggregator,
-        R::CumulativeGroupByContainsPartitionColumn => {
-            DiagnosticCode::CumulativeGroupByContainsPartitionColumn
+        R::KeyedRequiresGroupBy => DiagnosticCode::KeyedRequiresGroupBy,
+        R::KeyedUnknownCombiner => DiagnosticCode::KeyedUnknownCombiner,
+        R::KeyedGroupByContainsPartitionColumn => {
+            DiagnosticCode::KeyedGroupByContainsPartitionColumn
         }
-        R::CumulativeForbidsWindowFunctions => DiagnosticCode::CumulativeForbidsWindowFunctions,
-        R::CumulativeForbidsNondeterministic => DiagnosticCode::CumulativeForbidsNondeterministic,
-        R::CumulativeNoDrivingSource => DiagnosticCode::CumulativeNoDrivingSource,
-        R::CumulativeMultipleDrivingSources => DiagnosticCode::CumulativeMultipleDrivingSources,
-        R::CumulativeSqlNotParseable => DiagnosticCode::CumulativeSqlNotParseable,
-        R::IncrementalNotBatchSafe => DiagnosticCode::IncrementalNotBatchSafe,
+        R::KeyedForbidsWindowFunctions => DiagnosticCode::KeyedForbidsWindowFunctions,
+        R::KeyedForbidsNondeterministic => DiagnosticCode::KeyedForbidsNondeterministic,
+        R::KeyedSnapshotPostureUnsupported => DiagnosticCode::KeyedSnapshotPostureUnsupported,
+        R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
+        R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
+        R::BatchedNotSafe => DiagnosticCode::BatchedNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
         }
@@ -1106,11 +1114,12 @@ fn remap_pipe_parse_error_code(message: &str) -> DiagnosticCode {
 /// Resolve a `smelt.<path>` ref string to its definition's frontmatter
 /// `timeseries:` block, when it resolves to a model that declares one. This
 /// reconstructs (project-scoped) the `smelt.<path> → timeseries` lookup the
-/// runtime builds from the model graph, so the cumulative classifier sees the
+/// runtime builds from the model graph, so the keyed classifier sees the
 /// same driving sources in the editor as it does at build time.
 fn ref_timeseries_config(
     db: &dyn salsa::Database,
     workspace: Workspace,
+    project: Option<ProjectInput>,
     ref_str: &str,
 ) -> Option<smelt_core::config::TimeseriesConfig> {
     let segments: Vec<String> = ref_str
@@ -1119,7 +1128,19 @@ fn ref_timeseries_config(
         .map(|s| s.to_string())
         .collect();
     let leaf = segments.last()?.clone();
-    let resolved = resolve_ref_path(db, workspace, segments)?;
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    // Per-entity source YAML (`RefKind::Source`) has no `source_file` — its
+    // `timeseries:` block lives on the `SourceInfo` the project's source scan
+    // already parsed, not on a frontmatter-bearing model file. Look it up by
+    // `address_segments` before falling through to the model-file path below
+    // (which only applies to `RefKind::Model`/generator refs).
+    if resolved.kind == RefKind::Source {
+        let project = project?;
+        return project_sources(db, project)
+            .iter()
+            .find(|s| s.address_segments == segments)
+            .and_then(|s| s.timeseries.clone());
+    }
     let file = resolved.source_file?;
     let text = file.text(db);
     match extract_file_metadata(text) {
@@ -1140,6 +1161,207 @@ fn ref_timeseries_config(
             .and_then(|e| e.timeseries_config.clone()),
         _ => None,
     }
+}
+
+/// Resolve `ref_str` to its [`smelt_core::SourceInfo`] when it addresses a
+/// declared source — `None` when the ref doesn't resolve, or resolves to
+/// something other than a source (a model, seed, function). Sibling of
+/// [`ref_timeseries_config`], reused by [`maintenance_plan`] to build the
+/// [`smelt_logical::maintenance::SourceFacts`] the plan derivation reads.
+fn ref_source_info(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    project: Option<ProjectInput>,
+    ref_str: &str,
+) -> Option<smelt_core::SourceInfo> {
+    let segments: Vec<String> = ref_str
+        .strip_prefix("smelt.")?
+        .split('.')
+        .map(|s| s.to_string())
+        .collect();
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    if resolved.kind != RefKind::Source {
+        return None;
+    }
+    let project = project?;
+    project_sources(db, project)
+        .iter()
+        .find(|s| s.address_segments == segments)
+        .cloned()
+}
+
+/// Thin Salsa wrapper around
+/// `smelt_logical::maintenance::derive::derive_maintenance_plan`
+/// (`maintenance_plan.md` §Surface "The plan (derived, reported)"): gathers
+/// `file`'s referenced sources and declared `maintenance:`/`grain:`
+/// frontmatter, then calls
+/// [`crate::queries::maintenance::maintenance_plan_diagnostics`] (pure) to
+/// derive the plan and map its admission refusals onto a Salsa-safe
+/// return shape. Returns the default (empty) result for a model with no
+/// maintenance plan (not `refresh: incremental`, or no frontmatter at all).
+#[salsa::tracked]
+pub fn maintenance_plan(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Arc<crate::queries::maintenance::MaintenancePlanDiagnostics> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return Arc::new(Default::default());
+    };
+    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
+        || metadata.grain.is_none()
+    {
+        return Arc::new(Default::default());
+    }
+    let path = file.path(db);
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    let sql_body = &text[sql_offset..];
+    let refs = smelt_logical::collect_path_refs(sql_body);
+    let source_refs: Vec<(String, Option<smelt_core::SourceInfo>)> = refs
+        .iter()
+        .filter_map(|r| {
+            let info = ref_source_info(db, workspace, project, r)?;
+            // `SourceFacts::name` is the *bare* source name — the address
+            // with the leading `sources` breadcrumb stripped
+            // (`crate::maintenance::grouping` resolves a FROM alias's
+            // `smelt.<path>` the same way, stripping `sources.` before
+            // matching against `SourceFacts.name`; see
+            // `maintenance_plan_admission.rs`'s fixtures, which name
+            // sources bare — e.g. `"payments"` for `FROM
+            // smelt.sources.payments`). Keeping this stripping in one place
+            // (here) keeps the trigger/`scan_bounds.per_source` keys and the
+            // grouping-derived `mutation_sensitivity` keys in agreement.
+            let stripped = r.strip_prefix("smelt.")?;
+            let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+            Some((bare.to_string(), Some(info)))
+        })
+        .collect();
+
+    let project_scan_bounds = project
+        .and_then(|p| {
+            smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
+                .ok()
+                .map(|(cfg, _)| cfg.maintenance)
+        })
+        .flatten()
+        .and_then(|m| m.scan_bounds);
+
+    let table = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
+        sql_body,
+        &table,
+        &metadata,
+        &source_refs,
+        project_scan_bounds.as_ref(),
+    ))
+}
+
+/// Plain (non-Salsa-tracked) counterpart of [`maintenance_plan`] that returns
+/// the *full* derived plan — cells, clamps, locality verdicts — rather than
+/// the Salsa-safe refusals-only projection. Used by `smelt explain <model>`
+/// (`maintenance_plan.md` §Surface "CLI"), a one-shot CLI report that has no
+/// need for Salsa's incremental caching and cannot use the tracked query
+/// because [`smelt_logical::maintenance::MaintenancePlan`] does not implement
+/// `PartialEq`/`Eq` (the Salsa tracked-return-value requirement the
+/// refusals-only [`crate::queries::maintenance::MaintenancePlanDiagnostics`]
+/// projection exists to satisfy instead).
+///
+/// Mirrors the exact input-assembly `maintenance_plan` performs above, but
+/// calls [`crate::queries::maintenance::derive_model_maintenance_plan`]
+/// directly. Still a Salsa-purity-respecting function: it only assembles
+/// inputs from Salsa accessors and calls pure derivation code — it never
+/// re-implements admission, locality, or ledger logic. Returns `None` for a
+/// model with no maintenance plan (not `refresh: incremental`, or no
+/// `grain:` declared).
+pub fn maintenance_plan_report(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    file: SourceFile,
+) -> Option<crate::queries::maintenance::MaintenancePlanResult> {
+    let text = file.text(db);
+    let Ok(FileMetadata::Single {
+        metadata,
+        sql_offset,
+    }) = extract_file_metadata(text)
+    else {
+        return None;
+    };
+    if metadata.refresh != Some(smelt_core::config::RefreshStrategy::Incremental)
+        || metadata.grain.is_none()
+    {
+        return None;
+    }
+    let path = file.path(db);
+    let project_root = file.project_root(db).clone();
+    let project = find_project(db, workspace, &project_root);
+
+    let sql_body = &text[sql_offset..];
+    let refs = smelt_logical::collect_path_refs(sql_body);
+    let source_refs: Vec<(String, Option<smelt_core::SourceInfo>)> = refs
+        .iter()
+        .filter_map(|r| {
+            let info = ref_source_info(db, workspace, project, r)?;
+            let stripped = r.strip_prefix("smelt.")?;
+            let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+            Some((bare.to_string(), Some(info)))
+        })
+        .collect();
+
+    let project_scan_bounds = project
+        .and_then(|p| {
+            smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
+                .ok()
+                .map(|(cfg, _)| cfg.maintenance)
+        })
+        .flatten()
+        .and_then(|m| m.scan_bounds);
+
+    let table = path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+
+    let model_scan_bounds = metadata
+        .maintenance
+        .as_ref()
+        .and_then(|m| m.scan_bounds.as_ref());
+    let sources = crate::queries::maintenance::build_source_facts(
+        &source_refs,
+        model_scan_bounds,
+        project_scan_bounds.as_ref(),
+    );
+    let explicitly_mutable: std::collections::HashSet<String> = source_refs
+        .iter()
+        .filter(|(_, info)| {
+            info.as_ref().is_some_and(|i| {
+                i.mutation_profile
+                    .as_ref()
+                    .is_some_and(|m| m.kind == smelt_core::sources::MutationProfile::Mutable)
+            })
+        })
+        .map(|(name, _)| name.clone())
+        .collect();
+
+    crate::queries::maintenance::derive_model_maintenance_plan(
+        sql_body,
+        &table,
+        &metadata,
+        &sources,
+        &explicitly_mutable,
+    )
 }
 
 #[salsa::tracked]
@@ -1420,21 +1642,39 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let sql_body = &text[sql_offset..];
         if let Err(ts_err) = smelt_core::metadata::validate_timeseries(metadata, sql_body) {
             let maybe_diag = match &ts_err {
-                smelt_core::metadata::MetadataError::TimeseriesRequiredForIncremental => Some((
+                smelt_core::metadata::MetadataError::TimeseriesRequiredForBatched => Some((
                     ts_err.to_string(),
-                    DiagnosticCode::TimeseriesRequiredForIncremental,
+                    DiagnosticCode::TimeseriesRequiredForBatched,
                 )),
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
-                smelt_core::metadata::MetadataError::CumulativeForbidsTimeseries => Some((
+                smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => {
+                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsTimeseries))
+                }
+                smelt_core::metadata::MetadataError::KeyedForbidsBatched => {
+                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsBatched))
+                }
+                // `batched:` without `refresh: batched` maps to the generic
+                // YamlParseError code — no dedicated code exists yet.
+                smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
+                    Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
+                }
+                smelt_core::metadata::MetadataError::MaterializedViewForbidsTimeseries => Some((
                     ts_err.to_string(),
-                    DiagnosticCode::CumulativeForbidsTimeseries,
+                    DiagnosticCode::MaterializedViewForbidsTimeseries,
                 )),
-                smelt_core::metadata::MetadataError::CumulativeForbidsIncremental => Some((
+                smelt_core::metadata::MetadataError::MaterializedViewForbidsBatched => Some((
                     ts_err.to_string(),
-                    DiagnosticCode::CumulativeForbidsIncremental,
+                    DiagnosticCode::MaterializedViewForbidsBatched,
                 )),
+                smelt_core::metadata::MetadataError::GrainRequiredForIncremental => Some((
+                    ts_err.to_string(),
+                    DiagnosticCode::GrainRequiredForIncremental,
+                )),
+                smelt_core::metadata::MetadataError::GrainRequiresIncremental => {
+                    Some((ts_err.to_string(), DiagnosticCode::GrainRequiresIncremental))
+                }
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
                 _ => None,
@@ -1449,6 +1689,34 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 })
                 .accumulate(db);
             }
+        }
+
+        // Functional-dependency (`key -> determines`) declaration structural
+        // validation (DC2, `model_properties.md` §"Model-scoped declarations").
+        if let Err(fd_err) =
+            smelt_core::metadata::validate_functional_dependencies(metadata, sql_body)
+        {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: fd_err.to_string(),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::MalformedFunctionalDependency),
+                data: None,
+            })
+            .accumulate(db);
+        }
+
+        // Bounded-domain / space-budget declaration structural validation
+        // (DC3, `model_properties.md` §"Model-scoped declarations").
+        if let Err(bd_err) = smelt_core::metadata::validate_bounded_domains(metadata, sql_body) {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: bd_err.to_string(),
+                range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                code: Some(DiagnosticCode::MalformedBoundedDomain),
+                data: None,
+            })
+            .accumulate(db);
         }
 
         // Timeseries schema invariants (D-52 rules 7 and 8).
@@ -1492,19 +1760,21 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
-        // Built-in planner-rule diagnostics (cumulative classifier, incremental
+        // Built-in planner-rule diagnostics (keyed classifier, incremental
         // batch-safety) surfaced through the uniform rule → diagnostics
         // interface. The checks live in `smelt-planner` (analysis-pure); this
         // query only gathers inputs and aggregates, so the editor and the build
         // reach an identical verdict (architecture.md §"Diagnostic parity rule"
         // + §"Planner scope"). Anchored at the model SQL body start.
-        // Route cumulative detection through is_cumulative() (a `refresh:
-        // cumulative` model) so it reaches the classifier. The string below is
-        // the classifier's internal key for the cumulative rule, not a user
-        // surface value.
-        let materialization = if metadata.is_cumulative() {
+        // Route keyed detection through is_keyed() (`refresh: incremental` +
+        // `grain: key`) and partition-grain detection through
+        // is_partition_grain() (`refresh: incremental` + `grain: partition`
+        // — the opt-in, independent of whether the optional `batched:` block
+        // is present) so both reach the classifier. The strings below are the
+        // classifier's internal keys for each rule, not user surface values.
+        let materialization = if metadata.is_keyed() {
             "cumulative_aggregate"
-        } else if metadata.incremental.is_some() {
+        } else if metadata.is_partition_grain() {
             "incremental"
         } else {
             ""
@@ -1512,14 +1782,17 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         if !materialization.is_empty() {
             let stripped = smelt_parser::strip_frontmatter(text);
             let refs = smelt_logical::collect_path_refs(&stripped);
-            // The cumulative classifier resolves its driving source by looking
-            // each ref up in this map; the incremental rule does not use it.
+            // The keyed classifier resolves its driving source by looking
+            // each ref up in this map. The incremental rule's UNION-ALL
+            // injectability check (`rule_diagnostics::check_union_all_injectable`)
+            // also needs it — it builds the same per-ref `BoundContext` the
+            // pushdown-scoping walk (`rules::incremental::derive_model_source_bounds`)
+            // builds from `RuleContext.refs`/`source_timeseries`, so both rules
+            // populate this map for every ref regardless of materialization.
             let mut source_timeseries: smelt_logical::SourceTimeseriesMap = HashMap::new();
-            if materialization == "cumulative_aggregate" {
-                for r in &refs {
-                    if let Some(ts) = ref_timeseries_config(db, workspace, r) {
-                        source_timeseries.insert(r.clone(), ts);
-                    }
+            for r in &refs {
+                if let Some(ts) = ref_timeseries_config(db, workspace, project, r) {
+                    source_timeseries.insert(r.clone(), ts);
                 }
             }
             let model_name = path
@@ -1527,6 +1800,10 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 .and_then(|s| s.to_str())
                 .unwrap_or("")
                 .to_string();
+            // The opt-in is `refresh: batched`, not the presence of the optional
+            // `batched:` block — default to an empty config when the block is
+            // absent so a bare `refresh: batched` model still reaches the rule.
+            let default_batched_config = smelt_core::config::BatchedConfig::default();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,
@@ -1534,7 +1811,11 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 refs: &refs,
                 source_timeseries: &source_timeseries,
                 timeseries_config: metadata.timeseries.as_ref(),
-                incremental_config: metadata.incremental.as_ref(),
+                incremental_config: if materialization == "incremental" {
+                    Some(metadata.batched.as_ref().unwrap_or(&default_batched_config))
+                } else {
+                    None
+                },
             };
             let body_start = rowan::TextSize::from(sql_offset as u32);
             for rd in smelt_logical::detect_builtin_rules(&ctx) {
@@ -1550,6 +1831,48 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 })
                 .accumulate(db);
             }
+        }
+
+        // Maintenance-plan diagnostics (`maintenance_plan.md` §Diagnostics):
+        // fold the derived plan's admission refusals and the
+        // `maintenance.cells[]` column-group-span check onto the
+        // `Maintenance*` codes. `maintenance_plan` is the thin Salsa query —
+        // this block only maps its (already-derived) result onto
+        // diagnostics, never re-derives the plan itself.
+        let plan_diags = maintenance_plan(db, workspace, file);
+        let body_start = rowan::TextSize::from(sql_offset as u32);
+        for refusal in &plan_diags.refusals {
+            let (code, message) = match refusal {
+                crate::queries::maintenance::MaintenanceRefusal::ScanUnbounded { source, why } => (
+                    DiagnosticCode::MaintenanceScanUnbounded,
+                    format!("maintenance scan over '{source}' cannot be partition-bounded: {why}"),
+                ),
+                crate::queries::maintenance::MaintenanceRefusal::NoAdmissibleTechnique {
+                    trigger,
+                    why,
+                } => (
+                    DiagnosticCode::MaintenanceNoAdmissibleTechnique,
+                    format!("no maintenance technique admits trigger {trigger}: {why}"),
+                ),
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message,
+                range: rowan::TextRange::empty(body_start),
+                code: Some(code),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for violation in &plan_diags.cell_column_group_violations {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: violation.clone(),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
         }
     }
 

@@ -92,8 +92,8 @@ Prints a message indicating that docs are embedded in the binary and advises usi
       "description": "<string>",        // omitted if absent
       "owner": "<string>",              // omitted if absent
       "tags": ["<string>"],             // omitted if empty
-      "materialization": "table" | "view" | "ephemeral" | "materialized_view",
-      "refresh": "full" | "cumulative",  // omitted when "full" (default)
+      "materialization": "table" | "view" | "ephemeral",
+      "refresh": "full" | "batched" | "keyed" | "versioned" | "materialized_view",  // omitted when "full" (default)
       "path": "<workspace-relative path>",
       "columns": [
         {

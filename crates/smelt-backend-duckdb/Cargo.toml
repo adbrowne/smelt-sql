@@ -29,3 +29,10 @@ bundled = ["duckdb/bundled"]
 
 [dev-dependencies]
 tempfile = "3.8"
+# Dev-only, test-target-only dependency for the ledger DDL/DML builders
+# (`smelt_state::ddl_duckdb`) exercised by `fold_ledger_delta` tests below.
+# `smelt-state` does not depend on this crate as a normal dependency, so
+# this is not a cycle (dev-deps are excluded from a crate's own build graph
+# when it is depended on by another crate — see `smelt-state/Cargo.toml`'s
+# own comment on the same pattern).
+smelt-state = { path = "../smelt-state" }

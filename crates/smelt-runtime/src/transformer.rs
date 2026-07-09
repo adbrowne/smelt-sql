@@ -4,7 +4,9 @@
 //! for incremental materialization. It uses the smelt-parser to find the correct
 //! insertion points and modifies the SQL string accordingly.
 
-use smelt_parser::{parse, File};
+use chrono::{DateTime, Utc};
+use smelt_logical::analysis::monotonicity::{classify_function_determinism, FunctionDeterminism};
+use smelt_parser::{parse, File, FunctionCall};
 use thiserror::Error;
 
 /// Time range for filtering (inclusive start, exclusive end)
@@ -25,6 +27,13 @@ pub enum TransformError {
 
     #[error("No FROM clause found - cannot inject time filter")]
     NoFromClause,
+
+    #[error(
+        "output-clamp column '{0}' is qualified: the clamp ranges over the model's \
+         output schema, where an inner-alias qualifier is out of scope — pass the \
+         unqualified output column name"
+    )]
+    QualifiedClampColumn(String),
 
     #[error(
         "Query contains subqueries which are not yet supported for incremental transformation"
@@ -248,68 +257,198 @@ fn is_smelt_path_char(b: u8) -> bool {
     b.is_ascii_alphanumeric() || b == b'_' || b == b'.'
 }
 
-/// Transform a SQL query to filter by event time range.
+/// True when `source_bounds` describes the "transparent slice" (B0, research
+/// `20260703-model-updates.md` §3.3/§3.5): exactly one source, with a
+/// zero-margin bound (`before_secs == 0 && after_secs == 0`).
 ///
-/// This function injects a WHERE clause filter to restrict the query
-/// to only process data within the specified time range.
+/// For this case a single per-source scan filter is both the scan-pruning
+/// filter and the exact output clamp, because the source-level bound and the
+/// model's own write window are, by construction, the same window (no
+/// lookback/lookahead). The caller should skip the outer `inject_time_filter`
+/// wrap and rely solely on `inject_source_filters` — the two filters would
+/// otherwise be textually redundant (same bounds, different injection
+/// points).
+///
+/// A model with more than one bounded source, or any nonzero margin, keeps
+/// both layers: the outer clamp remains load-bearing whenever a genuine
+/// lookback makes the scan window wider than the output window.
+pub fn is_transparent_single_source(
+    source_bounds: &std::collections::HashMap<String, SourceBound>,
+) -> bool {
+    let mut it = source_bounds.values();
+    match (it.next(), it.next()) {
+        (Some(only), None) => only.before_secs == 0 && only.after_secs == 0,
+        _ => false,
+    }
+}
+
+/// Apply the outer output clamp: restrict the model's **output** to the
+/// write window `[start, end)`.
+///
+/// The clamp is applied to a wrapping projection over the model's output
+/// schema — `SELECT * FROM (<sql>) AS _smelt_output_clamp WHERE <col> …` —
+/// never spliced into the model's own outermost `WHERE`
+/// (`docs/specs/model_transforms.md` §"Source-filter pushdown + the two
+/// clamps"; design fork F1/G-11). The wrap is what makes the clamp bind
+/// unambiguously when several FROM items expose the clamp column's name (a
+/// self-referential model, two same-named timeseries sources), and it
+/// filters output *rows* — evaluated after any window function the
+/// outermost `SELECT` computes, so it can never undercut a widened-scan
+/// margin.
 ///
 /// # Arguments
 /// * `sql` - The original SQL query
-/// * `event_time_column` - The column name to filter on
+/// * `event_time_column` - An **unqualified** column of the model's output
+///   schema. A qualified (dotted) name is rejected: the wrapping
+///   projection's scope has no inner aliases to qualify by.
 /// * `range` - The time range (start inclusive, end exclusive)
-///
-/// # Returns
-/// The transformed SQL with the time filter injected, or an error if
-/// the transformation cannot be safely applied.
 ///
 /// # Example
 /// ```ignore
 /// let sql = "SELECT * FROM users WHERE active = true";
 /// let range = TimeRange { start: "2024-01-15".into(), end: "2024-01-18".into() };
 /// let result = inject_time_filter(sql, "created_at", &range)?;
-/// // Result: "SELECT * FROM users WHERE active = true AND (created_at >= '2024-01-15' AND created_at < '2024-01-18')"
+/// // Result: "SELECT * FROM (\nSELECT * FROM users WHERE active = true\n) AS _smelt_output_clamp \
+/// //          WHERE created_at >= '2024-01-15' AND created_at < '2024-01-18'"
 /// ```
 pub fn inject_time_filter(
     sql: &str,
     event_time_column: &str,
     range: &TimeRange,
 ) -> Result<String, TransformError> {
-    // Parse the SQL to get AST
+    // Contract: the clamp column names a column of the model's *output*
+    // schema; a dotted name is an inner-alias reference, definitionally out
+    // of scope in the wrapping projection.
+    if event_time_column.contains('.') {
+        return Err(TransformError::QualifiedClampColumn(
+            event_time_column.to_string(),
+        ));
+    }
+
+    // Validate the input is a SELECT with a FROM — clamping anything else
+    // is meaningless and refused (unchanged from the pre-wrap contract).
     let parse_result = parse(sql);
     let file = File::cast(parse_result.syntax()).ok_or(TransformError::ParseFailed)?;
     let stmt = file.select_stmt().ok_or(TransformError::NoSelectStmt)?;
+    if stmt.from_clause().is_none() {
+        return Err(TransformError::NoFromClause);
+    }
 
-    // Build the filter expression
-    // Escape single quotes in the column name (defensive)
+    // Escape single quotes (defensive)
     let safe_column = event_time_column.replace('\'', "''");
     let safe_start = range.start.replace('\'', "''");
     let safe_end = range.end.replace('\'', "''");
 
-    let filter = format!(
-        "{} >= '{}' AND {} < '{}'",
-        safe_column, safe_start, safe_column, safe_end
+    Ok(format!(
+        "SELECT * FROM (\n{sql}\n) AS _smelt_output_clamp \
+         WHERE {safe_column} >= '{safe_start}' AND {safe_column} < '{safe_end}'"
+    ))
+}
+
+/// Freeze every run-deterministic clock call (`NOW()`, `CURRENT_TIMESTAMP()`,
+/// `CURRENT_DATE()`) in `sql` to a single literal derived from
+/// `run_timestamp` — the compile-time pinning transform described in
+/// `docs/specs/model_transforms.md` §"Compile-time pinning of run-deterministic
+/// clocks".
+///
+/// This is what makes the non-determinism admission gate
+/// (`smelt_logical::rules::incremental::check_nondeterminism`) sound: that
+/// gate admits a direct SELECT-list projection of a run-deterministic
+/// function even into an unlisted column, on the assumption that the value
+/// is frozen once per run. Without this transform each per-chunk backfill
+/// query would evaluate `NOW()` independently at execution time, producing a
+/// different literal per chunk and breaking that assumption.
+///
+/// Only calls classified [`FunctionDeterminism::RunDeterministic`] by
+/// [`classify_function_determinism`] are touched — row-nondeterministic
+/// calls (`RANDOM()`, `UUID()`, ...) and ordinary function calls are left
+/// exactly as written. Uses the parsed AST (not text scanning) to find each
+/// call's byte range, so a substring match inside a string literal or an
+/// identifier (e.g. a column named `now_flag`, or a string literal
+/// containing the text `NOW()`) is never touched — only nodes the parser
+/// actually recognises as a function-call expression are replaced.
+///
+/// `sql` that fails to parse is returned unchanged (fail-soft here; the
+/// compiler's own parse step is the authoritative gate for malformed SQL —
+/// this transform runs on SQL that has already round-tripped through the
+/// planner).
+///
+/// Idempotent: since the literal is derived solely from `run_timestamp`
+/// (never from the current wall clock), calling this twice with the same
+/// `run_timestamp` on semantically equivalent SQL yields the same literal
+/// both times.
+pub fn pin_run_deterministic_clocks(sql: &str, run_timestamp: DateTime<Utc>) -> String {
+    let parse_result = parse(sql);
+    let Some(file) = File::cast(parse_result.syntax()) else {
+        return sql.to_string();
+    };
+
+    // Use `CAST('...' AS <type>)` rather than the bare `TIMESTAMP '...'` /
+    // `DATE '...'` typed-literal shorthand. The parser *does* have a
+    // dedicated typed-literal production for that shorthand
+    // (`smelt-parser::parser::expr::is_typed_literal`), and
+    // `smelt-db/src/type_inference/literal.rs` does have an explicit
+    // `TIMESTAMP '...'`/`DATE '...'`/etc. case — but that case is
+    // unreachable for `TIMESTAMP '...'`/`TIMESTAMPTZ '...'` literals whose
+    // string portion contains a decimal point (as our fractional-seconds
+    // format `%.f` always produces): `infer_literal_type`
+    // (`smelt-db/src/type_inference/literal.rs`) runs its numeric-literal
+    // fast path (`infer_numeric_literal_type`) *before* the typed-literal
+    // keyword checks, and that fast path treats any literal text containing
+    // `.` as decimal/double *unless* it also contains `e`/`E`, in which case
+    // it short-circuits straight to `DataType::Double` — and the word
+    // "TIMESTAMP" (and "TIMESTAMPTZ") itself contains an `E`. So a bare
+    // `TIMESTAMP '2026-07-05 12:00:00.000000'` literal is misinferred as
+    // `Double` before the dedicated typed-literal case ever runs, corrupting
+    // the type-conforming CAST that `SqlCompiler::apply_type_casts`
+    // (`smelt-runtime/src/compile.rs`) wraps around every SELECT column
+    // (verified empirically: swapping this function to emit bare typed
+    // literals reproduces `Conversion Error: Unimplemented type for cast
+    // (TIMESTAMP -> DOUBLE)` in the `nondeterministic_columns` e2e tests).
+    // `CAST(expr AS type)` is a first-class AST node the inferencer already
+    // understands (it is the mechanism `apply_type_casts` itself emits), so
+    // this sidesteps the bug and stays self-consistent. The underlying
+    // ordering bug in `infer_numeric_literal_type`/`infer_literal_type`
+    // belongs to `smelt-db` and is tracked separately, not fixed here.
+    let timestamp_literal = format!(
+        "CAST('{}' AS TIMESTAMP)",
+        run_timestamp.format("%Y-%m-%d %H:%M:%S%.f")
     );
+    let date_literal = format!("CAST('{}' AS DATE)", run_timestamp.format("%Y-%m-%d"));
 
-    // Determine where to inject the filter
-    if let Some(where_clause) = stmt.where_clause() {
-        // Append to existing WHERE clause
-        let where_end = usize::from(where_clause.text_range().end());
+    // Collect (start, end, literal) for every run-deterministic call, then
+    // splice back-to-front so earlier byte offsets stay valid after later
+    // (higher-offset) replacements have already changed the string length.
+    let mut ranges: Vec<(usize, usize, String)> = file
+        .syntax()
+        .descendants()
+        .filter_map(FunctionCall::cast)
+        .filter_map(|call| {
+            let name = call.name()?;
+            if classify_function_determinism(&name) != FunctionDeterminism::RunDeterministic {
+                return None;
+            }
+            let literal = if name.eq_ignore_ascii_case("CURRENT_DATE") {
+                date_literal.clone()
+            } else {
+                timestamp_literal.clone()
+            };
+            let range = call.syntax().text_range();
+            Some((
+                usize::from(range.start()),
+                usize::from(range.end()),
+                literal,
+            ))
+        })
+        .collect();
 
-        // Split the SQL at the end of the WHERE clause
-        let (before, after) = sql.split_at(where_end);
+    ranges.sort_by_key(|r| std::cmp::Reverse(r.0));
 
-        Ok(format!("{} AND ({}){}", before, filter, after))
-    } else if let Some(from_clause) = stmt.from_clause() {
-        // Insert new WHERE clause after FROM
-        let from_end = usize::from(from_clause.text_range().end());
-
-        // Split the SQL at the end of the FROM clause
-        let (before, after) = sql.split_at(from_end);
-
-        Ok(format!("{} WHERE {}{}", before, filter, after))
-    } else {
-        Err(TransformError::NoFromClause)
+    let mut result = sql.to_string();
+    for (start, end, literal) in ranges {
+        result.replace_range(start..end, &literal);
     }
+    result
 }
 
 #[cfg(test)]
@@ -490,6 +629,141 @@ mod tests {
         assert_eq!(result, "2023-03-01");
     }
 
+    // ─── is_transparent_single_source (B0) ───────────────────────────────────
+
+    /// A single source with a zero-margin bound is the transparent slice —
+    /// the outer clamp is redundant.
+    #[test]
+    fn test_transparent_single_source_true_for_zero_margin() {
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        assert!(is_transparent_single_source(&bounds));
+    }
+
+    /// A single source with a nonzero lookback margin keeps the outer clamp.
+    #[test]
+    fn test_transparent_single_source_false_for_nonzero_margin() {
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 86400,
+                after_secs: 0,
+            },
+        );
+        assert!(!is_transparent_single_source(&bounds));
+    }
+
+    /// More than one bounded source (e.g. a join) keeps the outer clamp even
+    /// when every source has a zero margin — the routing is conservative and
+    /// only special-cases the single-source case.
+    #[test]
+    fn test_transparent_single_source_false_for_multiple_sources() {
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        bounds.insert(
+            "smelt.silver.other".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 0,
+                after_secs: 0,
+            },
+        );
+        assert!(!is_transparent_single_source(&bounds));
+    }
+
+    /// An empty bound map (no timeseries-declared sources) is not the
+    /// transparent-single-source case — callers keep the outer clamp so the
+    /// model's own output is still constrained to the run window.
+    #[test]
+    fn test_transparent_single_source_false_for_empty() {
+        let bounds = std::collections::HashMap::new();
+        assert!(!is_transparent_single_source(&bounds));
+    }
+
+    // ─── Two-layer widened-scan + exact output clamp invariant ───────────────
+
+    /// Locks the "two windows differ; write window = output window" invariant
+    /// at the transformer-function level (`docs/specs/model_transforms.md`
+    /// §Semantics — "Source-filter pushdown + the two clamps").
+    ///
+    /// For a model with a genuine lookback margin, `inject_source_filters`
+    /// (the scan) must read a *wider* window than the narrow run window,
+    /// while `inject_time_filter` (the output clamp), when called with that
+    /// SAME narrow run window, must clamp to exactly that window — never the
+    /// widened scan window. This is the function-level contract the
+    /// `execute.rs` batch loop must uphold: the scan margin is read but never
+    /// re-written.
+    #[test]
+    fn test_scan_widens_but_output_clamp_stays_exact_to_run_window() {
+        let run_range = TimeRange {
+            start: "2024-01-15".into(),
+            end: "2024-01-16".into(),
+        };
+
+        // A source with a real 1-day lookback margin (e.g. a bounded RANGE
+        // INTERVAL window frame's derived bound).
+        let mut bounds = std::collections::HashMap::new();
+        bounds.insert(
+            "smelt.silver.events_parsed".to_string(),
+            SourceBound {
+                partition_col: "event_date".to_string(),
+                before_secs: 86400, // 1 day
+                after_secs: 0,
+            },
+        );
+
+        let sql = "SELECT * FROM smelt.silver.events_parsed";
+        let scan_sql = inject_source_filters(sql, &bounds, &run_range);
+
+        // The scan filter must be WIDER than the run window: start is pulled
+        // back a day, end is unchanged (no lookahead).
+        assert!(
+            scan_sql.contains("event_date >= '2024-01-14'"),
+            "scan filter must widen the start by the lookback margin: {scan_sql}"
+        );
+        assert!(
+            scan_sql.contains("event_date < '2024-01-16'"),
+            "scan filter end must be unwidened (no lookahead): {scan_sql}"
+        );
+        // Sanity: the scan window differs from the run window at all.
+        assert!(
+            !scan_sql.contains("event_date >= '2024-01-15'"),
+            "scan filter must NOT equal the narrow run window's start: {scan_sql}"
+        );
+
+        // The output clamp, called with the SAME narrow run_range, must equal
+        // the run window exactly — never the widened scan window.
+        let clamp_sql = inject_time_filter("SELECT * FROM staged", "event_date", &run_range)
+            .expect("inject_time_filter must succeed");
+
+        assert!(
+            clamp_sql.contains("event_date >= '2024-01-15' AND event_date < '2024-01-16'"),
+            "output clamp must equal the exact output window [2024-01-15, 2024-01-16): {clamp_sql}"
+        );
+        // The clamp must NOT contain the widened scan's start date — the
+        // margin is read by the scan but never re-written by the clamp.
+        assert!(
+            !clamp_sql.contains("2024-01-14"),
+            "output clamp must not leak the widened scan's margin: {clamp_sql}"
+        );
+    }
+
     // ─── Existing inject_time_filter tests ───────────────────────────────────
 
     #[test]
@@ -502,8 +776,12 @@ mod tests {
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
 
+        // The clamp lives on a wrapping projection over the model's output,
+        // never spliced into the model body (F1/G-11 subquery wrap).
+        assert!(result.starts_with("SELECT * FROM ("));
+        assert!(result.contains("AS _smelt_output_clamp"));
         assert!(result.contains("WHERE event_time >= '2024-01-15' AND event_time < '2024-01-18'"));
-        assert!(result.starts_with("SELECT * FROM smelt.models.transactions"));
+        assert!(result.contains("SELECT * FROM smelt.models.transactions"));
     }
 
     #[test]
@@ -516,8 +794,12 @@ mod tests {
 
         let result = inject_time_filter(sql, "event_time", &range).unwrap();
 
+        // The model's own WHERE is untouched inside the wrap; the clamp is
+        // the wrapping projection's WHERE.
         assert!(result.contains("WHERE status = 'active'"));
-        assert!(result.contains("AND (event_time >= '2024-01-15' AND event_time < '2024-01-18')"));
+        assert!(result.contains(
+            "_smelt_output_clamp WHERE event_time >= '2024-01-15' AND event_time < '2024-01-18'"
+        ));
     }
 
     #[test]
@@ -538,14 +820,16 @@ GROUP BY 1, 2
 
         let result = inject_time_filter(sql, "transaction_timestamp", &range).unwrap();
 
-        // Should have both the original WHERE and the new filter
+        // The original WHERE stays inside the wrapped body; the clamp lands
+        // on the wrapping projection, evaluated over the model's output.
         assert!(
             result.contains("WHERE transaction_timestamp IS NOT NULL"),
             "Missing original WHERE. Got: {}",
             result
         );
         assert!(result.contains(
-            "AND (transaction_timestamp >= '2024-01-15' AND transaction_timestamp < '2024-01-18')"
+            "_smelt_output_clamp WHERE transaction_timestamp >= '2024-01-15' \
+             AND transaction_timestamp < '2024-01-18'"
         ));
         // GROUP BY should still be there
         assert!(result.contains("GROUP BY 1, 2"));
@@ -571,13 +855,99 @@ GROUP BY 1, 2
             end: "2024-01-18".into(),
         };
 
-        let result = inject_time_filter(sql, "orders.created_at", &range).unwrap();
+        // Contract change with the F1 subquery wrap (deliberate, see
+        // 03-design-forks.md F1): the clamp column is an UNQUALIFIED column
+        // of the model's output schema — a qualified inner-alias name is
+        // definitionally out of scope in the wrapping projection and is
+        // rejected rather than emitted broken.
+        let err = inject_time_filter(sql, "orders.created_at", &range)
+            .expect_err("qualified clamp column must be rejected");
+        assert!(matches!(err, TransformError::QualifiedClampColumn(_)));
 
-        // Should have WHERE clause injected
+        // The unqualified output column clamps the join fine.
+        let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(result.contains(
-            "WHERE orders.created_at >= '2024-01-15' AND orders.created_at < '2024-01-18'"
+            "_smelt_output_clamp WHERE created_at >= '2024-01-15' AND created_at < '2024-01-18'"
         ));
-        // JOINs should still be there
+        // JOINs should still be there, inside the wrapped body.
         assert!(result.contains("INNER JOIN"));
+    }
+
+    // ─── pin_run_deterministic_clocks tests ────────────────────────────────
+
+    #[test]
+    fn test_pin_run_deterministic_clocks_stable_across_calls() {
+        let sql = "SELECT NOW() AS inserted_at, CURRENT_DATE() AS d, RANDOM() AS r FROM events";
+        let run_ts = DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let first = pin_run_deterministic_clocks(sql, run_ts);
+        let second = pin_run_deterministic_clocks(sql, run_ts);
+
+        assert_eq!(
+            first, second,
+            "pinning must be idempotent for the same run_timestamp"
+        );
+        assert!(
+            first.contains("CAST('2026-07-05 12:00:00"),
+            "NOW() must be pinned to a literal timestamp: {first}"
+        );
+        assert!(
+            first.contains("CAST('2026-07-05' AS DATE)"),
+            "CURRENT_DATE() must be pinned to a literal date: {first}"
+        );
+        // RANDOM() is row-nondeterministic and must never be pinned.
+        assert!(
+            first.contains("RANDOM()"),
+            "RANDOM() must be left untouched: {first}"
+        );
+        assert!(!first.contains("NOW()"), "NOW() call must be replaced");
+    }
+
+    #[test]
+    fn test_pin_run_deterministic_clocks_multiple_occurrences() {
+        let sql = "SELECT NOW() AS a, NOW() AS b, NOW() AS c FROM events";
+        let run_ts = DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = pin_run_deterministic_clocks(sql, run_ts);
+
+        assert!(
+            !result.contains("NOW()"),
+            "every NOW() occurrence must be replaced: {result}"
+        );
+        let occurrences = result.matches("CAST('2026-07-05 12:00:00").count();
+        assert_eq!(
+            occurrences, 3,
+            "all three NOW() calls must resolve to the same literal, byte offsets must not corrupt: {result}"
+        );
+    }
+
+    #[test]
+    fn test_pin_run_deterministic_clocks_ignores_lookalike_text() {
+        // `now_flag` is a bare identifier (no call parens) and must not be
+        // touched; the string literal containing "NOW()" text must not be
+        // touched either — only actual FUNCTION_CALL AST nodes are pinned.
+        let sql = "SELECT now_flag, 'call NOW() later' AS note, NOW() AS inserted_at FROM events";
+        let run_ts = DateTime::parse_from_rfc3339("2026-07-05T12:00:00Z")
+            .unwrap()
+            .with_timezone(&Utc);
+
+        let result = pin_run_deterministic_clocks(sql, run_ts);
+
+        assert!(
+            result.contains("now_flag"),
+            "bare identifier must be untouched: {result}"
+        );
+        assert!(
+            result.contains("'call NOW() later'"),
+            "string literal must be untouched: {result}"
+        );
+        assert!(
+            result.contains("CAST('2026-07-05 12:00:00"),
+            "the real NOW() call must still be pinned: {result}"
+        );
     }
 }

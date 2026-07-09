@@ -1,0 +1,21 @@
+name: horizon_ceiling_tight
+version: 1
+
+# Fixture for the `horizon_ceiling` declaration (docs/plans/20260704-model-updates-l3-declarations.md;
+# docs/specs/model_maintenance.md §"Windowed maintenance and the horizon"): the
+# downstream model's SQL reaches a 2-hour lookback (a `RANGE BETWEEN INTERVAL`
+# frame), which exceeds the declared 1-hour `horizon_ceiling`. This licenses
+# a compile-time warning naming both the derived reach and the declared
+# ceiling — the ceiling never narrows the clamp, which still uses the
+# derived (2-hour) value.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

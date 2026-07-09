@@ -134,6 +134,75 @@ fn fn_incremental_ts_no_diagnostics() {
     check_workspace_no_diagnostics("examples/fn_incremental_ts");
 }
 
+/// `batched.nondeterministic_columns` opt-in fixture: an incremental model
+/// stamping every row with `NOW()` into a listed payload column. Verifies
+/// the workspace loads without any diagnostics (the non-determinism
+/// flow/taint check runs at build time in `smelt-logical::rules::incremental`,
+/// not through `file_diagnostics`, but the workspace itself must still be
+/// diagnostic-clean).
+#[test]
+fn incremental_nondeterministic_columns_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/incremental_nondeterministic_columns");
+}
+
+/// `timeseries.assert_monotonic` declared-monotonicity escape hatch fixture
+/// (DC1): a join whose driving-fact partition column is projected through an
+/// opaque scalar function. Verifies the workspace loads without any
+/// diagnostics (the widened join driving-fact resolution runs at build time
+/// in `smelt-logical::rules::incremental`, not through `file_diagnostics`,
+/// but the workspace itself must still be diagnostic-clean).
+#[test]
+fn incremental_declared_monotonic_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/incremental_declared_monotonic");
+}
+
+/// `functional_dependencies` declaration fixture (DC2): a plain pass-through
+/// column asserted to be a per-key constant. Verifies the workspace loads
+/// without any diagnostics (structural validation of the declaration passes;
+/// the widening/guard proof it feeds is exercised by
+/// `smelt-logical::analysis::functional_dependency` unit tests, not through
+/// `file_diagnostics`).
+#[test]
+fn functional_dependency_declared_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/functional_dependency_declared");
+}
+
+/// `bounded_domain` declaration fixture: an exact `MEDIAN` aggregate over a
+/// column asserted to have a bounded active domain (an explicit
+/// `max_cardinality` cap). Verifies the workspace loads without any
+/// diagnostics (structural validation of the declaration passes; the
+/// widening/guard proof it feeds is exercised by
+/// `smelt-logical::analysis::bounded_domain` unit tests, not through
+/// `file_diagnostics`).
+#[test]
+fn bounded_domain_declared_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/bounded_domain_declared");
+}
+
+/// `horizon_ceiling` declaration fixture (DC4): a downstream model's 2-hour
+/// `RANGE BETWEEN INTERVAL` lookback derives a horizon comfortably inside
+/// the declared 30-day ceiling. Verifies the workspace loads without any
+/// diagnostics (the warning this declaration licenses is a compile-time
+/// `tracing::warn!`, not a Salsa `Diagnostic` — exercised by
+/// `crates/smelt-runtime/tests/horizon_ceiling_warning.rs`, not through
+/// `file_diagnostics`).
+#[test]
+fn horizon_ceiling_comfortable_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/horizon_ceiling_comfortable");
+}
+
+/// Source-side `mutation_profile` + `source_lateness` declaration fixture
+/// (DC5): a source declaring `mutation_profile: change_feed` and a `2 hours`
+/// `source_lateness` margin. Verifies the workspace loads without any
+/// diagnostics — the declaration is structural YAML validation
+/// (`sources.md`), not a Salsa `Diagnostic`; `SourceShape::from_source_info`'s
+/// read of the declared profile is exercised by
+/// `crates/smelt-logical/src/analysis/input_delta.rs` unit tests.
+#[test]
+fn source_mutation_profile_declared_no_diagnostics() {
+    check_workspace_no_diagnostics("examples/source_mutation_profile_declared");
+}
+
 /// D-01/D-05: domain-grouped layout where models live under `billing/` and
 /// `finance/` rather than a top-level `models/` directory. Verifies that
 /// project-wide discovery (no scan-root gate) finds both models and that
@@ -1060,6 +1129,120 @@ fn broken_workspace_diagnostics_still_fire() {
             codes
         );
     }
+}
+
+/// MP6 TDD: `examples/broken/models/maintenance_scan_unbounded.sql` — a
+/// `grain: partition` model whose `enrichment_category` group is mutation-
+/// sensitive to an unclocked `maintenance_enrichment` source with no
+/// `allow_full_scan` acceptance — produces exactly one
+/// `MaintenanceScanUnbounded` diagnostic, anchored at that file, and no
+/// `MaintenanceScanUnbounded`/`MaintenanceNoAdmissibleTechnique` diagnostic
+/// fires from any other file in the shared `examples/broken/` workspace.
+///
+/// Spec: `docs/specs/maintenance_plan.md` §Semantics "Partition-local
+/// maintenance (the K8 guardrail)".
+#[test]
+fn broken_workspace_maintenance_scan_unbounded() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, DiagnosticCode, Workspace};
+
+    const MAINTENANCE_CODES: &[DiagnosticCode] = &[
+        DiagnosticCode::MaintenanceScanUnbounded,
+        DiagnosticCode::MaintenanceNoAdmissibleTechnique,
+    ];
+    let expected_file = "models/maintenance_scan_unbounded.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel.replace('\\', "/").ends_with(expected_file);
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !d
+                .code
+                .as_ref()
+                .is_some_and(|c| MAINTENANCE_CODES.contains(c))
+            {
+                continue;
+            }
+            if is_target {
+                target.push(d.clone());
+            } else {
+                other.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !d
+                .0
+                .code
+                .as_ref()
+                .is_some_and(|c| MAINTENANCE_CODES.contains(c))
+            {
+                continue;
+            }
+            if is_target {
+                target.push(d.0.clone());
+            } else {
+                other.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "expected zero maintenance diagnostics from files other than '{expected_file}', got {}:\n  {}",
+        other.len(),
+        other
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target.len(),
+        1,
+        "expected exactly 1 maintenance diagnostic from '{expected_file}', got {}:\n  {}",
+        target.len(),
+        target
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        target[0].code,
+        Some(DiagnosticCode::MaintenanceScanUnbounded)
+    );
 }
 
 // ===== Phase D (meta-language) TDD tests =====
@@ -2146,7 +2329,7 @@ fn meta_polish_broken_reducer_arity() {
 //   — one broken model that declares `incremental:` without `timeseries:`
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `TimeseriesRequiredForIncremental` or `MalformedTimeseries` diagnostic fires
+/// `TimeseriesRequiredForBatched` or `MalformedTimeseries` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any
 /// other file in the workspace.
 fn check_workspace_emits_timeseries_diagnostic(
@@ -2159,7 +2342,7 @@ fn check_workspace_emits_timeseries_diagnostic(
     use std::path::Path;
 
     const TIMESERIES_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::TimeseriesRequiredForIncremental,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
         smelt_db::DiagnosticCode::MalformedTimeseries,
     ];
 
@@ -2265,7 +2448,7 @@ fn check_workspace_emits_timeseries_diagnostic(
 }
 
 /// Timeseries TDD: `examples/timeseries_broken_incremental_without_timeseries/` produces
-/// exactly one `TimeseriesRequiredForIncremental` diagnostic anchored at
+/// exactly one `TimeseriesRequiredForBatched` diagnostic anchored at
 /// `models/incremental_without_timeseries.sql`.
 ///
 /// This test verifies that `validate_timeseries` is wired into the production
@@ -2275,24 +2458,24 @@ fn timeseries_broken_incremental_without_timeseries() {
     check_workspace_emits_timeseries_diagnostic(
         "examples/timeseries_broken_incremental_without_timeseries",
         "models/incremental_without_timeseries.sql",
-        smelt_db::DiagnosticCode::TimeseriesRequiredForIncremental,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
     );
 }
 
-// ===== BUG-006: CumulativeForbidsTimeseries / CumulativeForbidsIncremental regression =====
+// ===== BUG-006: KeyedForbidsTimeseries / KeyedForbidsBatched regression =====
 //
 // Before the fix, `validate_timeseries` returned these errors but `file_diagnostics`
 // silently dropped them via the `_ => None` catch-all in the match block.
 //
 // Fixtures:
-//   - `examples/timeseries_broken_cumulative_with_timeseries/`   — CumulativeForbidsTimeseries
-//   - `examples/timeseries_broken_cumulative_with_incremental/`  — CumulativeForbidsIncremental
+//   - `examples/timeseries_broken_cumulative_with_timeseries/`   — KeyedForbidsTimeseries
+//   - `examples/timeseries_broken_cumulative_with_incremental/`  — KeyedForbidsBatched
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `CumulativeForbidsTimeseries` or `CumulativeForbidsIncremental` diagnostic fires
+/// `KeyedForbidsTimeseries` or `KeyedForbidsBatched` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any other
 /// file in the workspace.
-fn check_workspace_emits_cumulative_frontmatter_diagnostic(
+fn check_workspace_emits_keyed_frontmatter_diagnostic(
     example_dir: &str,
     expected_file: &str,
     expected_code: smelt_db::DiagnosticCode,
@@ -2301,9 +2484,9 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     use smelt_db::{DiagnosticAcc, Workspace};
     use std::path::Path;
 
-    const CUMULATIVE_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
-        smelt_db::DiagnosticCode::CumulativeForbidsIncremental,
+    const KEYED_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
+        smelt_db::DiagnosticCode::KeyedForbidsTimeseries,
+        smelt_db::DiagnosticCode::KeyedForbidsBatched,
     ];
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -2327,8 +2510,8 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     let mut target_diags: Vec<smelt_db::Diagnostic> = Vec::new();
     let mut other_diags: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
 
-    let is_cumulative = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
-        code.is_some_and(|c| CUMULATIVE_FRONTMATTER_CODES.contains(c))
+    let is_keyed_frontmatter = |code: Option<&smelt_db::DiagnosticCode>| -> bool {
+        code.is_some_and(|c| KEYED_FRONTMATTER_CODES.contains(c))
     };
 
     for model in &models {
@@ -2347,7 +2530,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
             .ends_with(&expected_file.replace('\\', "/"));
 
         for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
-            if !is_cumulative(d.code.as_ref()) {
+            if !is_keyed_frontmatter(d.code.as_ref()) {
                 continue;
             }
             if is_target {
@@ -2357,7 +2540,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
             }
         }
         for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
-            if !is_cumulative(d.0.code.as_ref()) {
+            if !is_keyed_frontmatter(d.0.code.as_ref()) {
                 continue;
             }
             if is_target {
@@ -2370,7 +2553,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
 
     assert!(
         other_diags.is_empty(),
-        "expected zero cumulative frontmatter diagnostics from files other than '{}' in {}, got {}:\n  {}",
+        "expected zero keyed frontmatter diagnostics from files other than '{}' in {}, got {}:\n  {}",
         expected_file,
         example_dir,
         other_diags.len(),
@@ -2384,7 +2567,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     assert_eq!(
         target_diags.len(),
         1,
-        "expected exactly 1 cumulative frontmatter diagnostic from '{}' in {}, got {}:\n  {}",
+        "expected exactly 1 keyed frontmatter diagnostic from '{}' in {}, got {}:\n  {}",
         expected_file,
         example_dir,
         target_diags.len(),
@@ -2398,7 +2581,7 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
     assert_eq!(
         target_diags[0].code,
         Some(expected_code),
-        "expected cumulative frontmatter diagnostic code {:?} from '{}' in {}, got {:?}: {}",
+        "expected keyed frontmatter diagnostic code {:?} from '{}' in {}, got {:?}: {}",
         expected_code,
         expected_file,
         example_dir,
@@ -2408,36 +2591,36 @@ fn check_workspace_emits_cumulative_frontmatter_diagnostic(
 }
 
 /// BUG-006 regression: `examples/timeseries_broken_cumulative_with_timeseries/` produces
-/// exactly one `CumulativeForbidsTimeseries` diagnostic from
+/// exactly one `KeyedForbidsTimeseries` diagnostic from
 /// `models/cumulative_with_timeseries.sql`.
 ///
-/// Before the fix, `validate_timeseries` returned `CumulativeForbidsTimeseries`
+/// Before the fix, `validate_timeseries` returned `KeyedForbidsTimeseries`
 /// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
-/// so the LSP showed no error even though cumulative models must not declare
-/// `timeseries:` (cumulative_aggregate.md §"Output shape").
+/// so the LSP showed no error even though keyed models must not declare
+/// `timeseries:` without key temporal locality (`keyed_models.md` §"Output shape").
 #[test]
 fn timeseries_broken_cumulative_with_timeseries() {
-    check_workspace_emits_cumulative_frontmatter_diagnostic(
+    check_workspace_emits_keyed_frontmatter_diagnostic(
         "examples/timeseries_broken_cumulative_with_timeseries",
         "models/cumulative_with_timeseries.sql",
-        smelt_db::DiagnosticCode::CumulativeForbidsTimeseries,
+        smelt_db::DiagnosticCode::KeyedForbidsTimeseries,
     );
 }
 
 /// BUG-006 regression: `examples/timeseries_broken_cumulative_with_incremental/` produces
-/// exactly one `CumulativeForbidsIncremental` diagnostic from
+/// exactly one `KeyedForbidsBatched` diagnostic from
 /// `models/cumulative_with_incremental.sql`.
 ///
-/// Before the fix, `validate_timeseries` returned `CumulativeForbidsIncremental`
+/// Before the fix, `validate_timeseries` returned `KeyedForbidsBatched`
 /// but `file_diagnostics` silently dropped it, so the LSP showed no error even
-/// though cumulative models must not declare `incremental:` (cumulative_aggregate.md
+/// though keyed models must not declare `batched:` (`keyed_models.md`
 /// §"Constraints & Invariants" #2).
 #[test]
 fn timeseries_broken_cumulative_with_incremental() {
-    check_workspace_emits_cumulative_frontmatter_diagnostic(
+    check_workspace_emits_keyed_frontmatter_diagnostic(
         "examples/timeseries_broken_cumulative_with_incremental",
         "models/cumulative_with_incremental.sql",
-        smelt_db::DiagnosticCode::CumulativeForbidsIncremental,
+        smelt_db::DiagnosticCode::KeyedForbidsBatched,
     );
 }
 

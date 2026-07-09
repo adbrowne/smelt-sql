@@ -31,6 +31,7 @@ mod legacy_sources_yaml_diag;
 mod meta_list_scalar;
 mod model_frontmatter_diagnostics;
 mod model_input_constraints_set_ops;
+mod monotonicity_nullability_gate;
 mod outer_join_nullability;
 mod overlay_diag_surface;
 mod overlay_dispatch;

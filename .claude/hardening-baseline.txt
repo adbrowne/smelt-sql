@@ -1,10 +1,10 @@
 # Production code debt baseline
-# Updated: 2026-06-29
+# Updated: 2026-07-10
 # Format: <crate> <pattern> <count>
 # Patterns: unwrap  expect  println
 # Regenerate with: .claude/scripts/hardening-budget.sh --update
 #
-smelt-backend-duckdb expect 15
+smelt-backend-duckdb expect 17
 smelt-backend-duckdb println 0
 smelt-backend-duckdb unwrap 0
 smelt-backend expect 0
@@ -19,8 +19,8 @@ smelt-backend unwrap 0
 smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
-smelt-cli expect 36
-smelt-cli println 105
+smelt-cli expect 37
+smelt-cli println 108
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0
@@ -43,6 +43,9 @@ smelt-logical unwrap 1
 smelt-lsp expect 1
 smelt-lsp println 0
 smelt-lsp unwrap 3
+smelt-maintenance-testkit expect 20
+smelt-maintenance-testkit println 0
+smelt-maintenance-testkit unwrap 2
 smelt-parser-compat expect 0
 smelt-parser-compat println 0
 smelt-parser-compat unwrap 3
@@ -52,7 +55,7 @@ smelt-parser unwrap 2
 smelt-planner expect 0
 smelt-planner println 0
 smelt-planner unwrap 2
-smelt-runtime expect 7
+smelt-runtime expect 4
 smelt-runtime println 0
 smelt-runtime unwrap 0
 smelt-state expect 0

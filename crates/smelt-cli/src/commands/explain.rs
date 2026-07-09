@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
-    argument_resolution::{compute_scope, resolve_selector_args},
-    build_explain_output, discover_emitted_model_files, discover_python_models, find_project_root,
-    init_db, parse_selector, Config, ModelDiscovery, SourcesConfig,
+    argument_resolution::{compute_scope, resolve_argument, resolve_selector_args},
+    build_explain_output, build_maintenance_plan_report, discover_emitted_model_files,
+    discover_python_models, find_project_root, init_db, parse_selector, Config, ModelDiscovery,
+    SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -11,6 +12,10 @@ use std::collections::HashMap;
 use crate::ExplainArgs;
 
 pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
+    if let Some(model_name) = args.model_name.clone() {
+        return explain_maintenance_plan(&args, &model_name, scope).await;
+    }
+
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -122,8 +127,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
         let frontmatter = Frontmatter::parse(&model.content);
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -178,7 +182,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
                 if let Some(ref inc) = model.incremental {
                     print!(
                         " (incremental: {} by {}, {})",
-                        serde_json::to_value(&inc.granularity)
+                        serde_json::to_value(inc.granularity)
                             .ok()
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_else(|| "?".to_string()),
@@ -302,8 +306,7 @@ fn build_physical_section(
 
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -315,7 +318,7 @@ fn build_physical_section(
                 part_col, gran
             )
         } else if let (Some(_), Some(ts)) = (&inc_config, &ts_config) {
-            let gran = serde_json::to_value(&ts.granularity)
+            let gran = serde_json::to_value(ts.granularity)
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "?".to_string());
@@ -323,7 +326,7 @@ fn build_physical_section(
                 "incremental (partition: {}, granularity: {})",
                 ts.partition_column, gran
             )
-        } else if metadata.is_some_and(|m| m.is_cumulative()) {
+        } else if metadata.is_some_and(|m| m.is_keyed()) {
             "cumulative_aggregate".to_string()
         } else {
             "full_refresh".to_string()
@@ -350,6 +353,83 @@ fn build_physical_section(
     }
 }
 
+/// `smelt explain <model>` — the maintenance-plan report
+/// (`maintenance_plan.md` §Surface "CLI"). Read-only: consumes
+/// `smelt_db::maintenance_plan_report` (itself a thin wrapper over the pure
+/// derivation in `smelt-logical`) rather than re-deriving admission,
+/// locality, or ledger logic (maintenance-plan-purity invariant,
+/// `architecture.md` §"Constraints & Invariants" item 12).
+async fn explain_maintenance_plan(
+    args: &ExplainArgs,
+    model_name: &str,
+    scope: Option<&str>,
+) -> Result<()> {
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let mut models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
+    }
+
+    let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), model_name)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let model = models
+        .iter()
+        .find(|m| m.canonical_path() == canonical)
+        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", canonical))?;
+
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+
+    let Some(result) = smelt_db::maintenance_plan_report(&db, ws, file) else {
+        println!(
+            "no maintenance plan: `{}` is not an incremental model with a declared grain",
+            canonical
+        );
+        return Ok(());
+    };
+
+    let graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+    let upstream = graph.get_upstream(&canonical);
+
+    let report = build_maintenance_plan_report(&canonical, &result, &upstream);
+    println!("{}", report);
+
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,9 +442,11 @@ mod tests {
         ModelFile,
     };
 
-    /// A model declared with `materialization: table` + `refresh: cumulative`
-    /// must report `"cumulative_aggregate"` as its physical strategy in
-    /// `smelt explain` output (the human-readable strategy label), NOT `"full_refresh"`.
+    /// A model declared with `materialization: table` + `refresh: incremental`
+    /// and `grain: key` (the former `refresh: cumulative`/`keyed`) must
+    /// report `"cumulative_aggregate"` as its physical strategy in `smelt
+    /// explain` output (the human-readable strategy label), NOT
+    /// `"full_refresh"`.
     #[test]
     fn refresh_cumulative_table_strategy_is_cumulative_aggregate() {
         // Minimal smelt.yml in a temp dir.
@@ -377,12 +459,13 @@ mod tests {
         std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
         let config = smelt_cli::Config::load(tmp.path()).expect("Config::load from temp smelt.yml");
 
-        // Build a ModelFile with `materialization: table` + `refresh: cumulative`.
+        // Build a ModelFile with `materialization: table` + `refresh: incremental` + `grain: key`.
         let model_name = "my_cumulative_model";
         let path: std::path::PathBuf = format!("models/{}.sql", model_name).into();
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Cumulative),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Key),
             ..ModelMetadata::default()
         };
         let model_file = ModelFile {

@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-05
 owners: [andrew]
 ---
 
@@ -102,38 +102,63 @@ Owned by `docs/specs/timeseries.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `TimeseriesRequiredForIncremental` | Error | A model declares `incremental:` but has no `timeseries:` block. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
+| `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
+| `MalformedBoundedDomain` | Error | A `bounded_domain:` declaration is structurally invalid: a non-positive `max_cardinality` (an absent cap is already a YAML parse error, since the field is required), an empty `column`, or a `column` absent from the model's SQL body. |
+| `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` without a sibling `grain:` declaration. |
+| `GrainRequiresIncremental` | Error | A model declares `grain:` without `refresh: incremental`. |
 
 ---
 
-### Incremental
+### Batched
 
-Owned by `docs/specs/incremental_models.md`.
+Owned by `docs/specs/batched_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `IncrementalNotBatchSafe` | Warning | An `incremental` model's SQL is not batch-safe under the planner's incremental safety classifier; execution falls back to a safe chunking strategy. |
-| `EventTimeColumnNotVisibleAtOuterSelect` | Error | An incremental model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
+| `BatchedNotSafe` | Warning | A `refresh: batched` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
+| `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 
 ---
 
-### Cumulative aggregate
+### Keyed refresh mode
 
-Owned by `docs/specs/cumulative_aggregate.md`.
+Owned by `docs/specs/keyed_models.md`. This family replaces the retired `Cumulative*` and
+`AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
+unchanged; `CumulativeNoDrivingSource` and `AccumulatingSnapshotUnboundedHorizon` are
+**retired outright, not renamed** (an unclocked model is a legitimate snapshot-reconcile
+posture under `keyed`, not an error, and there is no write-eligibility horizon to bound —
+`keyed_models.md` §Known Divergences).
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `CumulativeRequiresGroupBy` | Error | A `refresh: cumulative` model's SELECT has no GROUP BY (key columns are required). |
-| `CumulativeUnknownAggregator` | Error | A `refresh: cumulative` model's projection uses a non-allowlisted aggregator or composite expression over aggregates. |
-| `CumulativeGroupByContainsPartitionColumn` | Error | The `refresh: cumulative` model's GROUP BY contains the driving source's `partition_column`. |
-| `CumulativeForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: cumulative` model. |
-| `CumulativeForbidsNondeterministic` | Error | A non-deterministic function appears in a `refresh: cumulative` model's SELECT. |
-| `CumulativeNoDrivingSource` | Error | No source in a `refresh: cumulative` model's FROM declares a `timeseries:` block. |
-| `CumulativeMultipleDrivingSources` | Error | Multiple timeseries-tagged sources in a `refresh: cumulative` model's FROM (v1 supports exactly one). |
-| `CumulativeSqlNotParseable` | Error | A `refresh: cumulative` model's SELECT could not be parsed for aggregator classification. |
-| `CumulativeForbidsTimeseries` | Error | A `refresh: cumulative` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
-| `CumulativeForbidsIncremental` | Error | A `refresh: cumulative` model incorrectly declares an `incremental:` block. Anchored at offset 0. |
+| `KeyedRequiresGroupBy` | Error | A `refresh: keyed` model's SELECT has no GROUP BY (key columns are required). |
+| `KeyedForbidsTimeseries` | Error | A `refresh: keyed` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`keyed_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedForbidsBatched` | Error | A `refresh: keyed` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+| `KeyedUnknownCombiner` | Error | A `refresh: keyed` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
+| `KeyedGroupByContainsPartitionColumn` | Error | The `refresh: keyed` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
+| `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: keyed` model's outer body. |
+| `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `refresh: keyed` model's SELECT. |
+| `KeyedSqlNotParseable` | Error | A `refresh: keyed` model's SELECT could not be parsed for column-family classification. |
+| `KeyedMultipleDrivingSources` | Error | Multiple timeseries-tagged sources appear in a `refresh: keyed` model's FROM (exactly one is admitted under window-forward). |
+| `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column has no once-write provenance proof (key-derived, or a declared functional dependency). Names the column. |
+| `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen). Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
+| `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
+| `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
+| `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
+| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `refresh: keyed` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`keyed_models.md` §Known Divergences). Retired once snapshot-reconcile ships. |
+
+---
+
+### Materialized view
+
+Owned by `docs/specs/materialized_view.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `MaterializedViewForbidsTimeseries` | Error | A `refresh: materialized_view` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
+| `MaterializedViewForbidsBatched` | Error | A `refresh: materialized_view` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 
 ---
 
@@ -414,9 +439,24 @@ Owned by `docs/specs/virtual_environments.md`.
 
 ---
 
+### Maintenance plan
+
+Owned by `docs/specs/maintenance_plan.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `MaintenanceNoAdmissibleTechnique` | Error | No maintenance technique survives a cell's admission; names the cell. |
+| `MaintenanceReachNotDerivable` | Error | A required scan bound is neither derivable nor declared. |
+| `MaintenanceScanUnbounded` | Error | A scan or write footprint cannot be partition-bounded (or exceeds a declared `max_lookback`) and no `allow_full_scan` acceptance exists. |
+| `MaintenanceUnboundedFootprint` | Error | A targeted write was requested for a cell whose write footprint is unbounded (e.g. a stored trajectory under late data). |
+| `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. |
+| `MaintenanceGraphUnsupportedNode` | Error | A keyed-grain or self-referential node in the propagation graph; refused fail-loud rather than silently under-running. |
+
+---
+
 ## Known divergences
 
-None currently open.
+- **Four of the six `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique` and `MaintenanceScanUnbounded` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
 
 ## Open questions
 

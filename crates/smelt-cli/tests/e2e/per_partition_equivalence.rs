@@ -293,16 +293,22 @@ const START_DATE: &str = "2026-03-19";
 const END_DATE_EXCLUSIVE: &str = "2026-03-26"; // 7 days
 
 /// Day sequence for the day-by-day pipeline: each entry is (window_start,
-/// window_end) passed to `smelt run`, honouring the 1-day lookback used by
-/// the Python driver.
+/// window_end) passed to `smelt run`. Windows are non-overlapping — the
+/// workspace includes `silver.device_user_edges`, an additive-fold keyed
+/// model (`grain: key`), and the transactional merge ledger refuses to
+/// re-fold a partition it has already merged (`docs/specs/keyed_models.md`
+/// §"Reprocessing" / §"The transactional merge ledger" —
+/// `KeyedReprocessedWindow`). The Python driver's superseded 1-day-lookback
+/// schedule predates that model and would double-fold day D on both day D's
+/// and day D+1's window; it is not reproduced here.
 const DAY_WINDOWS: &[(&str, &str)] = &[
-    ("2026-03-18", "2026-03-20"), // day 1
-    ("2026-03-19", "2026-03-21"), // day 2
-    ("2026-03-20", "2026-03-22"), // day 3
-    ("2026-03-21", "2026-03-23"), // day 4
-    ("2026-03-22", "2026-03-24"), // day 5
-    ("2026-03-23", "2026-03-25"), // day 6
-    ("2026-03-24", "2026-03-26"), // day 7
+    ("2026-03-19", "2026-03-20"), // day 1
+    ("2026-03-20", "2026-03-21"), // day 2
+    ("2026-03-21", "2026-03-22"), // day 3
+    ("2026-03-22", "2026-03-23"), // day 4
+    ("2026-03-23", "2026-03-24"), // day 5
+    ("2026-03-24", "2026-03-25"), // day 6
+    ("2026-03-25", "2026-03-26"), // day 7
 ];
 
 // ─────────────────────────────────────────────────────────────────────────────
@@ -579,16 +585,18 @@ fn test_runs_under_test_harness() {
     fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
     repopulate_sources(&db_path, &setup_abs);
 
-    // Day-by-day: 2 iterations with 1-day lookback windows.
+    // Day-by-day: 2 non-overlapping single-day windows (see `DAY_WINDOWS`
+    // above for why — `silver.device_user_edges` is additive-fold and
+    // refuses to re-fold an already-ledgered partition).
     smelt_run(
         &workspace,
-        "2026-03-18",
+        "2026-03-19",
         "2026-03-20",
         "harness-smoke-B-day1",
     );
     smelt_run(
         &workspace,
-        "2026-03-19",
+        "2026-03-20",
         "2026-03-21",
         "harness-smoke-B-day2",
     );

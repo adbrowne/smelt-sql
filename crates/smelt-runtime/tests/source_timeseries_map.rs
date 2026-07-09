@@ -14,6 +14,7 @@ fn day_ts(partition_column: &str) -> TimeseriesConfig {
         partition_column: partition_column.to_string(),
         granularity: Granularity::Day,
         week_start: None,
+        assert_monotonic: false,
     }
 }
 
@@ -26,6 +27,11 @@ fn make_source(segments: Vec<&str>, ts: Option<TimeseriesConfig>) -> SourceInfo 
         name_override: None,
         tags: vec![],
         timeseries: ts,
+        mutation_profile: None,
+        source_lateness: None,
+        watermark: None,
+        unique_key: None,
+        retention: None,
     }
 }
 
@@ -84,6 +90,7 @@ fn model_frontmatter_timeseries_preserved() {
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         })),

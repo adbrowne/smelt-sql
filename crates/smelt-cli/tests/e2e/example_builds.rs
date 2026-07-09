@@ -193,6 +193,45 @@ const KNOWN_UNBUILDABLE: &[(&str, &str)] = &[
          verified e2e via fn_incremental_ts_e2e.rs)",
     ),
     (
+        "incremental_nondeterministic_columns",
+        "Catalog Error: Table with name sources_events does not exist \
+         (batched.nondeterministic_columns fixture: the non-determinism flow/taint check \
+         admits the model correctly; source table `main.sources_events` not seeded in \
+         standalone build env; verified e2e via incremental_nondeterministic_columns_e2e.rs)",
+    ),
+    (
+        "incremental_declared_monotonic",
+        "Catalog Error: Table with name sources_fact does not exist \
+         (DC1 fixture: `timeseries.assert_monotonic` correctly widens the opaque-function \
+         join driving-fact trace and admits the model; source table `main.sources_fact` \
+         not seeded in the standalone build env — covered by the unit tests in \
+         crates/smelt-logical/src/rules/incremental.rs)",
+    ),
+    (
+        "horizon_ceiling_comfortable",
+        "Catalog Error: Table with name sources_raw_events does not exist \
+         (DC4 fixture: `horizon_ceiling` warning-only declaration — the derived 2-hour \
+         reach is comfortably inside the declared 30-day ceiling, so no warning fires; \
+         source table `main.sources_raw_events` not seeded in the standalone build env — \
+         covered by crates/smelt-runtime/tests/horizon_ceiling_warning.rs)",
+    ),
+    (
+        "horizon_ceiling_tight",
+        "Catalog Error: Table with name sources_raw_events does not exist \
+         (DC4 fixture: `horizon_ceiling` warning-only declaration — the derived 2-hour \
+         reach exceeds the declared 1-hour ceiling, licensing a compile-time warning that \
+         never narrows the clamp; source table `main.sources_raw_events` not seeded in the \
+         standalone build env — covered by crates/smelt-runtime/tests/horizon_ceiling_warning.rs)",
+    ),
+    (
+        "source_mutation_profile_declared",
+        "Catalog Error: Table with name sources_raw_events does not exist \
+         (DC5 fixture: source-side `mutation_profile` + `source_lateness` declaration; \
+         source table `main.sources_raw_events` not seeded in the standalone build env — \
+         covered by crates/smelt-core/tests/source_yaml.rs and \
+         crates/smelt-logical/src/analysis/input_delta.rs unit tests)",
+    ),
+    (
         "fn_struct_spread_cte",
         "Catalog Error: Table with name sources_gps_readings does not exist \
          (D2 probe fixture: struct spread inside CTE body schema propagation; \

@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Virtual Environments
 
-> **What this is.** A normative spec for smelt's opt-in **virtual data environments** — cheap, isolated environments (dev branches, CI runs, PR previews) that share physical tables with production whenever a model's output is *provably unchanged*, and rebuild only what provably changed. It defines the `state.mode` posture, environment-suffixed addressing, fingerprint-keyed table reuse, plan categorization (breaking vs non-breaking), the author override hatches, and the promotion ("virtual update") model. Out of scope: the equivalence oracle this is built on (see `output_fingerprint.md`); the persisted state layout (see `run_state.md`); incremental interval execution (see `incremental_models.md`); physical schema migration (see `schema_evolution.md`). This spec is the orchestration layer; `output_fingerprint.md` is the judgement it orchestrates.
+> **What this is.** A normative spec for smelt's opt-in **virtual data environments** — cheap, isolated environments (dev branches, CI runs, PR previews) that share physical tables with production whenever a model's output is *provably unchanged*, and rebuild only what provably changed. It defines the `state.mode` posture, environment-suffixed addressing, fingerprint-keyed table reuse, plan categorization (breaking vs non-breaking), the author override hatches, and the promotion ("virtual update") model. Out of scope: the equivalence oracle this is built on (see `output_fingerprint.md`); the persisted state layout (see `run_state.md`); incremental interval execution (see `batched_models.md`); physical schema migration (see `schema_evolution.md`). This spec is the orchestration layer; `output_fingerprint.md` is the judgement it orchestrates.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -28,7 +28,7 @@ state:
 ```
 
 - `stateless` (default) is exactly today's behaviour: no `.smelt/` state store is required, and no model is snapshot-reused. Stateless projects pay nothing for this feature.
-- `intervals` enables the persisted interval ledger (see `incremental_models.md`, `run_state.md`).
+- `intervals` enables the persisted interval ledger (see `batched_models.md`, `run_state.md`).
 - `environments` enables environment-suffixed addressing and fingerprint-keyed reuse (this spec). A model may narrow but not widen the project posture.
 
 The three postures form a lattice ordered by capability:
@@ -126,4 +126,4 @@ A model with state normally gets safe, revertible, provable-equivalence reuse. `
 - **Tests**: `crates/smelt-fingerprint/tests/` (oracle and determinism gates)
 - **User docs**: none yet
 - **Plans (history)**: [`docs/plans/20260620-w8-virtual-env.md`](plans/20260620-w8-virtual-env.md) (data model + evaluator: `StateMode`, reuse hatches, `SnapshotStore`, `evaluate_reuse`); predecessor research is `docs/research/20260601-virtual-environments.md`
-- **Related specs**: `output_fingerprint.md` (the equivalence oracle), `run_state.md` (persisted `.smelt/` state and snapshots), `incremental_models.md` (interval ledger, the `intervals` posture), `schema_evolution.md` (physical migration when reuse needs a schema change), `architecture.md` (`state.mode` surface, crate responsibilities), `planner_integration.md` (the author-declared `deterministic` property), `cli.md` (`smelt plan`/`apply`/`status`)
+- **Related specs**: `output_fingerprint.md` (the equivalence oracle), `run_state.md` (persisted `.smelt/` state and snapshots), `batched_models.md` (interval ledger, the `intervals` posture), `schema_evolution.md` (physical migration when reuse needs a schema change), `architecture.md` (`state.mode` surface, crate responsibilities), `planner_integration.md` (the author-declared `deterministic` property), `cli.md` (`smelt plan`/`apply`/`status`)

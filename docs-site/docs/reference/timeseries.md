@@ -75,28 +75,31 @@ models:
 
 Frontmatter wins over `smelt.yml` when both set the same field. The two sources are merged key-by-key: declaring `granularity: day` in frontmatter and `event_time_column: order_ts` in `smelt.yml` yields a single combined block.
 
-## Materialization compatibility
+## Materialization / refresh compatibility
 
-| Materialization | `timeseries:` allowed? |
+| Storage / refresh | `timeseries:` allowed? |
 |---|---|
 | `view` | Yes |
-| `table` | Yes |
-| `materialized_view` | Yes |
+| `table`, `refresh: full` | Yes |
+| `table`, `refresh: incremental`, `grain: partition` | **Required** |
+| `table`, `refresh: incremental`, `grain: key` | Only when key temporal locality is established (`keyed_models.md` §"Key temporal locality"); otherwise forbidden (`KeyedForbidsTimeseries`) |
+| `table`, `refresh: incremental`, `grain: key_per_partition` | **Required** — the partition axis is half the grain |
+| `table`, `refresh: materialized_view` | No — `MaterializedViewForbidsTimeseries` |
 | `ephemeral` | No — `MalformedTimeseries` |
 | `test` | No — `MalformedTimeseries` |
 
-## Interaction with `incremental:`
+## Interaction with `refresh: incremental`
 
-A model that opts into incremental execution (via `incremental: { enabled: true }`) must also declare `timeseries:`. The two blocks are independent:
+A `refresh: incremental` model must also declare `timeseries:` whenever its `grain:` is `partition` or `key_per_partition`. The two blocks are independent:
 
 - `timeseries:` declares the time dimension (event time, partition column, granularity).
-- `incremental:` opts the model into incremental execution and carries strategy keys (`unique_key`, `safety_overrides`).
+- `refresh: incremental` + `grain:` opts the model into the derived maintenance plan; the `batched:` block carries per-model preference keys (`unique_key`, `safety_overrides`) layered on top.
 
-Declaring `incremental:` without `timeseries:` is a validation error. See the [incremental models guide](../guide/incremental-models.md).
+Declaring `refresh: incremental` + `grain: partition` without `timeseries:` is a validation error. See the [incremental models guide](../guide/incremental-models.md).
 
 ## Diagnostic codes
 
 | Code | Severity | Trigger |
 |---|---|---|
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule — unknown key, `granularity` not in the enum, `partition_column` absent from the model's SQL body, `week_start` set without `granularity: week`, or `timeseries:` on an `ephemeral` / `test` model. |
-| `TimeseriesRequiredForIncremental` | Error | A model declares `incremental:` but has no `timeseries:` block. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |

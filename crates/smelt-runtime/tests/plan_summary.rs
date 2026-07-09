@@ -49,6 +49,7 @@ fn make_config() -> Arc<Config> {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     })
 }
 
@@ -199,7 +200,7 @@ async fn test_plan_summary_lists_strategies() {
 #[tokio::test]
 async fn test_planner_override_applied() {
     use smelt_core::config::{ModelConfig, TimeseriesConfig};
-    use smelt_core::{Granularity, IncrementalConfig, IncrementalSafetyOverrides};
+    use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
 
     let project_dir = tempfile::tempdir().expect("tempdir");
     let project_dir = project_dir.path();
@@ -207,12 +208,12 @@ async fn test_planner_override_applied() {
 
     // Write a model with incremental frontmatter so it's classified as Incremental
     let inc_sql = r#"---
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-incremental:
-  enabled: true
 ---
 SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
 
@@ -228,11 +229,14 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
                 partition_column: "event_date".to_string(),
                 granularity: Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
-            incremental: Some(IncrementalConfig {
-                enabled: true,
+            refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Partition),
+            batched: Some(BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: IncrementalSafetyOverrides::default(),
+                nondeterministic_columns: vec![],
+                safety_overrides: BatchedSafetyOverrides::default(),
             }),
             tags: vec![],
             target: None,

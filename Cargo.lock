@@ -4064,6 +4064,7 @@ dependencies = [
  "async-trait",
  "duckdb",
  "smelt-backend",
+ "smelt-state",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",
@@ -4130,6 +4131,7 @@ dependencies = [
  "duckdb",
  "include_dir",
  "line-index",
+ "proptest",
  "pyo3",
  "rand 0.8.6",
  "rowan",
@@ -4143,6 +4145,8 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
+ "smelt-logical",
+ "smelt-maintenance-testkit",
  "smelt-parser",
  "smelt-planner",
  "smelt-runtime",
@@ -4220,8 +4224,10 @@ dependencies = [
  "smelt-dialect",
  "smelt-logical",
  "smelt-parser",
+ "smelt-runtime",
  "smelt-types",
  "tempfile",
+ "tracing",
  "walkdir",
 ]
 
@@ -4253,6 +4259,7 @@ dependencies = [
 name = "smelt-logical"
 version = "0.3.2"
 dependencies = [
+ "duckdb",
  "serde",
  "serde_yaml",
  "smelt-core",
@@ -4281,6 +4288,23 @@ dependencies = [
  "tokio",
  "tower-lsp",
  "walkdir",
+]
+
+[[package]]
+name = "smelt-maintenance-testkit"
+version = "0.3.2"
+dependencies = [
+ "anyhow",
+ "chrono",
+ "duckdb",
+ "proptest",
+ "smelt-backend",
+ "smelt-backend-duckdb",
+ "smelt-core",
+ "smelt-db",
+ "smelt-runtime",
+ "tokio",
+ "tokio-util",
 ]
 
 [[package]]
@@ -4329,7 +4353,10 @@ name = "smelt-runtime"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "arrow",
+ "async-trait",
  "chrono",
+ "duckdb",
  "line-index",
  "pyo3",
  "rowan",
@@ -4341,6 +4368,7 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
+ "smelt-logical",
  "smelt-parser",
  "smelt-planner",
  "smelt-state",
@@ -4358,13 +4386,16 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "chrono",
+ "duckdb",
  "serde",
  "serde_json",
  "sha2 0.10.9",
  "smelt-dialect",
+ "smelt-maintenance-testkit",
  "smelt-types",
  "tempfile",
  "thiserror 2.0.18",
+ "tokio",
  "tracing",
 ]
 

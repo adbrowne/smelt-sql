@@ -21,7 +21,7 @@ This may be:
 ### Step 1: Load the spec as primary context
 
 1. Read `docs/specs/<slug>.md` **completely** in your own context. This is the brief — do not re-derive it from code.
-2. Read the spec's References → Code paths to ground yourself in current implementation.
+2. Ground yourself in the current implementation via the spec's References → Code paths. Prefer dispatching an **Explore** agent ("map how <area> is implemented today: key types, entry points, which crates consume it") and keeping only its summary — reading the implementation files into your own context makes every later planning turn pay for them again.
 3. If the spec has a `last_reviewed` date older than 30 days, warn the user and offer to run `/smelt:spec` first.
 
 ### Step 2: Compute the spec diff
@@ -90,6 +90,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 **Conventions every phase:**
 - Real-fixture tests, not just AST units — every phase exercises its feature in `examples/`.
 - Red-green TDD: failing test before any implementation.
+- Verification gate is `bash .claude/scripts/verify-phase.sh` (one call: fmt + clippy + tests + example_diagnostics, failures-only output) — do not run the four commands separately.
 - Atomic per-phase commits with the phase's `Commit.` line verbatim.
 - Never skip hooks, never `--no-verify`, never force-push the tracking PR.
 - Don't widen scope: a phase may not reach into a later phase's scope.
@@ -167,7 +168,7 @@ For each phase:
 
 How to confirm the spec is satisfied at the end:
 - {Real-fixture test or example workspace command}
-- `cargo test -p smelt-cli --test example_diagnostics`
+- `bash .claude/scripts/verify-phase.sh`
 - `/smelt:validate {slug}` reports zero drift
 ```
 

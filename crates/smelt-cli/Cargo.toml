@@ -15,6 +15,7 @@ path = "src/main.rs"
 smelt-core = { path = "../smelt-core" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
+smelt-logical = { path = "../smelt-logical" }
 smelt-types = { path = "../smelt-types" }
 smelt-planner = { path = "../smelt-planner" }
 smelt-backend = { path = "../smelt-backend" }
@@ -69,6 +70,8 @@ line-index.workspace = true
 
 [dev-dependencies]
 tempfile = "3.8"
+proptest = { workspace = true }
+smelt-maintenance-testkit = { path = "../smelt-maintenance-testkit" }
 
 [features]
 default = ["duckdb"]

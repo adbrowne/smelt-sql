@@ -40,8 +40,8 @@ fn stage_workspace(tmp: &TempDir, name: &str, model_files: &[(&str, &str)]) -> P
 /// A model with OVER in the outer body (window function — not partition-local).
 const SQL_OVER: &str = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -56,11 +56,38 @@ FROM raw.events
 GROUP BY 1, 2
 "#;
 
-/// A model with HAVING in the outer body.
-const SQL_HAVING: &str = r#"---
+/// A model with a **misaligned** HAVING in the outer body: its scope's
+/// GROUP BY (`user_id`) does not include the partition column, so group
+/// composition on a batched run can differ from a full refresh — refused
+/// (`batched_models.md` §"Safety checks").
+const SQL_HAVING_MISALIGNED: &str = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+---
+SELECT
+    MAX(event_date) as event_date,
+    user_id,
+    COUNT(*) as cnt
+FROM raw.events
+GROUP BY user_id
+HAVING COUNT(*) > 5
+"#;
+
+/// A model with a **partition-aligned** HAVING: its scope's GROUP BY
+/// includes the partition column, so every group is scoped to a single
+/// partition and the DELETE+INSERT contract makes the filter safe —
+/// admitted since the group-aligned HAVING/DISTINCT admission
+/// (`batched_models.md` §"Safety checks": rejected *unless* the scope's own
+/// GROUP BY key is a superset of `partition_column`).
+const SQL_HAVING_ALIGNED: &str = r#"---
+materialization: table
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: event_date
   partition_column: event_date
@@ -127,11 +154,16 @@ fn test_outer_over_refused() {
     );
 }
 
-/// A model with HAVING in the outer body is refused at planning time.
+/// A model whose HAVING scope's GROUP BY does not include the partition
+/// column is refused at planning time.
 #[test]
 fn test_outer_having_refused() {
     let tmp = TempDir::new().unwrap();
-    let ws = stage_workspace(&tmp, "having_refused", &[("bad_having.sql", SQL_HAVING)]);
+    let ws = stage_workspace(
+        &tmp,
+        "having_refused",
+        &[("bad_having.sql", SQL_HAVING_MISALIGNED)],
+    );
     let output = run_dry_run_with_flags(&ws, &[]);
 
     let combined = format!(
@@ -157,6 +189,27 @@ fn test_outer_having_refused() {
     assert!(
         combined.contains("bad_having"),
         "diagnostic must name the refused model; got:\n{combined}"
+    );
+}
+
+/// A partition-aligned HAVING (its scope's GROUP BY includes the partition
+/// column) is admitted — the group-aligned admission of
+/// `batched_models.md` §"Safety checks", end-to-end.
+#[test]
+fn test_partition_aligned_having_admitted() {
+    let tmp = TempDir::new().unwrap();
+    let ws = stage_workspace(
+        &tmp,
+        "having_aligned",
+        &[("aligned_having.sql", SQL_HAVING_ALIGNED)],
+    );
+    let output = run_dry_run_with_flags(&ws, &[]);
+
+    assert!(
+        output.status.success(),
+        "a partition-aligned HAVING must be admitted; stderr:\n{}\nstdout:\n{}",
+        String::from_utf8_lossy(&output.stderr),
+        String::from_utf8_lossy(&output.stdout),
     );
 }
 

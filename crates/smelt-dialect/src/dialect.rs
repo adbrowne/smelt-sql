@@ -63,8 +63,20 @@ pub struct BackendCapabilities {
     /// Supports native INSERT OVERWRITE for partition replacement
     pub supports_insert_overwrite: bool,
 
-    /// Supports CREATE MATERIALIZED VIEW
-    pub supports_materialized_views: bool,
+    /// Supports native incremental-view maintenance (IVM): the backend can
+    /// maintain a declared query as a continuously-refreshed materialized
+    /// object with no smelt-driven refresh loop (e.g. Databricks Enzyme,
+    /// Snowflake Dynamic Tables). Gates `refresh: materialized_view`
+    /// (`materialized_view.md` §"No silent fallback"); `false` on every
+    /// backend today.
+    pub supports_native_ivm: bool,
+
+    /// Supports retraction (inverting / reprocessing a prior input) within
+    /// its native IVM runtime. Meaningful only alongside `supports_native_ivm`;
+    /// does not describe smelt-driven `cumulative` retraction, which is a
+    /// per-model property of the aggregator algebra, not a backend flag
+    /// (`multi_backend.md` §"Incremental-view-maintenance capabilities").
+    pub supports_retraction: bool,
 
     // --- Schema evolution capabilities ---
     /// Supports `ALTER TABLE ADD COLUMN s.field` (struct field DDL via dot-notation)
@@ -115,7 +127,8 @@ impl BackendCapabilities {
             supports_double_colon_cast: true,
             supports_trailing_commas: true,
             supports_insert_overwrite: false,
-            supports_materialized_views: false,
+            supports_native_ivm: false,
+            supports_retraction: false,
             // Schema evolution: DuckDB supports all struct/array DDL
             supports_struct_field_ddl: true,
             supports_alter_column_using: true,
@@ -147,8 +160,9 @@ impl BackendCapabilities {
             supports_double_colon_cast: false,
             supports_trailing_commas: false,
             supports_insert_overwrite: true,
-            // OSS Spark SQL has no native materialized view; falls back to table.
-            supports_materialized_views: false,
+            // OSS Spark SQL has no native incremental-view-maintenance runtime.
+            supports_native_ivm: false,
+            supports_retraction: false,
             // Schema evolution: Delta supports struct field DDL and column mapping
             supports_struct_field_ddl: true,
             supports_alter_column_using: false,
@@ -175,8 +189,9 @@ impl BackendCapabilities {
             supports_double_colon_cast: false,
             supports_trailing_commas: false,
             supports_insert_overwrite: true,
-            // OSS Spark SQL has no native materialized view; falls back to table.
-            supports_materialized_views: false,
+            // OSS Spark SQL has no native incremental-view-maintenance runtime.
+            supports_native_ivm: false,
+            supports_retraction: false,
             // Empirically verified (W6·P2, Spark 4.1.x): ALTER TABLE … ADD COLUMNS
             // with a qualified struct path is rejected — [UNSUPPORTED_FEATURE.TABLE_OPERATION].
             supports_struct_field_ddl: false,
@@ -204,7 +219,9 @@ impl BackendCapabilities {
             supports_double_colon_cast: true,
             supports_trailing_commas: false,
             supports_insert_overwrite: false,
-            supports_materialized_views: true,
+            // No backend advertises native IVM today (`multi_backend.md` §IVM).
+            supports_native_ivm: false,
+            supports_retraction: false,
             // Schema evolution: PostgreSQL has limited struct support
             supports_struct_field_ddl: false,
             supports_alter_column_using: true,

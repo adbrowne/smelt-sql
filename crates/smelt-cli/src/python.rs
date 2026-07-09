@@ -84,6 +84,7 @@ def cli_model(project):
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         };
 
         // Call via CLI's re-export (now delegates to smelt-runtime)
@@ -117,6 +118,7 @@ def cli_model(project):
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         };
         let result = discover_python_models(&[], &[], &config, project_dir, None).unwrap();
         assert!(result.is_empty());

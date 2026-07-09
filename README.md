@@ -22,10 +22,11 @@ smelt is a data transformation framework that separates **logical transformation
 ---
 name: daily_revenue
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
+timeseries:
   event_time_column: order_date
   partition_column: order_date
+  granularity: day
 tags: [revenue, daily]
 ---
 
@@ -98,10 +99,11 @@ smelt supports **YAML frontmatter** in SQL files for model-level configuration. 
 ---
 name: user_summary
 materialization: table
-incremental:
-  enabled: true
+refresh: batched
+timeseries:
   event_time_column: updated_at
   partition_column: summary_date
+  granularity: day
 tags: [users, daily]
 owner: analytics-team
 description: Daily user activity summary

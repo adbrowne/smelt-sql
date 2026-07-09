@@ -60,7 +60,11 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
     ("generates", &[DeclarationKind::Model]),
     ("materialization", &[DeclarationKind::Model]),
     ("timeseries", &[DeclarationKind::Model]),
+    // Retired — kept catalogued (not "unknown") so `extract_single_model` can
+    // hard-error with a migration hint pointing at `refresh: batched` instead
+    // of the generic "unknown key" message.
     ("incremental", &[DeclarationKind::Model]),
+    ("batched", &[DeclarationKind::Model]),
     ("target", &[DeclarationKind::Model]),
     ("owner", &[DeclarationKind::Model]),
     ("description", &[DeclarationKind::Model]),
@@ -73,6 +77,11 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
     ("forward_only", &[DeclarationKind::Model]),
     ("state", &[DeclarationKind::Model]),
     ("refresh", &[DeclarationKind::Model]),
+    ("grain", &[DeclarationKind::Model]),
+    ("functional_dependencies", &[DeclarationKind::Model]),
+    ("bounded_domain", &[DeclarationKind::Model]),
+    ("horizon_ceiling", &[DeclarationKind::Model]),
+    ("maintenance", &[DeclarationKind::Model]),
     // Function/extern-only keys (match the fields of FunctionProperties).
     (
         "deterministic",
