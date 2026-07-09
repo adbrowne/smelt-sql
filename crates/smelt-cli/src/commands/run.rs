@@ -72,6 +72,15 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     graph.add_seeds(&seeds);
     graph.warn_unused_ephemerals(&config);
 
+    // `--since-upstream`: forward propagation from caller-declared per-source
+    // deltas (`maintenance_plan.md` §CLI). A separate codepath from the
+    // regular selector-driven run below — it computes its own (model,
+    // region) set from the propagation graph rather than a --select/--start/
+    // --end window, then loops `execute_project` once per propagated region.
+    if args.since_upstream {
+        return run_since_upstream(args, &project_dir, &config, &models, graph).await;
+    }
+
     let mut gen_salsa_db = smelt_cli::init_db(
         &project_dir,
         &discovery.discover_models().unwrap_or_default(),
@@ -267,5 +276,107 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     info!("{}", "=".repeat(60));
     info!("Executed {} models successfully", outcome.models.len());
     let _ = (run_start, std::time::Instant::now().elapsed());
+    Ok(())
+}
+
+/// `smelt run --since-upstream` — forward propagation from caller-declared
+/// per-source deltas (`maintenance_plan.md` §CLI, §"The graph layer").
+///
+/// Argument parsing + reporter wiring only (per the Run Pipeline Parity
+/// invariant): `smelt_runtime::propagation` computes the real per-workspace
+/// propagation graph and the exact `(model, region)` set to run; this
+/// function only pairs the `--source`/`--landed` flags, prints the dirty set
+/// the plan computed, and loops the SAME `execute_project` entry point every
+/// other run path uses, once per propagated region.
+async fn run_since_upstream(
+    args: RunArgs,
+    project_dir: &std::path::Path,
+    config: &Config,
+    models: &[smelt_cli::ModelFile],
+    graph: DependencyGraph,
+) -> Result<()> {
+    let deltas = smelt_runtime::propagation::pair_source_deltas(
+        &args.since_upstream_source,
+        &args.since_upstream_landed,
+    )
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
+    let order = graph
+        .execution_order()
+        .with_context(|| "Failed to compute execution order")?;
+
+    let plan =
+        smelt_runtime::propagation::plan_since_upstream(models, &source_infos, &order, &deltas)
+            .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    print!("{}", plan.dirty_set_report);
+    if plan.runs.is_empty() {
+        eprintln!("smelt: --since-upstream propagated nothing — no model has dirt to run");
+        return Ok(());
+    }
+
+    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+    let (salsa_models, function_files) =
+        discover_models_for_run(&discovery, &args.target, project_dir, config)?;
+    let seeds = smelt_core::discover_seed_infos_with_sidecars(project_dir, &config.paths);
+    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+
+    let salsa_db = build_execute_salsa_db(
+        &discovery,
+        &function_files,
+        &salsa_models,
+        project_dir,
+        &args.target,
+    )?;
+
+    let config_arc = Arc::new(config.clone());
+    let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
+    let db_arc = Arc::new(tokio::sync::Mutex::new(salsa_db));
+    let reporter = CliReporter::new(args.verbose, args.dry_run, args.show_results);
+    let backend_factory = CliBackendFactory {
+        database_override: args.database.clone(),
+    };
+
+    for run in &plan.runs {
+        info!(
+            "[--since-upstream] running {} over {}",
+            run.model,
+            match (&run.start, &run.end) {
+                (Some(s), Some(e)) => format!("[{s}, {e})"),
+                _ => "whole table".to_string(),
+            }
+        );
+        let request = ExecuteRequest {
+            target: args.target.clone(),
+            select: vec![run.model.clone()],
+            exclude: vec![],
+            start: run.start.clone(),
+            end: run.end.clone(),
+            batch_size_days: args.batch_size,
+            per_partition: args.per_partition,
+            full_refresh: false,
+            dry_run: args.dry_run,
+            enforce_safety: !args.allow_downgrade,
+            allow_column_removal: args.allow_column_removal,
+            allow_full_refresh: args.allow_full_refresh,
+            ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
+        };
+        let run_id = generate_run_id();
+        smelt_runtime::execute_project(
+            run_id,
+            request,
+            Arc::clone(&config_arc),
+            Arc::clone(&graph_arc),
+            Arc::clone(&db_arc),
+            project_dir,
+            &backend_factory,
+            &reporter,
+            CancellationToken::new(),
+        )
+        .await
+        .with_context(|| format!("--since-upstream run of '{}' failed", run.model))?;
+    }
+
     Ok(())
 }

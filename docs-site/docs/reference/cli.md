@@ -119,6 +119,9 @@ smelt run [OPTIONS]
 | `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
+| `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
+| `--source` | | string[] | | A source address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
+| `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
 
 **Selector syntax:**
 
@@ -156,6 +159,24 @@ smelt run --dry-run
 
 # Auto mode: process only new intervals
 smelt run --auto
+```
+
+### Forward propagation with `--since-upstream`
+
+Every `refresh: incremental` model with a declared `grain:` derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (`smelt explain <model>` prints it). `--since-upstream` composes those clamps into a propagation graph and walks it forward from **caller-declared** per-source deltas: for each `--source <address> --landed <start>..<end>` pair, the delta reflects through every downstream edge, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. The dirty set is printed before anything runs, then `smelt` runs exactly those `(model, region)` pairs — never a partition outside the propagated set.
+
+`--source` and `--landed` are repeatable and pair up positionally: the first `--source` pairs with the first `--landed`, and so on. A source named without a matching `--landed` interval contributes nothing for that invocation — there is no implicit whole-table fallback and no automatic discovery of what changed. The runner (or an external poller that watches the real upstream systems) is responsible for telling `smelt` what landed; a cron tick is only the trigger to ask.
+
+An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (`bronze`), with its `sources.` breadcrumb (`sources.bronze`), or with the full `smelt.` prefix (`smelt.sources.bronze`) — all three resolve identically.
+
+A model whose dependency graph contains a cycle, a self-reference, or a keyed-grain node (no partition axis for interval dirt) refuses the whole `--since-upstream` invocation with a named error rather than guessing.
+
+```bash
+# Two sources landed data since the last propagation; run exactly the
+# partitions each delta can affect.
+smelt run --since-upstream \
+  --source sources.raw.events --landed 2026-01-03..2026-01-04 \
+  --source sources.raw.users --landed 2026-01-07..2026-01-08
 ```
 
 ---

@@ -153,6 +153,25 @@ struct RunArgs {
     /// Combine with --dry-run to see the plan without executing.
     #[arg(long = "show-plan")]
     show_plan: bool,
+
+    /// Forward propagation: run exactly the partitions dirtied by the
+    /// caller-declared per-source deltas (`--source`/`--landed`), computed
+    /// through the maintenance-plan propagation graph
+    /// (`maintenance_plan.md` §"The graph layer"). Requires at least one
+    /// `--source`/`--landed` pair.
+    #[arg(long = "since-upstream")]
+    since_upstream: bool,
+
+    /// A source address whose landed delta is declared via the paired
+    /// `--landed` flag (repeatable — the Nth `--source` pairs with the Nth
+    /// `--landed`). Only meaningful with `--since-upstream`.
+    #[arg(long = "source", requires = "since_upstream")]
+    since_upstream_source: Vec<String>,
+
+    /// The landed interval for the paired `--source`: `<start>..<end>`
+    /// (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`.
+    #[arg(long = "landed", requires = "since_upstream")]
+    since_upstream_landed: Vec<String>,
 }
 
 #[derive(Parser)]

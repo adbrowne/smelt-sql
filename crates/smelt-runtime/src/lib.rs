@@ -26,6 +26,7 @@ pub mod fn_bodies;
 pub mod gate;
 pub mod maintenance_driver;
 pub mod meta_eval;
+pub mod propagation;
 pub mod python;
 pub mod reporter;
 pub mod safety;

@@ -38,6 +38,9 @@ pub async fn build(args: BuildArgs, scope: Option<&str>) -> Result<()> {
         allow_full_refresh: false,
         allow_downgrade: args.allow_downgrade,
         show_plan: false,
+        since_upstream: false,
+        since_upstream_source: Vec::new(),
+        since_upstream_landed: Vec::new(),
     };
     super::run::run(run_args, scope).await
 }

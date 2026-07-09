@@ -562,16 +562,21 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
 
 ## References
 
-- **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit,propagate}.rs` (tracer v0);
+- **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit}.rs` (the per-cell derivation);
+  `crates/smelt-logical/src/maintenance/propagate.rs` (the pure graph-layer composition math —
+  `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation.rs` (the real per-workspace
+  graph assembly and `smelt run --since-upstream` planning, consuming both);
   `crates/smelt-logical/src/analysis/` (the classifiers admission consumes);
   `crates/smelt-runtime/src/{cumulative,maintenance_driver,dimension_horizon_merge,transformer,backfill}.rs`
   (today's technique executors and clamps); `crates/smelt-state/src/intervals.rs` (the degenerate
   ledger); `crates/smelt-backend/src/lib.rs` (technique primitives).
 - **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation}.rs`
-  (pure derivation-side assertions); `crates/smelt-runtime/tests/{tracer_maintenance,tracer_evolution,tracer_propagation}.rs`
-  (the DuckDB equivalence oracles — moved from `smelt-cli` 2026-07-08, since they only depend on
-  `smelt_logical::maintenance::*` + `duckdb`, both already available to `smelt-runtime`);
-  `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
+  (pure derivation-side and graph-composition-math assertions — the regression floor for chains,
+  fan-out, diamonds, granularity mapping, and adjointness); `crates/smelt-runtime/tests/
+  {tracer_maintenance,tracer_evolution,tracer_propagation,since_upstream_propagation}.rs` (the
+  DuckDB equivalence oracles, and the real-workspace propagation-graph assembly tests);
+  `crates/smelt-cli/tests/since_upstream.rs` (the CLI-wired forward-propagation suite, including
+  the sufficiency-vs-full-refresh equivalence check); `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
   harness — the real-run-pipeline driver, the model-shape catalogue, the multiset-equality oracle,
   and the mutation-aware run-schedule generator/driver — wired as a dev-dependency of `smelt-cli`);
   `cargo test -p smelt-cli --test property_discovery` is the standing equivalence gate: it runs the
