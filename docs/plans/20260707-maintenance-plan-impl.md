@@ -77,7 +77,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP10  | done     | `0a1cab1f` | 2026-07-10 |
 | MP11  | done     | `7f13b3b0` | 2026-07-10 |
 | MP12  | done     | `6f97578f` | 2026-07-10 |
-| MP13  | blocked  |        |      |
+| MP13  | done (bakeoff CLI deferred — see docs/ROADMAP.md §10) | `d8948bf5` | 2026-07-10 |
 | MP14  | pending  |        |      |
 | MP15  | pending  |        |      |
 | MP16  | pending  |        |      |
@@ -551,6 +551,8 @@ Append-only log.
   2. **`--pin` has no round-trip precedent.** Nothing in the codebase writes a YAML frontmatter block back into a `.sql` file today. `smelt_logical::types::Frontmatter` (used by `explain.rs`) is `Deserialize`-only and has no `maintenance` field; the real `ModelMetadata` (`smelt-core/src/metadata.rs`) round-trips via serde but naively re-serializing risks destroying hand-authored YAML comments/ordering/unrelated keys. The plan doesn't say whether `--pin` may reformat the whole frontmatter block or must patch it minimally in place.
   3. **The CLI test can't drive `bakeoff` in-process today.** `crates/smelt-cli/src/main.rs` declares `mod commands;` (private), so `crates/smelt-cli/tests/bakeoff.rs` (the phase's named TDD target) cannot call a command's `run()` directly the way `crates/smelt-cli/tests/property_discovery/*.rs` calls `LinkCProject`/`execute_project` — it would need either `pub(crate) mod commands` plus a testable library entrypoint, or a subprocess test in the `e2e/` style (which can't easily assert on measured-cost internals without parsing stdout).
   Options: (A) scope this iteration of MP13 down to landing the ladder only (already done) and split `smelt bakeoff` into its own follow-up phase once a human has resolved the three questions above; (B) resolve all three inline as part of MP13 (would need reviewer sign-off on the new `smelt-runtime` scratch-schema API and the frontmatter round-trip strategy before proceeding, per "Fail-loud discipline"/API-surface conventions). Recommendation: A — `choice.rs` is self-contained, tested, and unblocks nothing else waiting on it being merged into `mod.rs`; `bakeoff` is a genuinely separate CLI feature with its own runtime-API and file-mutation design surface worth a dedicated review pass rather than folding into this phase's red-green loop.
+
+**2026-07-10 — resolved (human decision): deferred, option A.** The ladder half is the acceptance target this plan actually needs (nothing downstream of MP13 depends on the `bakeoff` CLI); the CLI is re-scoped out of this plan entirely rather than left as a blocked row, so the loop isn't gated on it. Tracked as its own future backlog item in [`docs/ROADMAP.md`](../ROADMAP.md) §10 (`⏸️ smelt bakeoff CLI (deferred)`), which restates the three open design questions above. MP13's Progress-tracking row is marked `done` accordingly; MP14 is next.
 
 ## Verification
 

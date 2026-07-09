@@ -86,6 +86,10 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
+### 10. ⏸️ `smelt bakeoff` CLI (deferred)
+
+The maintenance-plan programme's cost-model override ladder (`crates/smelt-logical/src/maintenance/choice.rs` — `ChosenTechnique`, `resolve_cell_choice`, the override ladder, `ChoiceRefusal`) is landed and tested. The `smelt bakeoff <model> [--cells ...] [--pin]` CLI that measures admissible techniques over a representative window and optionally pins a choice into frontmatter is deferred until three design questions are resolved: (1) no runtime plumbing exists to force-execute a single named technique against a scratch schema — `execute_project` only runs whole-model resolution; (2) `--pin` has no frontmatter round-trip precedent — nothing writes YAML frontmatter back into a `.sql` file today, and naively re-serializing `ModelMetadata` risks destroying hand-authored formatting; (3) `smelt-cli`'s `commands` module is private, so a bakeoff CLI test can't drive it in-process the way other CLI tests do. See the full writeup in [`docs/plans/20260707-maintenance-plan-impl.md`](plans/20260707-maintenance-plan-impl.md) §"Blocked phases" (2026-07-10). Scope for the eventual follow-up phase: resolve the three questions above (each needs a design decision, not just an implementation), then implement the CLI against them.
+
 ---
 
 ## Recently Completed
