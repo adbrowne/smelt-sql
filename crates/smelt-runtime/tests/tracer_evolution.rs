@@ -22,7 +22,8 @@ use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, Region,
+    emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, MaintenanceDialect,
+    Region, StatementGroup,
 };
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, PartitionLocal, ScanClamp, SourceFacts,
@@ -44,6 +45,26 @@ fn batch(conn: &Connection, statements: &[String]) {
         conn.execute_batch(sql)
             .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
     }
+}
+
+fn batch_group(conn: &Connection, group: &StatementGroup) {
+    for stmt in &group.statements {
+        conn.execute_batch(&stmt.sql)
+            .unwrap_or_else(|e| panic!("statement failed: {e}\n{}", stmt.sql));
+    }
+}
+
+/// Test-only stand-in for the runtime's output-clamp injection
+/// (`smelt-runtime/src/transformer.rs`): the single-owner emitter contract
+/// requires the caller to fold the region predicate into the body it hands
+/// `emit_delete_insert` — the emitter itself no longer adds one
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn clamped(body: &str, col: &str, region: &Region) -> String {
+    format!(
+        "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
+        start = region.start,
+        end = region.end,
+    )
 }
 
 fn day(d: &str) -> String {
@@ -215,13 +236,18 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         start: day("2026-01-01"),
         end: day("2026-01-02"),
     };
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r1,
-            &v2_body(&widened_scan_predicate(&clamp, &r1)),
+            &clamped(
+                &v2_body(&widened_scan_predicate(&clamp, &r1)),
+                "event_date",
+                &r1,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM silver_events", &full));
@@ -239,13 +265,18 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         start: day("2026-01-01"),
         end: day("2026-01-03"),
     };
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r2,
-            &v2_body(&widened_scan_predicate(&clamp, &r2)),
+            &clamped(
+                &v2_body(&widened_scan_predicate(&clamp, &r2)),
+                "event_date",
+                &r2,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM silver_events", &full));
@@ -301,13 +332,18 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
         start: day("2026-01-01"),
         end: day("2026-01-02"),
     };
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r1,
-            &v3_body(&widened_scan_predicate(&clamp, &r1)),
+            &clamped(
+                &v3_body(&widened_scan_predicate(&clamp, &r1)),
+                "event_date",
+                &r1,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
 
@@ -319,13 +355,18 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
            (1, 10, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-02 09:00:00', DATE '2026-01-02', '/dup');",
     )
     .expect("duplicate delivery");
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r1,
-            &v3_body(&widened_scan_predicate(&clamp, &r1)),
+            &clamped(
+                &v3_body(&widened_scan_predicate(&clamp, &r1)),
+                "event_date",
+                &r1,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM silver_events", &full));

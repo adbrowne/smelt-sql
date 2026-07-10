@@ -14,7 +14,10 @@ use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::FromPyArrow;
 use async_trait::async_trait;
 use pyo3::prelude::*;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    emit_delete_insert, Backend, BackendCapabilities, BackendError, MaintenanceDialect,
+    PartitionRange, Region, SqlDialect,
+};
 
 mod sql;
 
@@ -469,6 +472,38 @@ impl Backend for SparkBackend {
         let table_name = self.qualified_name(schema, name);
         self.py_execute_no_result(&sql::insert_into(&table_name, sql))
             .await
+    }
+
+    /// Overrides the trait default so the emitted `DELETE`/`INSERT` text
+    /// targets the full catalog-qualified table name
+    /// (`catalog.schema.table`) — the generic default in `smelt-backend`
+    /// only sees `schema`/`name` and cannot know Spark's catalog. The text
+    /// itself still comes from `emit_delete_insert`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"); this crate builds no `DELETE`/`INSERT` string of its own.
+    /// No native multi-statement transaction here (same precedent as the
+    /// pre-Phase-1 default) — statements execute sequentially via
+    /// `execute_statement_group`'s default.
+    async fn delete_and_insert_transactional(
+        &self,
+        schema: &str,
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
+    ) -> Result<(), BackendError> {
+        let table_name = self.qualified_name(schema, name);
+        let region = Region {
+            start: format!("'{}'", partition.start.replace('\'', "''")),
+            end: format!("'{}'", partition.end.replace('\'', "''")),
+        };
+        let group = emit_delete_insert(
+            &table_name,
+            &partition.column,
+            &region,
+            sql,
+            MaintenanceDialect::Spark,
+        );
+        self.execute_statement_group(&group).await
     }
 
     async fn merge_into(

@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use smelt_logical::analysis::model_diff::{additive_only_diff, ColumnDef};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold, Region,
+    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold,
+    MaintenanceDialect, Region,
 };
 use smelt_logical::maintenance::grouping::derive_column_groups;
 use smelt_logical::maintenance::skeleton::skeleton_columns;
@@ -125,24 +126,35 @@ fn ex02_new_data_and_backfill_are_partition_local_recompute_region() {
 }
 
 #[test]
-fn ex02_delete_insert_carries_the_partition_predicate_on_both_statements() {
+fn ex02_delete_insert_carries_the_partition_predicate_on_the_delete_and_the_clamped_body() {
     let region = Region {
         start: "DATE '2026-01-01'".to_string(),
         end: "DATE '2026-01-08'".to_string(),
     };
-    let stmts = emit_delete_insert(
+    // The caller (the runtime's output clamp — `model_transforms.md` §"the
+    // two clamps") is responsible for folding the region predicate into the
+    // body it hands the emitter; the emitter does not add a second, outer
+    // WHERE to the INSERT (`maintenance_plan.md` §"Statement emission
+    // (single owner)").
+    let body = "SELECT event_id, user_id, event_date, event_ts, page, referrer FROM events \
+                WHERE event_date >= DATE '2026-01-01' AND event_date < DATE '2026-01-08'";
+    let group = emit_delete_insert(
         "clickstream",
         "event_date",
         &region,
-        "SELECT event_id, user_id, event_date, event_ts, page, referrer FROM events",
+        body,
+        MaintenanceDialect::DuckDb,
     );
-    assert_eq!(stmts.len(), 2);
-    assert!(stmts[0].starts_with("DELETE FROM clickstream WHERE"));
-    for stmt in &stmts {
+    assert_eq!(group.statements.len(), 2);
+    assert!(group.statements[0]
+        .sql
+        .starts_with("DELETE FROM clickstream WHERE"));
+    for stmt in &group.statements {
         assert!(
-            stmt.contains("event_date >= DATE '2026-01-01'")
-                && stmt.contains("event_date < DATE '2026-01-08'"),
-            "partition predicate missing from: {stmt}"
+            stmt.sql.contains("event_date >= DATE '2026-01-01'")
+                && stmt.sql.contains("event_date < DATE '2026-01-08'"),
+            "partition predicate missing from: {}",
+            stmt.sql
         );
     }
 }

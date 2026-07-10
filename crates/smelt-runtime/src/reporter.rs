@@ -12,6 +12,8 @@
 
 use std::time::Duration;
 
+use smelt_logical::maintenance::emit::StatementGroup;
+
 /// Sink for run-progress callbacks. Implementations are responsible for the
 /// transport (stdout, broadcast channel, log capture); the runtime emits the
 /// events.
@@ -53,6 +55,15 @@ pub trait RunReporter: Send + Sync {
     /// Default: no-op. This is the Phase 4 hook; consumers that need verbose
     /// output implement it; others inherit the default.
     fn model_compiled(&self, _run_id: &str, _model: &str, _sql: &str) {}
+
+    /// The maintenance statements a batch is about to execute, as produced
+    /// by the single-owner emitters in `smelt_logical::maintenance::emit`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"). Called after `model_compiled` and before the batch's
+    /// backend call, for every maintained (non-`full`) technique this
+    /// runtime lowers to a `StatementGroup`. Default: no-op; `smelt explain
+    /// <model> --show-sql` and statement-parity tests are the consumers.
+    fn maintenance_statements(&self, _run_id: &str, _model: &str, _group: &StatementGroup) {}
 
     /// One batch of an incremental model completed. `batch_index` is
     /// 0-based; `batches_total` is the count of batches in this model's

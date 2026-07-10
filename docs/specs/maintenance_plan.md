@@ -603,21 +603,25 @@ disagree; one per node cannot). Deeper rationale:
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Statement emission is not yet single-owner.** The emitters in
-  `crates/smelt-logical/src/maintenance/emit.rs` are exercised only by the tracer/conformance
-  tests; production runs author their maintenance SQL elsewhere — the region `DELETE`+`INSERT`
-  inside the backends (`smelt-backend-duckdb`'s `delete_and_insert_transactional`,
-  `smelt-backend-spark`'s `sql.rs`), the keyed fold `MERGE` in
-  `smelt-runtime::cumulative::build_cumulative_merge_sql` (combiner-aware, unlike the
-  additive-only `emit_keyed_fold`), the column-scoped `MERGE` in the backends' `merge_into`
-  (DuckDB's `UPDATE SET *` full-row-projection shape, unlike `emit_column_scoped_merge`'s
-  column-list shape), and the first-run `CREATE TABLE … AS` in
-  `smelt-runtime::maintenance_driver`. Consequently the conformance suite's
-  technique-equivalence legs (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`)
-  prove the *emitters* equivalent to full refresh, not the production statements, and
+- **Statement emission is single-owner for the region recompute family; the keyed-fold and
+  column-scoped-MERGE families are not yet unified.** The region `DELETE`+`INSERT` pair
+  (`IncrementalStrategy::DeleteInsert`) is produced by `emit_delete_insert` in
+  `crates/smelt-logical/src/maintenance/emit.rs` and executed, never authored, by the backends
+  (`smelt-backend`'s `execute_statement_group`, overridden by `smelt-backend-duckdb` for a real
+  transaction and by `smelt-backend-spark` for its catalog-qualified table name); the
+  `crates/smelt-runtime/tests/statement_parity.rs` gate diffs a real `execute_project` run's
+  executed statements against a direct emitter call over the same inputs. The keyed fold `MERGE`
+  still comes from `smelt-runtime::cumulative::build_cumulative_merge_sql` (combiner-aware, unlike
+  the additive-only `emit_keyed_fold`), the column-scoped `MERGE` still comes from the backends'
+  `merge_into` (DuckDB's `UPDATE SET *` full-row-projection shape, unlike `emit_column_scoped_merge`'s
+  column-list shape), and the first-run `CREATE TABLE … AS` still comes from
+  `smelt-runtime::maintenance_driver`. Consequently the conformance suite's technique-equivalence
+  legs (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`) prove the *emitters*
+  equivalent to full refresh for these two families, not the production statements, and
   `--show-sql` does not exist yet. No live plan cell lowers to `emit_in_place_update` today (the
   schema-evolution column backfill's `UPDATE … FROM` in `smelt-runtime::backfill` is a separate
-  surface). Unification is tracked in `docs/plans/20260710-emit-unification.md`.
+  surface). Unification of the remaining families is tracked in
+  `docs/plans/20260710-emit-unification.md`.
 - **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
   footprint reflection, partition-locality projection, faithful-fold conditions, and
   definition-change column classification. Column-group-scoped dirt, gated by provenance, today

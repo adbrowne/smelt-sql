@@ -5,7 +5,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect, StatementGroup,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -615,43 +617,47 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
-    async fn delete_and_insert_transactional(
-        &self,
-        schema: &str,
-        name: &str,
-        partition: &PartitionRange,
-        sql: &str,
-    ) -> Result<(), BackendError> {
-        let table_name = format!("{}.{}", schema, name);
-
-        let delete_sql = format!(
-            "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
-            table_name,
-            partition.column,
-            partition.start.replace('\'', "''"),
-            partition.column,
-            partition.end.replace('\'', "''"),
-        );
-        let insert_sql = format!("INSERT INTO {} {}", table_name, sql);
-
+    /// Real transactional override: executes the emitted [`StatementGroup`]
+    /// (`smelt_logical::maintenance::emit`) inside one `duckdb::Transaction`
+    /// when `group.transactional` — e.g. a paired region `DELETE`+`INSERT`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"). `Transaction` rolls back on `Drop` unless explicitly
+    /// committed (`duckdb::transaction::DropBehavior::Rollback` is the
+    /// default), so a later statement's failure — the `?` returns before
+    /// `commit()` is reached — rolls back every earlier statement in the
+    /// group for free. This crate no longer builds any maintenance-statement
+    /// text of its own; every string in `statements` came from the emitter.
+    async fn execute_statement_group(&self, group: &StatementGroup) -> Result<(), BackendError> {
+        let label = group
+            .statements
+            .first()
+            .map(|s| s.sql.clone())
+            .unwrap_or_default();
+        let statements: Vec<String> = group.statements.iter().map(|s| s.sql.clone()).collect();
+        let transactional = group.transactional && statements.len() > 1;
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
             // invariant: see table_exists_sync for rationale; same mutex.
             let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
-            // `Transaction` rolls back on `Drop` unless explicitly committed
-            // (`duckdb::transaction::DropBehavior::Rollback` is the default),
-            // so an INSERT failure below — the `?` returns before `commit()`
-            // is reached — rolls back the paired DELETE for free.
-            let tx = conn
-                .transaction()
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            tx.execute(&delete_sql, [])
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            tx.execute(&insert_sql, [])
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            tx.commit()
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            if transactional {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| BackendError::execution_failed(label.clone(), e.to_string()))?;
+                for sql in &statements {
+                    tx.execute(sql, []).map_err(|e| {
+                        BackendError::execution_failed(label.clone(), e.to_string())
+                    })?;
+                }
+                tx.commit()
+                    .map_err(|e| BackendError::execution_failed(label.clone(), e.to_string()))?;
+            } else {
+                for sql in &statements {
+                    conn.execute(sql, []).map_err(|e| {
+                        BackendError::execution_failed(label.clone(), e.to_string())
+                    })?;
+                }
+            }
             Ok(())
         })
         .await

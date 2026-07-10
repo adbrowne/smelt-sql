@@ -29,7 +29,8 @@ use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold, Region,
+    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold,
+    MaintenanceDialect, Region, StatementGroup,
 };
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Technique, Trigger,
@@ -51,6 +52,26 @@ fn batch(conn: &Connection, statements: &[String]) {
         conn.execute_batch(sql)
             .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
     }
+}
+
+fn batch_group(conn: &Connection, group: &StatementGroup) {
+    for stmt in &group.statements {
+        conn.execute_batch(&stmt.sql)
+            .unwrap_or_else(|e| panic!("statement failed: {e}\n{}", stmt.sql));
+    }
+}
+
+/// Test-only stand-in for the runtime's output-clamp injection
+/// (`smelt-runtime/src/transformer.rs`): the single-owner emitter contract
+/// requires the caller to fold the region predicate into the body it hands
+/// `emit_delete_insert` — the emitter itself no longer adds one
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn clamped(body: &str, col: &str, region: &Region) -> String {
+    format!(
+        "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
+        start = region.start,
+        end = region.end,
+    )
 }
 
 fn day(d: &str) -> String {
@@ -78,16 +99,18 @@ fn ex02_recompute_region_equals_full_refresh_across_new_data_and_redelivered_bac
     let full = body; // full refresh over current input
 
     // New data: land the initial window.
-    batch(
+    let region1 = Region {
+        start: day("2026-01-01"),
+        end: day("2026-01-03"),
+    };
+    batch_group(
         &conn,
         &emit_delete_insert(
             "clickstream",
             "event_date",
-            &Region {
-                start: day("2026-01-01"),
-                end: day("2026-01-03"),
-            },
-            body,
+            &region1,
+            &clamped(body, "event_date", &region1),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM clickstream", full));
@@ -98,16 +121,18 @@ fn ex02_recompute_region_equals_full_refresh_across_new_data_and_redelivered_bac
         "INSERT INTO events VALUES (4, 12, DATE '2026-01-03', '/d', 'https://z.com/s');",
     )
     .expect("new day");
-    batch(
+    let region2 = Region {
+        start: day("2026-01-02"),
+        end: day("2026-01-04"),
+    };
+    batch_group(
         &conn,
         &emit_delete_insert(
             "clickstream",
             "event_date",
-            &Region {
-                start: day("2026-01-02"),
-                end: day("2026-01-04"),
-            },
-            body,
+            &region2,
+            &clamped(body, "event_date", &region2),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM clickstream", full));
@@ -260,16 +285,18 @@ fn ex40_aggregate_column_add_catch_up_then_new_data_equals_full_refresh() {
     // computes both groups together.
     conn.execute_batch("INSERT INTO payments VALUES (4, DATE '2026-01-03', 2.0);")
         .expect("new day");
-    batch(
+    let region3 = Region {
+        start: day("2026-01-03"),
+        end: day("2026-01-04"),
+    };
+    batch_group(
         &conn,
         &emit_delete_insert(
             "daily_revenue",
             "pay_date",
-            &Region {
-                start: day("2026-01-03"),
-                end: day("2026-01-04"),
-            },
-            v2_body,
+            &region3,
+            &clamped(v2_body, "pay_date", &region3),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(

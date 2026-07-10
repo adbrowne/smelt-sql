@@ -4050,6 +4050,7 @@ dependencies = [
  "async-trait",
  "smelt-core",
  "smelt-dialect",
+ "smelt-logical",
  "thiserror 2.0.18",
  "tokio",
  "tracing",

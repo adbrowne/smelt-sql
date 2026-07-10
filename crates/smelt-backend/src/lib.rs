@@ -13,6 +13,9 @@ pub use smelt_core::config::{
     BatchedConfig, BatchedSafetyOverrides, Granularity, IncrementalStrategy,
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
+pub use smelt_logical::maintenance::emit::{
+    emit_delete_insert, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+};
 pub use types::{
     ExecutionResult, Materialization, MaterializationStrategy, PartitionRange, PartitionSpec,
 };
@@ -20,6 +23,45 @@ pub use types::{
 use arrow::array::RecordBatch;
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
+
+/// Map a backend's [`SqlDialect`] to the [`MaintenanceDialect`] the
+/// single-owner emitters key their dialect-specific variants on. The region
+/// `DELETE`+`INSERT` family this maps for today is dialect-invariant (no
+/// emitter branch actually reads it yet); `PostgreSQL` has no
+/// `smelt-backend-*` implementation, so it shares the `Spark` branch until
+/// one exists.
+pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
+    match dialect {
+        SqlDialect::DuckDB => MaintenanceDialect::DuckDb,
+        SqlDialect::SparkSQL | SqlDialect::PostgreSQL => MaintenanceDialect::Spark,
+    }
+}
+
+/// Build the transactional region `DELETE`+`INSERT` [`StatementGroup`] for
+/// an incremental batch — the single call site every `Backend` impl's
+/// `delete_and_insert_transactional` routes through, so the emitted text is
+/// the only text a backend ever executes for this family
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn build_delete_insert_group(
+    schema: &str,
+    name: &str,
+    partition: &PartitionRange,
+    sql: &str,
+    dialect: SqlDialect,
+) -> StatementGroup {
+    let table_name = format!("{schema}.{name}");
+    let region = Region {
+        start: format!("'{}'", partition.start.replace('\'', "''")),
+        end: format!("'{}'", partition.end.replace('\'', "''")),
+    };
+    emit_delete_insert(
+        &table_name,
+        &partition.column,
+        &region,
+        sql,
+        maintenance_dialect(dialect),
+    )
+}
 
 /// Abstract interface for smelt execution backends.
 ///
@@ -289,12 +331,13 @@ pub trait Backend: Send + Sync {
     /// INSERT failure rolls back the chunk's DELETE; earlier committed
     /// chunks do not roll back.").
     ///
-    /// Default implementation preserves the pre-transactional behaviour
-    /// (two independent calls, no atomicity across them) for any backend
-    /// that does not override it — e.g. Spark Connect, whose execution model
-    /// does not offer a straightforward two-statement transaction wrapper
-    /// here. Backends that can wrap both statements in a native transaction
-    /// (DuckDB) should override this.
+    /// The statement text comes from `smelt_logical::maintenance::emit`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)") — this method builds the [`StatementGroup`] and hands it to
+    /// [`Backend::execute_statement_group`], never authoring `DELETE`/
+    /// `INSERT` text itself. Override `execute_statement_group`, not this
+    /// method, to change how the group is executed (e.g. a real backend
+    /// transaction).
     async fn delete_and_insert_transactional(
         &self,
         schema: &str,
@@ -302,8 +345,26 @@ pub trait Backend: Send + Sync {
         partition: &PartitionRange,
         sql: &str,
     ) -> Result<(), BackendError> {
-        self.delete_partitions(schema, name, partition).await?;
-        self.insert_into_from_query(schema, name, sql).await?;
+        let group = build_delete_insert_group(schema, name, partition, sql, self.dialect());
+        self.execute_statement_group(&group).await
+    }
+
+    /// Execute an emitted [`StatementGroup`] — the single point every
+    /// `smelt_logical::maintenance::emit` consumer routes through
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"). Backends execute; they never author the statement text.
+    ///
+    /// Default implementation runs each statement sequentially via
+    /// `execute_sql` — a best-effort, **non-atomic** fallback for any
+    /// backend that does not override it (the same precedent as
+    /// [`Backend::fold_ledger_delta`]'s default). A backend that can wrap
+    /// a `group.transactional` group in a native transaction (DuckDB)
+    /// should override this so a failure mid-group rolls back every
+    /// statement already applied in this call.
+    async fn execute_statement_group(&self, group: &StatementGroup) -> Result<(), BackendError> {
+        for stmt in &group.statements {
+            self.execute_sql(&stmt.sql).await?;
+        }
         Ok(())
     }
 

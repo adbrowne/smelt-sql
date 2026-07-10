@@ -1,4 +1,6 @@
-//! Physical maintenance SQL emission — v0 tracer bullet.
+//! Physical maintenance SQL emission — the single author of every
+//! maintenance statement a run executes
+//! (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
 //!
 //! One emitter per [`Technique`](super::Technique), following the
 //! physical-maintenance notation of
@@ -12,9 +14,48 @@
 //! (the model SQL with source refs resolved to physical table names); clamp
 //! *injection into* the body is the runtime transformer's job
 //! (`smelt-runtime/src/transformer.rs`) and is deliberately not duplicated
-//! here.
+//! here — an emitter never adds a predicate the caller did not already fold
+//! into the body it hands in, so the emitted text is exactly what a backend
+//! executes, byte for byte.
+//!
+//! Backends *execute* the [`StatementGroup`]s these functions return; they
+//! never author maintenance-statement text of their own
+//! (`docs/specs/architecture.md` §"Constraints & Invariants" item 12).
 
 use super::ScanClamp;
+
+/// One SQL statement a maintenance run executes.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MaintenanceStatement {
+    pub sql: String,
+}
+
+impl MaintenanceStatement {
+    fn new(sql: String) -> Self {
+        Self { sql }
+    }
+}
+
+/// An ordered group of [`MaintenanceStatement`]s produced by one emitter
+/// call, plus whether they must run inside a single backend transaction. A
+/// paired region `DELETE`+`INSERT` is transactional: a failed `INSERT` must
+/// roll back its `DELETE` (`docs/specs/maintenance_plan.md` §"Statement
+/// emission (single owner)").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StatementGroup {
+    pub statements: Vec<MaintenanceStatement>,
+    pub transactional: bool,
+}
+
+/// The backend SQL dialect a [`StatementGroup`] is rendered for. Dialect
+/// differences (e.g. a `MERGE … UPDATE SET *` requiring a full-row source
+/// projection versus an explicit column-list `SET`) live in the emitters as
+/// dialect-keyed variants, not in backend string construction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MaintenanceDialect {
+    DuckDb,
+    Spark,
+}
 
 /// A half-open region `[start, end)` on the output partition column; values
 /// are SQL literals (already quoted where needed).
@@ -59,19 +100,33 @@ impl Region {
 }
 
 /// Recompute-a-region (bottom-right): `DELETE` exactly the write window,
-/// `INSERT` its recompute. The same predicate bounds both statements — the
-/// DELETE range must equal exactly what the INSERT writes.
+/// `INSERT` its recompute, as one transactional [`StatementGroup`]. The
+/// DELETE's range must equal exactly what the INSERT writes
+/// (`docs/specs/model_transforms.md` §"Write window = output window"); the
+/// INSERT does **not** re-add the predicate — `body` is the caller's
+/// already-clamped compiled SELECT (the output clamp is injected upstream,
+/// `smelt-runtime/src/transformer.rs`), so re-wrapping it here would be a
+/// second, redundant filter the emitter has no business adding.
+///
+/// `dialect` is accepted for signature symmetry with the other emitters in
+/// this module; the DELETE/INSERT shape is currently dialect-invariant
+/// (DuckDB and Spark share the same `DELETE FROM … WHERE …` / `INSERT INTO
+/// … <select>` grammar for this family).
 pub fn emit_delete_insert(
     table: &str,
     partition_col: &str,
     region: &Region,
     body: &str,
-) -> Vec<String> {
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
     let pred = region.predicate(None, partition_col);
-    vec![
-        format!("DELETE FROM {table} WHERE {pred}"),
-        format!("INSERT INTO {table} SELECT * FROM ({body}) WHERE {pred}"),
-    ]
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(format!("DELETE FROM {table} WHERE {pred}")),
+            MaintenanceStatement::new(format!("INSERT INTO {table} {body}")),
+        ],
+        transactional: true,
+    }
 }
 
 /// Column-scoped re-derivation (bottom-left): a keyed `MERGE` writing only

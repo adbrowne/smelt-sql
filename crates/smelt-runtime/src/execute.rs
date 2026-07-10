@@ -1316,6 +1316,46 @@ pub async fn execute_project(
                             }
                         }
                     } else {
+                        // Observability: report the region DELETE+INSERT
+                        // group this batch is about to execute — the same
+                        // emitter call `Backend::delete_and_insert_transactional`
+                        // makes to build what it actually executes
+                        // (`docs/specs/maintenance_plan.md` §"Statement
+                        // emission (single owner)"). Pure function, same
+                        // inputs, so the reported text cannot drift from the
+                        // executed text.
+                        //
+                        // `schema.table` is the correct fully-qualified name
+                        // for every dialect this runtime path is exercised
+                        // against today (DuckDB); a catalog-qualifying
+                        // backend (Spark) would need its own qualified name
+                        // here, so the report is scoped to DuckDB until a
+                        // generic `Backend::qualified_table_name` exists —
+                        // Spark's *executed* text is still correct (its own
+                        // `delete_and_insert_transactional` override builds
+                        // it), only this runtime-side report is narrowed.
+                        if backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                            && matches!(
+                                resolved_strategy,
+                                smelt_backend::IncrementalStrategy::DeleteInsert
+                            )
+                        {
+                            let table_name =
+                                format!("{schema}.{}", plan.model_file.db_name_owned());
+                            let region = smelt_logical::maintenance::emit::Region {
+                                start: format!("'{}'", partition.start.replace('\'', "''")),
+                                end: format!("'{}'", partition.end.replace('\'', "''")),
+                            };
+                            let group = smelt_logical::maintenance::emit::emit_delete_insert(
+                                &table_name,
+                                &partition.column,
+                                &region,
+                                &compiled.sql,
+                                smelt_backend::maintenance_dialect(backend.dialect()),
+                            );
+                            reporter.maintenance_statements(&run_id, &plan.name, &group);
+                        }
+
                         let strategy = MaterializationStrategy::Incremental {
                             partition,
                             strategy: resolved_strategy.clone(),

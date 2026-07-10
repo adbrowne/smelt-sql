@@ -53,7 +53,9 @@ use std::collections::BTreeSet;
 use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
-use smelt_logical::maintenance::emit::{emit_delete_insert, emit_keyed_fold, Region};
+use smelt_logical::maintenance::emit::{
+    emit_delete_insert, emit_keyed_fold, MaintenanceDialect, Region, StatementGroup,
+};
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, SourceFacts, Technique, Trigger,
 };
@@ -138,16 +140,18 @@ fn described_technique_matches_execution_partition_recompute() {
     assert_eq!(plan.cells[0].technique, Technique::DeleteInsert);
 
     let body = "SELECT event_id, user_id, event_date, page FROM events";
-    batch(
+    let region = Region {
+        start: day("2026-01-01"),
+        end: day("2026-01-02"),
+    };
+    batch_group(
         &conn,
         &emit_delete_insert(
             "clickstream",
             "event_date",
-            &Region {
-                start: day("2026-01-01"),
-                end: day("2026-01-02"),
-            },
-            body,
+            &region,
+            &clamped(body, "event_date", &region),
+            MaintenanceDialect::DuckDb,
         ),
     );
     // The technique the plan described actually reproduces a full refresh.
@@ -319,16 +323,18 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
     // touches zero rows, because no stored `order_week` value falls inside
     // a single day's half-open interval — the write silently no-ops and the
     // week goes stale.
-    batch(
+    let day_scoped_region = Region {
+        start: day("2026-01-07"),
+        end: day("2026-01-08"),
+    };
+    batch_group(
         &conn,
         &emit_delete_insert(
             "weekly_finance",
             "order_week",
-            &Region {
-                start: day("2026-01-07"),
-                end: day("2026-01-08"),
-            },
-            body,
+            &day_scoped_region,
+            &clamped(body, "order_week", &day_scoped_region),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(
@@ -340,16 +346,18 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
     // Now the correct write window: rounded up to the whole week
     // containing the new day. This is the guarantee
     // `check_declared_granularity` (MP14) makes true by construction.
-    batch(
+    let week_scoped_region = Region {
+        start: day("2026-01-05"),
+        end: day("2026-01-12"),
+    };
+    batch_group(
         &conn,
         &emit_delete_insert(
             "weekly_finance",
             "order_week",
-            &Region {
-                start: day("2026-01-05"),
-                end: day("2026-01-12"),
-            },
-            body,
+            &week_scoped_region,
+            &clamped(body, "order_week", &week_scoped_region),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(
@@ -363,6 +371,26 @@ fn batch(conn: &Connection, statements: &[String]) {
         conn.execute_batch(sql)
             .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
     }
+}
+
+fn batch_group(conn: &Connection, group: &StatementGroup) {
+    for stmt in &group.statements {
+        conn.execute_batch(&stmt.sql)
+            .unwrap_or_else(|e| panic!("statement failed: {e}\n{}", stmt.sql));
+    }
+}
+
+/// Test-only stand-in for the runtime's output-clamp injection
+/// (`smelt-runtime/src/transformer.rs`): the new single-owner emitter
+/// contract requires the caller to fold the region predicate into the body
+/// it hands `emit_delete_insert` — the emitter itself no longer adds one
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn clamped(body: &str, col: &str, region: &Region) -> String {
+    format!(
+        "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
+        start = region.start,
+        end = region.end,
+    )
 }
 
 // =============================================================================
