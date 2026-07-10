@@ -521,6 +521,25 @@ incremental model:
   because column references through a `TableExpr` function are inferred, and a
   typed literal like `INTERVAL '1 day'` is no longer mistaken for a column.
 
+## Generated tutorial page
+
+The lateness/redelivery/attribution/enrichment slice of this pipeline (the
+maintenance-plan machinery in particular) has a generated walkthrough at
+[`docs-site/docs/examples/web-analytics-maintenance.md`](../../docs-site/docs/examples/web-analytics-maintenance.md),
+rendered by [`generate_tutorial.py`](generate_tutorial.py) from real
+`smelt explain --show-sql` / `smelt backbuild --dry-run` output — the
+embedded SQL is never hand-pasted. Regenerate it after changing any of the
+models it names:
+
+```bash
+python3 examples/web_analytics/generate_tutorial.py           # regenerate
+python3 examples/web_analytics/generate_tutorial.py --check   # verify freshness (no write)
+```
+
+`crates/smelt-cli/tests/tutorial_freshness.rs` is the CI-enforced drift
+gate: it re-derives the same SQL in-process (no datagen, no backend) and
+fails if the committed page has drifted from the emitters' current output.
+
 ## How this example was built
 
 Multi-session implementation tracked in
