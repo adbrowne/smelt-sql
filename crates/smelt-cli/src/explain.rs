@@ -451,21 +451,36 @@ pub fn render_cell_statements_text(statements: &[CellStatements]) -> String {
         let _ = writeln!(out, "  cell[{}] statements:", cs.cell_index);
         match &cs.outcome {
             Ok(group) => {
-                if group.transactional {
-                    let _ = writeln!(out, "    BEGIN");
-                    for stmt in &group.statements {
-                        let _ = writeln!(out, "      {}", stmt.sql);
-                    }
-                    let _ = writeln!(out, "    COMMIT");
-                } else {
-                    for stmt in &group.statements {
-                        let _ = writeln!(out, "    {}", stmt.sql);
-                    }
-                }
+                out.push_str(&render_statement_group_text(group, "    "));
             }
             Err(reason) => {
                 let _ = writeln!(out, "    (no statements: {reason})");
             }
+        }
+    }
+    out
+}
+
+/// Render one emitted [`StatementGroup`] as the plain-text block both
+/// `smelt explain <model> --show-sql` and `smelt run`/`smelt backbuild
+/// --dry-run` print for a maintenance statement: a transactional group is
+/// bracketed by `BEGIN`/`COMMIT` lines to show its atomicity (the backend
+/// supplies the real transaction mechanics at run time), a single-statement
+/// group prints its statement directly. `indent` prefixes every line so the
+/// caller controls nesting (`--show-sql` nests each group under its cell;
+/// `--dry-run` prints at the top level).
+pub fn render_statement_group_text(group: &StatementGroup, indent: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if group.transactional {
+        let _ = writeln!(out, "{indent}BEGIN");
+        for stmt in &group.statements {
+            let _ = writeln!(out, "{indent}  {}", stmt.sql);
+        }
+        let _ = writeln!(out, "{indent}COMMIT");
+    } else {
+        for stmt in &group.statements {
+            let _ = writeln!(out, "{indent}{}", stmt.sql);
         }
     }
     out

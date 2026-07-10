@@ -400,12 +400,6 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 
 ## Known Divergences / Open Questions
 
-- **`--dry-run` prints only the compiled SELECT body today.** The specified behaviour
-  (§"`--dry-run` prints the maintenance statements") — emitted maintenance statements with real
-  window literals, and per-chunk boundary lines under `smelt backbuild --dry-run` — is not yet
-  implemented: the dry-run branch in `smelt-runtime`'s `execute_project` returns after reporting
-  the compiled SELECT, before any maintenance-statement emission or chunk planning. Tracked in
-  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **Exit code standardization incomplete.** Configuration errors, YAML parse failures, and selector parse errors exit with non-zero codes but the exact code is not consistently `2` or any defined value distinct from `1`. Exit code meaning for "user/config error" is not defined.
 - **`smelt test --select` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (§"`smelt test` isolation"), consistent with every other command. Any remaining substring-match behaviour in the implementation is an unlanded gap, not the intended contract.
 - **`smelt explain` physical section gating.** The `physical` section of the explain output is documented as present, but the condition that triggers its inclusion (`--show-physical` flag?) is not clearly surfaced in the CLI help or user guide.

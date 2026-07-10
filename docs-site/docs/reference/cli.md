@@ -107,7 +107,7 @@ smelt run [OPTIONS]
 | `--target` | | string | `dev` | Target environment from smelt.yml |
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
-| `--dry-run` | | bool | `false` | Parse and validate without executing |
+| `--dry-run` | | bool | `false` | Print the maintenance statements that would run — without executing (see below) |
 | `--event-time-start` | | string | | Start of event time range for incremental models (ISO 8601: YYYY-MM-DD). Requires `--event-time-end`. |
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--start` | | string | | Alias for `--event-time-start` |
@@ -161,6 +161,14 @@ smelt run --dry-run
 smelt run --auto
 ```
 
+### `--dry-run` — inspect the maintenance statements before they run
+
+`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation would execute, the **maintenance statements** the run would execute — the region `DELETE`+`INSERT` pair (or keyed `MERGE`, etc.) a maintained model rebuilds its window with — not merely the compiled `SELECT` body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are **real**: they come from the invocation's own `--event-time-start`/`--event-time-end` window, never symbolic placeholders. A transactional group is bracketed by `BEGIN`/`COMMIT` lines to show its atomicity. Nothing is executed and no backend connection is opened.
+
+`smelt backbuild --dry-run` additionally reflects the **chunking** a real backbuild performs: when a model's batch-safety classification (or an explicit `--batch-size`/`--per-partition`) splits the range, the statements print once per chunk, each introduced by a boundary line naming its `[start, end)` window and position — `-- chunk 2/4: [2026-03-08, 2026-03-15)` — in the order a real backbuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.
+
+Division of labour with [`smelt explain <model> --show-sql`](#smelt-explain): `--show-sql` is the no-window, single-model plan-inspection surface (symbolic bounds unless `--period` is given); `--dry-run` is the "exactly what would **this invocation** do" surface — real window, real selection, real chunking.
+
 ### Forward propagation with `--since-upstream`
 
 Every `refresh: incremental` model with a declared `grain:` derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (`smelt explain <model>` prints it). `--since-upstream` composes those clamps into a propagation graph and walks it forward from **caller-declared** per-source deltas: for each `--source <address> --landed <start>..<end>` pair, the delta reflects through every downstream edge, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. The dirty set is printed before anything runs, then `smelt` runs exactly those `(model, region)` pairs — never a partition outside the propagated set.
@@ -210,7 +218,7 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 | `--target` | | string | `dev` | Target environment from smelt.yml |
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
-| `--dry-run` | | bool | `false` | Show what would execute without running |
+| `--dry-run` | | bool | `false` | Print the maintenance statements that would run, with per-chunk boundaries — without executing ([details](#dry-run-inspect-the-maintenance-statements-before-they-run)) |
 | `--batch-size` | | integer | | Override batch size in days for backfill chunking |
 | `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
 
@@ -223,7 +231,8 @@ smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
 # Same using scope shorthand (equivalent when scope is marts)
 smelt --scope marts backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
 
-# Preview what would be executed
+# Preview the maintenance statements — one block per auto-derived chunk —
+# without executing anything
 smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
 
 # Backbuild with per-partition execution
