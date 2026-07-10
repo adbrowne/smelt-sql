@@ -1,254 +1,352 @@
-# DRAFT — Web-Analytics Maintenance Demo + Keyed Temporal Locality
+# Plan: Web-Analytics Maintenance Demo (partition-grain reframe)
 
-**Status:** DRAFT / brainstorming output. Not yet a phased implementation plan.
-**Date:** 2026-07-10
-**Author:** Andrew (via brainstorming session)
+**Date**: 2026-07-10
+**Spec**: [`docs/specs/cli.md`](../specs/cli.md), [`docs/specs/maintenance_plan.md`](../specs/maintenance_plan.md), [`docs/specs/datagen.md`](../specs/datagen.md) — semantic oracles for the example models: [`docs/specs/timeseries.md`](../specs/timeseries.md), [`docs/specs/batched_models.md`](../specs/batched_models.md)
+**Spec diff**: uncommitted working tree (2026-07-10): `cli.md` §"`--dry-run` prints the maintenance statements"; `maintenance_plan.md` §"Upstream model edges"; `datagen.md` `timestamp_offset` generator + §"Redelivery (duplicate emission)"
+**Tracking PR / branch**: `worktree-incremental` (PR TBD)
+**Docs**: code+docs
 
-> This document captures (a) the demo we want to build, (b) what was verified
-> about the current implementation status of the features it needs, and (c) the
-> decisions and open questions. It is intentionally paused: the next step is a
-> **separate review session** to confirm the recent maintenance-plan (MP-series)
-> work landed complete specs + code, after which we revisit and turn this into a
-> real phased plan (`/smelt:plan`).
-
----
-
-## 1. The goal — a realistic web-analytics maintenance demo
-
-Extend `examples/web_analytics/` (chosen: **extend in place**, not a new example) into
-a realistic-ish pipeline that shows off the model-maintenance features, then turn
-it into a **script-generated tutorial** in the user docs whose SQL snippets are the
-**real** insert/update/merge statements smelt emits (so the doc cannot drift).
-
-### Intended pipeline
-
-- **Bronze (source / landing)** — raw append-only events. Each event carries **two
-  timestamps**: `event_time` (client-side occurrence) and `arrival_time` (when it
-  landed). Conceptually partitioned by **arrival date** (the ingest axis).
-  - *Caveat found:* in DuckDB, bronze is a passthrough **view** over the source, so
-    "partitioned by arrival" is largely **narrative** — there is no physical
-    arrival-partition to demonstrate. Keep `arrival_time` as a real column (drives
-    dedup ordering + the lateness story); treat arrival-partitioning as conceptual.
-
-- **Silver (`events`, cleaned + deduplicated)** — incremental ingest from bronze.
-  - Accepts **late-arriving** events up to a **3-day** window (UTC day boundary).
-  - **Deduplicates `event_id`** over that same window (re-delivery safety).
-  - **Re-partitioned by event date** (not arrival date) — the analytical grain. The
-    load-bearing repartition to demonstrate. A late event landing today can rewrite
-    an event-date partition up to 3 days old = the bounded partition-level update.
-
-- **Sessions (`sessions`, derived)** — group silver events into standard
-  sessionization windows per visitor, with a **max session length** cap (upper
-  bound → old partitions seal → safe partition-level maintenance). Capture
-  **`utm_campaign`** from an event in the **first 5 minutes** of the session as a
-  session attribute (campaign attribution). *(The sessionize showcase already
-  exists in web_analytics; extend it with the campaign attribute + max-length cap
-  if not already present.)*
-
-- **Enriched silver (`events_enriched`)** — join `session_id` + campaign
-  attribution back onto the event grain. Demonstrates that smelt targets a **narrow
-  update** (only affected event-date/session partitions) rather than a full rebuild.
-
-### Deliverable
-
-1. The extended, **buildable** `examples/web_analytics/` workspace (kept green in
-   `example_diagnostics` + the equivalence-proof harness).
-2. A **script-generated tutorial** under `docs-site/docs/examples/` (or
-   `getting-started/`) embedding the **real** emitted maintenance SQL.
+> Supersedes the DRAFT version of this file (brainstorming output + MP-series review findings;
+> see git history of this path). Decisions carried forward: extend `examples/web_analytics/` in
+> place; demo ships on the **partition-grain reframe** (dedup via `QUALIFY ROW_NUMBER()` under
+> `grain: partition`), not keyed temporal locality; tutorial is a **generated** page whose SQL is
+> the real emitter output.
 
 ---
 
-## 2. Verified implementation status (as of HEAD, worktree-incremental)
+## Execution prompt (for a fresh Claude session)
 
-Verified against **production code + tests**, not just spec prose (specs use a
-"timeless-oracle" rule where true status lives in §Known Divergences and can lag).
+You are executing this plan from the start of a new session. Your job is to drive it to completion using `/smelt:implement`.
 
-### Ships today (mature path)
-- **Partition-grain incremental** (`grain: partition` + `timeseries:` block):
-  DELETE+INSERT per partition, derived lookback / scan clamp, batch-safety
-  classification + auto-chunked backfill (`smelt backbuild`), safety-check
-  overrides. Driven by `smelt run/build/backbuild --event-time-start/--event-time-end`.
-- **Key-grain additive + extremal folds** (`grain: key`): `COUNT`/`SUM`/`BIT_XOR`
-  and `MIN`/`MAX`/`BOOL_*`/`BIT_AND/OR` — a real DELETE-free MERGE path. `unique_key`
-  = GROUP BY list; combiners derived from aggregators.
-- **One column-scoped MERGE** demo path (`examples/timeseries/models/daily_events_enriched.sql`,
-  `maintenance: scan_bounds.per_source.<src>.allow_full_scan: true`).
-- **Forward propagation / backward resolution** graph CLI:
-  `smelt run --since-upstream --source <addr> --landed <a>..<b>` and
-  `smelt build <model> --period <a>..<b> --include-upstreams` (both refuse keyed
-  nodes, cycles, self-refs; delta detection is **manual/explicit** — caller supplies
-  `--landed`, no auto watermark diffing).
+**Before touching any code:**
 
-### NOT shipped / spec-only / refused — **directly blocks the literal demo spec**
-- **Keyed dedup over an event-time window** — `grain: key` **+** `timeseries:` block
-  is **refused unconditionally, today**, via `KeyedForbidsTimeseries`.
-  - Production guard: `crates/smelt-core/src/metadata.rs:537`
-    (`if metadata.is_keyed() && metadata.timeseries.is_some() { return Err(..) }`).
-  - Refusal covered at 3 layers: `crates/smelt-core/tests/refresh_axis.rs`
-    (`refresh_keyed_forbids_timeseries`), a `metadata.rs` unit test, and
-    `example_diagnostics` BUG-006 + fixture
-    `examples/timeseries_broken_cumulative_with_timeseries/`.
-  - The "key temporal locality" routing that would relax it
-    (`establish_locality`, the three routes, `KeyedRecurrenceBoundViolated`) **does
-    not exist in code** — spec-only.
-  - `keyed_models.md §Known Divergences:293` is **accurate** (matches production).
-- **"Latest-copy-wins" / first-seen dedup folds** — `MAX_BY`/`MIN_BY`,
-  `COALESCE`-first, `ANY_VALUE`, and the `smelt.latest()/once()/current()` sugar —
-  **spec-only**.
-- **Late-arriving-data automation** (per-column `data_latency:`) — **not
-  implemented**. Only manual mitigation: trail `--event-time-end` behind real time,
-  or re-run overlapping ranges.
-- **Maintenance SQL is not printed by any command.** `smelt run --dry-run` prints
-  only the compiled **SELECT body**, not the `DELETE+INSERT`/`MERGE` statements.
-  Those are built by pure fns in `crates/smelt-logical/src/maintenance/emit.rs`
-  (`emit_delete_insert:64`, `emit_column_scoped_merge:81`, `emit_in_place_update:111`,
-  `emit_keyed_fold:133`) but executed, never surfaced. `smelt explain` prints the
-  maintenance *plan* (cells/techniques/clamps), **not** literal SQL. **No golden-SQL
-  artifact exists** to lift into docs.
+1. Read this entire plan file. Then read the specs listed in the header — they are the correctness oracle. Do not re-open settled spec decisions.
+2. Confirm you are on branch `worktree-incremental`. If not, ask the user before continuing.
+3. Find the next phase whose status is `pending` in the Progress tracking table. That is your starting point. If every phase is `done`, run the post-implementation verification under "Verification" and stop.
 
-### Doc drift found (fix regardless of this demo)
-User-facing docs promise a **conditional** keyed+timeseries admission ("*unless / only
-when key temporal locality is established*") that has **no code path** — production
-refuses **unconditionally**:
-- `docs-site/docs/guide/materializations.md:196`
-- `docs-site/docs/reference/timeseries.md:85`
-- `docs-site/docs/reference/cumulative-aggregate.md:95`
-Minor spec/impl drift too: `keyed_models.md` claims the diagnostic message "names the
-three routes"; the shipped message (`metadata.rs:421`) is the older blanket wording.
+**For each phase, run the per-phase loop encoded in `/smelt:implement`:** implementer subagent → reviewer subagent → iterate → record + commit + push.
+
+**When to pause and ask the user:**
+
+- The reviewer surfaces the same material finding across two implementer passes.
+- TDD tests cannot be made green without violating a spec rule.
+- A spec assumption turns out to be wrong (run `/smelt:spec` to update first).
+- `cargo test` or `cargo clippy` surfaces a pre-existing failure unrelated to the plan.
+
+**Conventions every phase:**
+- Real-fixture tests, not just AST units — every phase exercises its feature in `examples/`.
+- Red-green TDD: failing test before any implementation.
+- Verification gate is `bash .claude/scripts/verify-phase.sh` (one call: fmt + clippy + tests + example_diagnostics, failures-only output) — do not run the four commands separately.
+- Atomic per-phase commits with the phase's `Commit.` line verbatim.
+- Never skip hooks, never `--no-verify`, never force-push the tracking PR.
+- Don't widen scope: a phase may not reach into a later phase's scope.
+- Honor architectural invariants from `CLAUDE.md` — in particular **maintenance-plan purity / statement single-owner** (`cargo test -p smelt-runtime --test statement_parity` stays green; dry-run rendering must consume the same emitters, never author SQL) and **run pipeline parity** (`execute_parity`).
+- **Timeless-oracle rule (CLAUDE.md).** Phase vocabulary lives in *this plan file only*. Edits to specs and `docs-site/docs/...` describe the feature as if it has always existed. If a phase ships an incomplete surface, the *spec* records the gap under **Known Divergences** in behavioural terms.
 
 ---
 
-## 3. Decisions made in this session
+## Context
 
-1. **Extend `examples/web_analytics/` in place** (not a new example). It already
-   implements ~80% of the pipeline: `bronze/raw_events.sql`,
-   `silver/events_parsed.sql` (partition-grain, event_date), `silver/sessions.sql`
-   (sessionize showcase, bounded lookback), `silver/device_user_edges.sql`
-   (`grain: key` cumulative merge), `run_incremental.py` day-by-day driver +
-   `verify_incremental_equivalence.py` full-rebuild-vs-incremental equality proof.
-2. **Add a maintenance-SQL emission surface first** (extend `--dry-run` or add
-   `smelt explain --show-sql`) so the tutorial captures real emitted MERGE/INSERT
-   SQL — keeps the doc drift-proof. Chosen over a codegen-only script.
-3. ~~**Build keyed temporal locality first** (user decision) so silver dedup uses the
-   *real* keyed-dedup-over-window path rather than the partition-grain reframe.~~
-   **REVERSED in the 2026-07-10 review session (see §6):** ship the demo on the
-   **partition-grain reframe** — express silver dedup as `grain: partition` on
-   `event_date` with
-   `QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1`;
-   the 3-day window becomes the derived lookback / batch-safety bound. Same
-   user-facing story, **builds today**, equivalence-verifiable. Keyed temporal
-   locality is confirmed 100% unbuilt (not even the diagnostic variant exists) and
-   its lowering depends on the emit-layer unification anyway (§6 finding 2), so
-   nothing is lost by reordering: build locality afterward as its own spec-first
-   plan, with this demo as its showcase once it lands.
+The maintenance-plan work (MP series + emit unification + `smelt explain --show-sql`) shipped the machinery; nothing in the repo yet *demonstrates* it end-to-end on a realistic pipeline, and two adjacent CLI/derivation gaps are recorded as Known Divergences (`cli.md`: dry-run prints SELECT only; model upstreams drop out of trigger derivation). This plan closes those two gaps and extends `examples/web_analytics/` with a lateness/dedup/attribution pipeline, culminating in a generated tutorial whose embedded SQL is the real emitter output — so the doc cannot drift.
 
----
+## Scope
 
-## 4. Stacked work (each spec-first) — to be turned into real plans
+### In scope (spec coverage)
+- `cli.md` §"`--dry-run` prints the maintenance statements": `smelt run`/`smelt backbuild --dry-run` render emitted maintenance statements, real window literals, per-chunk boundaries on backbuild.
+- `maintenance_plan.md` §"Upstream model edges": creation-trigger cells for maintained-model upstreams, refusal (never silence) when the clock is underivable, `--source <model-address>` for forward propagation.
+- `datagen.md` §Generator types `timestamp_offset` + §"Redelivery (duplicate emission)".
+- `examples/web_analytics/` extension: `arrival_time` ingestion clock, event-id dedup over a 3-day late window (`grain: partition` on `event_date`), first-5-minutes `utm_campaign` session attribution with an explicit max-session-length cap, `events_enriched` at event grain.
+- Generated tutorial page under `docs-site/docs/examples/` + drift gate.
 
-1. **Key temporal locality** (feature, gates the demo's dedup story). Spec diff to
-   `docs/specs/keyed_models.md` first: define what "locality established" means, the
-   three routes, `key_recurrence` bound, dedup/latest-wins semantics, ledger
-   idempotency (never double-fold a redelivery), the lowering technique (windowed
-   keyed-fold MERGE within a clamped region), and refusal diagnostics. Then
-   un-refuse `KeyedForbidsTimeseries` under real admission, migrate the 4 refusal
-   tests + the broken fixture.
-   - *(Spec-extraction of the full envisioned design was started then paused; resume
-     in the revisit session.)*
-2. **Maintenance-SQL emission surface** (`--dry-run`/`explain --show-sql` prints real
-   `emit.rs` output). Reusable, drift-proofs the tutorial.
-3. **web_analytics extension + generated tutorial** + the doc-drift cleanup (§2).
+### Explicitly deferred
+- **Keyed temporal locality** (`keyed_models.md` §Known Divergences) — its own spec-first plan; this demo becomes its showcase once it lands.
+- **Automatic watermark-diffed `--since-upstream`** (`maintenance_plan.md` §Future Extensions) — deltas stay explicit via `--landed`.
+- **`smelt bakeoff`** (MP13, deliberate; ROADMAP §10).
+- **Ephemeral-aggregate `BIGINT` cast fix** (`cli.md` §Known Divergences) — pre-existing shared-compiler ordering issue, unaffected by this plan.
+- **Keyed multi-aggregate plan-derivation widening** (second half of the `cli.md` NewData divergence) — untouched here; only the model-upstream half is closed.
+
+## Progress tracking
+
+| Phase | Status   | Commit | Date |
+|-------|----------|--------|------|
+| 1     | pending  |        |      |
+| 2     | pending  |        |      |
+| 3     | pending  |        |      |
+| 4     | pending  |        |      |
+| 5     | pending  |        |      |
+| 6     | pending  |        |      |
+| 7     | pending  |        |      |
+| 8     | pending  |        |      |
 
 ---
 
-## 5. Open questions — resolve in the revisit session
+### Phase 1: `--dry-run` renders the emitted maintenance statements (run + backbuild, chunked)
 
-- **Did the recent MP-series work actually leave keyed temporal locality
-  un-built?** (This session verified: yes, refused unconditionally at HEAD. The
-  review session should confirm the specs + code for the *shipped* MP work are
-  complete/consistent before we layer locality on top.)
-- **Is the full locality design in `keyed_models.md` implementable as written, or
-  under-specified?** (The extraction agent was stopped before reporting — rerun it,
-  or brief directly.)
-- **Scope call:** build keyed temporal locality (large, multi-phase) vs. the
-  partition-grain reframe (ships now) for the *demo*. If locality slips, the demo can
-  ship on the reframe and become locality's showcase once it lands.
-- **Tutorial home + generation mechanism:** MkDocs page under
-  `docs-site/docs/examples/`; generator follows the `docs/demos/generate-docs.ts` →
-  copy-into-`docs-site` precedent (there is **no** `pymdownx.snippets` include wiring
-  today — would need adding to `mkdocs.yml:48` if we want file-includes vs paste).
+**Goal.** `smelt run --dry-run` and `smelt backbuild --dry-run` print the single-owner emitters' statements with real window literals; backbuild additionally prints per-chunk boundary lines — per `cli.md` §"`--dry-run` prints the maintenance statements".
+
+**Pre-conditions.** Emit unification landed (statements have a single owner in `smelt-logical`); `statement_parity` green at HEAD.
+
+**TDD tests to write first.**
+- `crates/smelt-runtime/tests/dry_run_statements.rs::dry_run_reports_emitted_statements` — `execute_project` with `dry_run: true` on a partition-grain fixture reports, per model, the identical statement list the maintenance emitters produce for that window; literals are real (no `{{window_start}}` placeholders); asserts equality against the emitters' output, not a golden string.
+- `crates/smelt-runtime/tests/dry_run_statements.rs::dry_run_executes_nothing` — after a dry-run over `examples/web_analytics/`, no target table exists/changes.
+- `crates/smelt-cli/tests/backbuild_dry_run.rs::chunked_range_prints_per_chunk_boundaries` — a multi-day range on a model whose batch-safety classification forces chunking prints one statement block per chunk, each introduced by `-- chunk k/N: [start, end)`, in real execution order (real fixture: `examples/web_analytics/`).
+
+**Implementation shape.** In `smelt-runtime`'s `execute_project` dry-run branch: instead of returning after `model_compiled`, run the same plan/emit path a real run takes up to (but not including) backend execution, and hand the emitted statements to the reporter (new reporter method, e.g. `maintenance_statements(model, chunk_info, &[Statement])`). Backbuild's chunk loop must be reached under dry-run so chunk windows are real. CLI reporter renders blocks + `BEGIN`/`COMMIT` brackets, matching `explain --show-sql`'s rendering (share the renderer in `smelt-cli/src/explain.rs` if practical). No SQL is authored anywhere in `smelt-runtime`/`smelt-cli` — statements come from the emitters only.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-runtime/src/execute.rs` — dry-run branch reaches statement emission/chunking
+- `crates/smelt-runtime/src/reporter.rs` (or the reporter trait's home) — statement-reporting hook
+- `crates/smelt-cli/src/reporter.rs`, `crates/smelt-cli/src/explain.rs` — rendering reuse
+- `crates/smelt-cli/src/commands/backbuild.rs` — dry-run path reaches the chunk planner
+- `docs/specs/cli.md` — remove the "`--dry-run` prints only the compiled SELECT body today" Known Divergence
+
+**Docs touched.**
+- `docs-site/docs/reference/cli.md` — `--dry-run` description under run/backbuild: emitted statements, real literals, chunk boundaries; division of labour vs `explain --show-sql`
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] `cli.md` §"`--dry-run` prints the maintenance statements" satisfied; statement single-owner invariant intact (`statement_parity` green, no authored SQL)
+- [ ] Run pipeline parity: rendering lives behind `execute_project`'s reporter, not a CLI-side re-compile
+- [ ] No scope creep into later phases
+- [ ] User docs updated; spec + docs-site edits are timeless
+
+**Commit.** `feat(cli+runtime): --dry-run renders emitted maintenance statements; backbuild prints per-chunk boundaries`
 
 ---
 
-## 6. Review-session results (2026-07-10) — MP-series audit
+### Phase 2: Upstream-model trigger derivation
 
-The review session promised in the header ran on 2026-07-10 (three parallel audits:
-spec consistency, MP-plan-vs-code, docs-site drift). Answers to §5's questions and
-the resulting sequencing:
+**Goal.** A maintained model's ref to another maintained model derives a creation-trigger cell clocked by the upstream's `timeseries:` declaration; an underivable clock is a recorded `MaintenanceReachNotDerivable` refusal — per `maintenance_plan.md` §"Upstream model edges".
 
-**Findings (specs):**
-- `model_maintenance.md` is the one maintenance-family spec the SA-alignment plan
-  (`20260707-maintenance-plan-spec-alignment.md`) never swept. It still teaches the
-  removed refresh modes as live surface (`refresh: keyed` at `model_maintenance.md:81`)
-  and overlaps `maintenance_plan.md`. Decision: **fold** its still-normative contract
-  sections (equivalence invariant, technique ladder, validator-not-chooser,
-  composition contract) into `maintenance_plan.md`, retarget the ~8 citing specs,
-  and **delete** the file.
-- Stale implementation-status claims, resolved against `crates/smelt-core/src/config.rs:35-66`
-  (the `full`/`incremental`/`materialized_view` trichotomy HAS landed; removed mode
-  names hard-error): `keyed_models.md:290`, `versioned_models.md:137`, and the status
-  banners at `keyed_models.md:16` / `batched_models.md:16` all claim pre-cut parser
-  state and are wrong.
-- Otherwise the spec family is consistent (keyed+timeseries admission, ledger
-  semantics, lookback derivation all agree); no timeless-oracle violations; the
-  shape-profile specs (batched/keyed/versioned) are deliberate keeps.
+**Pre-conditions.** None beyond HEAD (independent of Phase 1).
 
-**Findings (implementation):**
-1. All 17 MP phases landed; `derive_maintenance_plan` is genuinely consumed by
-   production (`execute.rs:1007`, `maintenance_driver.rs`, `propagation.rs`,
-   diagnostics). Ledger fold-refusal is live.
-2. **The emitted-SQL layer is duplicated.** Every caller of
-   `crates/smelt-logical/src/maintenance/emit.rs` is test-only; production emits
-   through separately-written builders (`cumulative.rs:193,232`, `execute.rs`,
-   `smelt-state/src/ddl_duckdb.rs`). The conformance suite's HOLDS legs prove
-   `emit.rs` ≡ full-refresh, **not** production SQL ≡ full-refresh; its header
-   claim that `execute_project` has no plan consumer is stale post-MP11. MP5's
-   goal ("derived technique == what `execute_project` emits") is unmet.
-3. Keyed temporal locality: zero code (`establish_locality`,
-   `KeyedRecurrenceBoundViolated` absent from `crates/`; `key_recurrence` parses at
-   `sources.rs:113` but nothing consumes it). `keyed_models.md:293` is accurate.
-4. MP17 is ~9% grounded (9 of ~100 cells verified; ~50 in `KNOWN_GAPS`).
-5. `smelt bakeoff` CLI absent (deliberate, ROADMAP §10); no CLI prints maintenance
-   SQL; region-recompute ledger grading is whole-row `{*}` only (`execute.rs:1459`).
+**TDD tests to write first.**
+- `crates/smelt-db/tests/maintenance_model_upstream.rs::model_upstream_derives_creation_cell` — two-model chain (upstream `grain: partition` with `timeseries:`; downstream refs it): downstream's plan contains a creation cell for the model edge whose scan clamp uses the upstream's clock column + granularity.
+- `crates/smelt-db/tests/maintenance_model_upstream.rs::model_upstream_without_clock_records_refusal` — upstream with no `timeseries:` → `MaintenanceReachNotDerivable` naming the edge; the cell is refused, not silently absent.
+- `crates/smelt-db/tests/maintenance_model_upstream.rs::view_upstream_derives_no_creation_cell` — a view/`full` upstream contributes no creation cell and no refusal.
+- Real fixture: `crates/smelt-cli/tests/explain_model.rs` (extend) — `smelt explain gold.eventstream_with_identity` in `examples/web_analytics/` shows a creation cell for its silver model upstream.
 
-**Findings (docs-site):** the phantom "unless key temporal locality is established"
-wording is in SEVEN locations (`guide/materializations.md:112,193,196,241`,
-`reference/timeseries.md:85`, `reference/cumulative-aggregate.md:95`,
-`reference/smelt-yml.md:160`); `guide/incremental-models.md:710` calls shipped
-`--since-upstream` "unbuilt"; `mutation_profile` has contradictory schemas on two
-pages (`guide/sources.md:90` vs `guide/incremental-models.md:696`); the
-reconciliation ledger is undocumented; `scan_bounds` missing from the smelt-yml
-reference; `reference/smelt-explain.md` omits the per-model maintenance-plan mode.
+**Implementation shape.** `crates/smelt-db/src/queries/maintenance.rs`: when assembling the derivation inputs, resolve `smelt.<path>` refs against the project's maintained models as well as `sources.*`; a model upstream contributes an edge descriptor carrying the upstream's clock (from its own validated metadata). `crates/smelt-logical/src/maintenance/derive.rs`: accept model edges in trigger-list construction; refusal path for missing clock. Pure-function discipline: Salsa query stays a thin assembler (Salsa purity rule).
 
-**Resulting sequence (replaces §4's ordering):**
-1. **Hygiene sweep** — spec fold/delete + stale-divergence fixes + all docs-site
-   drift fixes above. No behavior change.
-2. **Emit unification** (spec-first, own plan) — single owner for maintenance SQL:
-   production consumes `emit.rs` (or `emit.rs` retires into the production
-   builders); conformance HOLDS legs diff against `execute_project`; then the
-   maintenance-SQL surface (`smelt explain --show-sql` / `--dry-run`) is a thin
-   layer over the single owner. This is the real MP5 close-out AND the demo's
-   drift-proof-tutorial prerequisite.
-3. **This demo on the partition-grain reframe** (decision 3, reversed).
-4. **Keyed temporal locality** — its own spec-first plan afterward; the demo
-   becomes its showcase.
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-db/src/queries/maintenance.rs` — ref resolution over models
+- `crates/smelt-logical/src/maintenance/derive.rs` (+ neighbours) — model-edge cells, refusal
+- `docs/specs/cli.md`, `docs/specs/maintenance_plan.md` — trim the model-upstream Known Divergences to what remains (the `--source <model>` half until Phase 3)
 
+**Docs touched.**
+- `docs-site/docs/guide/incremental-models.md` — model-to-model chains derive creation cells; what `smelt explain` shows for them
 
-## References
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] `maintenance_plan.md` §"Upstream model edges" rules satisfied (clock from upstream `timeseries:`, refusal never silence, view/full upstreams excluded)
+- [ ] Salsa purity + maintenance-plan purity invariants honored; `walk_coverage` green
+- [ ] No scope creep into Phase 3 (CLI `--source` untouched)
+- [ ] User docs updated; spec + docs-site edits are timeless
 
-- Specs: `docs/specs/{keyed_models,batched_models,timeseries,maintenance_plan}.md`
-- Emitters: `crates/smelt-logical/src/maintenance/emit.rs`
-- Refusal guard: `crates/smelt-core/src/metadata.rs:537`
-- Example base: `examples/web_analytics/` (+ `run_incremental.py`,
-  `verify_incremental_equivalence.py`)
-- User docs to fix: `docs-site/docs/{guide/materializations.md,reference/timeseries.md,reference/cumulative-aggregate.md}`
+**Commit.** `feat(maintenance): derive creation-trigger cells for maintained-model upstreams; refuse underivable clocks`
+
+---
+
+### Phase 3: `--since-upstream --source <model-address>`
+
+**Goal.** Forward propagation accepts an upstream maintained model as the delta origin: `smelt run --since-upstream --source <model> --landed <a>..<b>` propagates through the graph and runs exactly the affected downstream `(model, region)` pairs — per `maintenance_plan.md` §"Upstream model edges" (final paragraph).
+
+**Pre-conditions.** Phase 2 (model edges exist in the derivation the propagation graph is built from).
+
+**TDD tests to write first.**
+- `crates/smelt-cli/tests/since_upstream.rs::model_address_landed_delta_propagates` (extend existing since-upstream suite if present) — in `examples/web_analytics/`, declaring a landed window on a silver model dirties only its downstreams; the printed dirty set and the executed pairs match.
+- `crates/smelt-cli/tests/since_upstream.rs::model_address_unknown_is_error` — an address that is neither a declared source nor a maintained model exits non-zero with a diagnostic naming it.
+
+**Implementation shape.** CLI arg resolution for `--source` goes through the same `resolve_ref_path` resolver as model SQL (cli.md invariant 11), accepting source or model addresses; `smelt-runtime/src/propagation.rs` seeds the walk from a model node the same way it seeds from a source node.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-cli/src/main.rs` / `crates/smelt-cli/src/commands/run.rs` — `--source` resolution
+- `crates/smelt-runtime/src/propagation.rs` — model-node delta seeding
+- `docs/specs/maintenance_plan.md` — remove the remaining `--source <model-address>` clause from the Known Divergence
+
+**Docs touched.**
+- `docs-site/docs/reference/cli.md` — forward-propagation section: `--source` accepts model addresses; example
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Resolution uses the canonical resolver (no parallel leaf-only resolver — cli.md invariant 11)
+- [ ] Dirty-set printout unchanged in shape; exit codes meaningful
+- [ ] No scope creep into example phases
+- [ ] User docs updated; spec + docs-site edits are timeless
+
+**Commit.** `feat(cli): --since-upstream --source accepts maintained-model addresses as delta origins`
+
+---
+
+### Phase 4: Datagen lateness + redelivery + campaign columns
+
+**Goal.** Implement `timestamp_offset` and `redelivery:` per `datagen.md`; extend `examples/web_analytics/datagen.yaml` with `event_time`/`arrival_time` (0–3-day lateness), ~2% redelivered duplicate `event_id`s, and a nullable `utm_campaign` payload field.
+
+**Pre-conditions.** None (independent of Phases 1–3).
+
+**TDD tests to write first.**
+- `crates/smelt-datagen/tests/timestamp_offset.rs::offset_adds_seconds_to_base_column` — output equals base + drawn offset; ISO 8601.
+- `crates/smelt-datagen/tests/timestamp_offset.rs::base_must_be_earlier_timestamp_column` — later or non-timestamp base is a config error.
+- `crates/smelt-datagen/tests/redelivery.rs::duplicates_identical_except_arrival_column` — redelivered rows byte-equal to originals except the shifted arrival column; count = `round(fraction × num_rows)`.
+- `crates/smelt-datagen/tests/redelivery.rs::redelivery_does_not_perturb_primary_rows` — toggling `redelivery:` leaves primary rows byte-identical (dedicated RNG stream, seed `+200`).
+- `crates/smelt-datagen/tests/example_web_analytics.rs::web_analytics_has_lateness_duplicates_and_campaigns` (extend) — generated dataset: `arrival_time >= event_time` everywhere; some rows ≥1 day late, none >3 days; duplicate `event_id`s exist; `utm_campaign` non-null for a strict subset of rows.
+
+**Implementation shape.** New generator variant + config parsing in `smelt-datagen` (mirroring `optional`'s inner-generator delegation for `offset_seconds`/`delay_seconds`); redelivery as a post-pass over the generated batch before Parquet write, drawing from the `+200` stream. `datagen.yaml`: add `event_time` (`timestamp`), `arrival_time` (`timestamp_offset` off `event_time`, weighted lateness mostly 0, tail to 3 days), `utm_campaign` (`optional` + `one_of`) inside the payload or as a column, `redelivery:` block on the events dataset.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-datagen/src/` — generator + config + redelivery pass
+- `examples/web_analytics/datagen.yaml` — new columns + redelivery (models untouched; extra parquet columns are inert until Phase 5)
+- `docs/specs/datagen.md` — remove the "`timestamp_offset` and `redelivery:` are not yet implemented" Known Divergence
+
+**Docs touched.**
+- `docs-site/docs/reference/` datagen page — new generator row + redelivery section
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] `datagen.md` determinism semantics honored (isolated RNG stream, prefix stability)
+- [ ] Existing example datasets byte-identical where redelivery/offset unused
+- [ ] No scope creep into model changes (Phase 5)
+- [ ] User docs updated; spec + docs-site edits are timeless
+
+**Commit.** `feat(datagen): timestamp_offset generator + redelivery block; web_analytics gains lateness, duplicates, utm_campaign`
+
+---
+
+### Phase 5: Silver dedup over a 3-day late window
+
+**Goal.** `events_parsed` becomes the demo's load-bearing model: repartitions arrival-ordered input by `event_date`, dedups `event_id` via `QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1`, and accepts late events up to 3 days — the window expressed so the derived lookback / batch-safety bound is 3 days.
+
+**Pre-conditions.** Phase 4 (data has lateness + duplicates).
+
+**TDD tests to write first.**
+- `crates/smelt-cli/tests/per_partition_equivalence.rs::web_analytics_dedup_matches_full_rebuild` (extend the existing suite) — day-by-day incremental build equals one full-window rebuild: zero duplicate `event_id`s in the result; every ≤3-day-late event present in its `event_date` partition.
+- `examples/web_analytics/verify_incremental_equivalence.py` — add dedup/lateness assertion columns (duplicate count = 0; late-event presence count equal across pipelines) so the Python harness verifies the new behaviour too.
+
+**Implementation shape.** `bronze/raw_events.sql` projects `event_time`/`arrival_time`; `silver/events_parsed.sql` gains the QUALIFY dedup and the 3-day window in its scan expression (Form-B filters per the existing example conventions), staying `grain: partition` on `event_date`. Downstream identity models keep working (dedup is upstream hygiene). `smelt explain silver.events_parsed` must show the derived 3-day clamp — that report is Phase 8's tutorial input.
+
+**Critical files (allowed to touch in this phase).**
+- `examples/web_analytics/models/bronze/raw_events.sql`, `examples/web_analytics/models/silver/events_parsed.sql`
+- `examples/web_analytics/verify_incremental_equivalence.py`, `examples/web_analytics/README.md`
+- `crates/smelt-cli/tests/per_partition_equivalence.rs`
+
+**Docs touched.**
+- `examples/web_analytics/README.md` — lateness/dedup narrative (tutorial page itself is Phase 8)
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Derived lookback is 3 days (visible in `smelt explain`), not declared via YAML overrides (derive-don't-declare)
+- [ ] `example_diagnostics` + equivalence harness green; identity pipeline unaffected
+- [ ] No scope creep into sessions/enrichment
+- [ ] Docs edits are timeless
+
+**Commit.** `feat(examples): web_analytics silver dedup over 3-day late window (partition-grain QUALIFY reframe)`
+
+---
+
+### Phase 6: Session campaign attribution + explicit max-session-length cap
+
+**Goal.** `sessions.sql` captures `utm_campaign` from an event in the first 5 minutes of the session and declares an explicit max-session-length cap (the bound that seals old partitions for safe partition-level maintenance).
+
+**Pre-conditions.** Phase 5 (deduped events with `utm_campaign` available).
+
+**TDD tests to write first.**
+- `crates/smelt-cli/tests/per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild` — incremental vs full rebuild equality on `(session_id, utm_campaign)`; attribution comes only from events within 5 minutes of session start; sessions never exceed the cap.
+- `examples/web_analytics/verify_incremental_equivalence.py` — session/attribution assertion columns.
+
+**Implementation shape.** Extend the existing sessionize showcase: campaign attribute via a bounded window (`MIN_BY`-style earliest campaign within `session_start + 5 min`, expressed with admissible constructs), cap expressed so the derived bound = cap (today's 1-day frame generalises; keep the frame-derived cap but make it an explicit, named interval in the SQL).
+
+**Critical files (allowed to touch in this phase).**
+- `examples/web_analytics/models/silver/sessions.sql` (+ `examples/web_analytics/functions/` if the sessionize function needs the cap parameter)
+- `examples/web_analytics/verify_incremental_equivalence.py`, `examples/web_analytics/README.md`
+- `crates/smelt-cli/tests/per_partition_equivalence.rs`
+
+**Docs touched.**
+- `examples/web_analytics/README.md` — attribution + cap narrative
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Cap and lookback are derived from the SQL/function shape, not YAML declarations
+- [ ] Equivalence harness green
+- [ ] No scope creep into enrichment
+- [ ] Docs edits are timeless
+
+**Commit.** `feat(examples): web_analytics session utm_campaign attribution + explicit max-session-length cap`
+
+---
+
+### Phase 7: `events_enriched` — narrow update at event grain
+
+**Goal.** New model joining `session_id` + `utm_campaign` back onto the event grain, demonstrating that maintenance targets only affected `event_date` partitions — and, via Phase 2, that its model upstreams derive real creation cells.
+
+**Pre-conditions.** Phases 2, 5, 6.
+
+**TDD tests to write first.**
+- `crates/smelt-cli/tests/per_partition_equivalence.rs::web_analytics_events_enriched_matches_full_rebuild` — incremental equals full rebuild at event grain.
+- `crates/smelt-cli/tests/per_partition_equivalence.rs::web_analytics_events_enriched_narrow_update` — snapshot partitions, run one additional arrival day, assert only `event_date` partitions within the derived window changed.
+- `crates/smelt-cli/tests/explain_model.rs` (extend) — `smelt explain silver.events_enriched` shows creation cells for both model upstreams (`events_parsed`, `sessions`) with their derived clamps.
+
+**Implementation shape.** `examples/web_analytics/models/silver/events_enriched.sql`: `grain: partition` on `event_date`, joins bounded by the session cap + late window so the clamp composes (per `maintenance_plan.md` §"Upstream model edges"). Wire into `verify_incremental_equivalence.py`.
+
+**Critical files (allowed to touch in this phase).**
+- `examples/web_analytics/models/silver/events_enriched.sql` (new)
+- `examples/web_analytics/verify_incremental_equivalence.py`, `examples/web_analytics/README.md`
+- `crates/smelt-cli/tests/per_partition_equivalence.rs`, `crates/smelt-cli/tests/explain_model.rs`
+
+**Docs touched.**
+- `examples/web_analytics/README.md` — enrichment narrative
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Model-upstream creation cells derived (Phase 2 surface exercised on a real fixture)
+- [ ] Narrow-update assertion is on observed partitions, not implementation logs
+- [ ] Equivalence harness green
+- [ ] Docs edits are timeless
+
+**Commit.** `feat(examples): web_analytics events_enriched — bounded event-grain enrichment with model-upstream creation cells`
+
+---
+
+### Phase 8: Generated tutorial page + drift gate
+
+**Goal.** A generated MkDocs page `docs-site/docs/examples/web-analytics-maintenance.md` walking the pipeline, embedding the **real** emitted maintenance SQL (`smelt explain <model> --show-sql --json`) and a captured `smelt backbuild --dry-run` chunked backfill — plus a test that fails when the committed page drifts from regeneration.
+
+**Pre-conditions.** All prior phases.
+
+**TDD tests to write first.**
+- `crates/smelt-cli/tests/tutorial_freshness.rs::web_analytics_maintenance_tutorial_sql_is_fresh` — re-derives the embedded SQL blocks (via the same in-process explain/`--show-sql` path, pinned `--period`) for each model the page names and asserts they byte-match the committed page's fenced blocks. Cheap: no datagen, no backend.
+- Generator script self-check: `generate_tutorial.py --check` exits non-zero when the committed page differs from a fresh render.
+
+**Implementation shape.** `examples/web_analytics/generate_tutorial.py`: renders the page from a template — prose sections + fenced SQL lifted from `smelt explain <model> --show-sql --json` (`statements` array; pinned `--period` so literals are stable) and a captured `smelt backbuild --dry-run` transcript for the backfill section. Output committed at `docs-site/docs/examples/web-analytics-maintenance.md`; nav entry added beside the existing identity-stitching page (which stays untouched). Follows the `docs/demos/generate-docs.ts` generate-and-copy precedent; no `pymdownx.snippets` wiring.
+
+**Critical files (allowed to touch in this phase).**
+- `examples/web_analytics/generate_tutorial.py` (new), `examples/web_analytics/README.md`
+- `docs-site/docs/examples/web-analytics-maintenance.md` (new, generated+committed)
+- `docs-site/mkdocs.yml` — nav entry
+- `crates/smelt-cli/tests/tutorial_freshness.rs` (new)
+
+**Docs touched.**
+- `docs-site/docs/examples/web-analytics-maintenance.md` — the deliverable (generated; timeless by construction — the generator template must contain no plan vocabulary)
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Embedded SQL is lifted from the machine output, never hand-pasted
+- [ ] Existing identity-stitching page untouched; both pages in nav
+- [ ] Freshness gate runs in plain `cargo test` (no datagen/backend dependency)
+- [ ] Generated page is timeless — no phase vocabulary in the template
+
+**Commit.** `docs(examples): generated web-analytics maintenance tutorial embedding real emitted SQL, with freshness gate`
+
+---
+
+## Deferred during implementation
+
+(Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+## Verification
+
+How to confirm the spec is satisfied at the end:
+- `bash .claude/scripts/verify-phase.sh` (includes `statement_parity`, `execute_parity`, `example_diagnostics`)
+- `python examples/web_analytics/run_incremental.py` then `python examples/web_analytics/verify_incremental_equivalence.py` — full equivalence harness over the extended pipeline
+- `cargo test -p smelt-cli --test per_partition_equivalence`
+- `python examples/web_analytics/generate_tutorial.py --check` — tutorial page fresh
+- `/smelt:validate cli`, `/smelt:validate maintenance_plan`, `/smelt:validate datagen` report zero drift

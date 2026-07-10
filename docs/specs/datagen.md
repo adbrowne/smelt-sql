@@ -97,6 +97,7 @@ datasets:
 |------|------------|-------------|
 | `date` | `start`, `end` (YYYY-MM-DD) | Random date in `[start, end)`; output as `YYYY-MM-DD` string |
 | `timestamp` | `start`, `end` (YYYY-MM-DDTHH:MM:SS) | Random timestamp in range; output as ISO 8601 string |
+| `timestamp_offset` | `base: <column>`, `offset_seconds: <numeric generator>` | Emits `base + offset` where `base` names an **earlier column in the same dataset** whose generator produces a timestamp, and `offset_seconds` is any numeric generator (e.g. `weighted_choice` over `0` and multi-day delays, or `log_normal`) evaluated per row and added as seconds. Output is an ISO 8601 string like `timestamp`. Referencing a later or non-timestamp column is a config error. The canonical use is an ingestion clock derived from an occurrence clock: `arrival_time = event_time + lateness`. |
 
 **Boolean and nullable:**
 
@@ -185,6 +186,32 @@ Example — `linked_choice` modelling realistic device/user co-occurrence:
         start: "2026-01-01T00:00:00"
         end:   "2026-03-01T00:00:00"
 ```
+
+### Redelivery (duplicate emission)
+
+A `redelivery:` block under `DatasetConfig` re-emits a deterministic fraction of generated rows
+to model at-least-once delivery:
+
+```yaml
+redelivery:
+  fraction: 0.02                 # share of rows re-emitted (once each)
+  arrival_column: arrival_time   # the ingestion-clock column shifted on the duplicate
+  delay_seconds:                 # numeric generator; added to the original arrival value
+    type: uniform_int
+    min: 3600
+    max: 172800
+```
+
+A redelivered row is byte-identical to its original — same identifiers, same business columns,
+same occurrence timestamps — except `arrival_column`, which is shifted forward by a per-duplicate
+draw from `delay_seconds`. `arrival_column` must name a timestamp-producing column of the
+dataset. Duplicates are appended after the primary rows (dataset row count grows by
+`round(fraction × num_rows)`), and selection + delays draw from a dedicated RNG stream seeded
+`dataset_seed.wrapping_add(200)`, so enabling redelivery does not perturb the primary rows and
+changing `num_rows` reproduces the same duplicate pattern prefix-stably. This is the mechanism
+for exercising downstream dedup (`QUALIFY ROW_NUMBER() OVER (PARTITION BY <id> ORDER BY
+<arrival>) = 1`): the duplicate is a *true* redelivery, so any dedup keyed on the identifier
+converges to the original row.
 
 ### Output format
 
@@ -326,6 +353,10 @@ A raw tuple-list mode was rejected for v1 because it provides no abstraction ove
 
 ## Known Divergences / Open Questions
 
+- **`timestamp_offset` and `redelivery:` are not yet implemented.** The lateness/redelivery
+  surface (§"Generator types" dates table, §"Redelivery (duplicate emission)") is specified but
+  `smelt-datagen` does not yet parse or generate it. Tracked in
+  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **`json_object` has no array / list field type.** A field whose JSON value is an array (e.g. an `items: [...]` cart payload) cannot be expressed in v1. A `json_array` companion generator is the planned extension; until then, callers needing array-valued fields must shape them as count-prefixed scalars (`item_count`, `item_0_sku`, etc.) or post-process the JSON in a model.
 - **`json_object` produces a `Utf8` column, not a Parquet `Struct`.** This is the documented design choice (see §Design), but engines that prefer typed nested data (Spark, Iceberg readers) lose the schema. A native `parquet_struct` companion generator is an open question — tracked alongside the `json_array` extension.
 - **`json_object` floats use Rust `f64` `Display`.** Cross-locale formatting (e.g. comma decimal separators) is not a concern because Rust's `f64` `Display` is locale-independent, but the exact textual form (e.g. `1.0` vs `1`, when an integer-valued float is produced by a non-integer sub-generator) is not pinned across smelt-datagen versions — the determinism guarantee covers a single binary version.

@@ -56,6 +56,23 @@ Four trigger classes index the plan's columns:
 - **definition change** — the model gained output fields while sources stood still;
 - **backfill** — an explicit region recompute from replayable input.
 
+### Upstream model edges
+
+A maintained model's ref to **another maintained model in the same project** is a plan edge of
+the same standing as a `sources.*` ref. The upstream model's own `timeseries:` declaration —
+already validated by that model's plan — supplies the event-time clock the downstream
+creation-trigger cell is clamped by, and scan bounds compose through the chain exactly as the
+propagation graph composes them (§"The graph layer"). Deriving the cell requires nothing the
+plan does not already hold: the upstream's clock column, granularity, and the downstream's scan
+reach over that ref. An upstream-model ref whose clock cannot be derived (the upstream declares
+no `timeseries:` and none is inferable) is a **recorded refusal** on that cell
+(`MaintenanceReachNotDerivable`, naming the edge) — never a silent drop. A ref to a `full`-mode
+or view upstream derives no creation cell (there is no incremental delta to receive); it
+participates in mutation/backfill triggers only.
+
+For forward propagation, `--source <address>` accepts either a declared source or an upstream
+maintained model; a model's landed delta is the output window a completed run wrote for it.
+
 ### Frontmatter
 
 ```yaml
@@ -542,6 +559,13 @@ disagree; one per node cannot). Deeper rationale:
 
 ## Known Divergences / Open Questions
 
+- **Upstream model edges do not yet derive creation-trigger cells.** §"Upstream model edges"
+  specifies that a maintained-model ref derives a creation cell clocked by the upstream's
+  `timeseries:` declaration, with an underivable clock recorded as a `MaintenanceReachNotDerivable`
+  refusal; today the per-model derivation resolves refs against `sources.*` only and a model
+  upstream silently drops out (no cell, no refusal). `--source <model-address>` for forward
+  propagation is likewise unimplemented. Tracked in
+  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **The plan has three live consumers: diagnostics, `smelt explain`, and one execution
   technique.** `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) is
   production code, not a tracer: full per-cell admission (`§"Per-cell admission"` obligations

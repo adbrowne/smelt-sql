@@ -256,6 +256,27 @@ A single `smelt build` performs these steps, in order:
 
 `smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
 
+### `--dry-run` prints the maintenance statements
+
+`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation
+would execute, the maintenance statements the run would execute — the output of the same pure
+emitters a real run consumes (`maintenance_plan.md` §"Statement emission (single owner)") — not
+merely the compiled SELECT body. Region literals are **real**: they come from the invocation's
+resolved `--event-time-start`/`--event-time-end` window, never symbolic placeholders.
+Transactional groups are bracketed by `BEGIN`/`COMMIT` lines, exactly as in
+`smelt explain <model> --show-sql`.
+
+`smelt backbuild --dry-run` additionally reflects the chunking a real backbuild performs: when
+the batch-safety classification splits the range, statements print once per chunk, each chunk
+introduced by a boundary line naming its `[start, end)` window and its position
+(`-- chunk 2/5: [2026-03-21, 2026-03-22)`), in the order a real backbuild would execute them. An
+auto-chunked backfill is thereby inspectable in full before it runs.
+
+`--dry-run` never executes a statement against the target. The division of labour with
+`smelt explain <model> --show-sql`: `--show-sql` is the no-window, single-model plan-inspection
+surface (symbolic bounds unless `--period` is given); `--dry-run` is the "exactly what would
+*this invocation* do" surface — real window, real selection, real chunking.
+
 ### `--allow-downgrade` — incremental safety escape hatch
 
 A model that declares `incremental:` but whose SQL fails the safety classifier (contains `OVER`, `HAVING`, `LIMIT`, a subquery, or a non-deterministic function in the outer body) is **refused at planning time** by default. `smelt run` exits non-zero with a diagnostic naming the model and the construct.
@@ -379,6 +400,12 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 
 ## Known Divergences / Open Questions
 
+- **`--dry-run` prints only the compiled SELECT body today.** The specified behaviour
+  (§"`--dry-run` prints the maintenance statements") — emitted maintenance statements with real
+  window literals, and per-chunk boundary lines under `smelt backbuild --dry-run` — is not yet
+  implemented: the dry-run branch in `smelt-runtime`'s `execute_project` returns after reporting
+  the compiled SELECT, before any maintenance-statement emission or chunk planning. Tracked in
+  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **Exit code standardization incomplete.** Configuration errors, YAML parse failures, and selector parse errors exit with non-zero codes but the exact code is not consistently `2` or any defined value distinct from `1`. Exit code meaning for "user/config error" is not defined.
 - **`smelt test --select` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (§"`smelt test` isolation"), consistent with every other command. Any remaining substring-match behaviour in the implementation is an unlanded gap, not the intended contract.
 - **`smelt explain` physical section gating.** The `physical` section of the explain output is documented as present, but the condition that triggers its inclusion (`--show-physical` flag?) is not clearly surfaced in the CLI help or user guide.
@@ -392,7 +419,12 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   per-model maintenance-plan derivation (`smelt-db`'s `maintenance_plan_report`) resolves a
   model's `smelt.<path>` refs against declared `sources.*` entities only; a ref to another
   incremental *model* in the same project silently drops out of the trigger derivation (no cell,
-  no refusal) rather than deriving a `KeyedFold`/`DeleteInsert` cell for it. Separately, the
+  no refusal) rather than deriving a `KeyedFold`/`DeleteInsert` cell for it. The specified
+  contract (`maintenance_plan.md` §"Upstream model edges") is that a maintained-model upstream
+  derives a creation-trigger cell the same way a source does, clocked by the upstream model's
+  own `timeseries:` declaration, and that an underivable clock is a recorded refusal, never a
+  silent drop; closing this gap is tracked in
+  `docs/plans/20260710-web-analytics-maintenance-demo.md`. Separately, the
   keyed-grain fold-candidate detector admits only a single aggregate projection — a `grain: key`
   model with two or more aggregate columns falls back to `Trigger::Backfill`'s recompute cell
   with a `NoAdmissibleTechnique` refusal recorded for `NewData`, even though the same model's
