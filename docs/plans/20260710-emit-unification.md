@@ -66,7 +66,7 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 | 3     | done     | 329aeebf | 2026-07-10 |
 | 4     | done     | 37271fd6 | 2026-07-10 |
 | 5     | done     | 356fcfb4 | 2026-07-10 |
-| 6     | done     |        | 2026-07-10 |
+| 6     | done     | 8079498f | 2026-07-10 |
 
 ---
 

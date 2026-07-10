@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-10
 owners: [andrew]
 ---
 

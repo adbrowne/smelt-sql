@@ -51,7 +51,7 @@ Each entry in `models` has:
 |---|---|---|
 | `dependencies` | `string[]` | Upstream model names. |
 | `materialization` | `string` | Resolved storage materialization (`"view"`, `"table"`, `"ephemeral"`, `"materialized_view"`). |
-| `refresh` | `string` | Present only for cumulative models: `"cumulative"`. Omitted for full-refresh models. |
+| `refresh` | `string` | Resolved refresh strategy: `"incremental"` or `"materialized_view"`. Omitted when `"full"`. |
 | `incremental` | object | Present only when the model is incremental. See below. |
 | `tags` | `string[]` | Model tags from frontmatter or `smelt.yml`. Omitted when empty. |
 | `owner` | `string` | Model owner from frontmatter `owner:` key. Omitted when absent. |

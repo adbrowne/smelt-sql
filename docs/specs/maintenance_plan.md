@@ -740,9 +740,10 @@ disagree; one per node cannot). Deeper rationale:
   key_per_partition`, seeded from the worked example catalogue
   (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`).
   `docs-site/docs/reference/cli.md` now documents `--since-upstream` (forward propagation) and
-  `--include-upstreams` (backward resolution) under `smelt run`/`smelt build`. What is still not
-  yet covered — because the underlying surface doesn't exist yet — is the `maintenance:`
-  frontmatter block, `smelt explain`'s cell/clamp/ledger output, and `smelt bakeoff`.
+  `--include-upstreams` (backward resolution) under `smelt run`/`smelt build`, plus
+  `smelt explain`'s cell/clamp/ledger report and `--show-sql`; the `maintenance:` frontmatter
+  block is documented in `docs-site/docs/reference/smelt-yml.md`. What is still not yet
+  covered — because the underlying surface doesn't exist yet — is `smelt bakeoff`.
 - **A group merged across two mutable inputs has no group-merge-provenance policy.** Per-cell
   admission today checks obligations 4/5 (bounded reach/footprint) the same way regardless of
   whether a column group's `mutation_sensitivity` set came from ONE input or several — a
@@ -878,8 +879,8 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
   describe the trichotomy + grain surface; `docs-site/docs/reference/cli.md` also documents
-  `--since-upstream` and `--include-upstreams`. The plan itself (the `maintenance:` block,
-  `smelt explain`'s cell/clamp/ledger output) is not yet user-documented (see Known Divergences).
+  `--since-upstream`, `--include-upstreams`, and `smelt explain`'s cell/clamp/ledger report with
+  `--show-sql`; `docs-site/docs/reference/smelt-yml.md` documents the `maintenance:` block.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260704-model-updates-fundamentals.md` (the L1+L2 substrate),
   `docs/plans/20260705-property-discovery-loop.md` (the empirical engine).
