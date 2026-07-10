@@ -51,8 +51,9 @@ WITH sessionized AS (
 )
 -- Form B: the partition_column (session_start_date) is derived and skews earlier
 -- than the events that update it. This filter declares event_date stays within
--- 1 day of session_start_date, so the planner rebases the WRITE window to
--- [D-1, D+1) and a cross-midnight session updates its prior-day partition. The
+-- 1 day of session_start_date, so the planner rebases the WRITE window for a
+-- [D, D+1) run to [D-1, D+2) — half-open, covering partitions D-1, D, and D+1 —
+-- and a cross-midnight session updates its prior-day partition. The
 -- `1 day` here must match `max_session_length` above — it is the same cap,
 -- restated as a date-column filter because the planner's Form B bound
 -- derivation works over the outer model's date-typed partition column, not

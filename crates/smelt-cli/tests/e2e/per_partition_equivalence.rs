@@ -284,6 +284,55 @@ fn repopulate_sources(db_path: &Path, setup_abs: &Path) {
     setup_sources(db_path, setup_abs);
 }
 
+// ── Cross-midnight session fixture ───────────────────────────────────────────
+
+/// Synthetic `device_id` for the forced cross-midnight session pair — well
+/// outside `datagen.yaml`'s 150,000-row `devices` dataset, so it can never
+/// collide with an organically-generated device.
+const CROSS_MIDNIGHT_DEVICE_ID: i64 = 999_900_001;
+
+/// Insert a synthetic two-event pair into `raw.events` that crosses the
+/// day-1/day-2 midnight boundary (`DAY_WINDOWS[0]` / `DAY_WINDOWS[1]`) with a
+/// 16-minute gap — well under `sessionize`'s 30-minute inactivity threshold —
+/// and the same `platform`, so `smelt.functions.sessionize` merges them into
+/// one session rooted on day 1 (`session_start_date = 2026-03-19`) whose
+/// `session_end` lands on day 2 (`2026-03-20`).
+///
+/// This is the minimal repro of the write-window skew divergence documented
+/// in `docs/plans/20260710-web-analytics-maintenance-demo.md`
+/// §"Deferred during implementation" (the day-46 `event_id=7647` case): a
+/// real cross-midnight pair occurs in the datagen output only about once
+/// every 50 days at `scale_factor=0.01` (rare relative to the 30-minute
+/// inactivity gate), too infrequent to guarantee inside the harness's 7-day
+/// CI window. Both `arrival_time` values equal `event_time` (on-time
+/// delivery) so `silver.events_parsed`'s lateness filter never excludes
+/// either row, and both events are inserted before *any* `smelt run`, so
+/// both pipelines (full-window and day-by-day) see identical source data —
+/// only the run-window shape differs between them.
+fn inject_cross_midnight_session_pair(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let sql = format!(
+        "INSERT INTO raw.events \
+            (event_id, device_id, user_id, seconds_in_day, event_time, arrival_time, \
+             utm_campaign, payload, event_date) \
+         VALUES \
+            (900000001, {dev}, NULL, 85620, \
+                TIMESTAMP '2026-03-19 23:47:00', TIMESTAMP '2026-03-19 23:47:00', NULL, \
+                '{{\"event_name\": \"page_view\", \"platform\": \"web\", \
+                   \"url\": \"https://example.com/home\"}}', \
+                DATE '2026-03-19'), \
+            (900000002, {dev}, NULL, 180, \
+                TIMESTAMP '2026-03-20 00:03:00', TIMESTAMP '2026-03-20 00:03:00', NULL, \
+                '{{\"event_name\": \"page_view\", \"platform\": \"web\", \
+                   \"url\": \"https://example.com/home\"}}', \
+                DATE '2026-03-20');",
+        dev = CROSS_MIDNIGHT_DEVICE_ID,
+    );
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("insert cross-midnight session pair: {e}\nSQL:\n{sql}"));
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// We run 7 days (2026-03-19 … 2026-03-26) rather than the full 60-day window
@@ -813,6 +862,7 @@ struct SessionRow {
     device_id: i64,
     session_start: String,
     session_end: String,
+    event_count: i64,
     utm_campaign: Option<String>,
 }
 
@@ -826,6 +876,7 @@ fn query_session_rows(db_path: &Path) -> Vec<SessionRow> {
                 device_id, \
                 CAST(session_start AS VARCHAR), \
                 CAST(session_end AS VARCHAR), \
+                event_count, \
                 utm_campaign \
              FROM main.silver_sessions \
              ORDER BY session_id",
@@ -837,7 +888,8 @@ fn query_session_rows(db_path: &Path) -> Vec<SessionRow> {
             device_id: row.get::<_, i64>(1)?,
             session_start: row.get::<_, String>(2)?,
             session_end: row.get::<_, String>(3)?,
-            utm_campaign: row.get::<_, Option<String>>(4)?,
+            event_count: row.get::<_, i64>(4)?,
+            utm_campaign: row.get::<_, Option<String>>(5)?,
         })
     })
     .unwrap_or_else(|e| panic!("query session rows: {e}"))
@@ -884,16 +936,28 @@ fn query_expected_attribution(db_path: &Path) -> std::collections::HashMap<Strin
 }
 
 /// Day-by-day incremental build of `silver.sessions` equals one full-window
-/// rebuild on `(session_id, utm_campaign)`, campaign attribution comes only
-/// from events within the first 5 minutes of the session (verified against an
-/// independently-computed golden query over `events_parsed`), and no session
-/// exceeds the explicit max-session-length cap.
+/// rebuild on `(session_id, session_start, session_end, event_count,
+/// utm_campaign)`, campaign attribution comes only from events within the
+/// first 5 minutes of the session (verified against an independently-computed
+/// golden query over `events_parsed`), and no session exceeds the explicit
+/// max-session-length cap.
+///
+/// Includes a forced cross-midnight event pair
+/// (`inject_cross_midnight_session_pair`) spanning `DAY_WINDOWS[0]` /
+/// `DAY_WINDOWS[1]` — the shape that exposes a write-window skew divergence:
+/// `session_id`/`utm_campaign` alone are invariant under that bug (session
+/// identity is the root timestamp; attribution is the first 5 minutes), but
+/// `session_end`/`event_count` diverge when the neighbour partition a
+/// cross-midnight session reaches is never rewritten
+/// (`docs/plans/20260710-web-analytics-maintenance-demo.md`
+/// §"Deferred during implementation").
 #[test]
 fn web_analytics_session_attribution_matches_full_rebuild() {
     let tmp = TempDir::new().expect("tempdir");
     let tmp_path = tmp.path();
 
     let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+    inject_cross_midnight_session_pair(&db_path);
 
     // ── Pipeline A: full-window single rebuild ────────────────────────────
     smelt_run(
@@ -909,6 +973,7 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
     reset_db(&workspace);
     fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
     repopulate_sources(&db_path, &setup_abs);
+    inject_cross_midnight_session_pair(&db_path);
 
     for (ws, we) in DAY_WINDOWS {
         smelt_run(
@@ -978,22 +1043,46 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
         }
     }
 
-    // ── Day-by-day equals full rebuild exactly on (session_id, utm_campaign) ──
+    // ── Day-by-day equals full rebuild exactly on (session_id, session_start,
+    //    session_end, event_count, utm_campaign) ────────────────────────────
+    //
+    // Widened beyond (session_id, utm_campaign): both are invariant under the
+    // write-window skew divergence this harness must catch (session identity
+    // is the root timestamp; attribution is fixed by the first 5 minutes),
+    // so a bug that leaves a cross-midnight session's neighbour partition
+    // stale (wrong `session_end`/`event_count`) would pass silently under the
+    // narrower assertion.
     let set_a: std::collections::BTreeSet<_> = rows_a
         .iter()
-        .map(|r| (r.session_id.clone(), r.utm_campaign.clone()))
+        .map(|r| {
+            (
+                r.session_id.clone(),
+                r.session_start.clone(),
+                r.session_end.clone(),
+                r.event_count,
+                r.utm_campaign.clone(),
+            )
+        })
         .collect();
     let set_b: std::collections::BTreeSet<_> = rows_b
         .iter()
-        .map(|r| (r.session_id.clone(), r.utm_campaign.clone()))
+        .map(|r| {
+            (
+                r.session_id.clone(),
+                r.session_start.clone(),
+                r.session_end.clone(),
+                r.event_count,
+                r.utm_campaign.clone(),
+            )
+        })
         .collect();
     let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
     let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
     assert!(
         only_in_a.is_empty() && only_in_b.is_empty(),
-        "silver.sessions (session_id, utm_campaign) differs between full rebuild \
-         and day-by-day replay.\nonly in A (first 10): {only_in_a:?}\n\
-         only in B (first 10): {only_in_b:?}"
+        "silver.sessions (session_id, session_start, session_end, event_count, \
+         utm_campaign) differs between full rebuild and day-by-day replay.\n\
+         only in A (first 10): {only_in_a:?}\nonly in B (first 10): {only_in_b:?}"
     );
 }
 

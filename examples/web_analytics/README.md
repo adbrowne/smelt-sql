@@ -260,7 +260,9 @@ Because the partition column `session_start_date` is *derived* and can skew
 earlier than the events that update it (a session that started yesterday gains
 events today), the model carries a Form B filter
 (`event_date BETWEEN session_start_date - INTERVAL '1 day' AND … + INTERVAL '1 day'`)
-that widens the **write** window to `[D-1, D+1)`. The planner's DELETE+INSERT
+that widens the **write** window for a `[D, D+1)` run to `[D-1, D+2)` —
+half-open, covering partitions `D-1`, `D`, and `D+1` (`[start − after,
+end + before)` with the symmetric ±1-day skew). The planner's DELETE+INSERT
 deletes the same widened window the INSERT writes, so re-running consecutive
 days stays idempotent (no duplicate rows in the lookback partition).
 

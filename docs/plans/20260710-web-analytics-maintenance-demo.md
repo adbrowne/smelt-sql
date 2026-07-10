@@ -397,6 +397,23 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
   skew, and the Rust suite should additionally assert
   `(session_id, session_end, event_count)` to make the gap visible at CI
   scale.
+  **Resolved (2026-07-11) by `docs/plans/20260711-derived-output-window.md`.**
+  Phases 1–2 land the write-window rebase this note calls for: a pure
+  `smelt-logical` classifier derives the model's own partition-column skew
+  bound from its Form B relation, and the runtime windowing seam inverts the
+  run window through it — `[start − after, end + before)` — so the DELETE
+  range and output clamp cover the skew-reached neighbour partition instead
+  of pinning to the raw run window. Phase 3 closes the harness half of this
+  note: `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs`'s session
+  assertion now compares `(session_id, session_start, session_end,
+  event_count, utm_campaign)` (not just `(session_id, utm_campaign)`), with a
+  forced cross-midnight event pair in the fixture so the CI window exercises
+  this shape deterministically instead of relying on datagen's ~1-in-50-day
+  organic rate. Confirmed red on the pre-fix runtime (skew derivation
+  neutralized to `Skew::ZERO`): the day-by-day pipeline left the session at
+  `event_count=1, session_end=2026-03-19 23:47:00` where the full-window
+  rebuild correctly merged it to `event_count=2, session_end=2026-03-20
+  00:03:00`.
 
 ## Verification
 
