@@ -301,6 +301,41 @@ async fn run_since_upstream(
     )
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
+    // Each `--source` address must resolve to either a declared source or an
+    // upstream maintained model (`maintenance_plan.md` §"Upstream model
+    // edges": "`--source <address>` accepts either a declared source or an
+    // upstream maintained model"). Resolution goes through the canonical
+    // `resolve_ref_path` resolver — no parallel leaf-only path (`cli.md`
+    // §"Argument resolution"). An address that is neither is a named error,
+    // never a silent no-op.
+    {
+        let db = smelt_cli::init_db(project_dir, models);
+        let ws = smelt_db::Workspace::try_get(&db)
+            .ok_or_else(|| anyhow::anyhow!("workspace not initialized for --source resolution"))?;
+        for addr in &args.since_upstream_source {
+            let stripped = addr.strip_prefix("smelt.").unwrap_or(addr);
+            let segs: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+            match smelt_db::resolve_ref_path(&db, ws, segs) {
+                Some(r)
+                    if matches!(r.kind, smelt_db::RefKind::Source | smelt_db::RefKind::Model) => {}
+                Some(r) => {
+                    return Err(anyhow::anyhow!(
+                        "--source '{addr}' resolves to a {:?}, not a declared source or a \
+                         maintained model — forward propagation seeds a delta only on a source \
+                         or an upstream maintained model",
+                        r.kind
+                    ));
+                }
+                None => {
+                    return Err(anyhow::anyhow!(
+                        "--source '{addr}' is neither a declared source nor a maintained model in \
+                         this project"
+                    ));
+                }
+            }
+        }
+    }
+
     let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
     let order = graph
         .execution_order()

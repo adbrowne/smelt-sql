@@ -295,6 +295,16 @@ fn self_referential_node_refuses_fail_loud() {
          targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
          default_materialization: view\n",
     );
+    // A resolvable declared source so `--source sources.bronze` passes the
+    // `resolve_ref_path` precondition and the self-referential graph refusal
+    // (not an unknown-address error) is what surfaces.
+    write(
+        &root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
     write(
         &root,
         "models/rolling.sql",
@@ -370,5 +380,146 @@ fn malformed_landed_range_errors() {
     assert!(!output.status.success(), "malformed range must error");
     let stderr = String::from_utf8_lossy(&output.stderr);
     assert!(stderr.contains("malformed --landed range"), "{stderr}");
+    assert!(!stderr.contains("panicked at"), "{stderr}");
+}
+
+/// Stage a model->model chain under `parent/proj`: `silver` (maintained,
+/// partition-grain, clock `d`) reads `sources.bronze`; `gold` (maintained,
+/// partition-grain, clock `d`) reads `smelt.silver` as a passthrough. The
+/// `silver -> gold` edge is a maintained-model edge — the same one
+/// `smelt explain gold` reports. Returns the project dir.
+fn stage_model_chain(parent: &Path) -> PathBuf {
+    let root = parent.join("proj");
+    write(
+        &root,
+        "smelt.yml",
+        "name: model_chain_ws\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    );
+    write(
+        &root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        &root,
+        "models/silver.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d FROM smelt.sources.bronze\n",
+    );
+    write(
+        &root,
+        "models/gold.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d FROM smelt.silver\n",
+    );
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    root
+}
+
+/// Pre-populate `main.silver` (the maintained model's own output) with 10
+/// days of data — the delta origin's completed run is already materialized,
+/// so `--since-upstream --source silver` reads it directly.
+fn seed_silver(db_path: &Path) {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main;\n\
+         CREATE TABLE main.silver (id INTEGER, d DATE);\n\
+         INSERT INTO main.silver \
+           SELECT i, DATE '2026-01-01' + CAST(i - 1 AS INTEGER) FROM range(1, 11) t(i);\n",
+    )
+    .expect("seed silver table");
+}
+
+fn gold_dates(db_path: &Path) -> Vec<String> {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    let mut stmt = conn
+        .prepare("SELECT CAST(d AS VARCHAR) FROM main.gold ORDER BY d")
+        .expect("prepare");
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect()
+}
+
+/// `--source <model-address>` accepts an upstream **maintained model** as the
+/// delta origin (`maintenance_plan.md` §"Upstream model edges"): a landed
+/// window declared on `silver` dirties only its downstream `gold`, the origin
+/// model is never re-run, and `gold` materializes exactly the propagated
+/// region.
+#[test]
+fn model_address_landed_delta_propagates() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_model_chain(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_silver(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "silver",
+            "--landed",
+            "2026-01-03..2026-01-04",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "model-origin since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("gold <- silver"),
+        "the dirty set must show the model edge: {stdout}"
+    );
+    assert!(
+        !stdout.contains("RUN silver"),
+        "the origin model must not be re-run: {stdout}"
+    );
+
+    // silver's delta [Jan3,Jan4) reflects zero-margin to gold day Jan3.
+    assert_eq!(
+        gold_dates(&db_path),
+        vec!["2026-01-03".to_string()],
+        "only the propagated region of gold may be materialized"
+    );
+}
+
+/// A `--source` address that is neither a declared source nor a maintained
+/// model in this project is a named CLI error (non-zero exit), never a
+/// silent no-op or a panic — resolution goes through the canonical
+/// `resolve_ref_path` resolver (`cli.md` §"Argument resolution").
+#[test]
+fn model_address_unknown_is_error() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_model_chain(tmp.path());
+    seed_silver(&project_dir.join("target/dev.duckdb"));
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "ghost.nonexistent",
+            "--landed",
+            "2026-01-03..2026-01-04",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "an unknown --source address must exit non-zero"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("ghost.nonexistent"),
+        "the error must name the unresolved address: {stderr}"
+    );
     assert!(!stderr.contains("panicked at"), "{stderr}");
 }

@@ -111,6 +111,90 @@ fn source_without_a_delta_propagates_nothing() {
     assert!(plan.runs.is_empty(), "no delta => nothing propagated");
 }
 
+/// A maintained model is a delta origin of the same standing as a source
+/// (`maintenance_plan.md` §"Upstream model edges"): a `--source
+/// <model-address>` landed delta propagates to that model's downstreams,
+/// and the origin model itself is **not** re-run (its landed delta is the
+/// window a completed run already wrote for it). The `silver -> gold` edge
+/// is derived through the SAME edge-aware derivation `smelt explain` uses
+/// (a maintained-model creation cell), so the propagation clamp equals the
+/// creation cell's clamp — here a zero-margin passthrough.
+#[test]
+fn model_delta_origin_propagates_to_downstreams_without_rerunning_origin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: id\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/silver.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d FROM smelt.sources.bronze\n",
+    );
+    write(
+        root,
+        "models/gold.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT id, d FROM smelt.silver\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    // The model->model edge is present and derived (not a hand-typed clamp):
+    // a passthrough read is a zero-margin same-axis edge.
+    let edges = build_forward_graph(&models, &source_infos).expect("build graph");
+    let edge = edges
+        .iter()
+        .find(|e| e.upstream == "silver" && e.downstream == "gold")
+        .unwrap_or_else(|| panic!("expected a silver -> gold model edge: {edges:?}"));
+    assert_eq!(
+        edge.before_days, 0,
+        "passthrough read is zero-margin: {edge:?}"
+    );
+    assert_eq!(
+        edge.after_days, 0,
+        "passthrough read is zero-margin: {edge:?}"
+    );
+
+    let order = vec!["silver".to_string(), "gold".to_string()];
+    let deltas = vec![SourceDelta {
+        source: "silver".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect("plan");
+
+    assert!(
+        plan.runs.iter().any(|r| r.model == "gold"),
+        "silver's landed delta must propagate to gold: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "silver"),
+        "the delta origin model must NOT be re-run — its landed delta is already written: {:?}",
+        plan.runs
+    );
+    assert!(
+        plan.dirty_set_report.contains("gold <- silver"),
+        "the dirty set must show the model edge: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        !plan.dirty_set_report.contains("RUN silver"),
+        "the origin model must not appear as a scheduled run: {}",
+        plan.dirty_set_report
+    );
+}
+
 /// A self-referential model (a ref to its own address) refuses fail-loud
 /// before any interval math runs — `MaintenanceGraphUnsupportedNode`
 /// (`maintenance_plan.md` §"The graph layer" — refusals).

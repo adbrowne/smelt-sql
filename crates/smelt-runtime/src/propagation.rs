@@ -13,8 +13,11 @@
 //!
 //! Per the "Maintenance-plan purity" invariant (root `CLAUDE.md`), this
 //! module only *assembles* — it calls `smelt-db`'s pure
-//! `derive_model_maintenance_plan` and `smelt-logical`'s pure `propagate`;
-//! it never re-implements admission or the graph composition math itself.
+//! `derive_model_maintenance_plan_with_edges` (the SAME edge-aware
+//! derivation `smelt explain` consumes, so a maintained-model upstream's
+//! propagation clamp equals the creation cell's clamp) and `smelt-logical`'s
+//! pure `propagate`; it never re-implements admission or the graph
+//! composition math itself.
 
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
@@ -157,9 +160,16 @@ fn model_grain(model: &ModelFile) -> Result<PartitionGrain> {
 /// a `ScanClamp` for, widened to the maximum clamp margin across every cell
 /// that derives one for that pair (widen-never-narrow, `maintenance_plan.md`
 /// §"The graph layer"). `upstream` is either a raw source (a `sources.*`
-/// ref) or another model in `models` — both resolve through the same
-/// `derive_model_maintenance_plan` call, so a chain of models composes
-/// through the SAME clamp-derivation path a single source edge does.
+/// ref) or another model in `models`. Both resolve through the same
+/// `derive_model_maintenance_plan_with_edges` call `smelt explain` uses: a
+/// `sources.*` ref becomes a `SourceFacts` and a maintained-model ref
+/// becomes a `ModelEdge`, so a maintained-model edge's clamp equals the
+/// creation cell's clamp `smelt explain` reports and an underivable upstream
+/// clock is a refusal (no walkable edge) rather than a silently permissive
+/// whole-table synthesis (`maintenance_plan.md` §"Upstream model edges"). A
+/// `full`-mode / view upstream carries no incremental delta, so it stays on
+/// the plain source path as an unclocked whole-table dependency the
+/// backward-resolution graph must still stage.
 ///
 /// Refuses (`MaintenanceGraphUnsupportedNode`) fail-loud on a
 /// self-referential model (a ref to its own address) before any interval
@@ -187,6 +197,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         let sql = smelt_parser::strip_frontmatter(&model.content);
 
         let mut sources: Vec<SourceFacts> = Vec::new();
+        let mut model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = Vec::new();
         let mut explicitly_mutable: HashSet<String> = HashSet::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
         for r in &model.refs {
@@ -221,27 +232,58 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
                 );
             }
             if let Some(upstream_model) = model_by_addr.get(&addr) {
-                let partition_col = upstream_model
-                    .metadata
-                    .as_deref()
-                    .and_then(|m| m.timeseries.as_ref())
-                    .map(|ts| ts.partition_column.clone());
-                sources.push(SourceFacts {
-                    name: bare.clone(),
-                    mutation: PlanMutationProfile::MutableSnapshot,
-                    partition_col,
-                    unique_key: vec![],
-                    allow_full_scan: true,
-                });
+                let up_meta = upstream_model.metadata.as_deref();
+                let is_maintained =
+                    up_meta.map(|m| m.refresh == Some(RefreshStrategy::Incremental)) == Some(true);
+                if is_maintained {
+                    // A maintained-model upstream is a plan edge of the same
+                    // standing as a `sources.*` ref (`maintenance_plan.md`
+                    // §"Upstream model edges"): route it through the SAME
+                    // edge-aware derivation `smelt explain` uses
+                    // (`derive_model_maintenance_plan_with_edges` →
+                    // `append_model_edge_cells`), so the propagation clamp for
+                    // this edge equals the creation cell's clamp and an
+                    // upstream whose clock cannot be derived is a recorded
+                    // refusal (contributing no walkable edge), never a silently
+                    // permissive `MutableSnapshot { allow_full_scan: true }`
+                    // whole-table synthesis.
+                    let clock_col = up_meta
+                        .and_then(|m| m.timeseries.as_ref())
+                        .map(|ts| ts.partition_column.clone());
+                    model_edges.push(smelt_logical::maintenance::derive::ModelEdge {
+                        name: bare.clone(),
+                        clock_col,
+                    });
+                } else {
+                    // A `full`-mode or view upstream delivers no incremental
+                    // delta (`maintenance_plan.md` §"Upstream model edges":
+                    // "participates in mutation/backfill triggers only") — it
+                    // has no creation cell in `smelt explain` either. It is
+                    // still a real dependency the backward-resolution graph
+                    // must stage, so register it as an unclocked whole-table
+                    // edge via the plain source path (the honest widen for an
+                    // input with no interval structure).
+                    let partition_col = up_meta
+                        .and_then(|m| m.timeseries.as_ref())
+                        .map(|ts| ts.partition_column.clone());
+                    sources.push(SourceFacts {
+                        name: bare.clone(),
+                        mutation: PlanMutationProfile::MutableSnapshot,
+                        partition_col,
+                        unique_key: vec![],
+                        allow_full_scan: true,
+                    });
+                }
             }
         }
 
-        let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
             &sql,
             &table,
             metadata,
             &sources,
             &explicitly_mutable,
+            &model_edges,
         ) else {
             continue;
         };
@@ -372,12 +414,19 @@ pub fn plan_since_upstream(
         }
     }
     // Only real models (nodes in the caller's topological `order`) are ever
-    // run — `prop.dirty` also carries the seeded source deltas themselves
-    // (a source is its own "dirty" entry before any edge reflects it), which
-    // are not runnable models and must not appear as a RUN line.
+    // run — `prop.dirty` also carries the seeded deltas themselves (a delta
+    // origin is its own "dirty" entry before any edge reflects it). A raw
+    // *source* origin is filtered by `order_set` (sources are never in the
+    // topological model order); a *maintained-model* origin (a `--source
+    // <model-address>` delta, `maintenance_plan.md` §"Upstream model edges":
+    // "a model's landed delta is the output window a completed run wrote for
+    // it") IS in `order`, but its run already happened — it must propagate to
+    // its downstreams without being re-run itself. `origin_names` excludes
+    // both.
     let order_set: BTreeSet<&str> = order.iter().map(|s| s.as_str()).collect();
+    let origin_names: BTreeSet<&str> = deltas.iter().map(|d| d.source.as_str()).collect();
     for (model, intervals) in &prop.dirty {
-        if !order_set.contains(model.as_str()) {
+        if !order_set.contains(model.as_str()) || origin_names.contains(model.as_str()) {
             continue;
         }
         for iv in intervals {
@@ -387,6 +436,9 @@ pub fn plan_since_upstream(
 
     let mut runs = Vec::new();
     for name in order {
+        if origin_names.contains(name.as_str()) {
+            continue;
+        }
         let Some(intervals) = prop.dirty.get(name) else {
             continue;
         };

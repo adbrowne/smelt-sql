@@ -120,7 +120,7 @@ smelt run [OPTIONS]
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
 | `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
-| `--source` | | string[] | | A source address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
+| `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
 
 **Selector syntax:**
@@ -176,6 +176,15 @@ Every `refresh: incremental` model with a declared `grain:` derives a maintenanc
 `--source` and `--landed` are repeatable and pair up positionally: the first `--source` pairs with the first `--landed`, and so on. A source named without a matching `--landed` interval contributes nothing for that invocation — there is no implicit whole-table fallback and no automatic discovery of what changed. The runner (or an external poller that watches the real upstream systems) is responsible for telling `smelt` what landed; a cron tick is only the trigger to ask.
 
 An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (`bronze`), with its `sources.` breadcrumb (`sources.bronze`), or with the full `smelt.` prefix (`smelt.sources.bronze`) — all three resolve identically.
+
+`--source` also accepts an **upstream maintained model** as the delta origin — a model's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp `smelt explain` reports for it), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op.
+
+```bash
+# silver.events_parsed finished a run over Jan 3; propagate that landed
+# window to everything downstream of it (the origin model is not re-run).
+smelt run --since-upstream \
+  --source silver.events_parsed --landed 2026-01-03..2026-01-04
+```
 
 A model whose dependency graph contains a cycle, a self-reference, or a keyed-grain node (no partition axis for interval dirt) refuses the whole `--since-upstream` invocation with a named error rather than guessing.
 

@@ -70,8 +70,8 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | d245da69 | 2026-07-10 |
-| 2     | done     |        | 2026-07-10 |
-| 3     | pending  |        |      |
+| 2     | done     | d98af84b | 2026-07-10 |
+| 3     | done     |        | 2026-07-10 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
