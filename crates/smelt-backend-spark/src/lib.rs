@@ -506,17 +506,14 @@ impl Backend for SparkBackend {
         self.execute_statement_group(&group).await
     }
 
-    async fn merge_into(
-        &self,
-        schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
-    ) -> Result<(), BackendError> {
-        let table_name = self.qualified_name(schema, table);
-        self.py_execute_no_result(&sql::merge_into(&table_name, source_sql, unique_key))
-            .await
-    }
+    // `merge_into` is not overridden here — the `Backend` trait's default
+    // implementation (build the `StatementGroup` via `smelt_logical::
+    // maintenance::emit::emit_column_scoped_merge`, then
+    // `execute_statement_group`) routes through `execute_sql` per statement,
+    // matching this backend's shape exactly (single statement, no native
+    // transaction). `docs/specs/maintenance_plan.md` §"Statement emission
+    // (single owner)" — Spark statement parity is asserted at the emitter
+    // level; the live Spark leg is gated CI, not this default routing.
 
     async fn insert_overwrite(
         &self,

@@ -6,7 +6,8 @@
 //! in `crates/smelt-runtime/tests/statement_parity.rs`).
 
 use smelt_logical::maintenance::emit::{
-    emit_create_table_as, emit_delete_insert, emit_keyed_fold, MaintenanceDialect, Region,
+    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
+    MaintenanceDialect, Region,
 };
 
 #[test]
@@ -150,4 +151,81 @@ fn create_table_as_matches_production_shape() {
         "CREATE TABLE main.device_user_edges AS SELECT device_id, user_id, COUNT(*) AS \
          event_count FROM events GROUP BY 1, 2"
     );
+}
+
+/// The column-scoped `MERGE` production actually executes for `Technique::
+/// ColumnScopedMerge` (`crate::maintenance_driver::execute_column_scoped_merge`/
+/// `execute_column_scoped_merge_full`'s pre-phase text, both DuckDB's
+/// `merge_into` and `smelt-backend-spark::sql::merge_into`'s pre-phase
+/// text): `UPDATE SET *`, `INSERT *` — no explicit column list, matching
+/// every backend's production shape byte-for-byte. There is no
+/// partition-bounded variant: partition-scoping, when the technique is not
+/// the declared full-scan case, is the caller's job, folded into
+/// `source_select` before it reaches the emitter.
+#[test]
+fn column_scoped_merge_duckdb_uses_set_star_full_row_projection() {
+    let group = emit_column_scoped_merge(
+        "main.daily_events_enriched",
+        &["event_id".to_string()],
+        "SELECT event_id, event_date, user_id, event_type, user_name \
+         FROM sources_raw_events e JOIN sources_raw_users u ON e.user_id = u.user_id",
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(group.statements.len(), 1);
+    assert!(
+        !group.transactional,
+        "a single-statement group needs no transaction wrapper"
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO main.daily_events_enriched AS target USING (SELECT event_id, event_date, \
+         user_id, event_type, user_name FROM sources_raw_events e JOIN sources_raw_users u ON \
+         e.user_id = u.user_id) AS source ON target.event_id = source.event_id \
+         WHEN MATCHED THEN UPDATE SET * \
+         WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// A composite `unique_key` renders every key column into the `ON` clause,
+/// `AND`-joined, matching both DuckDB's and Spark's pre-phase production
+/// text for a multi-column key.
+#[test]
+fn column_scoped_merge_composite_key_ands_every_column() {
+    let group = emit_column_scoped_merge(
+        "cat.db.events",
+        &["user_id".to_string(), "event_date".to_string()],
+        "SELECT * FROM staging",
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO cat.db.events AS target USING (SELECT * FROM staging) AS source ON \
+         target.user_id = source.user_id AND target.event_date = source.event_date \
+         WHEN MATCHED THEN UPDATE SET * \
+         WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// The column-scoped MERGE family shares identical grammar across DuckDB
+/// and Spark today — both backends' pre-phase `merge_into` text was
+/// byte-identical (`smelt-backend-duckdb::merge_into`,
+/// `smelt-backend-spark::sql::merge_into`) — so the dialect-keyed variants
+/// coincide, same precedent as `emit_delete_insert`'s dialect-invariant
+/// shape.
+#[test]
+fn column_scoped_merge_dialect_invariant_shape() {
+    let duckdb = emit_column_scoped_merge(
+        "t",
+        &["id".to_string()],
+        "SELECT 1 AS id",
+        MaintenanceDialect::DuckDb,
+    );
+    let spark = emit_column_scoped_merge(
+        "t",
+        &["id".to_string()],
+        "SELECT 1 AS id",
+        MaintenanceDialect::Spark,
+    );
+    assert_eq!(duckdb, spark);
 }

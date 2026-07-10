@@ -169,15 +169,17 @@ fn ex07_dimension_churn_column_merge_equals_full_refresh() {
     // MERGE over the declared full scan (customers is unclocked).
     conn.execute_batch("UPDATE customers SET tier = 'gold' WHERE user_id = 10;")
         .expect("churn");
-    batch(
+    // `body` already projects the full target row (order_id, user_id,
+    // order_date, amount, tier) — the caller-side full-row-projection
+    // contract `UPDATE SET *` relies on (`docs/specs/maintenance_plan.md`
+    // §"Statement emission (single owner)").
+    batch_group(
         &conn,
         &emit_column_scoped_merge(
             "orders_tiered",
             &strings(&["order_id", "order_date"]),
-            &strings(&["tier"]),
             body,
-            None,
-            None,
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM orders_tiered", body));
@@ -257,21 +259,31 @@ fn ex40_aggregate_column_add_catch_up_then_new_data_equals_full_refresh() {
     assert_eq!(plan.cells[0].technique, Technique::ColumnScopedMerge);
     assert!(plan.cells[0].ledger_catch_up);
 
-    // Catch up the added group region by region (the backfill loop).
-    let count_body = "SELECT pay_date, COUNT(*) AS order_count FROM payments GROUP BY pay_date";
+    // Catch up the added group region by region (the backfill loop). The
+    // source projects the full target row — `revenue` carried through
+    // unchanged from the existing state via a join, `order_count`
+    // re-derived — per the full-row-projection contract `UPDATE SET *`
+    // relies on; the region predicate is folded into the scan itself.
     for (start, end) in [("2026-01-01", "2026-01-02"), ("2026-01-02", "2026-01-03")] {
-        batch(
+        let region = Region {
+            start: day(start),
+            end: day(end),
+        };
+        let count_body = format!(
+            "SELECT p.pay_date, d.revenue, COUNT(*) AS order_count \
+             FROM payments p JOIN daily_revenue d ON d.pay_date = p.pay_date \
+             WHERE p.pay_date >= {start} AND p.pay_date < {end} \
+             GROUP BY p.pay_date, d.revenue",
+            start = region.start,
+            end = region.end,
+        );
+        batch_group(
             &conn,
             &emit_column_scoped_merge(
                 "daily_revenue",
                 &strings(&["pay_date"]),
-                &strings(&["order_count"]),
-                count_body,
-                Some("pay_date"),
-                Some(&Region {
-                    start: day(start),
-                    end: day(end),
-                }),
+                &count_body,
+                MaintenanceDialect::DuckDb,
             ),
         );
     }

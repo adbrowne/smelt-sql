@@ -62,8 +62,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | e589e179 | 2026-07-10 |
-| 2     | done     |        | 2026-07-10 |
-| 3     | pending  |        |      |
+| 2     | done     | 3db5a0c6 | 2026-07-10 |
+| 3     | done     |        | 2026-07-10 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |

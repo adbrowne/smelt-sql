@@ -65,13 +65,6 @@ fn clamped(body: &str, col: &str, region: &Region) -> String {
     )
 }
 
-fn batch(conn: &Connection, statements: &[String]) {
-    for sql in statements {
-        conn.execute_batch(sql)
-            .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
-    }
-}
-
 /// Day ordinals: epoch day 0 = 2026-01-01. Regions/predicates are built as
 /// SQL date arithmetic so intervals map to dates without a date library.
 fn date_of(day: i64) -> String {
@@ -185,8 +178,12 @@ fn clamp_for<'a>(scans: &'a [ScanClamp], source: &str) -> &'a ScanClamp {
 /// conversions under the derived widened window.
 fn repair_conversion_score(conn: &Connection, clamp: &ScanClamp, region: &Region) {
     let scan = widened_scan_predicate(clamp, region);
+    // The source projects the full target row (event_id, user_id, event_ts,
+    // event_date, conversion_score) — the caller-side full-row-projection
+    // contract `UPDATE SET *` relies on — carrying every column but
+    // `conversion_score` through unchanged from `silver_events` itself.
     let source_select = format!(
-        "SELECT e.event_id, e.event_date, \
+        "SELECT e.event_id, e.user_id, e.event_ts, e.event_date, \
          (SELECT c.score FROM conversions c \
            WHERE c.event_id = e.event_id \
              AND c.conversion_ts >= e.event_ts \
@@ -195,15 +192,13 @@ fn repair_conversion_score(conn: &Connection, clamp: &ScanClamp, region: &Region
            ORDER BY c.conversion_ts LIMIT 1) AS conversion_score \
          FROM silver_events e"
     );
-    batch(
+    batch_group(
         conn,
         &emit_column_scoped_merge(
             "silver_events",
             &strings(&["event_id", "event_date"]),
-            &strings(&["conversion_score"]),
             &source_select,
-            Some("event_date"),
-            Some(region),
+            MaintenanceDialect::DuckDb,
         ),
     );
 }

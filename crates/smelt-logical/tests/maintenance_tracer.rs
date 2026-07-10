@@ -561,25 +561,46 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
     assert!(cell.ledger_catch_up);
 }
 
+/// `emit_column_scoped_merge`'s production shape (`docs/specs/
+/// maintenance_plan.md` §"Statement emission (single owner)"): `UPDATE
+/// SET *`, keyed on `unique_key`, no column-list `SET` and no predicate of
+/// its own on either the scan or the write target — partition-scoping, when
+/// the technique is not the declared full-scan case, is folded into
+/// `source_select` by the caller (the same convention `emit_delete_insert`'s
+/// `body` follows). The caller therefore carries the sibling column
+/// (`revenue`) through unchanged in the projection rather than relying on
+/// the emitter to leave it untouched via an explicit column list — this
+/// replaces the old column-list `SET` form, which never matched production.
 #[test]
-fn ex40_column_merge_sql_prunes_scan_and_target_and_leaves_siblings_alone() {
+fn ex40_column_merge_sql_is_set_star_over_the_callers_full_row_projection() {
     let region = Region {
         start: "DATE '2026-01-01'".to_string(),
         end: "DATE '2026-01-02'".to_string(),
     };
-    let stmts = emit_column_scoped_merge(
+    // The caller projects the full target row — `revenue` passed through
+    // unchanged from the existing state via a join, `order_count`
+    // re-derived — and folds the region predicate into the scan itself.
+    let source_select = format!(
+        "SELECT p.pay_date, d.revenue, COUNT(*) AS order_count \
+         FROM payments p JOIN daily_revenue d ON d.pay_date = p.pay_date \
+         WHERE p.pay_date >= {start} AND p.pay_date < {end} \
+         GROUP BY p.pay_date, d.revenue",
+        start = region.start,
+        end = region.end,
+    );
+    let group = emit_column_scoped_merge(
         "daily_revenue",
         &strings(&["pay_date"]),
-        &strings(&["order_count"]),
-        "SELECT pay_date, COUNT(*) AS order_count FROM payments GROUP BY pay_date",
-        Some("pay_date"),
-        Some(&region),
+        &source_select,
+        MaintenanceDialect::DuckDb,
     );
-    let sql = &stmts[0];
-    // Partition predicate on the scan side and the write target.
-    assert_eq!(sql.matches("pay_date >= DATE '2026-01-01'").count(), 2);
-    assert!(sql.contains("t.pay_date >= DATE '2026-01-01'"));
-    // Writes only the new field; the sibling column is untouched.
-    assert!(sql.contains("UPDATE SET order_count = s.order_count"));
-    assert!(!sql.contains("revenue = "));
+    assert_eq!(group.statements.len(), 1);
+    let sql = &group.statements[0].sql;
+    assert!(sql.contains("pay_date >= DATE '2026-01-01'"));
+    assert!(sql.contains("ON target.pay_date = source.pay_date"));
+    assert!(sql.contains("WHEN MATCHED THEN UPDATE SET *"));
+    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT *"));
+    // No explicit column-list SET — `revenue` flows through the source
+    // projection itself, not through emitter-side sibling exclusion.
+    assert!(!sql.contains("order_count = s.order_count"));
 }

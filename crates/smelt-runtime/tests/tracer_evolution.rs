@@ -40,13 +40,6 @@ fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-fn batch(conn: &Connection, statements: &[String]) {
-    for sql in statements {
-        conn.execute_batch(sql)
-            .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
-    }
-}
-
 fn batch_group(conn: &Connection, group: &StatementGroup) {
     for stmt in &group.statements {
         conn.execute_batch(&stmt.sql)
@@ -437,8 +430,13 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
             end: day(end),
         };
         let scan = widened_scan_predicate(&clamp, &region);
+        // The source projects the full target row — every v3 column carried
+        // through unchanged from `silver_events` itself, `session_id`
+        // re-derived — per the full-row-projection contract `UPDATE SET *`
+        // relies on.
         let source_select = format!(
-            "SELECT e.event_id, e.event_date, s.session_id \
+            "SELECT e.event_id, e.user_id, e.event_ts, e.arrival_ts, e.event_date, e.page, \
+             s.session_id \
              FROM silver_events e \
              LEFT JOIN sessions s \
                ON s.user_id = e.user_id \
@@ -446,15 +444,13 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
               AND e.event_ts < s.session_end_ts \
               AND {scan}"
         );
-        batch(
+        batch_group(
             &conn,
             &emit_column_scoped_merge(
                 "silver_events",
                 &strings(&["event_id", "event_date"]),
-                &strings(&["session_id"]),
                 &source_select,
-                Some("event_date"),
-                Some(&region),
+                MaintenanceDialect::DuckDb,
             ),
         );
     }
@@ -540,8 +536,13 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
 
     let merge_region = |conn: &Connection, region: &Region| {
         let scan = widened_scan_predicate(&clamp, region);
+        // The source projects the full target row — every v4 column carried
+        // through unchanged from `silver_events` itself, `conversion_score`
+        // re-derived — per the full-row-projection contract `UPDATE SET *`
+        // relies on.
         let source_select = format!(
-            "SELECT e.event_id, e.event_date, \
+            "SELECT e.event_id, e.user_id, e.event_ts, e.arrival_ts, e.event_date, e.page, \
+             e.session_id, \
              (SELECT c.score FROM conversions c \
                WHERE c.event_id = e.event_id \
                  AND c.conversion_ts >= e.event_ts \
@@ -550,15 +551,13 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
                ORDER BY c.conversion_ts LIMIT 1) AS conversion_score \
              FROM silver_events e"
         );
-        batch(
+        batch_group(
             conn,
             &emit_column_scoped_merge(
                 "silver_events",
                 &strings(&["event_id", "event_date"]),
-                &strings(&["conversion_score"]),
                 &source_select,
-                Some("event_date"),
-                Some(region),
+                MaintenanceDialect::DuckDb,
             ),
         );
     };

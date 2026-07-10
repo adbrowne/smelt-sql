@@ -4,7 +4,7 @@
 # Patterns: unwrap  expect  println
 # Regenerate with: .claude/scripts/hardening-budget.sh --update
 #
-smelt-backend-duckdb expect 17
+smelt-backend-duckdb expect 16
 smelt-backend-duckdb println 0
 smelt-backend-duckdb unwrap 0
 smelt-backend expect 0

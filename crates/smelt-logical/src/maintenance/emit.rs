@@ -129,36 +129,56 @@ pub fn emit_delete_insert(
     }
 }
 
-/// Column-scoped re-derivation (bottom-left): a keyed `MERGE` writing only
-/// `columns`, leaving skeleton and siblings in place. `region` scopes both
-/// the source scan and the merge target when the op is partition-bounded;
-/// `None` is the declared full-scan case (K8 `allow_full_scan`).
+/// Column-scoped re-derivation (bottom-left): the keyed `MERGE` production
+/// actually executes for `Technique::ColumnScopedMerge`
+/// (`crate::maintenance_driver::execute_column_scoped_merge`/
+/// `execute_column_scoped_merge_full` in `smelt-runtime`) —
+/// `WHEN MATCHED THEN UPDATE SET *`, `WHEN NOT MATCHED THEN INSERT *`. There
+/// is no column-list `SET` variant: DuckDB and Spark both key-match on
+/// `unique_key` and update every column from `source_select`'s projection
+/// (dialect-invariant text for this family — no branch reads `dialect` yet,
+/// kept for signature symmetry with the other emitters in this module).
+///
+/// **Full-row source-projection contract** (moved from
+/// `smelt-backend-duckdb`'s doc comment): `UPDATE SET *` requires
+/// `source_select`'s projection to carry every target column — DuckDB errors
+/// on a column-count/name mismatch, it does not silently subset by name — so
+/// the caller must project the FULL target row, not just the re-derived
+/// column group, carrying columns outside that group through unchanged from
+/// the existing target state (typically via a join back to the target, or —
+/// for the model's own recompute SQL — because the model's SELECT already
+/// projects every output column by construction). `SET *` then only changes
+/// the group's columns' actual values, satisfying `Technique::
+/// ColumnScopedMerge`'s contract without a second, column-list-aware MERGE
+/// primitive. This emitter does not (and cannot) verify the projection is
+/// complete — a caller that violates the contract fails at the backend, not
+/// silently.
+///
+/// Partition-scoping, when the technique is not the declared full-scan case,
+/// is the caller's job — fold it into `source_select` the same way
+/// `emit_delete_insert`'s caller folds the output clamp into `body`; the
+/// emitter adds no predicate of its own on either the scan or the write
+/// target (unlike the old, never-production-matching column-list form this
+/// replaces).
 pub fn emit_column_scoped_merge(
     table: &str,
-    key: &[String],
-    columns: &[String],
+    unique_key: &[String],
     source_select: &str,
-    partition_col: Option<&str>,
-    region: Option<&Region>,
-) -> Vec<String> {
-    let mut using = format!("SELECT * FROM ({source_select})");
-    let mut on: Vec<String> = key.iter().map(|k| format!("t.{k} = s.{k}")).collect();
-    if let (Some(p), Some(r)) = (partition_col, region) {
-        // Partition predicate on the scan side...
-        using.push_str(&format!(" WHERE {}", r.predicate(None, p)));
-        // ...and on the write target, so the engine prunes both.
-        on.push(r.predicate(Some("t"), p));
-    }
-    let sets = columns
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    let on = unique_key
         .iter()
-        .map(|c| format!("{c} = s.{c}"))
+        .map(|k| format!("target.{k} = source.{k}"))
         .collect::<Vec<_>>()
-        .join(", ");
-    vec![format!(
-        "MERGE INTO {table} t USING ({using}) s ON {on} \
-         WHEN MATCHED THEN UPDATE SET {sets}",
-        on = on.join(" AND ")
-    )]
+        .join(" AND ");
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
+             WHEN MATCHED THEN UPDATE SET * \
+             WHEN NOT MATCHED THEN INSERT *"
+        ))],
+        transactional: false,
+    }
 }
 
 /// In-place field backfill (top-left with an empty input delta): `UPDATE`

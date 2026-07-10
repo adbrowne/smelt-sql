@@ -520,12 +520,16 @@ pub async fn execute_column_scoped_merge_full(
 ///
 /// `dimension_batch_sql` must project the **full target row** — every
 /// column, not just the re-derived group's — carrying columns outside the
-/// group through unchanged from the existing target state. DuckDB's
-/// `merge_into` issues `UPDATE SET *`, which requires the source and
-/// target column sets to agree exactly (a column-count mismatch is a hard
-/// backend error, not a silent by-name subset); passing every other
-/// column through unchanged is what keeps the *values* column-scoped even
-/// though the physical `SET *` touches every column's assignment.
+/// group through unchanged from the existing target state. `Backend::
+/// merge_into`'s default implementation issues the `MERGE`
+/// `smelt_logical::maintenance::emit::emit_column_scoped_merge` emits
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"),
+/// `UPDATE SET *`, which requires the source and target column sets to
+/// agree exactly (a column-count mismatch is a hard backend error, not a
+/// silent by-name subset) — see that emitter's doc comment for the full
+/// contract; passing every other column through unchanged is what keeps
+/// the *values* column-scoped even though the physical `SET *` touches
+/// every column's assignment.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_column_scoped_merge(
     backend: &dyn Backend,

@@ -6,9 +6,10 @@
 //! during a real `execute_project` run and diffing them against a direct
 //! call of the emitter with the batch's own inputs.
 //!
-//! Phase 1 covers the region `DELETE`+`INSERT` family only (`IncrementalStrategy::
-//! DeleteInsert`); the keyed-fold and column-scoped-MERGE families land in
-//! later phases of `docs/plans/20260710-emit-unification.md`.
+//! Covers the region `DELETE`+`INSERT` family (`IncrementalStrategy::
+//! DeleteInsert`), the keyed-fold family (`refresh: keyed`), and the
+//! column-scoped `MERGE` family (`Technique::ColumnScopedMerge`) —
+//! `docs/plans/20260710-emit-unification.md` Phases 1–3.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -25,7 +26,8 @@ use smelt_core::config::{Config, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
-    emit_create_table_as, emit_delete_insert, emit_keyed_fold, MaintenanceDialect, Region,
+    emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
+    MaintenanceDialect, Region,
 };
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
 use smelt_runtime::types::ExecuteRequest;
@@ -117,6 +119,10 @@ impl Backend for RecordingBackend {
         self.inner.capabilities()
     }
 
+    fn supports_column_scoped_merge(&self) -> bool {
+        self.inner.supports_column_scoped_merge()
+    }
+
     async fn load_table(
         &self,
         schema: &str,
@@ -147,17 +153,13 @@ impl Backend for RecordingBackend {
         self.inner.insert_into_from_query(schema, name, sql).await
     }
 
-    async fn merge_into(
-        &self,
-        schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
-    ) -> Result<(), BackendError> {
-        self.inner
-            .merge_into(schema, table, source_sql, unique_key)
-            .await
-    }
+    // `merge_into` is deliberately not overridden here: the `Backend`
+    // trait's default implementation builds the `StatementGroup` via
+    // `emit_column_scoped_merge` and calls `self.execute_statement_group`,
+    // which routes through the override below — overriding `merge_into`
+    // itself (forwarding straight to `self.inner.merge_into`) would bypass
+    // this struct's own `execute_statement_group` override and record
+    // nothing.
 
     async fn insert_overwrite(
         &self,
@@ -258,6 +260,9 @@ impl Backend for ArcBackend {
     fn dialect(&self) -> SqlDialect {
         self.0.dialect()
     }
+    fn supports_column_scoped_merge(&self) -> bool {
+        self.0.supports_column_scoped_merge()
+    }
     fn capabilities(&self) -> BackendCapabilities {
         self.0.capabilities()
     }
@@ -286,17 +291,10 @@ impl Backend for ArcBackend {
     ) -> Result<(), BackendError> {
         self.0.insert_into_from_query(schema, name, sql).await
     }
-    async fn merge_into(
-        &self,
-        schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
-    ) -> Result<(), BackendError> {
-        self.0
-            .merge_into(schema, table, source_sql, unique_key)
-            .await
-    }
+    // `merge_into` is deliberately not overridden here — see the identical
+    // note on `RecordingBackend`'s impl above; the trait default's
+    // `execute_statement_group` call routes through this struct's own
+    // override below.
     async fn insert_overwrite(
         &self,
         schema: &str,
@@ -671,5 +669,213 @@ async fn keyed_fold_statements_come_from_the_emitter() {
     assert_eq!(
         &expected_merge, &groups[1],
         "executed MERGE group must be byte-identical to a direct emitter call"
+    );
+}
+
+/// Copy `examples/timeseries` into a scratch directory so the run's
+/// `.smelt/` state never lands inside the checked-in example (mirrors
+/// `crates/smelt-runtime/tests/technique_lowering.rs`'s
+/// `column_scoped_merge_e2e::copy_dir_recursive`).
+fn copy_dir_recursive(src: &Path, dst: &Path) {
+    std::fs::create_dir_all(dst).expect("create dst dir");
+    for entry in std::fs::read_dir(src).expect("read src dir") {
+        let entry = entry.expect("dir entry");
+        let file_type = entry.file_type().expect("file type");
+        let dst_path = dst.join(entry.file_name());
+        if file_type.is_dir() {
+            copy_dir_recursive(&entry.path(), &dst_path);
+        } else {
+            std::fs::copy(entry.path(), &dst_path).expect("copy file");
+        }
+    }
+}
+
+fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteRequest {
+    ExecuteRequest {
+        target: target.to_string(),
+        select: vec![model.to_string()],
+        exclude: vec![],
+        start: Some(start.to_string()),
+        end: Some(end.to_string()),
+        batch_size_days: None,
+        per_partition: false,
+        full_refresh: false,
+        dry_run: false,
+        enforce_safety: false,
+        allow_column_removal: false,
+        allow_full_refresh: false,
+        ephemeral_seed_ctes: vec![],
+    }
+}
+
+/// The column-scoped `MERGE` family (`Technique::ColumnScopedMerge`, MP11):
+/// re-runs `technique_lowering.rs::column_scoped_merge_e2e`'s
+/// `examples/timeseries/daily_events_enriched` fixture — a fact+dimension
+/// enrichment whose `raw.users` mutation drives the `{user_name}` cell's
+/// live column-scoped MERGE — through the recording reporter/backend, and
+/// asserts the executed `MERGE` is byte-identical to a direct call of
+/// `emit_column_scoped_merge` over the same table/unique_key/source_select.
+#[tokio::test]
+async fn column_scoped_merge_statements_come_from_the_emitter() {
+    let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().join("project");
+    copy_dir_recursive(&source_dir, &project_dir);
+
+    let db_path = tmp.path().join("run.duckdb");
+    let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+
+    // Stage the two source tables `execute_project` reads (same fixture
+    // data as `technique_lowering.rs::column_scoped_merge_e2e`).
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_events (event_id INTEGER, user_id INTEGER, \
+                 event_type VARCHAR, event_timestamp TIMESTAMP)",
+            )
+            .await
+            .expect("create events source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_events VALUES \
+                 (1, 1, 'login', TIMESTAMP '2025-01-10 08:00:00'), \
+                 (2, 2, 'login', TIMESTAMP '2025-01-10 09:00:00')",
+            )
+            .await
+            .expect("seed events");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                 signup_date DATE)",
+            )
+            .await
+            .expect("create users source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_users VALUES \
+                 (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02')",
+            )
+            .await
+            .expect("seed users");
+    }
+
+    let request = select_request("dev", "daily_events_enriched", "2025-01-10", "2025-01-11");
+
+    // Run 1: creates the target (table doesn't exist yet) — never the
+    // column-scoped MERGE path.
+    {
+        let (db, graph) = build_db_and_graph(&project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "column-scoped-merge-parity-run-1".to_string(),
+            request.clone(),
+            Arc::clone(&config),
+            graph,
+            db,
+            &project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("first run (create) must succeed");
+    }
+
+    // Mutate the dimension in place, making the `{user_name}` cell live.
+    {
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb");
+        backend
+            .execute_sql("UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1")
+            .await
+            .expect("mutate dimension");
+    }
+
+    // Run 2: the dimension mutation dispatches the column-scoped MERGE.
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    let outcome = execute_project(
+        "column-scoped-merge-parity-run-2".to_string(),
+        request,
+        Arc::clone(&config),
+        graph,
+        db,
+        &project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("second run (column-scoped merge) must succeed");
+
+    let record = outcome
+        .models
+        .get("daily_events_enriched")
+        .expect("daily_events_enriched ran");
+    assert_eq!(
+        record.strategy, "column_scoped_merge",
+        "the dimension mutation must dispatch the column-scoped MERGE technique"
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let merge_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .collect();
+    assert_eq!(
+        merge_groups.len(),
+        1,
+        "exactly one column-scoped MERGE group must have executed: {:?}",
+        groups
+    );
+
+    let group = merge_groups[0];
+    assert!(
+        !group.transactional,
+        "a single-statement group needs no transaction wrapper"
+    );
+    assert_eq!(group.statements.len(), 1);
+
+    let sql = &group.statements[0].sql;
+    let prefix = "MERGE INTO main.daily_events_enriched AS target USING (";
+    let suffix = ") AS source ON target.event_id = source.event_id \
+                  WHEN MATCHED THEN UPDATE SET * \
+                  WHEN NOT MATCHED THEN INSERT *";
+    assert!(
+        sql.starts_with(prefix) && sql.ends_with(suffix),
+        "unexpected merge statement: {sql}"
+    );
+    let source_select = &sql[prefix.len()..sql.len() - suffix.len()];
+
+    let expected = emit_column_scoped_merge(
+        "main.daily_events_enriched",
+        &["event_id".to_string()],
+        source_select,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed MERGE group must be byte-identical to a direct emitter call over the same inputs"
     );
 }

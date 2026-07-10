@@ -14,7 +14,8 @@ pub use smelt_core::config::{
 };
 pub use smelt_dialect::{BackendCapabilities, SqlDialect};
 pub use smelt_logical::maintenance::emit::{
-    emit_delete_insert, MaintenanceDialect, MaintenanceStatement, Region, StatementGroup,
+    emit_column_scoped_merge, emit_delete_insert, MaintenanceDialect, MaintenanceStatement, Region,
+    StatementGroup,
 };
 pub use types::{
     ExecutionResult, Materialization, MaterializationStrategy, PartitionRange, PartitionSpec,
@@ -59,6 +60,26 @@ fn build_delete_insert_group(
         &partition.column,
         &region,
         sql,
+        maintenance_dialect(dialect),
+    )
+}
+
+/// Build the column-scoped `MERGE` [`StatementGroup`] for `Backend::
+/// merge_into`'s default implementation — the single call site every
+/// `Backend` impl routes through unless it overrides `merge_into` itself
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn build_column_scoped_merge_group(
+    schema: &str,
+    table: &str,
+    source_sql: &str,
+    unique_key: &[String],
+    dialect: SqlDialect,
+) -> StatementGroup {
+    let table_name = format!("{schema}.{table}");
+    emit_column_scoped_merge(
+        &table_name,
+        unique_key,
+        source_sql,
         maintenance_dialect(dialect),
     )
 }
@@ -370,14 +391,30 @@ pub trait Backend: Send + Sync {
 
     /// MERGE (upsert) rows using unique_key columns for matching.
     ///
-    /// Matched rows are updated, unmatched rows are inserted.
+    /// Matched rows are updated, unmatched rows are inserted. The statement
+    /// text comes from `smelt_logical::maintenance::emit::
+    /// emit_column_scoped_merge` (`docs/specs/maintenance_plan.md`
+    /// §"Statement emission (single owner)") — this method builds the
+    /// [`StatementGroup`] and hands it to [`Backend::execute_statement_group`],
+    /// never authoring `MERGE` text itself. `source_sql` must project the
+    /// full target row (see the emitter's doc comment for the full-row
+    /// projection contract `UPDATE SET *` relies on).
+    ///
+    /// Default implementation routes through the shared emitter and
+    /// `execute_statement_group`; a backend only needs to override this if
+    /// it cannot express the emitted `MERGE` text at all (see
+    /// [`Backend::supports_column_scoped_merge`]).
     async fn merge_into(
         &self,
         schema: &str,
         table: &str,
         source_sql: &str,
         unique_key: &[String],
-    ) -> Result<(), BackendError>;
+    ) -> Result<(), BackendError> {
+        let group =
+            build_column_scoped_merge_group(schema, table, source_sql, unique_key, self.dialect());
+        self.execute_statement_group(&group).await
+    }
 
     /// Replace partitions by inserting new data and removing old partition rows.
     ///
