@@ -361,6 +361,42 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
   7-day CI scale (Rust `per_partition_equivalence` suite is green). Needs its
   own investigation — predates nothing obvious in this plan but was unreachable
   before the harness windowing fix let the script run to completion.
+  **Root cause found (2026-07-11, investigated on this worktree):** the
+  divergence is structural, not a data race. `silver.sessions`' partition
+  column (`session_start_date`) is *derived* and skews earlier than the event
+  time driving updates (`event_date`). The runtime pins the write window to
+  the run window — DELETE range and `_smelt_output_clamp` are both
+  `session_start_date ∈ [D, D+1)` for a `[D, D+1)` run
+  (`crates/smelt-runtime/src/execute.rs` "write window = output window";
+  `docs/specs/model_transforms.md` §Design "Rejected: auto-widening the write
+  window"). So no run after day D-1's own run can ever rewrite partition D-1,
+  but a session rooted late on D-1 that continues past midnight into D needs
+  exactly that rewrite. The Form B filter *does* widen the scan (observed
+  emitted SQL reads `event_date ∈ [D-1, D+2)`), so the correct merged session
+  row IS computed during day D's run — then discarded by the output clamp,
+  leaving day D-1's stale single-event row in place. Reproduced determinist-
+  ically: replay through 2026-05-08, then `smelt run --select silver.sessions
+  --event-time-start 2026-05-04 --event-time-end 2026-05-05 -v` with all
+  events present still leaves session `1448-2026-05-03 23:47:30` at
+  `event_count=1`. The comments in `models/silver/sessions.sql` /
+  `functions/sessionize.sql` / `README.md` claiming "the planner rebases the
+  WRITE window to [D-1, D+1)" describe behaviour that does not exist and
+  contradicts the spec. CI misses it because (a) the Rust suite's sessions
+  assertion compares only `(session_id, utm_campaign)` — both invariant under
+  this bug (session identity is the root timestamp; attribution is the first
+  5 minutes; only `session_end`/`event_count`/downstream join membership
+  diverge) — and (b) the trigger (same device+platform, cross-midnight gap
+  < 30 min) is rare at small scale (1 occurrence in ~50 days at scale 0.01).
+  Candidate fixes (needs its own spec-first plan): a write-window rebase for
+  Form B derived partition columns (write `[D-1, D+1)` with the scan widened
+  relative to the *rebased* window, i.e. `[D-2, D+2)`, so the rewritten
+  neighbour partition is recomputed from its own full reach — addressing the
+  double-count concern that motivated the spec's rejection), or re-clocking
+  the model (partition sessions by a non-derived column). Interim: the model
+  as written is not per-partition-equivalent under windows narrower than its
+  skew, and the Rust suite should additionally assert
+  `(session_id, session_end, event_count)` to make the gap visible at CI
+  scale.
 
 ## Verification
 
