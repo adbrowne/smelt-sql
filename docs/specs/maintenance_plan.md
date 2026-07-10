@@ -512,7 +512,7 @@ disagree; one per node cannot). Deeper rationale:
   falls through to the whole-model mutation-sensitivity collapse (same as any unrecognised
   shape), so every admitted cell is `DeleteInsert` region recompute regardless of source
   property — pinned by
-  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs::ex41_ex42_intersect_except_refuse_today`.
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs::ex41_ex42_intersect_no_payload_column_still_delete_insert`.
   A future set-op distribution proof covering `INTERSECT`/`EXCEPT` would need its own
   per-arm-cardinality reasoning (unlike `UNION ALL`'s multiset-union, an `INTERSECT`/`EXCEPT`
   row's presence in the output depends on BOTH arms simultaneously, so no single arm's delta
@@ -593,12 +593,25 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   append/lateness/mutation schedules. The per-cell probe modules under
   `crates/smelt-cli/tests/property_discovery/` that consume the testkit crate remain disposable
   research probes (see `.claude/scripts/property-experimental-gate.sh`); only the shared harness
-  graduated. `cargo test -p smelt-logical --test maintenance_coverage_matrix ::
+  graduated. `cargo test -p smelt-logical --test maintenance_plan_conformance ::
   coverage_matrix_is_inhabited` is the standing inventory gate over the research example
   catalogue's coverage matrix (`docs/research/20260705-refresh-as-maintenance-plan/
-  07-example-catalogue.md` §"Coverage matrix"): every inhabited `(construct × source-property)`
-  cell must have at least one registered shape or pure-derivation assertion — adding a matrix
-  cell without a matching registry entry fails the test, by construction (additive-only).
+  07-example-catalogue.md` §"Coverage matrix", plus one `INTERSECT`/`EXCEPT` row this gate adds):
+  it encodes the matrix as data and asserts every inhabited `(construct × source-property)` cell
+  is accounted for by exactly one of two explicit, disjoint lists — `CLAIMED` (a grounded,
+  executable test proves the cell's HOLDS-or-refuses verdict; see
+  `crates/smelt-logical/tests/maintenance_coverage_matrix.rs` and
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs` for the cells this phase
+  lifted) or `KNOWN_GAPS` (named, not silently omitted). Adding a matrix cell without a matching
+  `CLAIMED`/`KNOWN_GAPS` entry fails the test, by construction (additive-only). `CLAIMED` currently
+  lifts 9 catalogue ids (EX-02, EX-08, EX-12, EX-14, EX-18, EX-24, EX-26, EX-27, EX-35, plus the
+  added EX-41/EX-42 row); the remainder of the matrix's ~100 inhabited cells are named individually
+  in `KNOWN_GAPS` (most as "plausibly covered by an existing `G-*`/`SC-*` property-discovery probe,
+  not re-verified against this exact catalogue id" — cross-referencing those probes to catalogue
+  ids by name is itself unbuilt; a few, like EX-25's LAG/LEAD footprint reflection and EX-29's
+  as-of-run-contract gating, need production investigation not yet done). Both lists are per-cell,
+  never per-row, so a future change can lift one cell at a time without re-deriving the whole
+  inventory.
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
   describe the trichotomy + grain surface; `docs-site/docs/reference/cli.md` also documents

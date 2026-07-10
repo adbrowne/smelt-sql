@@ -13,6 +13,7 @@
 //! generator/driver (`smelt_maintenance_testkit::run_schedule`) — see
 //! `docs/specs/maintenance_plan.md` §References → Tests.
 
+mod coverage_matrix_gaps;
 mod g_01_additive_agg_append_only;
 mod g_02_additive_agg_redelivery;
 mod g_03_idempotent_agg_append_only;

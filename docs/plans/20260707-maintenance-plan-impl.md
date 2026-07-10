@@ -82,7 +82,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP14  | done     | `00544764` | 2026-07-10 |
 | MP15  | done     | `4413d46a` | 2026-07-10 |
 | MP16  | done     | `9710a9e2` | 2026-07-10 |
-| MP17  | pending  |        |      |
+| MP17  | done (partial — 9 cells CLAIMED, remainder in KNOWN_GAPS, see "Deferred during implementation") | `PLACEHOLDER_SHA` | 2026-07-10 |
 
 ---
 
@@ -546,6 +546,58 @@ the refusal diagnostic and are annotated with the catalogue id so later work fli
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+**2026-07-10 — MP17 (coverage-matrix conformance sweep): partial delivery, scoped down.** The
+research matrix (`07-example-catalogue.md` §"Coverage matrix") has ~100 inhabited
+`(construct × source-property)` cells across 21 rows (plus the `INTERSECT`/`EXCEPT` row this
+phase added); fully re-verifying every cell against a grounded, executable test in one pass was
+not achievable at this session's scope. What landed:
+- The standing inventory gate (`crates/smelt-logical/tests/maintenance_plan_conformance.rs::coverage_matrix_is_inhabited`)
+  encodes the full matrix as data and enforces additive-only coverage: every inhabited cell must
+  appear in exactly one of two explicit lists, `CLAIMED` or `KNOWN_GAPS` — never silently
+  omitted. `cargo test -p smelt-logical --test maintenance_plan_conformance` is green.
+- 9 catalogue ids got a new, grounded, pure-derivation test this pass: EX-08 (unclocked
+  change-feed dimension refuses `ScanUnbounded`), EX-12 (multi-input merge — pins the
+  shared-column-group-technique divergence), EX-14 (change-feed SUM refuses the fold, recompute
+  only), EX-18 (GROUP BY coarser — the declared-granularity widen check HOLDS), EX-26
+  (change-feed MAX_BY-style latest-writer — recompute only), EX-27 (ROW_NUMBER dedup — refuses,
+  no fold specification exists), EX-35 (correlated first-value/`ARG_MAX` — refuses, holistic
+  combiner), plus the added EX-41/EX-42 row (`INTERSECT`/`EXCEPT` — pins the set-op
+  classification collapse). EX-02 and EX-24 were already covered by this file's pre-existing
+  two cases. New test files:
+  `crates/smelt-logical/tests/maintenance_coverage_matrix.rs` (EX-12, EX-14, EX-18, EX-26, EX-27,
+  EX-35) and `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs` (EX-08,
+  EX-41/EX-42).
+- Everything else — the remainder of the matrix's inhabited cells — is named individually in
+  `KNOWN_GAPS` inside `coverage_matrix_is_inhabited`, each with a one-line reason. Most are
+  tagged "plausibly covered by an existing `G-*`/`SC-*` property-discovery probe, not
+  re-verified against this exact catalogue id" — the `docs/research/20260705-property-discovery-loop.md`
+  catalogue (`G-01`…`G-12`, `SC-1`…`SC-7`) and the `07-example-catalogue.md` `EX-nn` catalogue
+  are two independently-numbered systems with no cross-reference table between them; building
+  that cross-reference (or re-deriving each probe's exact EX-id coverage from its SQL shape) is
+  itself unbuilt and would need its own pass. A few gaps are genuine production investigation,
+  not just attribution: EX-25 (does `source_bounds` derive an `after` margin for `LAG`/`LEAD`
+  offsets at all?), EX-06/EX-11/EX-19/EX-28/EX-29/EX-31/EX-32/EX-33/EX-34 (graph-layer,
+  versioned-interval, and engine-delegation probes outside this pass's pure-derivation scope).
+  Follow-up: lift `KNOWN_GAPS` entries into `CLAIMED` one at a time in a future session — the
+  meta-test's per-cell (not per-row) accounting means this can happen incrementally without
+  re-deriving the whole inventory.
+
+**2026-07-10 — MP17 review remediation.** A reviewer found `ex18_group_by_coarser_write_window_rounds_up`
+only asserted the write-window-widen precondition (`check_declared_granularity`), not the
+equivalence leg its 3 `CLAIMED` entries claimed ("HOLDS"). Added
+`maintenance_plan_conformance.rs::described_technique_matches_execution_ex18_group_by_coarser_write_window`,
+which derives the plan, emits `DeleteInsert` over the week-rounded region, and asserts
+multiset-equivalence against a full refresh over a real DuckDB (plus a negative check that a
+day-scoped, non-rounded region does NOT reproduce the refresh — the hazard the rounding-up
+guarantee rules out). The 3 `CLAIMED` entries now point at this test instead. Also fixed: the
+`KNOWN_GAPS` entry for EX-29 had copy-pasted EX-28's reason (`versioned:` parser gap); corrected
+to EX-29's actual catalogue verdict (structural REFUSED — the interval row set depends on
+observation cadence, gated on OQ2 — independent of the parser gap). Renamed
+`coverage_matrix_gaps.rs::ex41_ex42_intersect_except_refuse_today` to
+`ex41_ex42_intersect_no_payload_column_still_delete_insert` (it asserts `DeleteInsert`/no
+refusals, not a refusal — the actual refusal is proved by the companion
+`..._collapses_whole_model` test).
 
 ## Blocked phases
 
