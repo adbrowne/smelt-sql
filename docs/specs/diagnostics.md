@@ -117,7 +117,7 @@ Owned by `docs/specs/batched_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `BatchedNotSafe` | Warning | A `refresh: batched` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
+| `BatchedNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 
 ---
@@ -133,21 +133,21 @@ posture under `keyed`, not an error, and there is no write-eligibility horizon t
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `KeyedRequiresGroupBy` | Error | A `refresh: keyed` model's SELECT has no GROUP BY (key columns are required). |
-| `KeyedForbidsTimeseries` | Error | A `refresh: keyed` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`keyed_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
-| `KeyedForbidsBatched` | Error | A `refresh: keyed` model incorrectly declares a `batched:` block. Anchored at offset 0. |
-| `KeyedUnknownCombiner` | Error | A `refresh: keyed` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
-| `KeyedGroupByContainsPartitionColumn` | Error | The `refresh: keyed` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
-| `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `refresh: keyed` model's outer body. |
-| `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `refresh: keyed` model's SELECT. |
-| `KeyedSqlNotParseable` | Error | A `refresh: keyed` model's SELECT could not be parsed for column-family classification. |
-| `KeyedMultipleDrivingSources` | Error | Multiple timeseries-tagged sources appear in a `refresh: keyed` model's FROM (exactly one is admitted under window-forward). |
+| `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
+| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`keyed_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedForbidsBatched` | Error | A `grain: key` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+| `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
+| `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
+| `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `grain: key` model's outer body. |
+| `KeyedForbidsNondeterministic` | Error | A non-deterministic function (`NOW()`, `RANDOM()`, …) appears in a `grain: key` model's SELECT. |
+| `KeyedSqlNotParseable` | Error | A `grain: key` model's SELECT could not be parsed for column-family classification. |
+| `KeyedMultipleDrivingSources` | Error | Multiple timeseries-tagged sources appear in a `grain: key` model's FROM (exactly one is admitted under window-forward). |
 | `KeyedOnceWriteUnproven` | Error | A once-write (`COALESCE`-first-non-null) column has no once-write provenance proof (key-derived, or a declared functional dependency). Names the column. |
 | `KeyedRetractableContribution` | Error | An enrichment join's per-key contribution is retractable (feeds a decrementing aggregate or a value that must be un-seen). Does not fire on join spelling alone; steers to `refresh: materialized_view` or DAG composition. |
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
-| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `refresh: keyed` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`keyed_models.md` §Known Divergences). Retired once snapshot-reconcile ships. |
+| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`keyed_models.md` §Known Divergences). Retired once snapshot-reconcile ships. |
 
 ---
 

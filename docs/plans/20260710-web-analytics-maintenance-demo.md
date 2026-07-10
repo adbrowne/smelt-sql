@@ -129,14 +129,18 @@ three routes"; the shipped message (`metadata.rs:421`) is the older blanket word
 2. **Add a maintenance-SQL emission surface first** (extend `--dry-run` or add
    `smelt explain --show-sql`) so the tutorial captures real emitted MERGE/INSERT
    SQL — keeps the doc drift-proof. Chosen over a codegen-only script.
-3. **Build keyed temporal locality first** (user decision) so silver dedup uses the
-   *real* keyed-dedup-over-window path rather than the partition-grain reframe.
-   - **Alternative on the table (revisit):** partition-grain reframe — express silver
-     dedup as `grain: partition` on `event_date` with
-     `QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1`;
-     the 3-day window becomes the derived lookback / batch-safety bound. Same
-     user-facing story, **builds today**, equivalence-verifiable. Kept as the
-     fallback if keyed temporal locality proves too large.
+3. ~~**Build keyed temporal locality first** (user decision) so silver dedup uses the
+   *real* keyed-dedup-over-window path rather than the partition-grain reframe.~~
+   **REVERSED in the 2026-07-10 review session (see §6):** ship the demo on the
+   **partition-grain reframe** — express silver dedup as `grain: partition` on
+   `event_date` with
+   `QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1`;
+   the 3-day window becomes the derived lookback / batch-safety bound. Same
+   user-facing story, **builds today**, equivalence-verifiable. Keyed temporal
+   locality is confirmed 100% unbuilt (not even the diagnostic variant exists) and
+   its lowering depends on the emit-layer unification anyway (§6 finding 2), so
+   nothing is lost by reordering: build locality afterward as its own spec-first
+   plan, with this demo as its showcase once it lands.
 
 ---
 
@@ -175,6 +179,70 @@ three routes"; the shipped message (`metadata.rs:421`) is the older blanket word
   today — would need adding to `mkdocs.yml:48` if we want file-includes vs paste).
 
 ---
+
+## 6. Review-session results (2026-07-10) — MP-series audit
+
+The review session promised in the header ran on 2026-07-10 (three parallel audits:
+spec consistency, MP-plan-vs-code, docs-site drift). Answers to §5's questions and
+the resulting sequencing:
+
+**Findings (specs):**
+- `model_maintenance.md` is the one maintenance-family spec the SA-alignment plan
+  (`20260707-maintenance-plan-spec-alignment.md`) never swept. It still teaches the
+  removed refresh modes as live surface (`refresh: keyed` at `model_maintenance.md:81`)
+  and overlaps `maintenance_plan.md`. Decision: **fold** its still-normative contract
+  sections (equivalence invariant, technique ladder, validator-not-chooser,
+  composition contract) into `maintenance_plan.md`, retarget the ~8 citing specs,
+  and **delete** the file.
+- Stale implementation-status claims, resolved against `crates/smelt-core/src/config.rs:35-66`
+  (the `full`/`incremental`/`materialized_view` trichotomy HAS landed; removed mode
+  names hard-error): `keyed_models.md:290`, `versioned_models.md:137`, and the status
+  banners at `keyed_models.md:16` / `batched_models.md:16` all claim pre-cut parser
+  state and are wrong.
+- Otherwise the spec family is consistent (keyed+timeseries admission, ledger
+  semantics, lookback derivation all agree); no timeless-oracle violations; the
+  shape-profile specs (batched/keyed/versioned) are deliberate keeps.
+
+**Findings (implementation):**
+1. All 17 MP phases landed; `derive_maintenance_plan` is genuinely consumed by
+   production (`execute.rs:1007`, `maintenance_driver.rs`, `propagation.rs`,
+   diagnostics). Ledger fold-refusal is live.
+2. **The emitted-SQL layer is duplicated.** Every caller of
+   `crates/smelt-logical/src/maintenance/emit.rs` is test-only; production emits
+   through separately-written builders (`cumulative.rs:193,232`, `execute.rs`,
+   `smelt-state/src/ddl_duckdb.rs`). The conformance suite's HOLDS legs prove
+   `emit.rs` ≡ full-refresh, **not** production SQL ≡ full-refresh; its header
+   claim that `execute_project` has no plan consumer is stale post-MP11. MP5's
+   goal ("derived technique == what `execute_project` emits") is unmet.
+3. Keyed temporal locality: zero code (`establish_locality`,
+   `KeyedRecurrenceBoundViolated` absent from `crates/`; `key_recurrence` parses at
+   `sources.rs:113` but nothing consumes it). `keyed_models.md:293` is accurate.
+4. MP17 is ~9% grounded (9 of ~100 cells verified; ~50 in `KNOWN_GAPS`).
+5. `smelt bakeoff` CLI absent (deliberate, ROADMAP §10); no CLI prints maintenance
+   SQL; region-recompute ledger grading is whole-row `{*}` only (`execute.rs:1459`).
+
+**Findings (docs-site):** the phantom "unless key temporal locality is established"
+wording is in SEVEN locations (`guide/materializations.md:112,193,196,241`,
+`reference/timeseries.md:85`, `reference/cumulative-aggregate.md:95`,
+`reference/smelt-yml.md:160`); `guide/incremental-models.md:710` calls shipped
+`--since-upstream` "unbuilt"; `mutation_profile` has contradictory schemas on two
+pages (`guide/sources.md:90` vs `guide/incremental-models.md:696`); the
+reconciliation ledger is undocumented; `scan_bounds` missing from the smelt-yml
+reference; `reference/smelt-explain.md` omits the per-model maintenance-plan mode.
+
+**Resulting sequence (replaces §4's ordering):**
+1. **Hygiene sweep** — spec fold/delete + stale-divergence fixes + all docs-site
+   drift fixes above. No behavior change.
+2. **Emit unification** (spec-first, own plan) — single owner for maintenance SQL:
+   production consumes `emit.rs` (or `emit.rs` retires into the production
+   builders); conformance HOLDS legs diff against `execute_project`; then the
+   maintenance-SQL surface (`smelt explain --show-sql` / `--dry-run`) is a thin
+   layer over the single owner. This is the real MP5 close-out AND the demo's
+   drift-proof-tutorial prerequisite.
+3. **This demo on the partition-grain reframe** (decision 3, reversed).
+4. **Keyed temporal locality** — its own spec-first plan afterward; the demo
+   becomes its showcase.
+
 
 ## References
 
