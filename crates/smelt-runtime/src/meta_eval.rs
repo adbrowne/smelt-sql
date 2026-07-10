@@ -609,10 +609,8 @@ fn loader_value_to_meta(value: &smelt_db::loader::MetaValue) -> Option<MetaValue
                         }
                         out.push(MetaElem::Record(rec));
                     }
-                    scalar => match render_loader_scalar(scalar) {
-                        Some(s) => out.push(MetaElem::Scalar(s)),
-                        None => return None, // a non-scalar, non-record element is unrenderable
-                    },
+                    // a non-scalar, non-record element is unrenderable
+                    scalar => out.push(MetaElem::Scalar(render_loader_scalar(scalar)?)),
                 }
             }
             Some(MetaValue::List(out))
@@ -630,10 +628,7 @@ fn loader_value_to_meta(value: &smelt_db::loader::MetaValue) -> Option<MetaValue
                         }
                         MetaElem::Record(rec)
                     }
-                    scalar => match render_loader_scalar(scalar) {
-                        Some(s) => MetaElem::Scalar(s),
-                        None => return None,
-                    },
+                    scalar => MetaElem::Scalar(render_loader_scalar(scalar)?),
                 };
                 out.insert(k.clone(), elem);
             }
