@@ -55,6 +55,15 @@ EXPLAIN_PERIOD = "2026-04-10..2026-04-11"
 BACKBUILD_START = "2026-04-01"
 BACKBUILD_END = "2026-04-19"
 
+# A single-day run pinned to the datagen day whose data actually realises the
+# skew inversion described in prose: an event at 2026-05-04 00:03 extends a
+# session rooted at 2026-05-03 23:47, one gap that straddles midnight. The
+# run window is [D, D+1) = [2026-05-04, 2026-05-05); the derived output
+# window this run computes is the skew inversion [D-1, D+2) =
+# [2026-05-03, 2026-05-06), which is exactly the DELETE range the emitted
+# block below shows.
+CROSS_MIDNIGHT_PERIOD = "2026-05-04..2026-05-05"
+
 
 def run_smelt(args: list[str]) -> str:
     """Run the smelt CLI (via `cargo run`, so it always matches the current
@@ -137,8 +146,8 @@ def render_cells_sql(cells: list[dict]) -> str:
     return "\n\n".join(blocks)
 
 
-def explain_block(model: str) -> str:
-    args = ["explain", model, "--show-sql", "--json", "--period", EXPLAIN_PERIOD]
+def explain_block(model: str, period: str = EXPLAIN_PERIOD) -> str:
+    args = ["explain", model, "--show-sql", "--json", "--period", period]
     stdout = run_smelt(args)
     data = json.loads(stdout)
     sql = canonicalize(render_cells_sql(data["cells"]))
@@ -165,6 +174,9 @@ def backbuild_block(model: str) -> str:
 def render_page() -> str:
     events_parsed_sql = explain_block("silver.events_parsed")
     sessions_sql = explain_block("silver.sessions")
+    cross_midnight_sessions_sql = explain_block(
+        "silver.sessions", period=CROSS_MIDNIGHT_PERIOD
+    )
     events_enriched_sql = explain_block("silver.events_enriched")
     backfill_transcript = backbuild_block("silver.events_parsed")
 
@@ -223,6 +235,46 @@ late one day and crosses midnight is reconstructed as a single row rather
 than split at the partition boundary.
 
 {sessions_sql}
+
+### The derived output window: a cross-midnight rewrite of the prior-day partition
+
+`session_start_date` is not the column that decides which day's data can
+still change a session — `silver.events_parsed.event_date` is, and the two
+skew apart whenever a session starts late in one day and keeps accumulating
+events into the next. The `WHERE event_date BETWEEN session_start_date -
+INTERVAL '1 day' AND session_start_date + INTERVAL '1 day'` filter in the
+model above is a **Form B relation**: it declares that bound explicitly, in
+the model's own SQL, rather than leaving it to be assumed. The planner reads
+that relation and **derives** the output window from it instead of using the
+run window verbatim — for a `[D, D+1)` run this is the relation's
+**skew inversion**, `[D−1, D+2)`: the run's own partition, plus the one
+immediately before it (a session rooted the day before can still be
+extended) and the one immediately after (recomputed for symmetry, though a
+session can never start after its own events, so that side always comes back
+unchanged).
+
+Concretely: an event at `2026-05-04 00:03` is a 16-minute gap from the same
+device's previous event at `2026-05-03 23:47` — well inside the session's
+30-minute inactivity rule, so it extends that session rather than starting a
+new one. A run over `[2026-05-04, 2026-05-05)` — the day the new event
+arrives, not the day the session started — must still rewrite the
+`2026-05-03` partition to fold the new event into the existing session row.
+Running the derived output window instead of the run window verbatim is
+exactly what makes that rewrite happen: the `DELETE`/`INSERT` pair below,
+generated for that single-day run, covers `session_start_date` in
+`[2026-05-03, 2026-05-06)` — the prior day included — not just
+`[2026-05-04, 2026-05-05)`.
+
+{cross_midnight_sessions_sql}
+
+The derived output window is a range to be **covered**, not a mandate for a
+single wide statement: write-size control stays available through backfill
+chunking, which splits a run spanning many days into sequential
+`DELETE`/`INSERT` pairs the same way it splits an ordinary wide run window,
+each chunk's scan sized from that chunk's own reach rather than from the
+whole range at once. Skew and chunk width compose independently — a
+multi-day backfill over this model still emits one bounded chunk at a time,
+each carrying its own one-day skew inversion at its edges.
 
 ## Event-grain enrichment and upstream-model edges: `silver.events_enriched`
 

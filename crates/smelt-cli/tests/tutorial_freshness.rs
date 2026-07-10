@@ -238,6 +238,12 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
 
     let mut found_explain = false;
     let mut found_backbuild = false;
+    // The cross-midnight derived-output-window section: a single-day
+    // `silver.sessions` explain block pinned to the day-46 shape (an event
+    // at 2026-05-04 00:03 extending a session rooted 2026-05-03 23:47). Its
+    // period argument distinguishes it from the earlier generic sessions
+    // block (`EXPLAIN_PERIOD`, 2026-04-10..2026-04-11) in the same page.
+    let mut found_cross_midnight_sessions = false;
 
     for block in &blocks {
         let subcommand = block
@@ -260,6 +266,13 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
             ),
         };
 
+        if block.args.first().map(String::as_str) == Some("explain")
+            && block.args.iter().any(|a| a == "silver.sessions")
+            && block.args.iter().any(|a| a.contains("2026-05-04"))
+        {
+            found_cross_midnight_sessions = true;
+        }
+
         assert_eq!(
             fresh,
             block.committed,
@@ -279,6 +292,13 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
     assert!(
         found_backbuild,
         "expected at least one 'backbuild' smelt-generate block in {}",
+        page_path.display()
+    );
+    assert!(
+        found_cross_midnight_sessions,
+        "expected a `silver.sessions` explain block pinned to the cross-midnight \
+         day-46 period (2026-05-04..2026-05-05) demonstrating the derived output \
+         window's skew inversion in {}",
         page_path.display()
     );
 }
