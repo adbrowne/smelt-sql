@@ -839,6 +839,9 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - `cumulative_aggregate.md` Known Divergences omits the Month/Quarter/Year grain limitation (BUG-071).
 - `smelt docs` follow-ons: HTML output, `smelt docs serve`, column-lineage visualization, `smelt docs diff` (`20260329-docs-generate.md`).
 
+**CI / Performance**
+- **Cold-Salsa full-diagnostics regression (2000-model benchmark)** — the `Benchmarks` CI workflow's catastrophic-regression gate (`crates/smelt-bench/src/bin/save_results.rs`, 10s ceiling) has failed on `main` for three consecutive pushes starting 2026-07-09: `initial_load_ms`/`full_diagnostics_ms` are ≈14.8s, up from a healthy baseline well under the ceiling. The jump lines up with the large incremental/batched-refresh feature merges around PR #151 (monotonicity trace, composition walk, and related per-model logical analyses added significant cold-load work across all 2000 models). Needs profiling (`crates/smelt-bench/src/bin/profile_initial_load.rs`) to find which new analysis is driving the blow-up before deciding whether to optimize it or raise the ceiling.
+
 ---
 
 ## Future / Exploration

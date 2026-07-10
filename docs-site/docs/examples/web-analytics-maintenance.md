@@ -504,11 +504,11 @@ COMMIT
 
 ## Where to look
 
-- The models: [`silver/events_parsed.sql`](models/silver/events_parsed.sql),
-  [`silver/sessions.sql`](models/silver/sessions.sql),
-  [`silver/events_enriched.sql`](models/silver/events_enriched.sql).
+- The models: [`silver/events_parsed.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/events_parsed.sql),
+  [`silver/sessions.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/sessions.sql),
+  [`silver/events_enriched.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/events_enriched.sql).
 - The datagen fixture producing the redelivered/late-arriving feed:
-  [`datagen.yaml`](datagen.yaml).
+  [`datagen.yaml`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/datagen.yaml).
 - `docs/specs/maintenance_plan.md` — the plan/statement machinery this page
   demonstrates. `docs/specs/cli.md` — `explain --show-sql` and `backbuild
   --dry-run` surface reference.
