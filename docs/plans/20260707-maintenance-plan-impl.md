@@ -82,7 +82,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP14  | done     | `00544764` | 2026-07-10 |
 | MP15  | done     | `4413d46a` | 2026-07-10 |
 | MP16  | done     | `9710a9e2` | 2026-07-10 |
-| MP17  | done (partial — 9 cells CLAIMED, remainder in KNOWN_GAPS, see "Deferred during implementation") | `PLACEHOLDER_SHA` | 2026-07-10 |
+| MP17  | done (partial — 9 cells CLAIMED, remainder in KNOWN_GAPS, see "Deferred during implementation") | `43785da4` | 2026-07-10 |
 
 ---
 
