@@ -54,6 +54,7 @@ A 2026-07-11 review found that the parser silently absorbs all top-level tokens 
 - architecture.md §Constraints #13 corpus grounding: vendored DuckDB sqllogictest + PostgreSQL regression SELECT corpus with failure ledger.
 - architecture.md §Constraints #13 oracle strictness: exact integer-width/decimal(p,s) comparison, known-unknowns ledger, generator coverage of temporal/decimal arithmetic and the untested function list.
 - Highest-value grammar gaps whose absence would swamp the new gates: `TRY_CAST`, `GROUP BY ALL`, `ORDER BY ALL`, `IGNORE/RESPECT NULLS`.
+- Function-registry consolidation: one authoritative home (`BuiltinRegistry`) for built-in function names/signatures/types, replacing the three overlapping lists (registry, `REGISTRY_MIGRATED` + legacy match, `SqlFunction` enum), with a consistency gate and a shrink-only migration ratchet (added 2026-07-11 after a survey of parser-vs-registry function handling).
 
 ### Explicitly deferred
 - Grammar support for the remaining registered gaps (dollar-quoted strings, list comprehensions, `MAP` literals, `GLOB`, SQL-standard function forms `trim(BOTH…)`/`substring(FROM FOR)`/`position(IN)`/`overlay`, `LIKE ANY`, hex/underscore numeric literals *as accepted syntax*). The Phase 3/4 ledgers make these visible; fixing them is follow-on work sized by ledger counts, not this plan.
@@ -66,11 +67,12 @@ A 2026-07-11 review found that the parser silently absorbs all top-level tokens 
 |-------|----------|--------|------|
 | 1     | done     | 1e09f6c0 | 2026-07-11 |
 | 2     | done     | 3da7e023 | 2026-07-11 |
-| 3     | done     |        | 2026-07-11 |
-| 4     | pending  |        |      |
+| 3     | done     | 2d8a80ce | 2026-07-11 |
+| 4     | done     |        | 2026-07-11 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
+| 8     | pending  |        |      |
 
 ---
 
@@ -308,6 +310,43 @@ Update printer round-trip for all four forms.
 
 ---
 
+### Phase 8: Function-registry consolidation — one authoritative home per function name
+
+**Goal.** A built-in SQL function's name, signature, and inferred type live in exactly one place: `BuiltinRegistry` (`crates/smelt-types/src/signatures.rs`). The three overlapping name lists that exist today — the registry, the `REGISTRY_MIGRATED` allowlist + hand-written legacy `match` in `crates/smelt-db/src/type_inference/function_call.rs`, and the `SqlFunction` enum in `crates/smelt-types/src/functions.rs` used for the "is this recognized" check — collapse so a function added to the registry is automatically recognized, typed, and classified (aggregate/window/scalar), and a function absent from the registry is *diagnosed*, never half-known. This is the structural fix for the failure mode where a name added to one list but not the others degrades silently.
+
+**Pre-conditions.** Phases 5–6 (the widened generators and strict comparison are the behavior-preservation net for migrating inference paths; do not attempt this migration against the lenient oracle). Phase 7 not required, but if done first its new functions must land registry-only.
+
+**TDD tests to write first.**
+- `crates/smelt-types/` (or `smelt-db/tests/`) consistency gate `every_recognized_function_is_registry_backed` — every name `SqlFunction::from_name` recognizes resolves in `BuiltinRegistry`, and every scalar/aggregate/window registry entry is recognized; a name in one list but not the other fails with the missing side named. Written red against today's known drift (enumerate the current mismatches in the failure message before fixing).
+- `legacy_match_ratchet` — the count of function names typed by the legacy hand-written `match` in `function_call.rs` (i.e., *not* through `try_registry_inference`) is asserted against a checked-in baseline that only ratchets **down** (`.claude/registry-migration-baseline.txt`, hardening-budget mechanics); this phase drives it to zero or to a named exception list, whichever triage supports.
+- Behavior preservation: `PROPTEST_CASES=1000 cargo test -p smelt-db --test type_property_tests prop_type_inference` and default-cases `nullability_property_tests` green after each migration batch — any type change surfaced by migration is either a bug fix (named regression test first, per repo rule) or a `divergences.rs` entry; silent behavior changes are not acceptable.
+- `unrecognized_function_still_warns` — an unknown name still produces `DiagnosticCode::UnrecognizedFunction` and `Unknown(Dynamic)` typed through the Phase 6 known-unknowns ledger path (the consolidation must not accidentally make unknown names panic or pass silently).
+- Real fixture: `examples/` workspaces stay diagnostic-clean (`example_diagnostics`, `example_workspaces`).
+
+**Implementation shape.** Migrate the legacy `match` arms in `function_call.rs` into `BuiltinRegistry` signatures batch by batch (extend `Signature`/`unify_call` where an arm encodes semantics the current signature language can't express — e.g. argument-dependent return types — rather than keeping the arm; if a genuinely inexpressible case remains, it becomes a named entry in an explicit exception list with a doc comment, not an anonymous match arm). Delete the `REGISTRY_MIGRATED` allowlist once the registry-first path is the only path. Replace `SqlFunction::from_name`-based recognition with a registry lookup (keep the enum only if something else consumes it — then derive it or gate it with the consistency test). `dispatch.rs`'s ExprKind seeding already uses the registry; verify unknown-name default (`Scalar`) still routes to the warning path. Expect the migration to surface latent inference differences — budget triage time.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-types/src/signatures.rs`, `crates/smelt-types/src/functions.rs`
+- `crates/smelt-db/src/type_inference/function_call.rs`, `dispatch.rs`, `check_types.rs` (recognition path only)
+- `crates/smelt-db/tests/` (consistency gate, ratchet test), `.claude/registry-migration-baseline.txt`
+- `crates/smelt-db/tests/prop_helpers/divergences.rs` — migration-surfaced entries
+- `docs/specs/types.md` — only if a triaged difference changes specified semantics (spec first)
+
+**Docs touched.**
+- `docs/specs/architecture.md` — Constraints & Invariants: new invariant "Function-registry single ownership" (one authoritative home per built-in function name; recognition, classification, and typing all derive from `BuiltinRegistry`), written timelessly; Known Divergences entry for any remaining exception-list names.
+- `CLAUDE.md` (root) — add the consistency gate + migration ratchet to the fail-loud CI-gate list.
+
+**Review checklist** (material findings only):
+- [ ] Consistency gate exists, was red against real drift first, now green
+- [ ] Legacy match is gone or every survivor is a named, doc-commented exception; ratchet baseline is 0 or matches the exception list exactly
+- [ ] No silent type changes: every migration-surfaced difference has a named regression test or divergence entry
+- [ ] Unknown-name path still warns + `Unknown(Dynamic)` through the known-unknowns ledger
+- [ ] New invariant landed in architecture.md + CLAUDE.md gate list, timeless wording
+
+**Commit.** `refactor(types): consolidate function name/signature/type into BuiltinRegistry — consistency gate + migration ratchet`
+
+---
+
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
@@ -320,4 +359,5 @@ How to confirm the spec is satisfied at the end:
 - `PROPTEST_CASES=2000 cargo test -p smelt-db --test type_property_tests --test nullability_property_tests` green under strict comparison
 - `cargo test -p smelt-lsp --test example_workspaces` green
 - Spot check: `SELECT a FROM t GARBAGE`, `SELECT a GLOB 'x'`, `SELECT 0x1F` all produce diagnostics in the LSP against `examples/test_workspace`
+- Registry consolidation gates green: the function-name consistency test passes and `.claude/registry-migration-baseline.txt` is 0 (or exactly matches the named exception list)
 - `/smelt:validate architecture` and `/smelt:validate diagnostics` report zero drift for the touched sections

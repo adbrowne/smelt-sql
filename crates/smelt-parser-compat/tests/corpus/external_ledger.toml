@@ -1,0 +1,2193 @@
+# External-corpus failure ledger — architecture spec §Constraints #13
+# "corpus grounding". Keyed by a stable hash of the normalized statement
+# (see `stmt_hash` in tests/external_corpus.rs — FNV-1a 64-bit over the
+# exact corpus line's UTF-8 bytes, a frozen algorithm stable across runs,
+# machines, and Rust toolchain releases). Each entry
+# records a `category` (reusing crates/smelt-parser-compat/src/gaps.rs
+# vocabulary where a gap corresponds to an existing registry entry) and a
+# free-text `note`.
+#
+# Provenance: this ledger was populated by running
+# `cargo test -p smelt-parser-compat --test external_corpus` against the
+# corpus vendored under tests/corpus/external/ and bucketing every failure
+# by pattern-matching its SQL text against a small set of known DuckDB/
+# PostgreSQL grammar-gap signatures (dollar-quoted strings, MAP literals,
+# full-text search operators, window-frame EXCLUDE clauses, and so on —
+# many of these signatures already exist as smelt-fails gaps.rs entries).
+# A large residual of failures did not match a known signature; those are
+# recorded under `category = "smelt_fails_unclassified"` with the actual
+# first smelt parser error message as the note — an honest, mechanically
+# derived diagnostic rather than a guessed root cause, given the sheer
+# grammar-surface diversity these upstream test suites intentionally probe.
+# NONE of these gaps are fixed by this phase; fixing is follow-on work
+# sized by these ledger counts (see architecture.md Known Divergences and
+# the plan's "Explicitly deferred" section).
+#
+# Shrink-only pressure: `ledger_has_no_stale_entries` in
+# tests/external_corpus.rs fails the build if a listed statement now passes
+# or no longer matches any corpus statement — remove the entry then.
+
+["b86e3620c3472ed0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+
+["5990e392c1ba486e"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["b4424d249fbc1310"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found LAST_KW"
+
+["b43911a50a9c1946"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["60f4625d09268f8f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found FIRST_KW"
+
+["c37e044f4cdbca2b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["464931d9fd9c6fc8"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["a2a35111e374fa5a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["1d031b0c610aff61"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["430fadb76ce45e99"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+
+["23d16822bcf40adc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["d16194276459eb33"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["f080296096ea53fc"]
+category = "grouping_sets"
+note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
+
+["619a820c59747ccb"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["a0c862cd03f7795f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["844a4cf2785f72ce"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["24916b695e5f2e68"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["dcfad1c21ca2871b"]
+category = "chained_dot_field_access"
+note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+
+["d4664bad27b9ae0f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["11f5625b7d0ac8bf"]
+category = "chained_dot_field_access"
+note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+
+["277dc70fd72c7682"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["68209df8cf51bf2f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["85371fba64bede9c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["a0545b1cb8b55e28"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["47dcd69c1a6af374"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["f6ebc1f04febf925"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d1a67e1b971e6254"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["4ad43ad287680e7f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["f81816ae565ef848"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["8cf0888b943601b7"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["9524a6c3963599d3"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["7a69089248afe15c"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["8435920558dfc484"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["f099a4257eff7688"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["a47297fba94ff4c4"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["088a53f703f9a29b"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["8a8b1ce9e2814df5"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["749b780f051d8171"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["8086f41036421b74"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["c4b11046e37641d3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["0fc51a5a43ff6ee9"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["dc250f60cb2ba1b9"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["473d1d251f89b01d"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["9e47230ac2592631"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["269f5470427064a7"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["7af72667f9982b6a"]
+category = "map_type_or_literal"
+note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
+
+["e7f8101e8ebcb4aa"]
+category = "list_comprehension"
+note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs::duckdb_list_comprehension)"
+
+["aa4b6f5c0bbe1d9a"]
+category = "natural_join_chain"
+note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
+
+["5251198afbf9d8bd"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["366a6098c46dbf5d"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["4d1c47594b381d8e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+
+["bfd77a838c18b1ee"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["c0c9b1ff8b7d8f2f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["b12be8f116c89c25"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["f4f84f035bf107c7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
+
+["fe081f2437428f8a"]
+category = "array_subscript_negative_or_slice"
+note = "Array negative-index or slice subscript syntax is not parsed"
+
+["4563e9312dc33851"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["72346eb01e27547a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["d84ebfb7140d34a4"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["ed9d5fdcb15fdac4"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["29f60f6deca55932"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["bf60747d66d2cb39"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["a6137afa188d4bc7"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["315571c158974ea3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["6dff1d985a5e9432"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["abc0037ef1a7ff76"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found HASH"
+
+["90757f69e6f1528c"]
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed"
+
+["4eb105e1f83bc57b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["bb06d51958809d45"]
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed"
+
+["f21f0cdd5e4a6bdc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["be1b96a2e833999b"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["6888fd274860944f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["110435db7d28187b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["e40913acdce167cb"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["4b5f29a8027c361a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+
+["3156d5843df8e3df"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["4fcfc6748413b7ad"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["31e689f81aaddaf6"]
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed"
+
+["309df939f0e0e423"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found PARTITION_KW"
+
+["fabbc15ec29c1748"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["403890fe1405f8ed"]
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed"
+
+["7b71a9f3e3052cea"]
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed"
+
+["909599832c250a5a"]
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed"
+
+["c1d9cfadd96c2de0"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["d02f115bf8aaf855"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["b1a3f652eadb0084"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["a5e238d31d51c3b6"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["a52e10e9c9b6a4ba"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["6bb0c9d1bbc982d2"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["d8d88b608d1f5372"]
+category = "recursive_cte_cycle_using_key"
+note = "WITH RECURSIVE ... USING KEY cycle-detection clause is not parsed"
+
+["4bfa6e902d2fed4e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["31561fe3e3e7cbe0"]
+category = "chained_dot_field_access"
+note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+
+["0287efd3e8516d74"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["8bd4b8deb3f3dbf4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["555d4c72d46225cc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["d97613440546afab"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["d53de3a8ee8c4408"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["f4780243e43996c6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["9821e4e6dd8018e7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["ca5bfc72ba6777ff"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["a168a931c2c358b6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["ccec0ffa95edaeac"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["9da73ad517a9c303"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["f1f9bd8c939a3d17"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["e7a85642ccb299c9"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["efd9c638408d8275"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["ee76fabcb0eaaef8"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["232928ca73dc0ee1"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["5e56cbfa24420e99"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["0a525a0e6cb3124d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+
+["11364d332cae94d5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+
+["bb786c3a21b69bb3"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["7d99682d2d443ec3"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["fdddb73327f92808"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["8e5f4a144bd755b4"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["3ed51e20c510117f"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["99ff81ffd052b9ce"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["1351aee33ae710ac"]
+category = "list_comprehension"
+note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs::duckdb_list_comprehension)"
+
+["d496c79b8fc64a9e"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["6165e2fa0040a18e"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["e60a4f9c4a5b6421"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["f3d40f22a0dcb274"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["c32e459dcc171212"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["3d2f3a348900dcb0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found LBRACKET"
+
+["35b62cabb23ff008"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
+
+["d6b2b42e7fbd5615"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["fd856e4f47ac0cc7"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["2820fea4f3ab5403"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["34c41fe5c5680ccb"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["42fc08aa5a971e67"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["eaa0a8e22ad859bb"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["dd08f6ff9fa4843a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["1a3ec219bdab77ac"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["a678a370075206ec"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["0603cc9aee102b86"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["5a81c9d59a8f801e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["846e3d125c8e02a9"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["31e5bad5703082a4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["62a960aea7213de2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["864cfe155c84cd0f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
+
+["eb04a0882f486e64"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["165601706514a57b"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["9d0fa3b3c25e2af2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["4fb7bac86850ba1d"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["bf4f9acc846503da"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["fdf234c9e21cdf34"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["3fc21ada2d17e40e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["24b75a39c9c0bf23"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["f4619b3187dea570"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["f16d828fc730974f"]
+category = "natural_join_chain"
+note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
+
+["0e187a17b572a0e5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["32b190f08513f4c0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["f1c243266bfc7ecd"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["bff464cbbf158492"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["c566463312d1e03f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["bcba706ae690b376"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["65b42acc411df115"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["8a6be84d3e138256"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["4370f8971e388a7d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found PLUS"
+
+["368d89aea7f439d7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["da676b8ed997d2e7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["8eeed1c2f5c0ec60"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["744042caf9e788fe"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["7dca435889a53d09"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["0b921d7047bdc030"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
+
+["32f26decb2020f32"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["34c0d550b05d75c8"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["55cea6f109f6aa75"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["ed076a4bed786a82"]
+category = "with_ordinality"
+note = "WITH ORDINALITY table-function modifier is not parsed"
+
+["159c243eec2324af"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["8fb37406c9ff66c2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["ee469a1707cb353b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
+
+["340d518ead2e82d9"]
+category = "list_comprehension"
+note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs::duckdb_list_comprehension)"
+
+["9f1dab2702dd484e"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["3cb23549de01fe86"]
+category = "values_trailing_comma"
+note = "Trailing comma inside a VALUES row is not parsed"
+
+["59b6e8884651ae90"]
+category = "grouping_sets"
+note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
+
+["c141c1db22e4a958"]
+category = "pivot_unpivot"
+note = "PIVOT/UNPIVOT clauses are not parsed (tracked gaps.rs::pivot_unpivot)"
+
+["d93932f2d774acbc"]
+category = "pivot_unpivot"
+note = "PIVOT/UNPIVOT clauses are not parsed (tracked gaps.rs::pivot_unpivot)"
+
+["4b1bfc630ecedbc5"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["327d2fe1686ecd7c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["85572a0abe900ae0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["c3c38ae23374bad2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found LAST_KW"
+
+["4d0dd132657b256e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["8b0afee4dbfd83cf"]
+category = "chained_dot_field_access"
+note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+
+["fbe13b47bb1dacaf"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["8c0a53f45fa7f6bc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["45383c22a08e098e"]
+category = "union_by_name"
+note = "DuckDB UNION [ALL] BY NAME is not parsed"
+
+["ea5c0ab10c7a83ca"]
+category = "union_by_name"
+note = "DuckDB UNION [ALL] BY NAME is not parsed"
+
+["92d92b0265459ed6"]
+category = "union_by_name"
+note = "DuckDB UNION [ALL] BY NAME is not parsed"
+
+["6687ca4f8399d92c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
+
+["a9d3badfc45dff85"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["c9c3dbc3b91c8643"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["cb4f1ada7439d9aa"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["dca844a46bc203da"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected SELECT in subquery"
+
+["8f1ac0c68f25351b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["ea88b2757d9c71e2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["159b1c43ab513ae5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["cfa83f6ab8d0b3f2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["7c63c0ec32a851c2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["8ffa23b311216bca"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["b298140e797d7cdd"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["a2a0218136085c71"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected SELECT after EXISTS ("
+
+["f79a2c821451faef"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found WITH_KW"
+
+["f4df58a72ab9997a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found WITH_KW"
+
+["c1307297692b3fcc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["ac13e479ff7001b3"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["909102b28165f9f6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["4e81a9226eafcc77"]
+category = "information_schema_roundtrip"
+note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
+
+["1fdfbfc3284379d1"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["98685dc6055e7793"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["176a64de634e996b"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["4444edd7851561d6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["298dd08e7c5b9b63"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["d7c0f7716796a39b"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["e37f7e02ad9a1a05"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["8150a207f52fa0e4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["f54a33907fde134d"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["bedcd41917f4c6be"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
+
+["55e2372801d9d8d6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
+
+["3bd207b2e25c682c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["0ee0644cb314ecf7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["f4f7ec1c7d4b3743"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["adbd9123def3a1ae"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOT"
+
+["86d5f8c89a0e4fe2"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["9aec02ab7e317a8e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d01c409e1c257644"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["d106520b2b903a2a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["0f470924dc083f2e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["0a0802d2ce42c4bb"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["5babdd6804121655"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
+
+["973b2c687ef3d02b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["d019f39e7d6696a6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["0ceb5c677007ef08"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["40b096cd22036c6a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
+
+["d3d41e1355313850"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["f75f39efc83ae601"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["64db298c2123f2cc"]
+category = "map_type_or_literal"
+note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
+
+["b53b84a4bb09b36a"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["ba2c116405ff7dbf"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["01c0f2fdd4823d7d"]
+category = "array_subscript_negative_or_slice"
+note = "Array negative-index or slice subscript syntax is not parsed"
+
+["364300d0dca2b341"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found COLON"
+
+["47d1d0e6b0779852"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RBRACKET, found COLON"
+
+["36d81cb73e5419a1"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["7a35234d10d8de7c"]
+category = "map_type_or_literal"
+note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
+
+["f204f83e26a1db9b"]
+category = "map_type_or_literal"
+note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
+
+["08aa64e509d114a3"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["ca16bec873c914f3"]
+category = "map_type_or_literal"
+note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
+
+["c8923c43debfab8b"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["5e169df3949c71bb"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["b51c675b6c3c339b"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["443eae9af7ec5ab2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["8f9689bcac066f22"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["37c1e193a0128f4a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["83c604461bbbc129"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["2f9e165c3f1a0bfd"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["31cbbfb11333cb31"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d80af49b27e90d8d"]
+category = "chained_dot_field_access"
+note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+
+["f6a9570e0245c383"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
+
+["582aafc5ac0f5a11"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
+
+["6f9067df4a97c47b"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["de41b13422c61adf"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["48ccbc31d75bae5c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
+
+["ba4c18abc83a0403"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["03a3b86c4d3f5478"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["991d632a5f8b010a"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["76e9af57d672e11b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["3dbec66fb359caef"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["7a689f12e5ce1105"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected `]` to close list literal"
+
+["6419ed0b514e1675"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["3af9377a12a72d3b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
+
+["a3fbcd23e56eea5e"]
+category = "power_operator_or_cast_target_literal"
+note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
+
+["89f3eb42ca6001a7"]
+category = "power_operator_or_cast_target_literal"
+note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
+
+["8d25f22ec749e9ca"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["10473e2a67b8dceb"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["057772c9ee270f10"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["d5ffbcb21a05ca9d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d734a6ccabf4ccec"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["7ad4c1e1173c8d68"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["042d9a65683cf0a4"]
+category = "duckdb_struct_dict_literal_compare"
+note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
+
+["122931512d64deb7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["a98f53701e8018fd"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["ceaf850b24169c8a"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["9c8c8884d1846598"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected frame bound (UNBOUNDED, CURRENT ROW, number, or INTERVAL literal)"
+
+["e78ccfa8ae60ac0d"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["b51d6e336c50e974"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["934ccb4bd945e173"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference"
+
+["2eeeab6e1921780c"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["d4711b65e8ff9019"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["a8c6b4e0e85d910f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+
+["edb92382ea809a3f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["8ec78958096fc4a5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["f7fd82844d7f1224"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["46de8e0ab57f769f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["b07a853630e2551e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+
+["4e2938497df48afe"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+
+["19ea620a10ec6a7f"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["5a40822826a71b22"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["2a12f587a5d6ca35"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["8e1c5448d54b61e2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["4fe2ee6cdd0704fd"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["425e2fadb5ea009c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ANY_KW"
+
+["351184b9bb661834"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+
+["cf206987a81ed8f4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["4b1da263d8fc85c9"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["5cd15d2e36445273"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["a3671965a256b79f"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["b77945503d530cd8"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
+
+["cda3bdc8fca3f704"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected LPAREN, found STRING"
+
+["fd2fd77ba205e851"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["ea7e4d37079be9fb"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found LT"
+
+["948f61eca609d6f7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["368958ab62644062"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["7197d17eb157905c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["4e8b97600a98b622"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["b8783ca07ad8a5f7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name"
+
+["5e6eb2a470302cec"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["041141d753598563"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["fad296cb1984b3c2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["b9d4cbdefd1fe8da"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["a09178ce769ac702"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+
+["40f8ad41bb7f2c7b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["fb901cb9a980d62c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["778a84897612d89a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["3dac5fcbdc081e56"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["edf5f5611a904f27"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["a8fd9c1fc1099b82"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["1ea4e85c5ee0ca1d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["dc2d3f2f09749641"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["eb37ac7ea2d5b1a5"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["9ba1807ec4998afc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["6af276b398df67ff"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["1bf158008cd20368"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["b99ec95b79923245"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["3df03d6993ec82eb"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["97288fa89f1ca8c3"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["0fa97b457f73c89b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["bd85096b1212237c"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["b6df6d802fb49130"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["491fc0d5bd0be6ca"]
+category = "power_operator_or_cast_target_literal"
+note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
+
+["80f741d04184b782"]
+category = "power_operator_or_cast_target_literal"
+note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
+
+["73437b4febc9bf64"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["143e9cc01d97c091"]
+category = "power_operator_or_cast_target_literal"
+note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
+
+["87ca4960829e3b9d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["b2ac103355cb7e31"]
+category = "information_schema_roundtrip"
+note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
+
+["129988e382e13e37"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["7cb60da0790f2809"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["54ea05c755c84417"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["70dda8e02029c155"]
+category = "grouping_sets"
+note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
+
+["4a2d04f0d86ec4ab"]
+category = "grouping_sets"
+note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
+
+["21509863ffaf373a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["49912a8d8c54c4f9"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["0be6b176bfb1a5e9"]
+category = "grouping_sets"
+note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
+
+["4ae2792a411e7deb"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["3e860460ae603de7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["5d919f7a3f708c51"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["d9f48bb80aed9a47"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["eca4611dbb482693"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["c4ad9c9be37cc4cb"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["f9aad433dec6f2b9"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["55a082db860d4f88"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["bffe4815fa87b76a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["3dafe942693dbbe0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["2e36739aa763413e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["748cb87386c1f0f4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found NUMBER"
+
+["89b6cc23eac6da92"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["02bbae9411867710"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["e4659dff58a92e06"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["dc057a3eb1dc18cc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["488d9923b19c0012"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["3bbd15fcaaa9f9e6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["9446ad94c98a3bf4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found LT"
+
+["59d747665c85c525"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["1cf441456a47a4e5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["58dafb55824fc674"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["9cddba224aa76ae9"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d184d544aec4b1b5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["8cebc9fc4b523c10"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["03290b92394cab6d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["24591a4aec125466"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["ca48cd01a3411558"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["8c97c5337c8b86b4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["5d463740d1279cb2"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["6827d4f00ad27d04"]
+category = "natural_join_chain"
+note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
+
+["b7420dba588d631a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected SELECT in subquery"
+
+["0b571b09988e1c59"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d7de0c9a7a556220"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected IDENT, found STAR"
+
+["6d90282c09c259fb"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["60a4afc966b46247"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["d85681c984b12038"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["4c93773454a47930"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["b10c367899b34065"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["554ceb62765ff459"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["530b215733abf00b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["a44b3f3934964ec3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["23bb729f96e4c852"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["721c5d4638313542"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["5209c5465479b74d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["9d9f1aa06f23fe50"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["7ea589a192639dc4"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["048d69fbfe7bcafe"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["0b81fafd4d61f092"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["46776f190688a163"]
+category = "json_to_record"
+note = "json_to_record/jsonb_to_record table-valued function is not parsed"
+
+["468b19861afcbfa5"]
+category = "json_to_record"
+note = "json_to_record/jsonb_to_record table-valued function is not parsed"
+
+["54048be0439b653c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["476ed4749dd5bfdc"]
+category = "dollar_quoted_or_backslash_literal"
+note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
+
+["da76db23a4b9f764"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["856ef694096f70cf"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["327e92f2ca0ddf80"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["c284a380f1b2790c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["5bb0dadc66e62120"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["4179343766f9c447"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["fd2e29813b4bad83"]
+category = "json_to_record"
+note = "json_to_record/jsonb_to_record table-valued function is not parsed"
+
+["76e8507c1ad6c6f6"]
+category = "json_to_record"
+note = "json_to_record/jsonb_to_record table-valued function is not parsed"
+
+["51f1f7d1e2935e55"]
+category = "json_to_record"
+note = "json_to_record/jsonb_to_record table-valued function is not parsed"
+
+["be9112ed269e53ae"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["5a792e901bc6a54c"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["6566fd6398c7faff"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["e01262da97c32168"]
+category = "jsonb_operators"
+note = "PostgreSQL jsonb operators (#-, #>, #>>, ?, ?|, ?&) are not parsed"
+
+["e6a25377d78d0163"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["572b76312eebf0f7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["91c452ca932b2952"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d0830a7407ca91a3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["441dccca55633b62"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
+
+["68643dd2001a3530"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["a04a59359daf5014"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["31bde0cab7cc702d"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["351fc33e4a180030"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["dac2a7e17cd3ec09"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["d559586053862371"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["49aadfcd5c8ca312"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["cd0aac3ae6402700"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["0ba012a17888bed1"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["dd16678db72225fe"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["e4ae9f2ab72a7f71"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["77b2dca8f6271dd2"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["7f7ff24642627735"]
+category = "postgres_range_types"
+note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, ...) are not parsed"
+
+["28f0f438b3d446e0"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["83272f10c183f2ac"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["9ddf04c31c1b9e6c"]
+category = "power_operator_or_cast_target_literal"
+note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
+
+["b5643f516376ffc3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["ee6959fa1df17a5f"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+
+["ee7d8489258d1343"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ERROR"
+
+["2729feeaafc6b76b"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
+
+["a1dabbd802f301f0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["f8a2c50d020865d6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["72d4d2e7c7830425"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["72d0e2e7c77f367e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["6698679897ba3955"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
+
+["cb74bdb27c086021"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["9c8fe5f0b0ea90e8"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["3226a1a01d7c5be1"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["4fed97a9b0057d83"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["e55b6152c35d6208"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["cdfce3fe07642069"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["0f783c77304dc0a5"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found EOF"
+
+["51f76c1db9da623c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ARRAY_KW"
+
+["a009b888921792d4"]
+category = "multidim_array_type_literal"
+note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
+
+["61000844d1e6291c"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["3c7323b703ff6dfd"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["daeba064d77e4897"]
+category = "named_arg_walrus_or_bare_eq"
+note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+
+["c38be65d41d4fd27"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["dc1c49b07dcb0148"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["761352dd4a45659d"]
+category = "with_ordinality"
+note = "WITH ORDINALITY table-function modifier is not parsed"
+
+["05f040bdd7e71599"]
+category = "with_ordinality"
+note = "WITH ORDINALITY table-function modifier is not parsed"
+
+["4d0c4fa00c707000"]
+category = "with_ordinality"
+note = "WITH ORDINALITY table-function modifier is not parsed"
+
+["a1e4b25c020f937c"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["9480ec7e9fa51e51"]
+category = "with_ordinality"
+note = "WITH ORDINALITY table-function modifier is not parsed"
+
+["fa29104c42b17d44"]
+category = "materialized_cte"
+note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+
+["1f8daeacf6b69560"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found LE"
+
+["3964b41895688849"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+
+["e6094c0f4f9355a3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found LE"
+
+["c5f6a2e0c67ff76d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found GE"
+
+["534d7081a626d936"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+
+["e89f5cc9ca4f64d6"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["adb984cf2cd20351"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["1fb783f70b614a38"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["6a9839262562ec1a"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["2d9242102c8a8704"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["e6800814a90ebf63"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found HASH"
+
+["b4278cee39d455a2"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COLON"
+
+["03040bcc83e9d236"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COLON"
+
+["3ec5993760c7719d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COLON"
+
+["8c15ff6acd16d5be"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+
+["2effb464d1a6c8ef"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found SELECT_KW"
+
+["211b433174d29594"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["de88738ea7aa7c95"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found COLON"
+
+["b167115761f11f93"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["49b2259ed1162c9d"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["9eab7a815794a2e9"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["f773cc38b34f25e4"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
+
+["86e13ab614b3f2e0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+
+["e8b74378d0930930"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["161238bb43fb14f3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["cf201f564ec6d1e3"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["ce001f4f76e5f892"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d2fe2136225d4e8e"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["a022324c863cecce"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["3419183ec6d2f76e"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["96df5cd72067098a"]
+category = "lambda_or_lateral_syntax"
+note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
+
+["79cdb2200dc2cadc"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected LPAREN, found IDENT"
+
+["d63aa08ca702f3ab"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["348bff3f69bc56c0"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ARRAY_KW"
+
+["fda6f7054f01a5b7"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["b8d2d9b9020d12ee"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found EOF"
+
+["012bffb042b14579"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["d5b343bc44fadced"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found WITH_KW"
+
+["a6bacfcecd57fae9"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["a15c8aa7d5276764"]
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+
+["5033d5c660b5c00d"]
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
+
+["66b4d5ff8c0ec6bf"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["1031de1ddf96bf80"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["a601f8785bb9631e"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["acebeb246c8295dc"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["9ddc979731608072"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["d5f2010e01e92764"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["9d56750fc24d4bcf"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["6848eae2af6dc971"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["144d89d1ae21fbd9"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["b114e508a907ae77"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["7ed8a1b8e866de24"]
+category = "fulltext_search_operators"
+note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
+
+["a2336f1f88e308b0"]
+category = "regtype_regclass_cast"
+note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
+
+["9a6f33a1626fafe7"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["10c6e832b34a19fa"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["87fac7f5b45ef952"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["191708174fb6c5c1"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["bd5f317418980fde"]
+category = "information_schema_roundtrip"
+note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
+
+["0baef910b27c1842"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["d6216a6d442919fe"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["a1818a8e35c2a665"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["29049631557d1e26"]
+category = "window_frame_non_integer_bound"
+note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
+
+["098552ef77c91f82"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["7b267bd36cb16322"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["017a8fa8a1361a13"]
+category = "derived_table_column_alias_list"
+note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+
+["f9722cb8182767ea"]
+category = "set_operation_nesting"
+note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+
+["0513478606d4f13d"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["0b78dd203657b8aa"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["5a2ecce08130bc05"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["93c5d1c2329ea02b"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["3200f90f3e3804af"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["3b6d9e2cbbc5e431"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["1edba1798c2f03f2"]
+category = "xml_functions"
+note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
