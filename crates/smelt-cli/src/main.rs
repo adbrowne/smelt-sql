@@ -280,8 +280,9 @@ struct SeedArgs {
 
 #[derive(Parser)]
 struct BuildArgs {
-    /// Optional path to a single model file to plan. Required with --show-plan,
-    /// ignored otherwise.
+    /// Optional path to a single model file to plan (with --show-plan), or a
+    /// model name/selector to backward-resolve (with --include-upstreams).
+    /// Ignored otherwise.
     file: Option<PathBuf>,
 
     /// Path to smelt project root
@@ -330,6 +331,23 @@ struct BuildArgs {
     /// Use this only as a temporary escape hatch while fixing the model SQL.
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
+
+    /// Backward resolution: given the target model (the positional
+    /// argument) and this period, resolve the per-ancestor required
+    /// upstream slices and the ancestor-first/target-last build order
+    /// through the same propagation graph `--since-upstream` assembles
+    /// (`maintenance_plan.md` §"Backward resolution — what must exist"),
+    /// print them, and build exactly that bounded set. Requires
+    /// `--include-upstreams`.
+    #[arg(long = "period", requires = "include_upstreams")]
+    period: Option<String>,
+
+    /// Resolve and build the target model's required upstream slices for
+    /// `--period` (backward resolution) instead of the ordinary
+    /// seed+run-everything build. Requires `--period` and the target model
+    /// as the positional argument.
+    #[arg(long = "include-upstreams", requires = "period")]
+    include_upstreams: bool,
 }
 
 #[derive(Parser)]

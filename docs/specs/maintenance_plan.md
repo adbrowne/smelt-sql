@@ -471,13 +471,15 @@ disagree; one per node cannot). Deeper rationale:
   names are removed outright per ratified decision 5; shape profiles replace them); until it
   lands, mode specs still read as strategy peers. A proposed `on_column_add:
   backfill | leave_null | recompute` policy knob is noted, not yet surface.
-- **User docs describe the trichotomy + grain surface, not yet the plan itself.** The
-  `docs-site/` pages consistently describe `refresh: full | incremental | materialized_view`
-  and `grain: partition | key | key_per_partition`, seeded from the worked example catalogue
-  (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`). What they do
-  not yet cover — because the underlying surface doesn't exist yet — is the maintenance plan
-  itself: the `maintenance:` frontmatter block, `smelt explain`'s cell/clamp/ledger output,
-  `--since-upstream`, `--include-upstreams`, and `smelt bakeoff`.
+- **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly
+  covered.** The `docs-site/` pages consistently describe
+  `refresh: full | incremental | materialized_view` and `grain: partition | key |
+  key_per_partition`, seeded from the worked example catalogue
+  (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`).
+  `docs-site/docs/reference/cli.md` now documents `--since-upstream` (forward propagation) and
+  `--include-upstreams` (backward resolution) under `smelt run`/`smelt build`. What is still not
+  yet covered — because the underlying surface doesn't exist yet — is the `maintenance:`
+  frontmatter block, `smelt explain`'s cell/clamp/ledger output, and `smelt bakeoff`.
 - **A group merged across two mutable inputs has no group-merge-provenance policy.** Per-cell
   admission today checks obligations 4/5 (bounded reach/footprint) the same way regardless of
   whether a column group's `mutation_sensitivity` set came from ONE input or several — a
@@ -565,18 +567,24 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
 - **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit}.rs` (the per-cell derivation);
   `crates/smelt-logical/src/maintenance/propagate.rs` (the pure graph-layer composition math —
   `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation.rs` (the real per-workspace
-  graph assembly and `smelt run --since-upstream` planning, consuming both);
+  graph assembly, `smelt run --since-upstream` planning, and `smelt build --include-upstreams`
+  planning — `build_forward_graph`, `plan_since_upstream`, `resolve_build_plan`, all consuming the
+  same `Edge` list);
   `crates/smelt-logical/src/analysis/` (the classifiers admission consumes);
   `crates/smelt-runtime/src/{cumulative,maintenance_driver,dimension_horizon_merge,transformer,backfill}.rs`
   (today's technique executors and clamps); `crates/smelt-state/src/intervals.rs` (the degenerate
   ledger); `crates/smelt-backend/src/lib.rs` (technique primitives).
-- **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation}.rs`
+- **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation,maintenance_propagation_adjoint}.rs`
   (pure derivation-side and graph-composition-math assertions — the regression floor for chains,
-  fan-out, diamonds, granularity mapping, and adjointness); `crates/smelt-runtime/tests/
+  fan-out, diamonds, granularity mapping, and adjointness — `maintenance_propagation_adjoint.rs`
+  is the dedicated home for the `forward(backward(P)) ⊇ P` law); `crates/smelt-runtime/tests/
   {tracer_maintenance,tracer_evolution,tracer_propagation,since_upstream_propagation}.rs` (the
   DuckDB equivalence oracles, and the real-workspace propagation-graph assembly tests);
   `crates/smelt-cli/tests/since_upstream.rs` (the CLI-wired forward-propagation suite, including
-  the sufficiency-vs-full-refresh equivalence check); `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
+  the sufficiency-vs-full-refresh equivalence check); `crates/smelt-cli/tests/include_upstreams.rs`
+  (the CLI-wired backward-resolution suite: resolved-slices-suffice-vs-full-refresh equivalence
+  over a two-hop chain, and an unclocked-ancestor-resolves-to-whole-table case);
+  `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
   harness — the real-run-pipeline driver, the model-shape catalogue, the multiset-equality oracle,
   and the mutation-aware run-schedule generator/driver — wired as a dev-dependency of `smelt-cli`);
   `cargo test -p smelt-cli --test property_discovery` is the standing equivalence gate: it runs the
@@ -593,8 +601,9 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   cell without a matching registry entry fails the test, by construction (additive-only).
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
-  describe the trichotomy + grain surface; the plan itself (the `maintenance:` block, `smelt explain`,
-  the propagation CLI) is not yet user-documented (see Known Divergences).
+  describe the trichotomy + grain surface; `docs-site/docs/reference/cli.md` also documents
+  `--since-upstream` and `--include-upstreams`. The plan itself (the `maintenance:` block,
+  `smelt explain`'s cell/clamp/ledger output) is not yet user-documented (see Known Divergences).
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260704-model-updates-fundamentals.md` (the L1+L2 substrate),
   `docs/plans/20260705-property-discovery-loop.md` (the empirical engine).

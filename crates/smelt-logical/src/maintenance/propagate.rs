@@ -435,11 +435,15 @@ pub fn required_inputs(
 
     // Build order: the required models (nodes with an inbound edge) in
     // forward topological order — ancestors of the target precede it, so
-    // the target is last.
+    // the target is last. The target itself is ALWAYS included even when it
+    // has no inbound edge (e.g. a `refresh: full` model, or any target with
+    // no upstream edges registered in the graph) — "no upstream deps" only
+    // means an empty required-slices set for its ancestors, never an empty
+    // build for the target the caller actually asked for.
     let has_inbound: BTreeSet<&str> = edges.iter().map(|e| e.downstream.as_str()).collect();
     let build_order: Vec<String> = order
         .iter()
-        .filter(|n| required.contains_key(**n) && has_inbound.contains(**n))
+        .filter(|n| required.contains_key(**n) && (has_inbound.contains(**n) || **n == target))
         .map(|n| n.to_string())
         .collect();
 

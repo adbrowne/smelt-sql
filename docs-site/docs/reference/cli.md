@@ -282,6 +282,8 @@ smelt build [OPTIONS]
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--select` | `-s` | string[] | | Select models to run (repeatable). Same syntax as `smelt run`. |
 | `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
+| `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with---include-upstreams). |
+| `--include-upstreams` | | bool | `false` | Resolve and build the target model's required upstream slices for `--period` instead of the ordinary seed+run-everything build. Requires `--period`. |
 
 **Examples:**
 
@@ -297,6 +299,26 @@ smelt build --select marts.daily_revenue --select marts.transactions
 
 # Same with scope shorthand
 smelt --scope marts build --select daily_revenue --select transactions
+
+# Bounded test/validation build: resolve and build exactly what marts.daily_revenue
+# needs for January
+smelt build marts.daily_revenue --period 2026-01-01..2026-02-01 --include-upstreams
+```
+
+### Backward resolution with `--include-upstreams`
+
+`smelt build <model> --period <start>..<end> --include-upstreams` answers the dual question to `--since-upstream`: given a target model and a requested output period, which upstream slices must exist for that period to be correct? It walks the target's ancestor sub-DAG backward through the SAME propagation graph `--since-upstream` assembles, applying each edge's derived scan clamp directly (`[s, e)` downstream requires `[s − before, e + after)` upstream), and resolves, for every ancestor, the partition interval that must exist — a data prerequisite for a raw source, a build region for an intermediate model — plus the build order those models must run in (ancestor-first, target last).
+
+The resolved-slices report — one `STAGE <source>: <interval>` or `BUILD <model>: <interval>` line per ancestor, then a `Build order: ...` line — is printed before anything runs. `smelt` then builds exactly that set, ancestor models first, the target last, through the same execution path every other run/build command uses. Raw sources are reported (so you know what must already be staged) but never built by `smelt` — sources are external data.
+
+An ancestor whose partition axis can't be sliced (an unclocked lookup/dimension source, or a model with no declared `timeseries:`) resolves to the whole table — printed as `whole table` rather than an interval — since there is no interval structure to bound it against.
+
+This is the bounded test/validation build: staging exactly the resolved slices and building bottom-up produces the same result, over the requested period, as a full build over complete history.
+
+```bash
+# Resolve and build exactly what marts.daily_revenue needs for January,
+# printing the required upstream slices and build order first.
+smelt build marts.daily_revenue --period 2026-01-01..2026-02-01 --include-upstreams
 ```
 
 ---

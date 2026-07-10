@@ -25,9 +25,11 @@ use smelt_core::config::{Grain as ConfigGrain, Granularity, RefreshStrategy};
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelFile;
 use smelt_logical::maintenance::propagate::{
-    day_ordinal, ordinal_to_iso, propagate, DayInterval, Edge, PartitionGrain,
+    day_ordinal, ordinal_to_iso, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
 };
-use smelt_logical::maintenance::{MutationProfile as PlanMutationProfile, SourceFacts};
+use smelt_logical::maintenance::{
+    MutationProfile as PlanMutationProfile, PartitionLocal, SourceFacts,
+};
 
 /// One caller-declared per-source delta: the partitions that landed on
 /// `source` (bare name, the `sources.` breadcrumb stripped — matches
@@ -253,6 +255,25 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
                 entry.0 = entry.0.max(e.before_days);
                 entry.1 = entry.1.max(e.after_days);
             }
+            // A read the derivation could not bound (`PartitionLocal::No`)
+            // carries no `ScanClamp` — `cell.scans` stays empty for it
+            // (`PlanCell::scans`'s own doc comment: "empty for reads the
+            // derivation could not bound — those surface in
+            // `partition_local` instead"). Register a zero-margin edge for
+            // it anyway so the propagation/resolution graph has a node to
+            // walk to at all; the source's own grain (`Unclocked` for an
+            // undeclared-timeseries source or model — see `source_grain`/
+            // `model_grain` below) is what actually widens every dirty/
+            // required interval through it to `DayInterval::WHOLE` via
+            // `PartitionGrain::align_outward`, never this margin.
+            // `maintenance_plan.md` §"Backward resolution — what must
+            // exist": "The required slice of an unclocked source is the
+            // whole table."
+            if let PartitionLocal::No { source, .. } = &cell.partition_local {
+                clamp_days
+                    .entry((source.clone(), table.clone()))
+                    .or_insert((0, 0));
+            }
         }
     }
 
@@ -389,6 +410,87 @@ pub fn plan_since_upstream(
     Ok(SinceUpstreamPlan {
         runs,
         dirty_set_report: report,
+    })
+}
+
+/// The resolved backward-resolution plan for `smelt build --include-upstreams`:
+/// the per-ancestor required slices (raw sources to stage, model regions to
+/// build) plus the ancestor-first/target-last build order, and a
+/// human-readable rendering to print **before** any build executes (mirrors
+/// [`SinceUpstreamPlan`]'s "print before acting" shape).
+#[derive(Debug, Clone, Default)]
+pub struct ResolvedBuildPlan {
+    /// The models to build, in dependency order, target last. Raw sources
+    /// are never in this list — they are staged (verified to exist), not
+    /// built.
+    pub build_order: Vec<PropagatedRun>,
+    pub report: String,
+}
+
+/// Resolve what must exist upstream for `target` to be correct over
+/// `period`, over the SAME real per-workspace graph
+/// [`build_forward_graph`] assembles for `--since-upstream` — the graph
+/// layer's two directions share one edge object
+/// (`maintenance_plan.md` §"The clamp both directions"). Delegates the
+/// actual reverse-topological resolution to
+/// [`smelt_logical::maintenance::propagate::required_inputs`]; this
+/// function only assembles the graph, renders the report, and shapes the
+/// per-model build order the CLI executes.
+pub fn resolve_build_plan(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    target: &str,
+    period: DayInterval,
+) -> Result<ResolvedBuildPlan> {
+    let edges = build_forward_graph(models, source_infos)?;
+
+    let resolved = required_inputs(&edges, target, period)
+        .map_err(|e| anyhow::anyhow!("MaintenanceGraphUnsupportedNode: {e}"))?;
+
+    // A required node with at least one inbound edge is a model to build;
+    // everything else (a leaf of the ancestor sub-DAG) is a raw source to
+    // stage — exactly `required_inputs`'s own `build_order` membership test.
+    let buildable: BTreeSet<&str> = resolved.build_order.iter().map(|s| s.as_str()).collect();
+
+    let mut report = String::from("Required upstream slices (--include-upstreams):\n");
+    for (node, intervals) in &resolved.required {
+        let verb = if buildable.contains(node.as_str()) {
+            "BUILD"
+        } else {
+            "STAGE"
+        };
+        for iv in intervals {
+            report.push_str(&format!("  {verb} {node}: {}\n", render_interval(iv)));
+        }
+    }
+    report.push_str(&format!(
+        "Build order: {}\n",
+        resolved.build_order.join(", ")
+    ));
+
+    let mut build_order = Vec::with_capacity(resolved.build_order.len());
+    for name in &resolved.build_order {
+        let intervals = resolved.required.get(name).cloned().unwrap_or_default();
+        for iv in intervals {
+            if iv.is_whole() {
+                build_order.push(PropagatedRun {
+                    model: name.clone(),
+                    start: None,
+                    end: None,
+                });
+            } else {
+                build_order.push(PropagatedRun {
+                    model: name.clone(),
+                    start: Some(ordinal_to_iso(iv.start)),
+                    end: Some(ordinal_to_iso(iv.end)),
+                });
+            }
+        }
+    }
+
+    Ok(ResolvedBuildPlan {
+        build_order,
+        report,
     })
 }
 
