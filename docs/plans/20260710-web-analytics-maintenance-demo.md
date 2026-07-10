@@ -348,6 +348,19 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
   CLI). Worked around by materializing `bronze/raw_events` as a table
   instead of a view; revisit — and consider reverting to the default view
   materialization — once the pinned DuckDB library moves past 1.5.0.
+- Open investigation (surfaced by the final verification, unresolved):
+  `verify_incremental_equivalence.py` at its default 60-day scale finds a
+  1-row local-column divergence at day 46 (2026-05-04) — on-time event
+  `event_id=7647` (device 1448, `event_ts=2026-05-04 00:03:36`) is present in
+  `silver.events_parsed` in both pipelines, but the day-by-day pipeline's
+  `silver.sessions` has no covering session for that device/timestamp (nearest
+  is a single-event session at `2026-05-03 23:47:30`), so the INNER JOINs in
+  `silver.events_enriched` and `gold/eventstream_with_identity` drop it.
+  Suspected cross-midnight incremental sessionization edge case in
+  `silver/sessions.sql` under single-day replay; does not reproduce at the
+  7-day CI scale (Rust `per_partition_equivalence` suite is green). Needs its
+  own investigation — predates nothing obvious in this plan but was unreachable
+  before the harness windowing fix let the script run to completion.
 
 ## Verification
 

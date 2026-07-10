@@ -159,9 +159,25 @@ def pipeline_a_full_window(start: date, end_exclusive: date) -> None:
 
 
 def pipeline_b_day_by_day(start: date, end_exclusive: date) -> None:
+    """Replay the datagen window one non-overlapping single-day `[D, D+1)`
+    window per iteration — mirrors `run_incremental.py` and the Rust
+    `per_partition_equivalence` harness's `DAY_WINDOWS` scheme.
+
+    An earlier version of this driver used an overlapping 2-day-lookback
+    window (`[D-1, D+1)`) per iteration. That schedule predates
+    `silver.device_user_edges`, an additive-fold keyed model
+    (`grain: key`); its transactional merge ledger refuses to re-fold a
+    partition it has already merged (`docs/specs/keyed_models.md`
+    §"Reprocessing" / §"The transactional merge ledger" —
+    `KeyedReprocessedWindow`), and the overlapping schedule would double-fold
+    day D on both day D's and day D+1's window. Non-overlapping windows are
+    the correct replay schedule; models that need a wider source read (e.g.
+    `gold/identity_forward_only`, `silver/sessions`) declare their lookback
+    via a Form B date filter, and the planner widens the read accordingly.
+    """
     d = start
     while d < end_exclusive:
-        window_start = d - timedelta(days=1)
+        window_start = d
         window_end = d + timedelta(days=1)
         run_or_die(
             [
@@ -405,7 +421,7 @@ def main() -> int:
 
     reset_target()
     setup_sources()
-    print(f"[B] day-by-day replay ({args.days} days, 2-day window each)")
+    print(f"[B] day-by-day replay ({args.days} days, single-day window each)")
     pipeline_b_day_by_day(args.start_date, end_exclusive)
     rows_b = query_json(
         "SELECT * FROM main.marts_daily_active_users_by_method ORDER BY event_date"
