@@ -10,11 +10,27 @@
 //! DeleteInsert`), the keyed-fold family (`refresh: keyed`), and the
 //! column-scoped `MERGE` family (`Technique::ColumnScopedMerge`) —
 //! `docs/plans/20260710-emit-unification.md` Phases 1–3.
+//!
+//! Each family's leg additionally proves **result**-equivalence to a full
+//! refresh (`multiset_equal`, the Link-C oracle also used by
+//! `crates/smelt-logical/tests/maintenance_plan_conformance.rs`), not just
+//! byte-equal statement text — this is the production-execution half of the
+//! "matches execution" proof `maintenance_plan_conformance.rs`'s own HOLDS
+//! legs cannot make themselves, since `smelt-logical` cannot depend on
+//! `smelt-runtime` to call `execute_project` (`docs/plans/
+//! 20260710-emit-unification.md` Phase 4).
+//!
+//! This file also carries the structural no-authoring gate
+//! (`no_maintenance_statement_authoring_outside_the_emitter`): a source
+//! scan asserting the region `DELETE FROM`/keyed+column-scoped
+//! `MERGE INTO`/keyed first-run `CREATE TABLE {}.{} AS`-shaped statement
+//! text is not constructed anywhere in `smelt-backend*/src` or
+//! `smelt-runtime/src` production code outside the single-owner emitters.
 
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use arrow::array::RecordBatch;
+use arrow::array::{Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 
@@ -309,6 +325,33 @@ impl Backend for ArcBackend {
     }
 }
 
+/// The Link-C oracle (`crates/smelt-runtime/tests/oracle/mod.rs`,
+/// `crates/smelt-logical/tests/maintenance_plan_conformance.rs`'s own copy):
+/// two relations are equal multisets iff `EXCEPT ALL` is empty in both
+/// directions. Runs through the real recording backend's `execute_sql` —
+/// the same connection the run itself executed against — so this is a
+/// same-connection, post-run check of the *result*, not a re-derivation.
+async fn except_all_count(backend: &dyn Backend, left_sql: &str, right_sql: &str) -> i64 {
+    let batches = backend
+        .execute_sql(&format!(
+            "SELECT count(*) FROM (({left_sql}) EXCEPT ALL ({right_sql})) AS d"
+        ))
+        .await
+        .expect("except all count query");
+    let batch = batches.first().expect("count query returns one batch");
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("count(*) column is Int64");
+    counts.value(0)
+}
+
+async fn multiset_equal(backend: &dyn Backend, left_sql: &str, right_sql: &str) -> bool {
+    except_all_count(backend, left_sql, right_sql).await == 0
+        && except_all_count(backend, right_sql, left_sql).await == 0
+}
+
 fn write_model(project_dir: &Path, name: &str, content: &str) {
     let path = project_dir.join("models").join(format!("{}.sql", name));
     std::fs::write(path, content).expect("write model file");
@@ -513,6 +556,23 @@ async fn region_recompute_statements_come_from_the_emitter() {
             "executed group must be byte-identical to a direct emitter call over the same inputs"
         );
     }
+
+    // Result-equivalence: the region DELETE+INSERT statements the run
+    // actually executed must leave `daily_events` multiset-equal to a full
+    // refresh of the model's own SQL — the technique the plan describes
+    // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    // owner)") reproduces a full refresh, not merely emitter-shaped text.
+    let full_refresh_sql = "SELECT * FROM (VALUES (DATE '2024-01-01', 10), \
+                             (DATE '2024-01-02', 20)) AS t(event_date, amount)";
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.daily_events",
+            full_refresh_sql
+        )
+        .await,
+        "the DELETE+INSERT statements execute_project actually ran must reproduce a full refresh"
+    );
 }
 
 /// The keyed fold family (`refresh: keyed`, `grain: key`): every statement
@@ -669,6 +729,21 @@ async fn keyed_fold_statements_come_from_the_emitter() {
     assert_eq!(
         &expected_merge, &groups[1],
         "executed MERGE group must be byte-identical to a direct emitter call"
+    );
+
+    // Result-equivalence: the CREATE + MERGE statements the run actually
+    // executed must leave `device_user_edges` multiset-equal to a full
+    // refresh of the model's own aggregation over the driving source's
+    // materialized output.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.device_user_edges",
+            "SELECT device_id, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen \
+             FROM main.events GROUP BY device_id"
+        )
+        .await,
+        "the CREATE+MERGE statements execute_project actually ran must reproduce a full refresh"
     );
 }
 
@@ -877,5 +952,188 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
     assert_eq!(
         &expected, group,
         "executed MERGE group must be byte-identical to a direct emitter call over the same inputs"
+    );
+
+    // Result-equivalence: the column-scoped MERGE the run actually executed
+    // must leave `daily_events_enriched` multiset-equal to a full refresh of
+    // the model's own fact+dimension join, post-mutation.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.daily_events_enriched",
+            "SELECT e.event_id, date_trunc('day', e.event_timestamp) AS event_date, \
+             e.user_id, e.event_type, u.user_name \
+             FROM main.sources_raw_events e \
+             JOIN main.sources_raw_users u ON e.user_id = u.user_id"
+        )
+        .await,
+        "the column-scoped MERGE execute_project actually ran must reproduce a full refresh"
+    );
+}
+
+// =============================================================================
+// Structural gate: no maintenance-statement authoring outside the emitter
+// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)";
+// `docs/plans/20260710-emit-unification.md` Phase 4). Same `rg`-over-sources
+// style as `crates/smelt-core/tests/hardening_budget.rs`: a source scan, not
+// a runtime assertion, so it catches a regression at review time rather than
+// only when a fixture happens to exercise the reintroduced text.
+// =============================================================================
+
+/// Repo root, two levels up from this crate's manifest dir
+/// (`crates/smelt-runtime` → `crates` → repo root) — the same derivation
+/// `crates/smelt-core/tests/hardening_budget.rs::repo_root` uses.
+fn repo_root() -> std::path::PathBuf {
+    Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .expect("crates dir")
+        .parent()
+        .expect("repo root")
+        .to_path_buf()
+}
+
+/// One forbidden-shape hit: `(file, 1-based line number, line text)`.
+struct StatementAuthoringHit {
+    file: std::path::PathBuf,
+    line_no: usize,
+    text: String,
+}
+
+/// Known, pre-existing, out-of-scope matches this gate does not fail on —
+/// `(file path suffix, distinguishing substring of the offending line)`.
+/// Removing an entry without fixing (or re-justifying) the underlying
+/// authoring is itself the review signal this gate exists to raise.
+///
+/// Every entry here belongs to `Backend::delete_partitions`/
+/// `Backend::insert_overwrite`, serving `IncrementalStrategy::
+/// InsertOverwrite` — a per-partition materialization strategy that
+/// predates `maintenance_plan.md`'s single-owner emitters entirely and
+/// that no live derivation selects today: `smelt_runtime::
+/// maintenance_driver::resolve_incremental_strategy` and the batch loop's
+/// own dispatch (`crates/smelt-runtime/src/execute.rs`) only ever resolve
+/// `IncrementalStrategy::DeleteInsert`; `Append`/`InsertOverwrite` have no
+/// construction site outside their own enum definition, a CLI display-name
+/// mapping (`smelt-cli/src/helpers.rs`), and unit tests. Retiring this dead
+/// code (or routing it through `emit_delete_insert` too, closing the
+/// remaining gap) is out of Phase 4's file scope (`docs/plans/
+/// 20260710-emit-unification.md` Phase 4 "Critical files" — the backend
+/// crates are not listed); tracked as follow-up, not fixed here.
+const STATEMENT_AUTHORING_ALLOWLIST: &[(&str, &str)] = &[
+    (
+        "smelt-backend-duckdb/src/lib.rs",
+        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+    ),
+    (
+        "smelt-backend-duckdb/src/lib.rs",
+        "DELETE FROM {} WHERE {} IN (SELECT DISTINCT {} FROM ({}))",
+    ),
+    (
+        "smelt-backend-spark/src/sql.rs",
+        "DELETE FROM {} WHERE {} IN ({})",
+    ),
+    (
+        "smelt-backend-spark/src/sql.rs",
+        "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
+    ),
+];
+
+fn statement_authoring_is_allowlisted(path: &Path, line: &str) -> bool {
+    let normalized = path.to_string_lossy().replace('\\', "/");
+    STATEMENT_AUTHORING_ALLOWLIST
+        .iter()
+        .any(|(file_suffix, substr)| normalized.ends_with(file_suffix) && line.contains(substr))
+}
+
+/// Scan one production `.rs` file for forbidden maintenance-statement
+/// shapes. Stops at the first `#[cfg(test)]` line (test fixtures — e.g.
+/// `maintenance_driver.rs`'s in-memory `SumRule`/`RecordingBackend` — build
+/// deliberately statement-shaped strings to exercise dispatch without a
+/// real backend; that is not production authoring) — the same truncation
+/// `hardening_budget.rs::count_println_in_file` uses. Skips comment lines
+/// (`//`, `///`, `//!`) since the forbidden shapes appear in doc comments
+/// describing the emitter's own output.
+fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringHit>) {
+    let content = std::fs::read_to_string(path).unwrap_or_default();
+    for (idx, line) in content.lines().enumerate() {
+        let trimmed = line.trim_start();
+        if trimmed.starts_with("#[cfg(test)]") {
+            break;
+        }
+        if trimmed.starts_with("//") {
+            continue;
+        }
+        let forbidden = line.contains("DELETE FROM ")
+            || line.contains("MERGE INTO ")
+            || line.contains("CREATE TABLE {}.{} AS");
+        if !forbidden {
+            continue;
+        }
+        if statement_authoring_is_allowlisted(path, line) {
+            continue;
+        }
+        hits.push(StatementAuthoringHit {
+            file: path.to_path_buf(),
+            line_no: idx + 1,
+            text: line.trim().to_string(),
+        });
+    }
+}
+
+fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit>) {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(_) => return,
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            // `tests/` subdirectories hold integration tests, not
+            // production code — this file (`crates/smelt-runtime/tests/`)
+            // is itself outside every scanned `src/` tree.
+            if path.file_name().map(|n| n == "tests").unwrap_or(false) {
+                continue;
+            }
+            scan_statement_authoring_dir(&path, hits);
+        } else if path.extension().map(|e| e == "rs").unwrap_or(false) {
+            // `tests.rs` (e.g. `smelt-backend-spark/src/tests.rs`) is a
+            // unit-test module file, not production code.
+            if path.file_name().map(|n| n == "tests.rs").unwrap_or(false) {
+                continue;
+            }
+            scan_statement_authoring_file(&path, hits);
+        }
+    }
+}
+
+/// Structural gate: `DELETE FROM`/`MERGE INTO`/`CREATE TABLE {}.{} AS`-shaped
+/// statement text must not be constructed anywhere in `smelt-backend*/src`
+/// or `smelt-runtime/src` production code outside the single-owner emitters
+/// in `crates/smelt-logical/src/maintenance/emit.rs` (which is not scanned
+/// — it is not a `smelt-backend*` or `smelt-runtime` crate). Backends
+/// execute emitted `StatementGroup`s (`Backend::execute_statement_group`);
+/// they never author maintenance-statement text of their own
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+#[test]
+fn no_maintenance_statement_authoring_outside_the_emitter() {
+    let crates_dir = repo_root().join("crates");
+    let mut hits = Vec::new();
+    for crate_name in [
+        "smelt-backend",
+        "smelt-backend-duckdb",
+        "smelt-backend-spark",
+        "smelt-backends",
+        "smelt-runtime",
+    ] {
+        scan_statement_authoring_dir(&crates_dir.join(crate_name).join("src"), &mut hits);
+    }
+    assert!(
+        hits.is_empty(),
+        "maintenance-statement text constructed outside smelt-logical's single-owner emitters \
+         (docs/specs/maintenance_plan.md §\"Statement emission (single owner)\") — backends must \
+         execute an emitted StatementGroup, never author their own SQL text:\n{}",
+        hits.iter()
+            .map(|h| format!("  {}:{}: {}", h.file.display(), h.line_no, h.text))
+            .collect::<Vec<_>>()
+            .join("\n")
     );
 }

@@ -63,8 +63,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 |-------|----------|--------|------|
 | 1     | done     | e589e179 | 2026-07-10 |
 | 2     | done     | 3db5a0c6 | 2026-07-10 |
-| 3     | done     |        | 2026-07-10 |
-| 4     | pending  |        |      |
+| 3     | done     | 329aeebf | 2026-07-10 |
+| 4     | done     |        | 2026-07-10 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -238,6 +238,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - **Phase 2:** `Grade::Additive` keyed folds execute their MERGE inside `fold_ledger_delta` (raw-string ledger interleaving), which is not observable at `execute_statement_group` — so the keyed parity test uses a self-contained idempotent keyed fixture instead of `examples/web_analytics` `device_user_edges` (Additive via its COUNT column). Asserting parity *inside* the Additive ledger transaction would need a recording hook on `fold_ledger_delta`; revisit in Phase 4 if the conformance upgrade wants it.
+- **Phase 4:** `Backend::delete_partitions`/`insert_overwrite` (DuckDB + Spark) still author a DELETE-range shape for `IncrementalStrategy::InsertOverwrite` — verified dead code (no live path selects InsertOverwrite; `resolve_incremental_strategy` only yields DeleteInsert). Allowlisted in the structural gate with justification comments and documented in `architecture.md` Known Divergences; deleting the dead strategy is follow-up work outside this plan.
+- **Phase 4:** `statement_parity.rs` carries a third small `multiset_equal`/`EXCEPT ALL` oracle copy (the existing ones in `smelt-maintenance-testkit::oracle` and `smelt-runtime/tests/oracle/` need a raw sync `duckdb::Connection`, which `RecordingBackend` doesn't expose). Consolidation opportunity, not blocking.
 - **Phase 2:** `WindowedKeyedRule::merge_sql` still returns `String` (consumed as `action_sql` by the Additive ledger arm); collapsing it to return `StatementGroup` was left out to avoid touching the ledger plumbing.
 
 ## Verification

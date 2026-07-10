@@ -1,45 +1,42 @@
 //! `described_technique_matches_execution`: for a representative partition-
-//! grain and key-grain shape, the technique `derive_maintenance_plan` derives
-//! is asserted *before* its corresponding `maintenance::emit` SQL runs
-//! against a real DuckDB — so a plan whose admission regresses (the wrong
-//! corner, the wrong technique) fails here before the multiset-equivalence
-//! check even executes, and a technique whose emitted SQL is NOT
-//! multiset-equal to a full refresh at the same processed-input set fails
-//! too. This is the production derivation's own conformance leg
-//! (`docs/plans/20260707-maintenance-plan-impl.md` phase MP5); it proves the
+//! grain and key-grain shape (plus a grain-alignment corner, EX-18), the
+//! technique `derive_maintenance_plan` derives is asserted *before* its
+//! corresponding `maintenance::emit` SQL runs against a real DuckDB — so a
+//! plan whose admission regresses (the wrong corner, the wrong technique)
+//! fails here before the multiset-equivalence check even executes, and a
+//! technique whose emitted SQL is NOT multiset-equal to a full refresh at
+//! the same processed-input set fails too. This is the production
+//! derivation's own conformance leg (`docs/plans/
+//! 20260707-maintenance-plan-impl.md` phase MP5); it proves the
 //! *description*, not an aspiration, of what a maintenance run does today.
 //!
-//! Scope, plainly stated: this file is a **reduced-scope placeholder**, not a
-//! full conformance suite. Its two cases (EX-02, EX-24) are simplified
-//! near-duplicates of coverage `crates/smelt-runtime/tests/tracer_maintenance.rs`
-//! already has; it exists only because there is no real `execute_project`
-//! consumer of the derived plan yet to diff against (see the judgment call
-//! below). Until such a consumer lands, this file adds no coverage beyond
-//! what `tracer_maintenance.rs` already provides for these two shapes.
+//! Scope, plainly stated: this file proves the *plan derivation's* chosen
+//! technique, called through the single-owner emitters directly against a
+//! raw DuckDB connection, reproduces a full refresh for three shapes —
+//! EX-02 (partition-grain recompute), EX-24 (key-grain fold), and EX-18
+//! (grain-alignment write-window rounding). It does **not** run these
+//! statements through `execute_project`: `smelt-logical` sits below
+//! `smelt-runtime` in the crate layering (`docs/specs/architecture.md`
+//! §"Layered single-ownership"; `smelt-runtime` depends on `smelt-logical`,
+//! never the reverse), so this file cannot call `execute_project` itself.
 //!
-//! Judgment call (documented per the phase's own escape hatch): the plan
-//! asked for this comparison against `execute_project`'s DuckDB leg
-//! specifically. `execute_project` lives in `smelt-runtime`, which already
-//! depends on `smelt-logical` — but `resolve_strategy` still returns a
-//! constant (`maintenance_plan.md` §Known Divergences "The plan is
-//! specified-and-unwired"), so `execute_project` does not yet consult
-//! `derive_maintenance_plan` for *any* model; there is nothing live to diff
-//! the derived technique against inside `execute_project` yet, only inside
-//! `smelt-runtime`'s own tracer suite (`tests/tracer_maintenance.rs`), which
-//! proves the identical property (derive → assert cell shape → emit → real
-//! DuckDB → multiset-equal to a full refresh) by calling
-//! `smelt_logical::maintenance::{derive, emit}` directly against a raw
-//! connection, with no dependency on `execute_project` either. This file
-//! ports two of those shapes (EX-02 partition-grain recompute, EX-24
-//! key-grain fold) into `smelt-logical`'s own test suite via the same
-//! pattern smelt-db already uses for its DuckDB-backed dev-dependencies
-//! (`smelt-db` dev-depends on `smelt-runtime`, its own downstream consumer,
-//! for exactly this reason) — `smelt-logical` dev-depends on `duckdb`
-//! directly (no cycle: `smelt-runtime` is not on the path). This is the most
-//! spec-faithful stand-in for "matches execution" available while
-//! `execute_project` itself has no maintenance-plan consumer to diff
-//! against; MP6+ wires the Salsa/diagnostics path, at which point a real
-//! `execute_project`-based comparison becomes possible.
+//! The **production-execution** half of "matches execution" — proving the
+//! statements a real `execute_project` run actually sends to a live
+//! backend are both byte-identical to the emitters' output *and*
+//! result-equivalent to a full refresh — is proved in
+//! `crates/smelt-runtime/tests/statement_parity.rs`
+//! (`region_recompute_statements_come_from_the_emitter`,
+//! `keyed_fold_statements_come_from_the_emitter`,
+//! `column_scoped_merge_statements_come_from_the_emitter`), which sits
+//! above both crates and can call `execute_project`. That file's structural
+//! gate (`no_maintenance_statement_authoring_outside_the_emitter`) is the
+//! standing CI enforcement of single ownership referenced by
+//! `docs/specs/architecture.md` §"Constraints & Invariants" item 12. This
+//! file and that one are companions, not duplicates: this file proves the
+//! *derivation* picks the right technique and that technique's emitter
+//! output reproduces a full refresh; `statement_parity.rs` proves
+//! *production execution* actually runs that same emitter output, byte for
+//! byte, and that its result also reproduces a full refresh.
 //!
 //! Skips loudly (never silently) when `DUCKDB_LIB_DIR`/the system DuckDB
 //! library is unavailable: this whole crate's dev-profile already requires
@@ -632,7 +629,7 @@ const CLAIMED: &[(&str, usize, &str)] = &[
     (
         "pass-through projection",
         0,
-        "maintenance_plan_conformance.rs::described_technique_matches_execution_partition_recompute (EX-02, HOLDS)",
+        "maintenance_plan_conformance.rs::described_technique_matches_execution_partition_recompute (EX-02, HOLDS); production-execution byte+result parity via crates/smelt-runtime/tests/statement_parity.rs::region_recompute_statements_come_from_the_emitter",
     ),
     (
         "additive agg (SUM/COUNT)",
@@ -642,7 +639,7 @@ const CLAIMED: &[(&str, usize, &str)] = &[
     (
         "additive agg (SUM/COUNT)",
         1,
-        "described_technique_matches_execution_ex18_group_by_coarser_write_window (EX-18, HOLDS — recompute over the week-rounded region, proved equivalent to full refresh)",
+        "described_technique_matches_execution_ex18_group_by_coarser_write_window (EX-18, HOLDS — recompute over the week-rounded region, proved equivalent to full refresh); the region DELETE+INSERT family's production-execution byte+result parity is grounded generically (not EX-18's specific week-rounding corner) via crates/smelt-runtime/tests/statement_parity.rs::region_recompute_statements_come_from_the_emitter",
     ),
     (
         "inner-join enrichment",
@@ -662,12 +659,12 @@ const CLAIMED: &[(&str, usize, &str)] = &[
     (
         "GROUP BY coarser than partition",
         0,
-        "described_technique_matches_execution_ex18_group_by_coarser_write_window (EX-18, HOLDS — recompute over the week-rounded region, proved equivalent to full refresh)",
+        "described_technique_matches_execution_ex18_group_by_coarser_write_window (EX-18, HOLDS — recompute over the week-rounded region, proved equivalent to full refresh); the region DELETE+INSERT family's production-execution byte+result parity is grounded generically (not EX-18's specific week-rounding corner) via crates/smelt-runtime/tests/statement_parity.rs::region_recompute_statements_come_from_the_emitter",
     ),
     (
         "GROUP BY coarser than partition",
         1,
-        "described_technique_matches_execution_ex18_group_by_coarser_write_window (EX-18, HOLDS — recompute over the week-rounded region, proved equivalent to full refresh)",
+        "described_technique_matches_execution_ex18_group_by_coarser_write_window (EX-18, HOLDS — recompute over the week-rounded region, proved equivalent to full refresh); the region DELETE+INSERT family's production-execution byte+result parity is grounded generically (not EX-18's specific week-rounding corner) via crates/smelt-runtime/tests/statement_parity.rs::region_recompute_statements_come_from_the_emitter",
     ),
     (
         "multi-input column group (merge)",
@@ -687,7 +684,7 @@ const CLAIMED: &[(&str, usize, &str)] = &[
     (
         "keyed end-state fold",
         0,
-        "maintenance_plan_conformance.rs::described_technique_matches_execution_keyed_fold (EX-24, HOLDS)",
+        "maintenance_plan_conformance.rs::described_technique_matches_execution_keyed_fold (EX-24, HOLDS); production-execution byte+result parity via crates/smelt-runtime/tests/statement_parity.rs::keyed_fold_statements_come_from_the_emitter",
     ),
     (
         "keyed end-state fold",
