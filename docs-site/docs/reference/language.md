@@ -270,6 +270,12 @@ x::INTEGER          -- PostgreSQL-style
 TRY_CAST(x AS DATE) -- Returns NULL on failure
 ```
 
+### Numeric literal forms
+
+smelt accepts plain integer and decimal literals (`1`, `1.5`), including scientific notation (`1e8`, `1.5e-3`). A numeric literal immediately followed by letters or an underscore with no separating space — `0x1F`, `1_000_000` — is not accepted as a single literal; it produces a parse error rather than being silently reinterpreted (e.g. as `0` implicitly aliased to `x1F`). Write a space before an intended alias (`1 x`) or drop the digit-separator/hex-prefix form.
+
+`E'...'` (escape string) and `B'...'` (bit-string-shaped) prefixed string literals lex as ordinary string literals.
+
 ## Date/time extraction
 
 ```sql

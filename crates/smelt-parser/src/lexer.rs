@@ -242,6 +242,24 @@ impl<'a> Lexer<'a> {
             // Strings
             '\'' | '"' => self.consume_string(c),
 
+            // Prefixed string literals: `E'...'` (escape string) and
+            // `B'...'` (bit-string-shaped literal). DuckDB accepts both as
+            // string literals with no parse error (the `E` prefix additionally
+            // triggers backslash-escape processing of the body on DuckDB's
+            // side; smelt does not need to replicate that semantics here,
+            // only avoid silently splitting the prefix letter from the string
+            // that follows it into an orphan IDENT + STRING pair). This arm
+            // must come before the generic identifier arm below, and only
+            // fires when the quote immediately follows the single prefix
+            // letter (no space) — `Extra'foo'` still lexes as IDENT `Extra`
+            // followed by STRING, since `peek_char` there is `x`, not `'`.
+            c if (c == 'E' || c == 'e' || c == 'B' || c == 'b')
+                && self.peek_char() == Some('\'') =>
+            {
+                self.advance(); // consume the E/B prefix letter
+                self.consume_string('\'')
+            }
+
             // Numbers
             c if c.is_ascii_digit() => self.consume_number(),
 
@@ -412,6 +430,26 @@ impl<'a> Lexer<'a> {
                     self.advance(); // consume exponent digits
                 }
             }
+        }
+
+        // Fail-loud: a numeric literal immediately followed by an identifier
+        // continuation character (letter or `_`) must never be silently
+        // split into a shorter NUMBER token plus a following IDENT/alias —
+        // e.g. `0x1F` must not read as `0` implicitly aliased to `x1F`, and
+        // `1_000_000` must not read as `1` implicitly aliased to `_000_000`.
+        // Digit-separator and hex-literal grammar *support* is deferred; for
+        // now the whole malformed blob becomes a single ERROR token so the
+        // parser surfaces a diagnostic instead of guessing at user intent.
+        // (DuckDB's own default grammar has no true hex-integer-literal
+        // syntax in this position either — `SELECT 0x1F` on DuckDB silently
+        // reads as `0` aliased to `x1F`; smelt refuses to reproduce that.
+        // DuckDB *does* treat `1_000_000` as a real numeric literal with no
+        // ambiguity, which is exactly the silent-split risk this guards.)
+        if self.current_char().is_alphabetic() || self.current_char() == '_' {
+            while self.current_char().is_alphanumeric() || self.current_char() == '_' {
+                self.advance();
+            }
+            return ERROR;
         }
 
         NUMBER

@@ -7043,6 +7043,142 @@ fn test_scientific_notation_number() {
 }
 
 #[test]
+fn number_followed_by_ident_without_space_errors() {
+    // Oracle: DuckDB does not have real hex-integer-literal grammar in this
+    // position either — `duckdb -c "SELECT 0x1F;"` prints a column named
+    // `x1F` with value `0` (i.e. DuckDB itself silently reads this as `0`
+    // implicitly aliased to `x1F`; a following `AS a` then fails as a
+    // syntax error, since the alias slot is already filled). smelt refuses
+    // to reproduce that silent split: the whole malformed blob must surface
+    // as a single ERROR token / parse error rather than being read as
+    // `0 AS x1F`.
+    //
+    // Oracle: `1_000_000` **is** a genuine numeric literal in DuckDB
+    // (`duckdb -c "SELECT 1_000_000 AS a, typeof(1_000_000);"` returns
+    // `a = 1000000`, `typeof = INTEGER`, no ambiguity with an alias).
+    // Digit-separator literal *support* is deferred grammar work; this
+    // phase only guarantees the lexer does not silently split it into `1`
+    // aliased to `_000_000`.
+    for (sql, blob) in [("SELECT 0x1F", "0x1F"), ("SELECT 1_000_000", "1_000_000")] {
+        let parse = parse(sql);
+        assert!(
+            !parse.errors.is_empty(),
+            "{sql:?} must produce a parse error, not a silent number+identifier split"
+        );
+
+        let error_tokens: Vec<_> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == crate::SyntaxKind::ERROR)
+            .collect();
+        assert!(
+            error_tokens.iter().any(|t| t.text() == blob),
+            "expected a single ERROR token spanning the whole blob {blob:?}, got: {:?}",
+            error_tokens
+        );
+
+        // Guard: the blob must never appear as a NUMBER token (i.e. it was
+        // never silently split into a shorter numeric prefix).
+        let numbers: Vec<String> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == NUMBER)
+            .map(|t| t.text().to_string())
+            .collect();
+        assert!(
+            !numbers.iter().any(|n| blob.starts_with(n.as_str())),
+            "{sql:?} must not split off a leading NUMBER token, got NUMBER tokens: {numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn is_not_distinct_from_parses() {
+    // `IS [NOT] DISTINCT FROM` is a standard SQL null-safe comparison; the
+    // planner's cube_split rule generates it in join conditions. Before the
+    // trailing-content check (fail-loud) landed, the parser silently
+    // absorbed the `DISTINCT FROM …` tail; it must now parse as part of the
+    // comparison, not error.
+    for sql in [
+        "SELECT 1 FROM a t0 JOIN b t1 ON t0.x IS NOT DISTINCT FROM t1.x",
+        "SELECT 1 FROM a t0 JOIN b t1 ON t0.x IS DISTINCT FROM t1.x",
+        "SELECT x IS NOT DISTINCT FROM y FROM t",
+    ] {
+        let parse = parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} must parse without errors, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn number_then_space_then_ident_is_alias() {
+    // Guard: whitespace before the identifier means this is a legitimate
+    // implicit alias (`expr alias`), not a malformed literal blob — the
+    // fail-loud check must not over-fire onto grammar the parser already
+    // recognises.
+    let (parse, select) = parse_select("SELECT 1 x");
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let item = select
+        .select_list()
+        .expect("select list")
+        .items()
+        .next()
+        .expect("one select item");
+    assert_eq!(item.alias(), Some("x".to_string()));
+}
+
+#[test]
+fn prefixed_string_literals_not_split() {
+    // Oracle: DuckDB accepts both forms as string literals without error —
+    // `duckdb -c "select E'a\nb', typeof(E'a\nb');"` returns a VARCHAR value
+    // (DuckDB additionally applies backslash-escape processing to the body,
+    // e.g. `\n` becomes a real newline — `length(E'a\nb') = 3`); and
+    // `duckdb -c "select B'0101', typeof(B'0101');"` likewise returns a
+    // VARCHAR value with no parse error. smelt must not silently split
+    // either form into an orphan `E`/`B` identifier followed by an
+    // unrelated string literal (which would misparse as `E` aliased next
+    // to a bare string, or read as two separate tokens with no connection
+    // to each other) — accepting the whole thing as one STRING token is
+    // preferred over erroring, and is what this phase implements.
+    for sql in ["SELECT E'\\n'", "SELECT B'0101'"] {
+        let parse = parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?}: expected the prefixed string literal to lex as one token \
+             (or, at minimum, no silent identifier+orphan-string split); got errors: {:?}",
+            parse.errors
+        );
+
+        // No lone `E`/`B` IDENT token immediately followed by a STRING
+        // token — that would be the silent split this phase forbids.
+        let tokens: Vec<_> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() != WHITESPACE)
+            .collect();
+        for w in tokens.windows(2) {
+            let split = w[0].kind() == IDENT
+                && (w[0].text() == "E"
+                    || w[0].text() == "e"
+                    || w[0].text() == "B"
+                    || w[0].text() == "b")
+                && w[1].kind() == crate::SyntaxKind::STRING;
+            assert!(
+                !split,
+                "{sql:?} must not silently split into an `{}` identifier followed by an orphan string token",
+                w[0].text()
+            );
+        }
+    }
+}
+
+#[test]
 fn test_postfix_cast_on_non_ident_primary() {
     // PostgreSQL-style `expr::type` must parse for non-IDENT primaries
     // (number, string, parenthesized expr, function-call result) into a

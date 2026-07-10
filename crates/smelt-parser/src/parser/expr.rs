@@ -243,7 +243,7 @@ impl<'a> super::Parser<'a> {
                 }
                 self.finish_node();
             } else if self.at(IS_KW) {
-                // IS [NOT] NULL
+                // IS [NOT] NULL  |  IS [NOT] DISTINCT FROM expr
                 self.start_node_at(checkpoint, BINARY_EXPR);
                 self.advance(); // consume IS
                 self.skip_trivia();
@@ -253,6 +253,13 @@ impl<'a> super::Parser<'a> {
                 }
                 if self.at(NULL_KW) {
                     self.advance(); // consume NULL
+                } else if self.at(DISTINCT_KW) {
+                    // Null-safe comparison: `a IS [NOT] DISTINCT FROM b`.
+                    self.advance(); // consume DISTINCT
+                    self.skip_trivia();
+                    self.expect(FROM_KW);
+                    self.skip_trivia();
+                    self.parse_collate_expr(); // right operand
                 }
                 self.finish_node();
             } else if self.at(BETWEEN_KW) {
