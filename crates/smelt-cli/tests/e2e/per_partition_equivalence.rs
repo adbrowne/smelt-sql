@@ -996,3 +996,209 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
          only in B (first 10): {only_in_b:?}"
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: silver/events_enriched — event-grain narrow update at model-upstream
+// creation cells
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `docs/plans/20260710-web-analytics-maintenance-demo.md` Phase 7:
+// `silver/events_enriched` joins `silver.events_parsed` and `silver.sessions`
+// (two maintained-model upstreams) back onto the event grain, `grain:
+// partition` on `event_date`. Its creation cells are clamped by each
+// upstream's own derived reach (`docs/specs/maintenance_plan.md` §"Upstream
+// model edges") — see `crates/smelt-cli/tests/explain_model.rs
+// ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
+// static evidence. These tests exercise the *dynamic* consequence on a real
+// fixture: incremental equals full rebuild, and a run touching one arrival
+// day only ever changes `event_date` partitions within the derived window.
+
+/// One row from `main.silver_events_enriched`, keyed for equivalence checks.
+type EventEnrichedRow = (i64, Option<String>, Option<String>); // (event_id, session_id, session_utm_campaign)
+
+/// Every `silver.events_enriched` row grouped by its `event_date` partition.
+fn query_events_enriched_by_partition(
+    db_path: &Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<EventEnrichedRow>> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign \
+             FROM main.silver_events_enriched",
+        )
+        .unwrap_or_else(|e| panic!("prepare events_enriched query: {e}"));
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .unwrap_or_else(|e| panic!("query events_enriched rows: {e}"))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| panic!("collect events_enriched rows: {e}"));
+
+    let mut by_partition: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<EventEnrichedRow>,
+    > = std::collections::BTreeMap::new();
+    for (event_date, event_id, session_id, session_utm_campaign) in rows {
+        by_partition.entry(event_date).or_default().insert((
+            event_id,
+            session_id,
+            session_utm_campaign,
+        ));
+    }
+    by_partition
+}
+
+/// Day-by-day incremental build of `silver.events_enriched` equals a
+/// full-window rebuild exactly, per partition — the per-partition
+/// equivalence contract (`docs/specs/incremental_models.md`) applied to a
+/// model whose creation trigger reads two model upstreams rather than a
+/// single source.
+#[test]
+fn web_analytics_events_enriched_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "enriched-pipeline-A",
+    );
+    let by_partition_a = query_events_enriched_by_partition(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("enriched-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let by_partition_b = query_events_enriched_by_partition(&db_path);
+
+    assert!(
+        !by_partition_a.is_empty(),
+        "Pipeline A produced no silver.events_enriched rows"
+    );
+    assert_eq!(
+        by_partition_a.keys().collect::<Vec<_>>(),
+        by_partition_b.keys().collect::<Vec<_>>(),
+        "silver.events_enriched partition sets (event_date) differ between \
+         full rebuild and day-by-day replay"
+    );
+
+    let mut mismatches = Vec::new();
+    for (partition, rows_a) in &by_partition_a {
+        let rows_b = by_partition_b.get(partition);
+        if rows_b != Some(rows_a) {
+            mismatches.push(format!(
+                "  partition {partition}: A has {} rows, B has {:?} rows",
+                rows_a.len(),
+                rows_b.map(|r| r.len())
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "silver.events_enriched differs between full rebuild and day-by-day \
+         replay on at least one partition:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Snapshot `silver.events_enriched`'s partitions after a day-by-day replay
+/// through day 6, then run one additional arrival day (day 7) and assert the
+/// change is exactly narrow: `event_date`'s output partition column is not
+/// write-rebased by either upstream edge (`silver.events_parsed`'s own
+/// creation-cell clamp is `Bounded(0,0)` — a direct 1:1 read — and
+/// `silver.sessions`'s ±1-day session-cap clamp only widens the *read*, not
+/// the write footprint; see `crates/smelt-cli/tests/explain_model.rs
+/// ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
+/// static clamp evidence), so a single-day run touches exactly its own
+/// `event_date` partition and no other. Verified empirically against the
+/// real fixture: running the day-7 window changes only the 2026-03-25
+/// partition; every one of the six previously-written partitions
+/// (2026-03-19 .. 2026-03-24) is byte-identical before and after. Asserted
+/// on observed partition contents (row sets), never on implementation logs.
+#[test]
+fn web_analytics_events_enriched_narrow_update() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+    repopulate_sources(&db_path, &setup_abs);
+
+    // Replay the first 6 of the 7 configured days (2026-03-19 .. 2026-03-25).
+    let (initial_windows, remaining_windows) = DAY_WINDOWS.split_at(DAY_WINDOWS.len() - 1);
+    for (ws, we) in initial_windows {
+        smelt_run(&workspace, ws, we, &format!("narrow-before [{ws}..{we})"));
+    }
+    let before = query_events_enriched_by_partition(&db_path);
+    assert!(
+        !before.is_empty(),
+        "no silver.events_enriched rows after the initial 6-day replay"
+    );
+    assert_eq!(
+        before.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "2026-03-19",
+            "2026-03-20",
+            "2026-03-21",
+            "2026-03-22",
+            "2026-03-23",
+            "2026-03-24",
+        ],
+        "unexpected partition set after the initial 6-day replay"
+    );
+
+    // Run the one additional arrival day (day 7: 2026-03-25 .. 2026-03-26).
+    for (ws, we) in remaining_windows {
+        smelt_run(&workspace, ws, we, &format!("narrow-after [{ws}..{we})"));
+    }
+    let after = query_events_enriched_by_partition(&db_path);
+
+    // Exactly one new partition appears (2026-03-25), and every
+    // previously-written partition is byte-identical.
+    assert_eq!(
+        after.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "2026-03-19",
+            "2026-03-20",
+            "2026-03-21",
+            "2026-03-22",
+            "2026-03-23",
+            "2026-03-24",
+            "2026-03-25",
+        ],
+        "expected exactly one new partition (2026-03-25) after the additional \
+         arrival day"
+    );
+
+    let mut unexpected_changes = Vec::new();
+    for partition in before.keys() {
+        if before.get(partition) != after.get(partition) {
+            unexpected_changes.push(partition.clone());
+        }
+    }
+    assert!(
+        unexpected_changes.is_empty(),
+        "narrow update touched previously-written partition(s) it should not \
+         have (a run touching only 2026-03-25 must not rewrite earlier \
+         partitions): {unexpected_changes:?}"
+    );
+}

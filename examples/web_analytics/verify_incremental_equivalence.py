@@ -43,6 +43,11 @@ campaign among its own events within the first 5 minutes of session start
 sessions exceed the explicit max-session-length cap, and the session count
 agrees across both pipelines.
 
+Also asserts `silver.events_enriched`'s event-grain enrichment: the set of
+`(event_id, session_id, session_utm_campaign)` rows per `event_date`
+partition matches exactly between the full-window rebuild and the
+day-by-day replay.
+
 Requires `smelt-datagen`, `smelt`, `duckdb` on PATH; Python 3.9+.
 """
 
@@ -298,6 +303,52 @@ def assert_session_attribution_and_cap(stats_a: dict, stats_b: dict) -> None:
         sys.exit(1)
 
 
+def query_events_enriched_by_partition() -> dict[str, set[tuple]]:
+    """`(event_id, session_id, session_utm_campaign)` rows grouped by
+    `event_date` partition, from the *current* `target/dev.duckdb`. Call
+    right after a pipeline finishes, before the next `reset_target()` wipes
+    the database."""
+    rows = query_json(
+        "SELECT event_date::VARCHAR AS event_date, event_id, session_id, "
+        "session_utm_campaign FROM main.silver_events_enriched"
+    )
+    by_partition: dict[str, set[tuple]] = {}
+    for row in rows:
+        by_partition.setdefault(row["event_date"], set()).add(
+            (row["event_id"], row["session_id"], row["session_utm_campaign"])
+        )
+    return by_partition
+
+
+def assert_events_enriched_matches(
+    by_partition_a: dict[str, set[tuple]], by_partition_b: dict[str, set[tuple]]
+) -> None:
+    """`silver.events_enriched` must match exactly, partition by partition,
+    between the full-window rebuild and the day-by-day replay — its
+    creation cells over both model upstreams (`silver.events_parsed`,
+    `silver.sessions`) are `RecomputeRegion`/`DeleteInsert`, so per-partition
+    equivalence is the hard invariant."""
+    failures: list[str] = []
+    if by_partition_a.keys() != by_partition_b.keys():
+        failures.append(
+            f"partition sets differ: A={sorted(by_partition_a)} "
+            f"B={sorted(by_partition_b)}"
+        )
+    for partition, rows_a in by_partition_a.items():
+        rows_b = by_partition_b.get(partition, set())
+        if rows_a != rows_b:
+            failures.append(
+                f"partition {partition}: {len(rows_a)} rows in A, "
+                f"{len(rows_b)} rows in B (row sets differ)"
+            )
+    if failures:
+        print()
+        print("=== EVENTS_ENRICHED MISMATCH (UNEXPECTED) ===")
+        for f in failures:
+            print(f"  {f}")
+        sys.exit(1)
+
+
 def assert_dedup_and_lateness(stats_a: dict, stats_b: dict) -> None:
     """`silver.events_parsed`'s redelivery-dedup and 3-day late-window
     acceptance invariants, checked on both pipelines."""
@@ -350,6 +401,7 @@ def main() -> int:
     )
     stats_a = query_events_parsed_stats()
     session_stats_a = query_session_stats()
+    events_enriched_a = query_events_enriched_by_partition()
 
     reset_target()
     setup_sources()
@@ -360,6 +412,7 @@ def main() -> int:
     )
     stats_b = query_events_parsed_stats()
     session_stats_b = query_session_stats()
+    events_enriched_b = query_events_enriched_by_partition()
 
     # The local columns must match exactly.  This is the hard invariant the
     # day-by-day pipeline preserves.
@@ -372,6 +425,10 @@ def main() -> int:
     # silver.sessions's campaign-attribution and max-session-length
     # invariants must hold identically in both pipelines.
     assert_session_attribution_and_cap(session_stats_a, session_stats_b)
+
+    # silver.events_enriched's event-grain enrichment must match exactly,
+    # partition by partition.
+    assert_events_enriched_matches(events_enriched_a, events_enriched_b)
 
     # Global columns are expected to differ — that's the "as-of-day-D" property
     # of incremental pipelines with global identity.  Print a summary so the

@@ -114,9 +114,11 @@ bronze/raw_events                  (table; passthrough)
   └── silver/events_parsed         (INCR by event_date)
         ├── silver/sessions        (INCR by session_start_date; 1-day lookback)
         │     └── gold/identity_forward_only         (INCR by session_start_date)
-        └── silver/device_user_edges                 (refresh: keyed)
-              ├── gold/identity_backward_fill        (view; rebuilt on query)
-              └── gold/identity_connected_components (view; rebuilt on query)
+        ├── silver/device_user_edges                 (refresh: keyed)
+        │     ├── gold/identity_backward_fill        (view; rebuilt on query)
+        │     └── gold/identity_connected_components (view; rebuilt on query)
+        ├── silver/events_enriched (INCR by event_date) ← silver/sessions
+        │     (event-grain: session_id + session-attributed utm_campaign)
         ↓
         gold/eventstream_with_identity (INCR by event_date)
               ├── marts/daily_active_users_by_method (INCR by event_date)
@@ -131,6 +133,7 @@ Source files:
 - [`models/silver/sessions.sql`](models/silver/sessions.sql) +
   [`functions/sessionize.sql`](functions/sessionize.sql) (bounded cross-midnight sessionization — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
 - [`models/silver/device_user_edges.sql`](models/silver/device_user_edges.sql)
+- [`models/silver/events_enriched.sql`](models/silver/events_enriched.sql) (see [Event-grain enrichment](#event-grain-enrichment))
 - [`models/gold/identity_forward_only.sql`](models/gold/identity_forward_only.sql)
 - [`models/gold/identity_backward_fill.sql`](models/gold/identity_backward_fill.sql)
 - [`models/gold/identity_connected_components.sql`](models/gold/identity_connected_components.sql)
@@ -148,6 +151,7 @@ plain (non-incremental) table, and the rest are views.
 | `silver/events_parsed`                        | INCR table          | `event_date`         |
 | `silver/sessions`                             | INCR table          | `session_start_date` |
 | `silver/device_user_edges`                    | table + refresh: keyed | (driven by source)   |
+| `silver/events_enriched`                      | INCR table          | `event_date`         |
 | `gold/identity_forward_only`                  | INCR table          | `session_start_date` |
 | `gold/eventstream_with_identity`              | INCR table          | `event_date`         |
 | `marts/daily_active_users_by_method`          | INCR table          | `event_date`         |
@@ -278,6 +282,42 @@ first 5 minutes count, mirroring first-touch campaign attribution in
 production analytics pipelines. Because the 5-minute attribution window sits
 well inside the `max_session_length` cap, it never needs a wider source read
 than the sessionization already declares.
+
+### Event-grain enrichment
+
+`silver/events_enriched` demonstrates a maintenance-plan creation cell over
+**two** maintained-model upstreams in the same body, rather than one. It
+joins every `silver/events_parsed` row to its `silver/sessions` row (the same
+join shape `gold/eventstream_with_identity` uses, with the same 1-day
+session-cap Form B filter widening the `sessions` read across midnight) and
+projects `session_id` plus the session-attributed `utm_campaign` — the
+first-touch campaign `silver/sessions` resolves — alongside the event's own
+raw `utm_campaign`, so the two can be compared row-by-row.
+
+`smelt explain silver.events_enriched` shows one creation cell per model
+upstream, each carrying the clamp derived from that edge
+(`docs/specs/maintenance_plan.md` §"Upstream model edges"):
+
+```
+  - group {*} on trigger NewData { source: "silver.events_parsed" }
+      scan clamps:
+        - source=silver.events_parsed column=event_date before=Seconds(0) after=Seconds(0)
+  - group {*} on trigger NewData { source: "silver.sessions" }
+      scan clamps:
+        - source=silver.sessions column=session_start_date before=Seconds(86400) after=Seconds(86400)
+```
+
+`events_parsed`'s edge is a direct 1:1 read (`event_date` is this model's own
+partition column, unfiltered against that upstream) — a `Bounded(0,0)` clamp.
+`sessions`'s edge carries the same ±1-day clamp as its own session-cap Form B
+filter — the downstream's scan reach over that ref, expressed in the
+upstream's own clock. Because neither edge write-rebases the output
+partition column, a run touching one `event_date` partition only ever writes
+that partition here: running one additional arrival day changes exactly its
+own `event_date` partition and leaves every previously-written partition
+byte-identical
+(`crates/smelt-cli/tests/e2e/per_partition_equivalence.rs
+::web_analytics_events_enriched_narrow_update`).
 
 ## Run locally
 
@@ -448,6 +488,15 @@ cases rather than aggregate statistics.
   (`raw ≤ forward_only ≤ backward_fill ≤ connected_components`) and the
   per-day `dau_*` shape including the cluster-collapse case where
   `dau_connected_components < dau_backward_fill` (Day 2 of the fixture).
+- `silver/events_enriched`'s event-grain enrichment (join correctness,
+  per-partition equivalence, and the model-upstream creation-cell narrow
+  update) is covered end-to-end by
+  `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs
+  ::web_analytics_events_enriched_matches_full_rebuild` and
+  `::web_analytics_events_enriched_narrow_update`,
+  `crates/smelt-cli/tests/explain_model.rs
+  ::events_enriched_shows_creation_cells_for_both_model_upstreams`, and by
+  `verify_incremental_equivalence.py`'s events_enriched assertion.
 
 ## Known divergences
 

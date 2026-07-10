@@ -74,8 +74,8 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
 | 3     | done     | d6effc7a | 2026-07-10 |
 | 4     | done     | 12ea3508 | 2026-07-11 |
 | 5     | done     | 23ef99ce | 2026-07-11 |
-| 6     | done     |        | 2026-07-11 |
-| 7     | pending  |        |      |
+| 6     | done     | 8fe2e313 | 2026-07-11 |
+| 7     | done     |        | 2026-07-11 |
 | 8     | pending  |        |      |
 
 ---
