@@ -1,7 +1,7 @@
 ---
 feature: model_transforms
 status: experimental
-last_reviewed: 2026-07-04
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
@@ -46,7 +46,8 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
-| Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[start − k − offset, end)`, clamp output to `[start, end)`: read the margin, never re-write it | **built** |
+| Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
+| Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | unbuilt |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
@@ -98,16 +99,44 @@ column name (a self-referential model, two same-named timeseries sources), and
 it filters output *rows*, evaluated after any window function the outermost
 `SELECT` computes. The clamp column is an **unqualified** column of the model's
 output schema; a qualified (dotted) name is rejected — an inner-alias
-qualifier is definitionally out of scope in the wrapping projection. When the
-model has a **finite frame reach `k`** (a `RANGE … INTERVAL` window, an
-interval join), the two-layer widened-scan reads `[start − k − offset, end)` —
-wide enough to compute the window correctly at the left edge — while the output
-clamp still restricts writes to `[start, end)`: the margin is *read but never
-re-written*, which is what keeps the result partition-equivalent. For the
-transparent single-source, zero-margin case the pushdown filter *is* the clamp
-(same window by construction) and the outer clamp is dropped as textually
-redundant. UNION-branch wrap-and-filter is the same pushdown distributed
-independently over each set-operation branch.
+qualifier is definitionally out of scope in the wrapping projection.
+
+**The output window is derived, never assumed.** The window the two clamps
+share — the **output window**, the partition range this run writes — is a
+function of the run window and the model's declared time relations, not the
+run window verbatim:
+
+- **Identity (the common case).** When the `partition_column` tracks the
+  event time driving new data (the same column, or a pure truncation of it),
+  new rows land in the partitions of their own window: `output window = run
+  window`.
+- **Skew inversion (derived `partition_column`).** When the `partition_column`
+  is *derived* and can skew away from the driving date column — declared by a
+  Form B relation in the model's SQL, `driving_date BETWEEN partition_column −
+  before AND partition_column + after` — new data in `[start, end)` can change
+  partitions outside the run window. The output window is the relation's
+  **inversion**: `[start − after, end + before)`. A session model partitioned
+  by `session_start_date` under a 1-day cap (`before = after = 1 day`) run for
+  `[D, D+1)` therefore has output window `[D−1, D+2)`: an event on day `D`
+  extending a session rooted on `D−1` rewrites the `D−1` partition in the
+  same run. A side of the inversion the data can never realise (here the
+  leading day: a session cannot start after its own events) simply recomputes
+  to an unchanged partition — the derivation stays purely declarative.
+
+When the model has a **finite frame reach `k`** (a `RANGE … INTERVAL` window,
+an interval join), the two-layer widened-scan reads a margin **relative to the
+derived output window** — `[out_start − k − offset, out_end + k′)` — wide
+enough to recompute *every written partition* correctly at its own edges,
+while the output clamp restricts writes to exactly `[out_start, out_end)`:
+the margin is *read but never re-written*, which is what keeps the result
+partition-equivalent. Sizing the scan from the run window instead of the
+derived output window would rewrite a skew-reached neighbour partition from
+a scan too narrow for *its* reach — the corruption the exact-clamp split
+exists to prevent. For the transparent single-source, zero-margin,
+zero-skew case the pushdown filter *is* the clamp (same window by
+construction) and the outer clamp is dropped as textually redundant.
+UNION-branch wrap-and-filter is the same pushdown distributed independently
+over each set-operation branch.
 
 **Hidden decomposed state + presentation view.** The stored column is a monoid
 element that is not itself the user value; the user value is a pure function
@@ -229,11 +258,31 @@ rungs 1–4 of the algebraic ladder; delegate-to-native-IVM is what lies beyond 
 The ladder itself (its ordering and cutoff) is owned by `maintenance_plan.md`;
 this spec only realises each rung as a physical transform.
 
-**Rejected: auto-widening the write window.** An earlier runtime widened the
-*written* partition range to cover a window's lookback rather than only widening
-the *scan*. That double-counts at partition edges and is being redesigned into the
-two-layer widened-scan/exact-clamp split (read the margin, write only the window).
-The write window must equal the output window; only the scan may be wider.
+**Rejected: auto-widening the write window to the scan margin.** An earlier
+runtime widened the *written* partition range to cover a window's lookback
+rather than only widening the *scan*. That double-counts at partition edges and
+was redesigned into the two-layer widened-scan/exact-clamp split (read the
+margin, write only the window). The write window must equal the output window;
+only the scan may be wider. This rejection is **not** a rejection of the
+output-window derivation (§Semantics): a skew-inverted output window is not a
+widened write — it is the *correct* output window, with each written
+partition's scan sized from that window's own reach. The two are distinguished
+by what sizes what: margin-widening let the *scan bound* leak into the write
+range (wrong direction); derivation computes the write range from the declared
+relation and then sizes the scan from it (right direction).
+
+**Derived output window composes with chunking; it never forces one wide
+write.** Controlling per-query write size is a first-class production concern:
+a job with a multi-day skew or lookback is routinely run as several sequential
+bounded updates rather than one large one. The derived output window is a
+*range to be covered*, not a mandate for a single statement — backfill
+chunking (`batched_models.md` §"First-run and backfill") splits it into
+sequential DELETE+INSERT pairs exactly as it splits a wide run window, each
+chunk's scan sized from that chunk's own reach. *Scheduling a separate re-run
+of the earlier calendar window* was rejected as the primitive: a calendar-window
+re-run is a whole-DAG event (and is refused outright by non-idempotent keyed
+models' reconciliation ledger), whereas the skew is a per-model fact — deriving
+the output window applies it exactly where it holds and nowhere else.
 
 ## Constraints & Invariants
 
@@ -244,6 +293,12 @@ The write window must equal the output window; only the scan may be wider.
   silent fallback to a default.
 - **Write window = output window; scan window ⊇ output window.** Any widened-scan
   transform may read a margin but must clamp writes to exactly the output window.
+  The output window is **derived** from the run window via the model's declared
+  partition-column relation (identity when the partition column tracks event
+  time; skew-inverted under a Form B relation on a derived partition column —
+  §Semantics "The output window is derived, never assumed"), and every written
+  partition's scan is sized from the derived output window's reach, never from
+  the run window's.
 - **`merge_into` requires a monoid rung; reprocessing requires invertibility.**
   A non-invertible combiner under reprocessing is refused (or routed to full
   refresh), never merged approximately.
@@ -304,6 +359,20 @@ by `docs/plans/20260704-model-updates.md` (design:
   timeseries sources), and the window-function hazard where a same-level
   `WHERE` filtered the rows *feeding* a bare outermost window function,
   undercutting its widened-scan margin.
+- **Output-window derivation is unbuilt; the runtime pins output window = run
+  window.** `smelt-runtime`'s execute loop builds both the DELETE range and the
+  `_smelt_output_clamp` from the batch's run window verbatim, with no skew
+  inversion — a model with a derived, skewing `partition_column` (a Form B
+  relation such as `event_date BETWEEN session_start_date − INTERVAL '1 day'
+  AND session_start_date + INTERVAL '1 day'`) silently under-writes: the run
+  that receives the skew-reaching data computes the correct row for the
+  neighbour partition (the scan *is* widened) and then clamps it away, and no
+  later run is entitled to write that partition either. Observable divergence:
+  `examples/web_analytics` `silver.sessions` under single-day replay — a
+  cross-midnight session keeps its stale prior-day row (root-caused with a
+  deterministic repro in `docs/plans/20260710-web-analytics-maintenance-demo.md`
+  §"Deferred during implementation"). Tracked in
+  `docs/plans/20260711-derived-output-window.md`.
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
