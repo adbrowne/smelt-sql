@@ -222,13 +222,6 @@ of `silver.events_parsed` by the same one-day cap so a session that starts
 late one day and crosses midnight is reconstructed as a single row rather
 than split at the partition boundary.
 
-`silver.sessions` composes its sessionization through the reusable
-`smelt.functions.sessionize` transparent function; `explain --show-sql`'s
-output clamp injection does not yet see through a function call sitting at
-the top of a model's `FROM` clause, so no statements print for this model
-today — the maintenance plan itself (grain, technique, scan clamps) is
-still fully derived and reported, and a real run still executes correctly.
-
 {sessions_sql}
 
 ## Event-grain enrichment and upstream-model edges: `silver.events_enriched`

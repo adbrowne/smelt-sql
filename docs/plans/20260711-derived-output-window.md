@@ -67,8 +67,8 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 |-------|----------|--------|------|
 | 1     | done     | f5144f69 | 2026-07-11 |
 | 2     | done     | fe7f13c5 | 2026-07-11 |
-| 3     | done     |        | 2026-07-11 |
-| 4     | pending  |        |      |
+| 3     | done     | 98813033 | 2026-07-11 |
+| 4     | done     |        | 2026-07-11 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -265,6 +265,9 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **(Phase 2) Skew-anchor matching is name-only** — a table-qualified Form B anchor on a foreign table (`b.d`) matches a model partition column named `d`, deriving a spurious over-wide (correctness-safe, never under-wide) output window. Documented in `docs/specs/model_transforms.md` §Known Divergences; a precise fix needs the anchor proven to be the model's own output column. Evidence: `crates/smelt-cli/tests/since_upstream.rs` fixture rename.
+- **(Phase 4) `SqlCompiler::apply_type_casts` is silently inert on every clamped incremental statement** — the output clamp always makes the outermost query a bare `SELECT *`, which `apply_type_casts` (`crates/smelt-runtime/src/compile.rs`) never wraps, so the static `CAST(col AS T)` machinery never applies to a real incremental run's executed statement. Pre-existing, confirmed independent of this plan (live run and explain now agree). Needs its own investigation/plan.
 
 ## Verification
 

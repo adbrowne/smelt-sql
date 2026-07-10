@@ -452,6 +452,9 @@ async fn explain_maintenance_plan(
 
     let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
     let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
+    // Kept for the `--period` output-window derivation below (`expand_function_calls`
+    // needs its own copy); `set_function_bodies_all` takes the registry's copy by value.
+    let fn_bodies_for_windowing = fn_bodies.clone();
     registry.set_function_bodies_all(fn_bodies);
 
     // Wire real upstream-column typing so `apply_type_casts` sees the
@@ -511,6 +514,28 @@ async fn explain_maintenance_plan(
         None => smelt_cli::explain::RegionLiterals::Placeholders,
     };
 
+    // When a concrete `--period` was given, derive the **output window**
+    // (`docs/specs/model_transforms.md` §Semantics "The output window is
+    // derived, never assumed") the same way a live run's `build_model_plans`
+    // does — identity for a plain `partition_column`, skew-inverted when the
+    // model's own SQL declares a Form B relation between the partition
+    // column and its driving date column — plus the per-source scan margin a
+    // `Technique::DeleteInsert` cell's read must widen by. `--period` names
+    // the *run* window a real invocation would be given; the statements
+    // `--show-sql` reports must reflect what that run actually reads/writes,
+    // not the literal text typed on the command line.
+    let derived_window = match &args.period {
+        Some(_) => build_derived_window(
+            &config,
+            model,
+            &canonical,
+            &source_timeseries,
+            &fn_bodies_for_windowing,
+            &region,
+        )?,
+        None => None,
+    };
+
     let statements = smelt_cli::explain::build_all_cell_statements(
         &result.plan.cells,
         model,
@@ -522,6 +547,7 @@ async fn explain_maintenance_plan(
         &unique_key,
         &source_timeseries,
         &region,
+        derived_window.as_ref(),
     );
 
     if args.json {
@@ -555,6 +581,113 @@ fn backend_type_to_maintenance_dialect(
         smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
     };
     smelt_backend::maintenance_dialect(dialect)
+}
+
+/// Derive the `--period`-relative output window + per-source scan margin a
+/// `Technique::DeleteInsert` cell's statements are built from
+/// (`smelt_cli::explain::DerivedWindow`), by calling the exact same
+/// single-owner windowing derivation a live run's `build_model_plans` uses
+/// (`smelt_runtime::windowing::compute_incremental_windows`,
+/// `docs/specs/model_transforms.md` §Semantics "The output window is
+/// derived, never assumed"). Returns `Ok(None)` for a model with no
+/// `timeseries:`/`incremental:` declared (nothing to derive; the caller's
+/// `Technique::DeleteInsert` branch itself already refuses those with a
+/// clear reason) or an empty `--period` range.
+fn build_derived_window(
+    config: &Config,
+    model: &smelt_core::ModelFile,
+    canonical: &str,
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    fn_bodies: &smelt_runtime::FnBodyMap,
+    region: &smelt_cli::explain::RegionLiterals,
+) -> Result<Option<smelt_cli::explain::DerivedWindow>> {
+    let smelt_cli::explain::RegionLiterals::Period { start, end } = region else {
+        return Ok(None);
+    };
+
+    let metadata = model.metadata.as_deref();
+    let frontmatter = Frontmatter::parse(&model.content);
+    let Some(ts) = config
+        .get_timeseries_with_metadata(canonical, metadata)
+        .cloned()
+        .or_else(|| metadata.and_then(|m| m.timeseries.clone()))
+    else {
+        return Ok(None);
+    };
+    let Some(inc) = config
+        .get_incremental_with_metadata(canonical, metadata)
+        .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()))
+    else {
+        return Ok(None);
+    };
+
+    let data_latency_days = metadata
+        .and_then(|m| m.columns.get(&ts.event_time_column))
+        .and_then(|c| c.data_latency.as_ref())
+        .map(|l| l.to_days())
+        .unwrap_or(0);
+
+    // Own `smelt.ref()` list, restricted to sources this model actually
+    // depends on — mirrors `execute.rs::build_model_plans`'s `dep_ts`
+    // construction exactly (`source_timeseries` also carries this model's
+    // own frontmatter `timeseries:` entry, which must be excluded or it
+    // inflates the map with a spurious self-entry).
+    let model_ref_paths: std::collections::HashSet<String> = model
+        .refs
+        .iter()
+        .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+        .collect();
+    let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
+        .iter()
+        .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
+        .filter_map(|(smelt_ref, ts_cfg)| {
+            let path = smelt_ref.strip_prefix("smelt.")?;
+            let segs: Vec<String> = path.split('.').map(String::from).collect();
+            Some((smelt_ref.clone(), (segs, ts_cfg.partition_column.clone())))
+        })
+        .collect();
+
+    // Bound derivation (both the skew classifier and the temporal-dependency
+    // scan-widening classifier) must see a `smelt.define` function body's own
+    // `RANGE BETWEEN INTERVAL` frames — expand exactly as
+    // `build_explain_output`/`build_model_plans` already do.
+    let expanded_sql = smelt_runtime::expand_function_calls(&model.content, fn_bodies);
+
+    let full_range = smelt_runtime::TimeRange {
+        start: start.clone(),
+        end: end.clone(),
+    };
+
+    let windows = smelt_runtime::windowing::compute_incremental_windows(
+        &ts,
+        &inc,
+        &expanded_sql,
+        &dep_ts,
+        data_latency_days,
+        &full_range,
+        None,
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to derive the output window for '{canonical}': {e}"))?;
+
+    let Some((output_start, output_end)) = windows
+        .batches
+        .iter()
+        .map(|b| (b.partition_start, b.partition_end))
+        .reduce(|(acc_start, acc_end), (s, e)| (acc_start.min(s), acc_end.max(e)))
+    else {
+        return Ok(None);
+    };
+
+    let scan_bounds = smelt_runtime::build_model_source_bounds(model, source_timeseries, canonical);
+
+    Ok(Some(smelt_cli::explain::DerivedWindow {
+        output_start: output_start.format("%Y-%m-%d").to_string(),
+        output_end: output_end.format("%Y-%m-%d").to_string(),
+        scan_bounds,
+        skew: windows.skew,
+        run_start: chrono::Utc::now(),
+    }))
 }
 
 /// Parse `--period <start>..<end>` (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive)

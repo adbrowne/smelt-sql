@@ -1792,7 +1792,12 @@ fn maintenance_dialect_for_target(
 /// batch's read + write. Mirrors the real run's own inline derivation so the
 /// dry-run statement-emission branch clamps a batch identically to a live run
 /// (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements").
-fn build_model_source_bounds(
+///
+/// `pub`: also reused by `smelt-cli`'s `explain --show-sql` statement
+/// emission (`crates/smelt-cli/src/commands/explain.rs`), which must derive a
+/// cell's per-source scan margin identically to a live run — the single-owner
+/// derivation this function already is, never re-implemented at the call site.
+pub fn build_model_source_bounds(
     model_file: &smelt_core::ModelFile,
     source_timeseries: &smelt_planner::SourceTimeseriesMap,
     model_name: &str,
@@ -1842,7 +1847,13 @@ fn build_model_source_bounds(
 /// when there is exactly one zero-margin source, so the outer clamp stays
 /// load-bearing (`docs/specs/model_transforms.md` §Semantics "Source-filter
 /// pushdown + the two clamps").
-fn derive_batch_filtered_sql(
+///
+/// `pub`: `smelt-cli`'s `explain --show-sql` statement emission
+/// (`crates/smelt-cli/src/commands/explain.rs`) calls this directly so the
+/// statements it reports for a `--period`-derived window are built by the
+/// exact same single-owner derivation a live run uses — never a second,
+/// hand-rolled clamp/pushdown composition at the CLI call site.
+pub fn derive_batch_filtered_sql(
     clean_sql: &str,
     partition_col: &str,
     per_model_source_bounds: &HashMap<String, crate::transformer::SourceBound>,

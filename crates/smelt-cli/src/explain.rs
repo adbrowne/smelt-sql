@@ -239,6 +239,39 @@ impl RegionLiterals {
     }
 }
 
+/// The `--period`-derived output window and per-source scan margin a
+/// `Technique::DeleteInsert` cell's statements are built from — computed once
+/// per `--show-sql` invocation (in `commands/explain.rs`, the only caller)
+/// via `smelt_runtime::windowing::compute_incremental_windows`, the same
+/// single-owner skew-inversion derivation a live run's `build_model_plans`
+/// uses (`docs/specs/model_transforms.md` §Semantics "The output window is
+/// derived, never assumed"). `None` when no `--period` was given (the
+/// symbolic-placeholder report), in which case the DeleteInsert branch falls
+/// back to the placeholder literals with no derivation (there is no concrete
+/// date to derive a skew inversion from).
+pub struct DerivedWindow {
+    /// The derived output window's inclusive start (`%Y-%m-%d`) — identity to
+    /// the requested `--period` start for an identity `partition_column`,
+    /// skew-inverted (earlier) otherwise.
+    pub output_start: String,
+    /// The derived output window's exclusive end (`%Y-%m-%d`).
+    pub output_end: String,
+    /// Per-upstream-source scan margin (`smelt_runtime::build_model_source_bounds`),
+    /// the input `derive_batch_filtered_sql` widens the read by, relative to
+    /// the output window above — the two-layer widened-scan
+    /// (`docs/specs/model_transforms.md` §Semantics "Source-filter pushdown +
+    /// the two clamps").
+    pub scan_bounds: std::collections::HashMap<String, SourceBound>,
+    /// The model's own derived partition-column skew bound
+    /// (`IncrementalWindows::skew`) — reused, never re-derived, by
+    /// `derive_batch_filtered_sql`'s transparent-slice fast-path gate.
+    pub skew: smelt_logical::analysis::source_bounds::Skew,
+    /// The clock-pin literal `derive_batch_filtered_sql` freezes
+    /// run-deterministic calls (`NOW()`, …) to. `--show-sql` has no real run
+    /// clock, so this is simply the report's own build time.
+    pub run_start: chrono::DateTime<chrono::Utc>,
+}
+
 /// One cell's `--show-sql` statement report: the cell it belongs to
 /// (by index into `MaintenancePlanResult.plan.cells`) and either the
 /// emitted [`StatementGroup`] or a plain-language reason none could be
@@ -287,6 +320,7 @@ pub fn build_cell_statement_group(
     unique_key: &[String],
     source_timeseries: &smelt_planner::SourceTimeseriesMap,
     region: &RegionLiterals,
+    derived: Option<&DerivedWindow>,
 ) -> Result<StatementGroup, String> {
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let table_name = format!("{schema}.{}", model.db_name_owned());
@@ -304,27 +338,86 @@ pub fn build_cell_statement_group(
                         .to_string()
                 })?;
 
-            let compiled = registry
-                .get(target)
-                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
-                .map_err(|e| format!("failed to compile model body: {e}"))?;
+            // Inject the output clamp on the model's own (uncompiled) SQL
+            // *before* compiling — the same order the live run uses
+            // (`derive_batch_filtered_sql` clamps `clean_sql` — the raw model
+            // body — then compiles the clamped text;
+            // `docs/specs/model_transforms.md` §Semantics "Source-filter
+            // pushdown + the two clamps"). `inject_time_filter` only needs
+            // the model's own outermost FROM clause, which is a plain
+            // CTE/table reference regardless of what a nested CTE's FROM
+            // contains, so clamping the raw body is always safe. Clamping
+            // the *compiled* SQL instead (the previous order here) fed
+            // `inject_time_filter`'s reparse a FROM position that the
+            // compiler's printer had already expanded — for a model whose
+            // FROM is a `TableExpr`-returning function call
+            // (`smelt.functions.f(...)`), that expansion emits a
+            // parenthesized form that smelt-parser's grammar cannot
+            // re-parse (it round-trips fine as DuckDB-executable text, which
+            // is all the live run ever does with it — it never feeds
+            // compiled SQL back through the parser), so the reparse-based
+            // `inject_time_filter` call spuriously failed with "No FROM
+            // clause found". Wrapping before compiling never asks the parser
+            // to re-parse the compiler's own function-expansion output, so
+            // this is a call-ordering fix, not a new clamp mechanism.
+            let (compiled, region_used) = if let Some(dw) = derived {
+                // A concrete `--period` was given: derive the statements
+                // exactly as a live run's `derive_batch_filtered_sql` would
+                // for this window — output clamp *and* the per-source
+                // widened-scan pushdown, composed in one single-owner call
+                // rather than re-implemented here.
+                let run_range = TimeRange {
+                    start: dw.output_start.clone(),
+                    end: dw.output_end.clone(),
+                };
+                let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
+                    &stripped_sql,
+                    &partition_col,
+                    &dw.scan_bounds,
+                    &run_range,
+                    dw.run_start,
+                    dw.skew,
+                )
+                .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
 
-            let (raw_start, raw_end) = region.raw();
-            let wrapped = inject_time_filter(
-                &compiled.sql,
-                &partition_col,
-                &TimeRange {
-                    start: raw_start,
-                    end: raw_end,
-                },
-            )
-            .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
+                let compiled = registry
+                    .get(target)
+                    .compile_with_sql_and_ephemerals(model, schema, &filtered_sql, resolver)
+                    .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+                let region_used = smelt_logical::maintenance::emit::Region {
+                    start: format!("'{}'", dw.output_start.replace('\'', "''")),
+                    end: format!("'{}'", dw.output_end.replace('\'', "''")),
+                };
+                (compiled, region_used)
+            } else {
+                // No `--period`: symbolic placeholders, no window to derive
+                // a skew inversion or scan margin from — output-clamp the
+                // raw body with the placeholder literals only.
+                let (raw_start, raw_end) = region.raw();
+                let wrapped_raw = inject_time_filter(
+                    &stripped_sql,
+                    &partition_col,
+                    &TimeRange {
+                        start: raw_start,
+                        end: raw_end,
+                    },
+                )
+                .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
+
+                let compiled = registry
+                    .get(target)
+                    .compile_with_sql_and_ephemerals(model, schema, &wrapped_raw, resolver)
+                    .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+                (compiled, region.quoted_region())
+            };
 
             Ok(smelt_logical::maintenance::emit::emit_delete_insert(
                 &table_name,
                 &partition_col,
-                &region.quoted_region(),
-                &wrapped,
+                &region_used,
+                &compiled.sql,
                 dialect,
             ))
         }
@@ -418,6 +511,7 @@ pub fn build_all_cell_statements(
     unique_key: &[String],
     source_timeseries: &smelt_planner::SourceTimeseriesMap,
     region: &RegionLiterals,
+    derived: Option<&DerivedWindow>,
 ) -> Vec<CellStatements> {
     plan_cells
         .iter()
@@ -435,6 +529,7 @@ pub fn build_all_cell_statements(
                 unique_key,
                 source_timeseries,
                 region,
+                derived,
             ),
         })
         .collect()
@@ -1161,6 +1256,89 @@ mod tests {
         assert!(
             !json.contains("\"refresh\""),
             "full-refresh model JSON must not emit a 'refresh' field; got:\n{json}"
+        );
+    }
+
+    /// `build_cell_statement_group`'s `Technique::DeleteInsert` branch must
+    /// succeed for a model whose outermost FROM is a `TableExpr`-returning
+    /// function call (`smelt.functions.windowed(...)`), the shape
+    /// `silver.sessions` uses in `examples/web_analytics`
+    /// (`crates/smelt-cli/tests/explain_model.rs::sessions_show_sql_emits_statements`
+    /// is the real-fixture counterpart of this unit test). Clamping the raw,
+    /// unexpanded model body *before* compiling — never the compiled output,
+    /// which the compiler's own printer has already expanded — is what makes
+    /// this succeed: `inject_time_filter`'s reparse only ever sees a plain
+    /// FROM clause referencing a CTE, never the function-expansion's
+    /// reparse-hostile output.
+    #[test]
+    fn delete_insert_clamp_succeeds_on_table_expr_function_from_after_expansion() {
+        use smelt_core::config::TimeseriesConfig;
+        use smelt_logical::maintenance::{Corner, PartitionLocal, Trigger};
+
+        let content = "SELECT device_id, d FROM smelt.functions.windowed(src => raw_events)";
+        let mut model = make_model("sessions", vec!["raw_events"], content);
+        model.metadata = Some(Box::new(crate::metadata::ModelMetadata {
+            materialization: Some(Materialization::Table),
+            timeseries: Some(TimeseriesConfig {
+                event_time_column: "d".to_string(),
+                partition_column: "d".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        }));
+
+        let config = make_config(vec![]);
+        let mut registry = CompilerRegistry::new(&config, &config.targets);
+        let mut fn_bodies: smelt_runtime::FnBodyMap = HashMap::new();
+        fn_bodies.insert(
+            "windowed".to_string(),
+            (
+                vec![("src".to_string(), None)],
+                "(SELECT * FROM src)".to_string(),
+            ),
+        );
+        registry.set_function_bodies_all(fn_bodies);
+        let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+
+        let cell = PlanCell {
+            group: "{*}".to_string(),
+            trigger: Trigger::Backfill,
+            corner: Corner::RecomputeRegion,
+            technique: Technique::DeleteInsert,
+            partition_local: PartitionLocal::Yes,
+            scans: vec![],
+            ledger_catch_up: false,
+        };
+
+        let source_timeseries = smelt_planner::SourceTimeseriesMap::new();
+        let region = RegionLiterals::Placeholders;
+
+        let outcome = build_cell_statement_group(
+            &cell,
+            &model,
+            "main",
+            "dev",
+            &registry,
+            &resolver,
+            smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+            &[],
+            &source_timeseries,
+            &region,
+            None,
+        );
+
+        let group = outcome.unwrap_or_else(|e| {
+            panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")
+        });
+        assert!(
+            group
+                .statements
+                .iter()
+                .any(|s| s.sql.contains("_smelt_output_clamp")),
+            "expected the output clamp wrapper in the emitted statements: {:?}",
+            group.statements
         );
     }
 }

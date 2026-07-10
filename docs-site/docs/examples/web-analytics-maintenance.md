@@ -42,7 +42,6 @@ pair must commit together:
 BEGIN
   DELETE FROM main.silver_events_parsed WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
   INSERT INTO main.silver_events_parsed SELECT * FROM (
-  SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS device_id, CAST(user_id AS INTEGER) AS user_id, CAST(amplitude_id AS VARCHAR) AS amplitude_id, CAST(event_ts AS TIMESTAMP) AS event_ts, CAST(event_date AS DATE) AS event_date, CAST(utm_campaign AS VARCHAR) AS utm_campaign, CAST(event_name AS VARCHAR) AS event_name, CAST(platform AS VARCHAR) AS platform, CAST(url AS VARCHAR) AS url FROM (
   -- Compose event_ts from the datagen-provided occurrence clock, project the
   -- JSON payload fields as typed columns via parse_event_payload, and
   -- synthesise the amplitude_id — the Amplitude-style never-NULL identifier
@@ -80,13 +79,12 @@ BEGIN
       CAST(event_date AS DATE) AS event_date,
       utm_campaign,
       json_extract_string(payload, '$.event_name') AS event_name, json_extract_string(payload, '$.platform') AS platform, json_extract_string(payload, '$.url') AS url
-  FROM main.bronze_raw_events
+  FROM (SELECT * FROM main.bronze_raw_events WHERE event_date >= '2026-04-07' AND event_date < '2026-04-11')
   WHERE event_date
       BETWEEN CAST(arrival_time AS DATE) - INTERVAL '3 days'
           AND CAST(arrival_time AS DATE)
   QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1
 
-  ) _smelt_typed
   ) AS _smelt_output_clamp WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
 COMMIT
 ```
@@ -106,20 +104,231 @@ of `silver.events_parsed` by the same one-day cap so a session that starts
 late one day and crosses midnight is reconstructed as a single row rather
 than split at the partition boundary.
 
-`silver.sessions` composes its sessionization through the reusable
-`smelt.functions.sessionize` transparent function; `explain --show-sql`'s
-output clamp injection does not yet see through a function call sitting at
-the top of a model's `FROM` clause, so no statements print for this model
-today — the maintenance plan itself (grain, technique, scan clamps) is
-still fully derived and reported, and a real run still executes correctly.
-
 <!-- smelt-generate: explain silver.sessions --show-sql --json --period 2026-04-10..2026-04-11 -->
 ```sql
 -- trigger: Backfill
--- (no statements: failed to inject the output clamp: No FROM clause found - cannot inject time filter)
+BEGIN
+  DELETE FROM main.silver_sessions WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-12'
+  INSERT INTO main.silver_sessions SELECT * FROM (
+  -- One row per session under the 30-minute inactivity + platform-boundary rule,
+  -- reconstructed across midnight from a bounded 1-day lookback.
+  -- The sessionization lives in the reusable `smelt.functions.sessionize`
+  -- transparent function: it assigns each event a stable `session_start_ts`
+  -- identity and declares its lookback via `RANGE BETWEEN INTERVAL '1 day'
+  -- PRECEDING` frames in its body — the **max-session-length cap**, named
+  -- `max_session_length` in the comments here and in the function. The planner
+  -- derives that bound from the expanded SQL and widens the events_parsed read
+  -- accordingly, so a session whose events straddle midnight is reconstructed
+  -- as one row instead of being split at the partition boundary.
+  -- session_id is (device_id, session_start_ts) — stable across run windows.
+  -- `max_session_length` also seals old partitions for safe partition-level
+  -- maintenance: a session cannot span more than this interval, so a partition
+  -- older than `max_session_length` (plus the attribution window below) can
+  -- never be touched by a later event. A window-frame bound must be a literal
+  -- `INTERVAL '...'` (the grammar does not admit a parameter reference there),
+  -- so `max_session_length` cannot be threaded through as a `sessionize`
+  -- argument; the `HAVING` clause below restates it as an explicit, checkable
+  -- assertion instead — the actual per-session duration this model emits can
+  -- never exceed it, in the emitted SQL rather than only in the window-frame
+  -- mechanics that happen to enforce it.
+  WITH sessionized AS (
+      -- Columns projected explicitly: a TableExpr-returning function's output is
+      -- opaque to the type checker, so the outer body names the columns it uses.
+      SELECT
+          device_id,
+          event_ts,
+          event_date,
+          platform,
+          utm_campaign,
+          session_start_ts,
+          CAST(session_start_ts AS DATE) AS session_start_date
+      FROM ((
+      WITH _marked AS (
+          SELECT
+              *,
+              LAG(event_ts) OVER (
+                  PARTITION BY device_id ORDER BY event_ts
+                  RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
+              ) AS _prev_ts,
+              LAG(platform
+      ) OVER (
+                  PARTITION BY device_id ORDER BY event_ts
+                  RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
+              ) AS _prev_platform
+          FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-08' AND event_date < '2026-04-13') AS source
+      ),
+      _bounded AS (
+          SELECT
+              *,
+              CASE
+                  WHEN _prev_ts IS NULL THEN event_ts
+                  WHEN epoch_us(event_ts) - epoch_us(_prev_ts) > 30 * 60 * 1000000 THEN event_ts
+                  WHEN _prev_platform != platform
+       THEN event_ts
+                  ELSE NULL
+              END AS _boundary_ts
+          FROM _marked
+      )
+      SELECT
+          *,
+          COALESCE(
+              MAX(_boundary_ts) OVER (
+                  PARTITION BY device_id ORDER BY event_ts
+                  RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
+              ),
+              event_ts
+          ) AS session_start_ts
+      FROM _bounded
+  )) AS __smelt_t2132)
+  -- Form B: the partition_column (session_start_date) is derived and skews earlier
+  -- than the events that update it. This filter declares event_date stays within
+  -- 1 day of session_start_date, so the planner rebases the WRITE window for a
+  -- [D, D+1) run to [D-1, D+2) — half-open, covering partitions D-1, D, and D+1 —
+  -- and a cross-midnight session updates its prior-day partition. The
+  -- `1 day` here must match `max_session_length` above — it is the same cap,
+  -- restated as a date-column filter because the planner's Form B bound
+  -- derivation works over the outer model's date-typed partition column, not
+  -- inside the function body.
+  SELECT
+      CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
+      device_id,
+      session_start_ts,
+      session_start_date,
+      MIN(event_ts) AS session_start,
+      MAX(event_ts) AS session_end,
+      COUNT(*) AS event_count,
+      ANY_VALUE(platform) AS platform,
+      -- Campaign attribution: the earliest non-NULL `utm_campaign` among the
+      -- session's own events within the first 5 minutes of the session start
+      -- (MIN_BY-style: `ARG_MAX` keyed by the *negated* timestamp picks the
+      -- value at the smallest, i.e. earliest, `event_ts`). Events beyond the
+      -- first 5 minutes never attribute a campaign, even if the session itself
+      -- runs longer.
+      ARG_MAX(utm_campaign, -epoch_us(event_ts)) FILTER (
+          WHERE utm_campaign IS NOT NULL
+              AND event_ts <= session_start_ts + INTERVAL '5 minutes'
+      ) AS utm_campaign
+  FROM sessionized
+  WHERE event_date
+      BETWEEN session_start_date - INTERVAL '1 day'
+          AND session_start_date + INTERVAL '1 day'
+  GROUP BY device_id, session_start_ts, session_start_date
+  HAVING MAX(event_ts) - MIN(event_ts) <= INTERVAL '1 day' -- max_session_length: explicit, checkable cap assertion
+
+  ) AS _smelt_output_clamp WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-12'
+COMMIT
 
 -- trigger: NewData { source: "silver.events_parsed" }
--- (no statements: failed to inject the output clamp: No FROM clause found - cannot inject time filter)
+BEGIN
+  DELETE FROM main.silver_sessions WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-12'
+  INSERT INTO main.silver_sessions SELECT * FROM (
+  -- One row per session under the 30-minute inactivity + platform-boundary rule,
+  -- reconstructed across midnight from a bounded 1-day lookback.
+  -- The sessionization lives in the reusable `smelt.functions.sessionize`
+  -- transparent function: it assigns each event a stable `session_start_ts`
+  -- identity and declares its lookback via `RANGE BETWEEN INTERVAL '1 day'
+  -- PRECEDING` frames in its body — the **max-session-length cap**, named
+  -- `max_session_length` in the comments here and in the function. The planner
+  -- derives that bound from the expanded SQL and widens the events_parsed read
+  -- accordingly, so a session whose events straddle midnight is reconstructed
+  -- as one row instead of being split at the partition boundary.
+  -- session_id is (device_id, session_start_ts) — stable across run windows.
+  -- `max_session_length` also seals old partitions for safe partition-level
+  -- maintenance: a session cannot span more than this interval, so a partition
+  -- older than `max_session_length` (plus the attribution window below) can
+  -- never be touched by a later event. A window-frame bound must be a literal
+  -- `INTERVAL '...'` (the grammar does not admit a parameter reference there),
+  -- so `max_session_length` cannot be threaded through as a `sessionize`
+  -- argument; the `HAVING` clause below restates it as an explicit, checkable
+  -- assertion instead — the actual per-session duration this model emits can
+  -- never exceed it, in the emitted SQL rather than only in the window-frame
+  -- mechanics that happen to enforce it.
+  WITH sessionized AS (
+      -- Columns projected explicitly: a TableExpr-returning function's output is
+      -- opaque to the type checker, so the outer body names the columns it uses.
+      SELECT
+          device_id,
+          event_ts,
+          event_date,
+          platform,
+          utm_campaign,
+          session_start_ts,
+          CAST(session_start_ts AS DATE) AS session_start_date
+      FROM ((
+      WITH _marked AS (
+          SELECT
+              *,
+              LAG(event_ts) OVER (
+                  PARTITION BY device_id ORDER BY event_ts
+                  RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
+              ) AS _prev_ts,
+              LAG(platform
+      ) OVER (
+                  PARTITION BY device_id ORDER BY event_ts
+                  RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
+              ) AS _prev_platform
+          FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-08' AND event_date < '2026-04-13') AS source
+      ),
+      _bounded AS (
+          SELECT
+              *,
+              CASE
+                  WHEN _prev_ts IS NULL THEN event_ts
+                  WHEN epoch_us(event_ts) - epoch_us(_prev_ts) > 30 * 60 * 1000000 THEN event_ts
+                  WHEN _prev_platform != platform
+       THEN event_ts
+                  ELSE NULL
+              END AS _boundary_ts
+          FROM _marked
+      )
+      SELECT
+          *,
+          COALESCE(
+              MAX(_boundary_ts) OVER (
+                  PARTITION BY device_id ORDER BY event_ts
+                  RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
+              ),
+              event_ts
+          ) AS session_start_ts
+      FROM _bounded
+  )) AS __smelt_t2132)
+  -- Form B: the partition_column (session_start_date) is derived and skews earlier
+  -- than the events that update it. This filter declares event_date stays within
+  -- 1 day of session_start_date, so the planner rebases the WRITE window for a
+  -- [D, D+1) run to [D-1, D+2) — half-open, covering partitions D-1, D, and D+1 —
+  -- and a cross-midnight session updates its prior-day partition. The
+  -- `1 day` here must match `max_session_length` above — it is the same cap,
+  -- restated as a date-column filter because the planner's Form B bound
+  -- derivation works over the outer model's date-typed partition column, not
+  -- inside the function body.
+  SELECT
+      CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
+      device_id,
+      session_start_ts,
+      session_start_date,
+      MIN(event_ts) AS session_start,
+      MAX(event_ts) AS session_end,
+      COUNT(*) AS event_count,
+      ANY_VALUE(platform) AS platform,
+      -- Campaign attribution: the earliest non-NULL `utm_campaign` among the
+      -- session's own events within the first 5 minutes of the session start
+      -- (MIN_BY-style: `ARG_MAX` keyed by the *negated* timestamp picks the
+      -- value at the smallest, i.e. earliest, `event_ts`). Events beyond the
+      -- first 5 minutes never attribute a campaign, even if the session itself
+      -- runs longer.
+      ARG_MAX(utm_campaign, -epoch_us(event_ts)) FILTER (
+          WHERE utm_campaign IS NOT NULL
+              AND event_ts <= session_start_ts + INTERVAL '5 minutes'
+      ) AS utm_campaign
+  FROM sessionized
+  WHERE event_date
+      BETWEEN session_start_date - INTERVAL '1 day'
+          AND session_start_date + INTERVAL '1 day'
+  GROUP BY device_id, session_start_ts, session_start_date
+  HAVING MAX(event_ts) - MIN(event_ts) <= INTERVAL '1 day' -- max_session_length: explicit, checkable cap assertion
+
+  ) AS _smelt_output_clamp WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-12'
+COMMIT
 ```
 
 
@@ -144,9 +353,8 @@ per upstream — each printing its own `DELETE`+`INSERT` pair:
 ```sql
 -- trigger: Backfill
 BEGIN
-  DELETE FROM main.silver_events_enriched WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
+  DELETE FROM main.silver_events_enriched WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12'
   INSERT INTO main.silver_events_enriched SELECT * FROM (
-  SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS device_id, CAST(user_id AS INTEGER) AS user_id, amplitude_id, event_ts, CAST(event_date AS VARCHAR) AS event_date, event_name, platform, url, CAST(event_utm_campaign AS VARCHAR) AS event_utm_campaign, session_id, CAST(session_utm_campaign AS VARCHAR) AS session_utm_campaign FROM (
   -- Event-grain enrichment: attaches each event's `session_id` and the
   -- session's attributed `utm_campaign` (first-touch, `silver/sessions`) back
   -- onto the event row, alongside the event's own raw `utm_campaign` from
@@ -185,8 +393,8 @@ BEGIN
       e.utm_campaign AS event_utm_campaign,
       s.session_id,
       s.utm_campaign AS session_utm_campaign
-  FROM main.silver_events_parsed e
-  JOIN main.silver_sessions s
+  FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12') e
+  JOIN (SELECT * FROM main.silver_sessions WHERE session_start_date >= '2026-04-08' AND session_start_date < '2026-04-13') s
       ON e.device_id = s.device_id
      AND e.event_ts >= s.session_start
      AND e.event_ts <= s.session_end
@@ -195,15 +403,13 @@ BEGIN
       BETWEEN e.event_date - INTERVAL '1 day'
           AND e.event_date + INTERVAL '1 day'
 
-  ) _smelt_typed
-  ) AS _smelt_output_clamp WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
+  ) AS _smelt_output_clamp WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12'
 COMMIT
 
 -- trigger: NewData { source: "silver.events_parsed" }
 BEGIN
-  DELETE FROM main.silver_events_enriched WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
+  DELETE FROM main.silver_events_enriched WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12'
   INSERT INTO main.silver_events_enriched SELECT * FROM (
-  SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS device_id, CAST(user_id AS INTEGER) AS user_id, amplitude_id, event_ts, CAST(event_date AS VARCHAR) AS event_date, event_name, platform, url, CAST(event_utm_campaign AS VARCHAR) AS event_utm_campaign, session_id, CAST(session_utm_campaign AS VARCHAR) AS session_utm_campaign FROM (
   -- Event-grain enrichment: attaches each event's `session_id` and the
   -- session's attributed `utm_campaign` (first-touch, `silver/sessions`) back
   -- onto the event row, alongside the event's own raw `utm_campaign` from
@@ -242,8 +448,8 @@ BEGIN
       e.utm_campaign AS event_utm_campaign,
       s.session_id,
       s.utm_campaign AS session_utm_campaign
-  FROM main.silver_events_parsed e
-  JOIN main.silver_sessions s
+  FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12') e
+  JOIN (SELECT * FROM main.silver_sessions WHERE session_start_date >= '2026-04-08' AND session_start_date < '2026-04-13') s
       ON e.device_id = s.device_id
      AND e.event_ts >= s.session_start
      AND e.event_ts <= s.session_end
@@ -252,15 +458,13 @@ BEGIN
       BETWEEN e.event_date - INTERVAL '1 day'
           AND e.event_date + INTERVAL '1 day'
 
-  ) _smelt_typed
-  ) AS _smelt_output_clamp WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
+  ) AS _smelt_output_clamp WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12'
 COMMIT
 
 -- trigger: NewData { source: "silver.sessions" }
 BEGIN
-  DELETE FROM main.silver_events_enriched WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
+  DELETE FROM main.silver_events_enriched WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12'
   INSERT INTO main.silver_events_enriched SELECT * FROM (
-  SELECT CAST(event_id AS BIGINT) AS event_id, CAST(device_id AS INTEGER) AS device_id, CAST(user_id AS INTEGER) AS user_id, amplitude_id, event_ts, CAST(event_date AS VARCHAR) AS event_date, event_name, platform, url, CAST(event_utm_campaign AS VARCHAR) AS event_utm_campaign, session_id, CAST(session_utm_campaign AS VARCHAR) AS session_utm_campaign FROM (
   -- Event-grain enrichment: attaches each event's `session_id` and the
   -- session's attributed `utm_campaign` (first-touch, `silver/sessions`) back
   -- onto the event row, alongside the event's own raw `utm_campaign` from
@@ -299,8 +503,8 @@ BEGIN
       e.utm_campaign AS event_utm_campaign,
       s.session_id,
       s.utm_campaign AS session_utm_campaign
-  FROM main.silver_events_parsed e
-  JOIN main.silver_sessions s
+  FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12') e
+  JOIN (SELECT * FROM main.silver_sessions WHERE session_start_date >= '2026-04-08' AND session_start_date < '2026-04-13') s
       ON e.device_id = s.device_id
      AND e.event_ts >= s.session_start
      AND e.event_ts <= s.session_end
@@ -309,8 +513,7 @@ BEGIN
       BETWEEN e.event_date - INTERVAL '1 day'
           AND e.event_date + INTERVAL '1 day'
 
-  ) _smelt_typed
-  ) AS _smelt_output_clamp WHERE event_date >= '2026-04-10' AND event_date < '2026-04-11'
+  ) AS _smelt_output_clamp WHERE event_date >= '2026-04-09' AND event_date < '2026-04-12'
 COMMIT
 ```
 
