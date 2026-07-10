@@ -123,6 +123,17 @@ run window verbatim:
   leading day: a session cannot start after its own events) simply recomputes
   to an unchanged partition — the derivation stays purely declarative.
 
+  The declared relation is also a **semantic cap**, not a heuristic: a row of
+  the driving date column that falls outside the declared relation of a
+  partition never contributes to that partition, in *any* build shape. An
+  entity that would naturally chain past the declared bound — a session whose
+  events span two midnights under a ±1-day declaration — is **truncated at
+  the declared bound**, and identically so in an incremental run and a full
+  rebuild, because the relation is part of the model's own SQL. Truncation is
+  therefore never an incremental artifact and never a processed-input
+  equivalence violation; a model that must not truncate widens its declared
+  relation, which widens the derived output window with it.
+
 When the model has a **finite frame reach `k`** (a `RANGE … INTERVAL` window,
 an interval join), the two-layer widened-scan reads a margin **relative to the
 derived output window** — `[out_start − k − offset, out_end + k′)` — wide

@@ -53,6 +53,7 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 - Example truth: `examples/web_analytics` comments/README describe the mechanism as it exists.
 - `smelt explain --show-sql` statement emission for a model whose FROM is a function call (prerequisite for embedding real sessions SQL in the tutorial).
 - Tutorial: cross-midnight prior-day rewrite section in `docs-site/docs/examples/web-analytics-maintenance.md`, freshness-gated.
+- `model_transforms.md` §Semantics "semantic cap" paragraph — two-boundary truncation at the declared bound, asserted equivalent between day-by-day and full builds, explained in the tutorial (Phase 6; spec edit committed with the plan extension).
 
 ### Explicitly deferred
 - Key-grain (`grain: key`) interaction — the skew inversion applies to the partition grain's recompute corner only; keyed folds keep their ledger semantics.
@@ -69,6 +70,7 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
+| 6     | pending  |        |      |
 
 ---
 
@@ -226,6 +228,37 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 - [ ] `mkdocs` nav unchanged (section within the existing page)
 
 **Commit.** `docs(examples): tutorial section — cross-midnight prior-day rewrite via the derived output window`
+
+---
+
+### Phase 6: Two-boundary truncation — the declared relation is a semantic cap
+
+**Goal.** A session whose events chain across **two** date boundaries is truncated at the declared ±1-day Form B bound — identically in a day-by-day replay and a full rebuild — and the tutorial explains why: the declared relation is part of the model's own SQL (a semantic cap, not a heuristic), so truncation is never an incremental artifact; widening the declaration is the remedy and widens the derived output window with it. Spec anchor: `model_transforms.md` §Semantics "The output window is derived, never assumed" (the "semantic cap" paragraph).
+
+**Pre-conditions.** Phase 5 merged (extends the tutorial section it creates).
+
+**TDD tests to write first.**
+- `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound` — fixture with an event chain spanning two midnights, every gap < 30 min (e.g. day 1 23:50 → day 2 00:10 → … → day 2 23:55 → day 3 00:15): replay day-by-day as single-day windows; assert the session rooted on day 1 is truncated at the declared bound (its `session_end`/`event_count` exclude the events outside `[root − 1 day, root + 1 day]`), pin what happens to the excess events (the test documents the model's actual behaviour for them — e.g. they root a new session), and assert the day-by-day result set-equals a from-scratch full-window build of the same source data (truncation identical in both shapes).
+- `crates/smelt-cli/tests/tutorial_freshness.rs` — gate entry for the new tutorial block(s), red before the section exists.
+
+**Implementation shape.** Test + docs only; no runtime or model-SQL semantics changes expected. If the equivalence assertion fails (day-by-day ≠ full build for the two-boundary shape), STOP — that is a real bug, pause and report rather than adjusting the test. Tutorial: extend `examples/web_analytics/generate_tutorial.py` with a follow-on subsection after the cross-midnight rewrite — "What about a session that spans two midnights?" — narrating the truncation with real emitted/queried output (`smelt-generate` block), and stating the cap/widen trade-off in spec vocabulary. Regenerate `docs-site/docs/examples/web-analytics-maintenance.md`. If the web_analytics fixture data cannot exhibit a two-boundary chain deterministically, demonstrate with the e2e fixture's numbers in prose instead of a generated block, and say so in the phase notes.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs`
+- `crates/smelt-cli/tests/tutorial_freshness.rs`
+- `examples/web_analytics/generate_tutorial.py`
+- `docs-site/docs/examples/web-analytics-maintenance.md` (generated)
+
+**Docs touched.**
+- The tutorial page subsection (generated; timeless narrative).
+
+**Review checklist** (material findings only):
+- [ ] Truncation asserted at the exact declared bound, and day-by-day ≡ full-build equivalence asserted for the two-boundary shape
+- [ ] Excess-event behaviour pinned explicitly, not left implicit
+- [ ] Tutorial subsection freshness-gated (or prose-only fallback recorded in phase notes); spec vocabulary; no plan/phase vocabulary
+- [ ] No model SQL or runtime changes
+
+**Commit.** `docs(examples): two-boundary session truncation — the declared relation is a semantic cap`
 
 ---
 
