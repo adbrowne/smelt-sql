@@ -64,8 +64,8 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     | 23249b62 | 2026-07-11 |
-| 2     | pending  |        |      |
+| 1     | done     | f5144f69 | 2026-07-11 |
+| 2     | done     |        | 2026-07-11 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |

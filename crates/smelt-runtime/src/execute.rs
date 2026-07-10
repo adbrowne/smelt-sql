@@ -62,6 +62,13 @@ struct IncrementalPlan {
     timeseries: smelt_core::config::TimeseriesConfig,
     /// Batches with separate partition and filter ranges (bound-aware windowing).
     batches: Vec<IncrementalBatch>,
+    /// The model's own derived partition-column skew bound
+    /// (`docs/specs/model_transforms.md` §Semantics "The output window is
+    /// derived, never assumed"), carried alongside `batches` (whose
+    /// `partition_start`/`partition_end` already reflect it) so
+    /// `derive_batch_filtered_sql` can additionally gate the transparent
+    /// fast path on it without re-deriving it from the SQL a second time.
+    skew: smelt_logical::analysis::source_bounds::Skew,
 }
 
 /// Future returned by `BackendFactory::create`. Pinned + boxed so the trait
@@ -436,6 +443,7 @@ pub async fn execute_project(
                         &per_model_source_bounds,
                         &run_range,
                         run_start,
+                        inc.skew,
                     )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
                         model_file,
@@ -1096,12 +1104,18 @@ pub async fn execute_project(
 
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
 
-                    // Source-filter pushdown: narrow each source read to the run window
-                    // (partition_start / partition_end) plus per-source bounds derived from
-                    // the model SQL's INTERVAL patterns. The run window is the unwidened
-                    // partition range; source filters derive from the run window so the
-                    // source scan tracks the partition being produced, not the potentially
-                    // wider DELETE range.
+                    // Source-filter pushdown: narrow each source read to this batch's
+                    // window (partition_start / partition_end) plus per-source bounds
+                    // derived from the model SQL's INTERVAL patterns. `batch.partition_start
+                    // / partition_end` is the **derived output window**, not the CLI-declared
+                    // run window verbatim (`windowing::compute_incremental_windows`
+                    // widens the declared window by the model's own partition-column
+                    // skew before chunking, `docs/specs/model_transforms.md` §Semantics
+                    // "The output window is derived, never assumed") — a skewed model's
+                    // batch here may already reach outside what the user typed on the
+                    // command line. Source filters derive from this (already-derived)
+                    // window so the source scan tracks the partition being produced,
+                    // not the potentially wider DELETE range.
                     let run_range = TimeRange {
                         start: batch.partition_start.format("%Y-%m-%d").to_string(),
                         end: batch.partition_end.format("%Y-%m-%d").to_string(),
@@ -1116,14 +1130,17 @@ pub async fn execute_project(
                     // never re-written. B0 (unified pushdown-depth walk,
                     // `docs/research/20260703-model-updates.md` §3.3/§3.5): for the
                     // transparent slice — a single bounded source with no lookback
-                    // margin — the source-level filter on the exact run window *is*
-                    // the output clamp; the outer `inject_time_filter` wrap would
-                    // inject a textually identical, redundant filter. Skip it and
-                    // rely solely on the source-level filter. A model with a real
-                    // lookback margin (or more than one source) keeps both layers,
-                    // but the outer clamp uses the narrow run window (`run_range`),
-                    // not the widened scan window — the write window must equal the
-                    // output window.
+                    // margin AND zero partition-column skew — the source-level filter
+                    // on the exact output-window batch *is* the output clamp; the
+                    // outer `inject_time_filter` wrap would inject a textually
+                    // identical, redundant filter. Skip it and rely solely on the
+                    // source-level filter (`derive_batch_filtered_sql`'s
+                    // `is_transparent_single_source(...) && skew == Skew::ZERO` gate).
+                    // A model with a real lookback margin, a genuine partition-column
+                    // skew, or more than one source keeps both layers, but the outer
+                    // clamp uses the narrow output-window batch (`run_range`), not the
+                    // widened scan window — the write window must equal the output
+                    // window.
                     // Two-layer widened-scan + exact output clamp, then
                     // compile-time clock pinning — the output clamp ranges over
                     // the declared `partition_column` (the same output-axis
@@ -1138,6 +1155,7 @@ pub async fn execute_project(
                         &per_model_source_bounds,
                         &run_range,
                         run_start,
+                        inc_plan.skew,
                     )?;
 
                     let compiler = compilers.get(model_target);
@@ -1694,6 +1712,7 @@ fn build_model_plans(
                 }
 
                 let batches = inc_windows.batches;
+                let skew = inc_windows.skew;
                 total_batches += batches.len();
                 model_plans.push(ModelPlan {
                     name: model_name.clone(),
@@ -1703,6 +1722,7 @@ fn build_model_plans(
                         config: inc,
                         timeseries: ts,
                         batches,
+                        skew,
                     }),
                     model_file: model.clone(),
                 });
@@ -1810,14 +1830,29 @@ fn build_model_source_bounds(
 /// branch so the statements a dry-run reports are derived exactly as a live run
 /// derives the ones it executes (`docs/specs/cli.md` §"`--dry-run` prints the
 /// maintenance statements").
+///
+/// `skew` is the model's own derived partition-column skew bound
+/// (`IncrementalPlan::skew`, sourced from `windowing::compute_incremental_windows`
+/// — never re-derived here, maintenance-plan purity). The transparent-slice
+/// fast path (`is_transparent_single_source`) additionally requires
+/// `skew == Skew::ZERO`: for a skewed model the per-source pushdown filter
+/// and the output clamp are genuinely different ranges (the source filter is
+/// built from `run_range`, i.e. this batch's own derived-output-window slice,
+/// while a *different* batch's scan may reach into this one's margin) even
+/// when there is exactly one zero-margin source, so the outer clamp stays
+/// load-bearing (`docs/specs/model_transforms.md` §Semantics "Source-filter
+/// pushdown + the two clamps").
 fn derive_batch_filtered_sql(
     clean_sql: &str,
     partition_col: &str,
     per_model_source_bounds: &HashMap<String, crate::transformer::SourceBound>,
     run_range: &TimeRange,
     run_start: chrono::DateTime<Utc>,
+    skew: smelt_logical::analysis::source_bounds::Skew,
 ) -> Result<String> {
-    let filtered_sql = if is_transparent_single_source(per_model_source_bounds) {
+    let filtered_sql = if is_transparent_single_source(per_model_source_bounds)
+        && skew == smelt_logical::analysis::source_bounds::Skew::ZERO
+    {
         inject_source_filters(clean_sql, per_model_source_bounds, run_range)
     } else {
         let filtered_sql = inject_time_filter(clean_sql, partition_col, run_range)?;

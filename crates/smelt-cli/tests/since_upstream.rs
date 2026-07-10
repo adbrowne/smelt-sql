@@ -59,12 +59,26 @@ fn stage_workspace(parent: &Path) -> PathBuf {
          mutation_profile:\n  kind: append_only\n\
          timeseries:\n  partition_column: d2\n  event_time_column: d2\n  granularity: day\n",
     );
+    // The model's own output/partition column is aliased to `event_date`
+    // (a straight passthrough of bronze's `d`, not a derived value) rather
+    // than left as bare `d` — so it reads distinctly from the join's anchor
+    // expression `b.d` in `a.d2 BETWEEN b.d - INTERVAL ... AND b.d + INTERVAL
+    // ...`. A textual skew-bound scan
+    // (`smelt_logical::analysis::walk::model_partition_skew`) matches a Form
+    // B relation whose anchor identifier equals the declared
+    // `partition_column`; with `partition_column: d` and anchor `b.d`, that
+    // match fires even though `d` here is a straight passthrough with no
+    // actual derivation/skew (the same shape `examples/timeseries`'s real
+    // `daily_events_status.sql` avoids by truncating its event-time column
+    // into a differently-named `event_date`, `models/daily_events_status.sql`)
+    // — aliasing to `event_date` here keeps this fixture isolated to the
+    // propagation/reflection mechanism it actually exercises.
     write(
         &root,
         "models/silver.sql",
         "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
-         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
-         SELECT b.id, b.d, a.id AS aux_id\nFROM smelt.sources.bronze b\n\
+         timeseries:\n  partition_column: event_date\n  event_time_column: event_date\n  granularity: day\n---\n\
+         SELECT b.id, b.d AS event_date, a.id AS aux_id\nFROM smelt.sources.bronze b\n\
          JOIN smelt.sources.aux a\n  ON a.id = b.id\n\
          AND a.d2 BETWEEN b.d - INTERVAL '1 day' AND b.d + INTERVAL '1 day'\n",
     );
@@ -102,7 +116,7 @@ fn run_smelt(project_dir: &Path, args: &[&str]) -> std::process::Output {
 fn silver_dates(db_path: &Path) -> Vec<String> {
     let conn = Connection::open(db_path).expect("open duckdb");
     let mut stmt = conn
-        .prepare("SELECT CAST(d AS VARCHAR) FROM main.silver ORDER BY d")
+        .prepare("SELECT CAST(event_date AS VARCHAR) FROM main.silver ORDER BY event_date")
         .expect("prepare");
     stmt.query_map([], |row| row.get::<_, String>(0))
         .expect("query")
@@ -258,7 +272,7 @@ fn sufficiency_equals_full_refresh() {
     let partial_conn = Connection::open(&partial_db).expect("open partial db");
     let mut stmt = partial_conn
         .prepare(
-            "SELECT id, CAST(d AS VARCHAR), aux_id FROM main.silver WHERE d = DATE '2026-01-03'",
+            "SELECT id, CAST(event_date AS VARCHAR), aux_id FROM main.silver WHERE event_date = DATE '2026-01-03'",
         )
         .unwrap();
     let partial_row: (i32, String, i32) = stmt
@@ -268,7 +282,7 @@ fn sufficiency_equals_full_refresh() {
     let full_conn = Connection::open(&full_db).expect("open full db");
     let mut stmt = full_conn
         .prepare(
-            "SELECT id, CAST(d AS VARCHAR), aux_id FROM main.silver WHERE d = DATE '2026-01-03'",
+            "SELECT id, CAST(event_date AS VARCHAR), aux_id FROM main.silver WHERE event_date = DATE '2026-01-03'",
         )
         .unwrap();
     let full_row: (i32, String, i32) = stmt

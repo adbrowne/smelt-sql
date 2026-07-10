@@ -47,7 +47,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
-| Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | unbuilt |
+| Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
 | Hidden decomposed state + presentation view | decomposed-monoid rung | store the monoid element (`(sum,count)` / Welford / HLL), expose the user value through a pure presentation view `π(state)` | **built** |
 | Retraction via delta history | group (invertible) rung | store the invertible per-partition delta; on reprocessing subtract the old contribution, then add the new | unbuilt |
@@ -320,13 +320,20 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Built today:** keyed `merge_into` (the `Backend::merge_into` trait method,
   impls in `smelt-backend-duckdb`/`-spark`); source-filter pushdown
   (`inject_source_filters`); partition DELETE+INSERT (`delete_partitions` +
-  `insert_into_from_query`); outer output-clamp (`inject_time_filter`); the
+  `insert_into_from_query`); outer output-clamp (`inject_time_filter`);
+  output-window derivation (`smelt_logical::analysis::walk::model_partition_skew`
+  derives the model's own partition-column skew bound, consumed by
+  `crates/smelt-runtime/src/windowing.rs::compute_incremental_windows` to
+  widen the run window into the output window before chunking) — the
   two-layer widened-scan + exact output clamp split (the scan reads
-  `[start − k − offset, end)`, but the output clamp and the DELETE partition
-  range both use the unwidened `[start, end)`); the transparent single-source,
-  zero-margin fast path (`is_transparent_single_source`), which skips the
-  outer clamp entirely since the source-level filter already is the output
-  clamp; full refresh; backend lowering/emulation (`insert_overwrite`,
+  `[out_start − k − offset, out_end)`, and the output clamp and the DELETE
+  partition range both use the derived output window `[out_start, out_end)`,
+  which equals `[start, end)` for an identity `partition_column` and the
+  skew-inverted range otherwise); the transparent single-source, zero-margin,
+  zero-skew fast path (`is_transparent_single_source` composed with a
+  `Skew::ZERO` check at its call site), which skips the outer clamp entirely
+  since the source-level filter already is the output clamp; full refresh;
+  backend lowering/emulation (`insert_overwrite`,
   cross-engine Parquet); the in-place-`UPDATE` half of definition-change
   field-backfill (`crates/smelt-runtime/src/backfill.rs::targeted_column_backfill`),
   which builds the `UPDATE ... FROM (...) AS src` statement licensed by an
@@ -359,20 +366,34 @@ by `docs/plans/20260704-model-updates.md` (design:
   timeseries sources), and the window-function hazard where a same-level
   `WHERE` filtered the rows *feeding* a bare outermost window function,
   undercutting its widened-scan margin.
-- **Output-window derivation is unbuilt; the runtime pins output window = run
-  window.** `smelt-runtime`'s execute loop builds both the DELETE range and the
-  `_smelt_output_clamp` from the batch's run window verbatim, with no skew
-  inversion — a model with a derived, skewing `partition_column` (a Form B
-  relation such as `event_date BETWEEN session_start_date − INTERVAL '1 day'
-  AND session_start_date + INTERVAL '1 day'`) silently under-writes: the run
-  that receives the skew-reaching data computes the correct row for the
-  neighbour partition (the scan *is* widened) and then clamps it away, and no
-  later run is entitled to write that partition either. Observable divergence:
-  `examples/web_analytics` `silver.sessions` under single-day replay — a
-  cross-midnight session keeps its stale prior-day row (root-caused with a
-  deterministic repro in `docs/plans/20260710-web-analytics-maintenance-demo.md`
-  §"Deferred during implementation"). Tracked in
+- **Skew-anchor matching is name-only; a table-qualified anchor on a foreign
+  table can false-positive.** The partition-skew classifier
+  (`smelt_logical::analysis::source_bounds::derive_partition_skew`) matches a
+  Form B anchor by identifier name, accepting a table-qualified form — so a
+  relation like `a.d2 BETWEEN b.d - INTERVAL '1 day' AND b.d + INTERVAL '1
+  day'` anchored on an *upstream table's* column `b.d` matches a model whose
+  own `partition_column` happens to be named `d`, even when that column is a
+  straight passthrough with no derivation. The consequence is an over-wide
+  (never under-wide) derived output window: neighbour partitions are
+  DELETE+INSERTed unnecessarily and recompute to themselves — wasteful, never
+  incorrect (the inversion only ever widens the write, and each written
+  partition's scan is sized for its own reach). Avoidable by naming the
+  model's output column distinctly from the join anchor. A precise fix would
+  require the anchor to be provably the model's *own output column*, not any
+  same-named qualified column. Tracked in
   `docs/plans/20260711-derived-output-window.md`.
+- **Ordered (convergent self-edge) execution skips output-window derivation.**
+  A self-referential model proven to converge partition-by-partition
+  (`batched_models.md` §"Window independence and self-referential models")
+  builds strictly sequential single-partition batches over the run window
+  verbatim — its self-edge's own bounding relation (e.g. `bal.d >= t.d −
+  INTERVAL '1 day'`) is the windowed-driver mechanism's convergence bound,
+  not a partition-column skew declaration, and (per the name-only matching
+  above) would otherwise read as a spurious skew whenever the self-referenced
+  column shares the model's partition-column name. Whether a genuinely
+  skewing derived `partition_column` can compose with ordered self-referential
+  execution at all is undecided; today the combination simply does not widen.
+  Tracked in `docs/plans/20260711-derived-output-window.md`.
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.

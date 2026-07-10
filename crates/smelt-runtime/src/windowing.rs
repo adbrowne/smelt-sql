@@ -14,10 +14,12 @@
 
 use std::collections::HashMap;
 
-use chrono::{Duration, NaiveDate};
+use chrono::{Datelike, Duration, NaiveDate};
 
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{BatchedConfig, Granularity};
+use smelt_logical::analysis::source_bounds::{Seconds, Skew};
+use smelt_logical::analysis::walk::model_partition_skew;
 use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
 use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days, BatchSafety,
@@ -51,6 +53,16 @@ pub struct IncrementalWindows {
     /// many partition periods. The message recommends `--per-partition` or
     /// `--batch-size` to avoid OOM on large backfills.
     pub wide_batch_warning: Option<String>,
+    /// The model's own derived partition-column skew bound (`docs/specs/
+    /// model_transforms.md` §Semantics "The output window is derived, never
+    /// assumed"), as [`model_partition_skew`] reads it off the (expanded)
+    /// model SQL. `Skew::ZERO` for an identity model. Reported regardless of
+    /// whether this run actually widened its batches by it (see
+    /// [`compute_incremental_windows_ordered`]'s `Ordered` branch) — a
+    /// consumer that needs to know whether the transparent-slice fast path
+    /// (`is_transparent_single_source`) is still eligible reads this field
+    /// directly rather than re-deriving it from the SQL a second time.
+    pub skew: Skew,
 }
 
 /// Warn when a single FullyBatchSafe batch spans more than this many
@@ -80,8 +92,71 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 /// batch-safety roll-up cannot classify the model (a `NotDerivable` source
 /// bound) — the caller must surface this as a hard refusal, never fall back
 /// to an approximate chunk shape.
+///
+/// Before chunking, `full_range` is itself widened into the **derived output
+/// window** (`docs/specs/model_transforms.md` §Semantics "The output window
+/// is derived, never assumed"): identity when `timeseries.partition_column`
+/// tracks the driving event-time column (`output window = run window`), or
+/// skew-inverted `[start − after, end + before)` when a Form B relation
+/// anchored on the model's own partition column declares it can skew away
+/// from the driving date column ([`model_partition_skew`], `smelt-logical`'s
+/// pure leaf classifier — this function only consumes it, per the
+/// maintenance-plan-purity rule). The widened range is then aligned outward
+/// to `timeseries.granularity` boundaries and chunked exactly as before, so
+/// every batch's `partition_start`/`partition_end` — which both the DELETE
+/// range and the output clamp key off (`crate::execute`) — already reflect
+/// the derived output window; the execute loop needs no window math of its
+/// own.
 #[allow(clippy::too_many_arguments)]
 pub fn compute_incremental_windows(
+    timeseries: &TimeseriesConfig,
+    inc_config: &BatchedConfig,
+    sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+    data_latency_days: u32,
+    full_range: &TimeRange,
+    batch_size_days: Option<u32>,
+    per_partition: bool,
+) -> Result<IncrementalWindows, String> {
+    compute_incremental_windows_impl(
+        timeseries,
+        inc_config,
+        sql,
+        dep_timeseries,
+        data_latency_days,
+        full_range,
+        batch_size_days,
+        per_partition,
+        true,
+    )
+}
+
+/// The shared implementation behind [`compute_incremental_windows`] and
+/// [`compute_incremental_windows_ordered`]'s `Ordered` branch.
+///
+/// `apply_output_window_derivation` gates whether `full_range` is widened by
+/// [`model_partition_skew`] before chunking. It is `true` for every ordinary
+/// call ([`compute_incremental_windows`] always passes `true`) and `false`
+/// only when [`compute_incremental_windows_ordered`] has forced strictly
+/// sequential single-partition batches for a **convergent self-edge**
+/// (`WindowIndependence::Ordered`) — a self-referential model reading its own
+/// immediately-prior partition is the *windowed-keyed-maintenance driver*
+/// mechanism (`docs/specs/model_transforms.md`'s own catalog entry, distinct
+/// from the *default plan (recompute corner)* the output-window-derivation
+/// entry belongs to), and its own convergence proof already establishes
+/// correctness without any output-window widening. Skipping it here also
+/// sidesteps a textual false positive: a self-edge's own bounding relation
+/// (e.g. `bal.d >= t.d - INTERVAL '1 day'`) reads, to a text-level anchor
+/// scan, identically to a genuine partition-column skew declaration when the
+/// self-referenced table's column happens to share the model's own
+/// `partition_column` name — the model's own output column is a direct
+/// passthrough of the self-reference in that case, not a derived, skewing
+/// value, so no genuine skew exists to invert. `windows.skew` still reports
+/// the raw derived value in both cases (only whether it *widens the chunked
+/// range* differs) — a `false` here never turns a real skew into a lie, it
+/// only declines to compose it with the Ordered driver's own mechanism.
+#[allow(clippy::too_many_arguments)]
+fn compute_incremental_windows_impl(
     timeseries: &TimeseriesConfig,
     _inc_config: &BatchedConfig,
     sql: &str,
@@ -90,6 +165,7 @@ pub fn compute_incremental_windows(
     full_range: &TimeRange,
     batch_size_days: Option<u32>,
     per_partition: bool,
+    apply_output_window_derivation: bool,
 ) -> Result<IncrementalWindows, String> {
     let start_date = match parse_date(&full_range.start) {
         Ok(d) => d,
@@ -98,6 +174,7 @@ pub fn compute_incremental_windows(
                 batches: vec![],
                 effective_window: zero_effective_window(),
                 wide_batch_warning: None,
+                skew: Skew::ZERO,
             })
         }
     };
@@ -108,6 +185,7 @@ pub fn compute_incremental_windows(
                 batches: vec![],
                 effective_window: zero_effective_window(),
                 wide_batch_warning: None,
+                skew: Skew::ZERO,
             })
         }
     };
@@ -117,6 +195,7 @@ pub fn compute_incremental_windows(
             batches: vec![],
             effective_window: zero_effective_window(),
             wide_batch_warning: None,
+            skew: Skew::ZERO,
         });
     }
 
@@ -132,6 +211,31 @@ pub fn compute_incremental_windows(
     let temporal_dep = analyze_temporal_dependencies(&stripped);
     let period_days = granularity_period_days(&timeseries.granularity);
     let effective_window = compute_effective_window(&temporal_dep, data_latency_days, period_days);
+
+    // The model's own derived partition-column skew bound — a pure leaf
+    // classifier `smelt-logical` owns (`crate::analysis::walk::model_partition_skew`);
+    // consumed here, never re-derived (maintenance-plan purity). Reported on
+    // `IncrementalWindows` regardless of `apply_output_window_derivation`, so
+    // a caller can always tell a genuinely skewed model from an identity one.
+    let skew = model_partition_skew(&stripped, &timeseries.partition_column);
+
+    // Invert the run window through the skew bound
+    // (`docs/specs/model_transforms.md` §Semantics "The output window is
+    // derived, never assumed"): `after` extends the window earlier (it
+    // bounds how far the driving date can sit *after* the partition column,
+    // i.e. how far a partition can be dated *before* the data that reaches
+    // it), `before` extends it later. Skipped for the Ordered driver — see
+    // `compute_incremental_windows_impl`'s doc comment.
+    let (output_start, output_end) = if apply_output_window_derivation {
+        let raw_start = start_date - Duration::days(days_ceil(skew.after) as i64);
+        let raw_end = end_date + Duration::days(days_ceil(skew.before) as i64);
+        (
+            align_output_start(raw_start, &timeseries.granularity),
+            align_output_end(raw_end, &timeseries.granularity),
+        )
+    } else {
+        (start_date, end_date)
+    };
 
     // Compute filter widening. Unbounded lookback can't be widened; use zero.
     let filter_lookback = if effective_window.is_unbounded {
@@ -163,7 +267,7 @@ pub fn compute_incremental_windows(
         let safety = batch_safety_for_model(&stripped, dep_timeseries)?;
         match &safety {
             BatchSafety::FullyBatchSafe => {
-                let total_days = (end_date - start_date).num_days() as u32;
+                let total_days = (output_end - output_start).num_days() as u32;
                 let period_count = total_days / granularity_period.max(1);
                 if period_count > WIDE_BATCH_PERIOD_THRESHOLD {
                     wide_batch_warning = Some(format!(
@@ -194,12 +298,12 @@ pub fn compute_incremental_windows(
         );
 
     let mut batches = Vec::new();
-    let mut batch_start = start_date;
-    while batch_start < end_date {
+    let mut batch_start = output_start;
+    while batch_start < output_end {
         let batch_end = if use_calendar_stepping {
-            calendar_next_partition_start(batch_start, &timeseries.granularity).min(end_date)
+            calendar_next_partition_start(batch_start, &timeseries.granularity).min(output_end)
         } else {
-            (batch_start + Duration::days(batch_days as i64)).min(end_date)
+            (batch_start + Duration::days(batch_days as i64)).min(output_end)
         };
         let filter_start = batch_start - Duration::days(filter_lookback as i64);
         let filter_end = batch_end + Duration::days(filter_lookahead as i64);
@@ -216,6 +320,7 @@ pub fn compute_incremental_windows(
         batches,
         effective_window,
         wide_batch_warning,
+        skew,
     })
 }
 
@@ -264,7 +369,7 @@ pub fn compute_incremental_windows_ordered(
         &stripped,
     );
 
-    let forced_per_partition = match verdict {
+    let forced_per_partition = match &verdict {
         WindowIndependence::Refused { reason } => {
             return Err(format!(
                 "model '{model_name}' is not eligible for batched execution: {reason}"
@@ -274,7 +379,13 @@ pub fn compute_incremental_windows_ordered(
         WindowIndependence::WindowIndependent => per_partition,
     };
 
-    compute_incremental_windows(
+    // The `Ordered` driver does not compose with output-window derivation —
+    // see `compute_incremental_windows_impl`'s doc comment for why (a
+    // distinct licensed mechanism, plus a real risk of a same-named
+    // self-referenced column reading as a false-positive skew anchor).
+    let apply_output_window_derivation = !matches!(verdict, WindowIndependence::Ordered);
+
+    compute_incremental_windows_impl(
         timeseries,
         inc_config,
         sql,
@@ -283,6 +394,7 @@ pub fn compute_incremental_windows_ordered(
         full_range,
         batch_size_days,
         forced_per_partition,
+        apply_output_window_derivation,
     )
 }
 
@@ -489,6 +601,50 @@ fn calendar_next_partition_start(current: NaiveDate, granularity: &Granularity) 
 
 fn parse_date(s: &str) -> Result<NaiveDate, chrono::ParseError> {
     NaiveDate::parse_from_str(s, "%Y-%m-%d")
+}
+
+/// Round a [`Seconds`] duration up to a whole number of days — the skew
+/// grammar's INTERVAL literals are whole-day (`docs/specs/model_transforms.md`
+/// examples are all `INTERVAL '1 day'`-shaped), but rounding up rather than
+/// truncating keeps any sub-day remainder from silently narrowing the
+/// derived output window.
+fn days_ceil(s: Seconds) -> i64 {
+    s.0.div_ceil(86400) as i64
+}
+
+/// Floor `date` down to the nearest `granularity` boundary at or before it —
+/// the "outward" (earlier) side of aligning the skew-derived output window
+/// to `timeseries.granularity` (`docs/specs/model_transforms.md` §Semantics
+/// "The output window is derived, never assumed"). Mirrors the boundary
+/// rules [`validate_run_window_alignment`] enforces for a *declared* window,
+/// but computes rather than validates.
+fn align_output_start(date: NaiveDate, granularity: &Granularity) -> NaiveDate {
+    match granularity {
+        Granularity::Hour | Granularity::Day => date,
+        Granularity::Week => {
+            let days_since_monday = date.weekday().num_days_from_monday();
+            date - Duration::days(days_since_monday as i64)
+        }
+        Granularity::Month => date.with_day(1).unwrap_or(date),
+        Granularity::Quarter => {
+            let quarter_start_month = ((date.month() - 1) / 3) * 3 + 1;
+            NaiveDate::from_ymd_opt(date.year(), quarter_start_month, 1).unwrap_or(date)
+        }
+        Granularity::Year => NaiveDate::from_ymd_opt(date.year(), 1, 1).unwrap_or(date),
+    }
+}
+
+/// Ceil `date` up to the nearest `granularity` boundary at or after it — the
+/// "outward" (later) side of aligning the skew-derived output window. If
+/// `date` already falls exactly on a boundary, it is returned unchanged (the
+/// common, zero-skew case never nudges an already-aligned run-window edge).
+fn align_output_end(date: NaiveDate, granularity: &Granularity) -> NaiveDate {
+    let floor = align_output_start(date, granularity);
+    if floor == date {
+        date
+    } else {
+        calendar_next_partition_start(floor, granularity)
+    }
 }
 
 fn granularity_display(g: &Granularity) -> &'static str {

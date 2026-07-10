@@ -658,6 +658,15 @@ For `BoundedSafe(n)` models, the window is auto-chunked into sub-ranges sized to
 
 Misaligned windows (not an integer multiple of granularity, or endpoints that aren't on granularity boundaries) are rejected at planning time with a clear diagnostic.
 
+## The derived output window
+
+The partitions a run actually writes — the **output window** — are not always the run window verbatim. smelt derives the output window from the run window and the model's own declared time relations:
+
+- **Identity (the common case).** When `partition_column` tracks the event time driving new data (the same column, or a pure truncation of it), the output window equals the run window exactly — nothing changes from the run-window semantics above.
+- **A derived, skewing `partition_column`.** Some models compute their partition column from a rule that can place new data in a partition *other than* the one implied by the run window — a session model whose `partition_column` is the session's start date, for example, where a late-night event can extend a session rooted the *previous* day. When such a model declares the relationship (a `WHERE`/`JOIN` filter comparing the driving date column to `partition_column ± INTERVAL '…'`), smelt inverts it: a run over `[start, end)` derives an output window reaching as far as the declared interval allows on either side. A session model capped at one day, for instance, run for a single day `[D, D+1)`, derives the output window `[D-1, D+2)` — the run also rewrites the prior day's partition when new data reaches back into it.
+
+The output window is what the `DELETE` and the output clamp both key off; every written partition's **scan** is sized from the output window's own reach (plus any further lookback the model's SQL declares), never from the narrower run window. Backfill chunking still applies to the derived output window exactly as it does to a plain run window — a wide skew or lookback is split into several bounded sequential updates rather than one large one.
+
 ## Backbuilding
 
 Backbuilding rebuilds a model **and all its upstream dependencies** for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.
