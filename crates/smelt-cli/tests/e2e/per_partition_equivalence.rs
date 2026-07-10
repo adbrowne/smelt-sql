@@ -801,3 +801,198 @@ fn web_analytics_dedup_matches_full_rebuild() {
         );
     }
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: session campaign attribution matches full rebuild + respects the cap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One row from `silver.sessions`, projected for attribution + cap checks.
+#[derive(Debug, Clone)]
+struct SessionRow {
+    session_id: String,
+    device_id: i64,
+    session_start: String,
+    session_end: String,
+    utm_campaign: Option<String>,
+}
+
+fn query_session_rows(db_path: &Path) -> Vec<SessionRow> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                session_id, \
+                device_id, \
+                CAST(session_start AS VARCHAR), \
+                CAST(session_end AS VARCHAR), \
+                utm_campaign \
+             FROM main.silver_sessions \
+             ORDER BY session_id",
+        )
+        .unwrap_or_else(|e| panic!("prepare sessions query: {e}"));
+    stmt.query_map([], |row| {
+        Ok(SessionRow {
+            session_id: row.get::<_, String>(0)?,
+            device_id: row.get::<_, i64>(1)?,
+            session_start: row.get::<_, String>(2)?,
+            session_end: row.get::<_, String>(3)?,
+            utm_campaign: row.get::<_, Option<String>>(4)?,
+        })
+    })
+    .unwrap_or_else(|e| panic!("query session rows: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_or_else(|e| panic!("collect session rows: {e}"))
+}
+
+/// For every session row, the earliest non-NULL `utm_campaign` among the
+/// events that actually belong to that session (`event_ts` within
+/// `[session_start, session_end]`, the model's own, independently-tested
+/// session boundaries — see `tests/session_boundary_invariants.test.sql`)
+/// and within the first 5 minutes of session start. This is a golden
+/// attribution query computed independently of the model's own `ARG_MAX`
+/// aggregation, via a correlated subquery straight against `events_parsed`;
+/// it does not re-derive session *membership* (that has its own dedicated
+/// invariant test), only the attribution rule given membership.
+fn query_expected_attribution(db_path: &Path) -> std::collections::HashMap<String, Option<String>> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                s.session_id, \
+                ( \
+                    SELECT e.utm_campaign \
+                    FROM main.silver_events_parsed e \
+                    WHERE e.device_id = s.device_id \
+                      AND e.event_ts >= CAST(s.session_start AS TIMESTAMP) \
+                      AND e.event_ts <= CAST(s.session_end AS TIMESTAMP) \
+                      AND e.event_ts <= CAST(s.session_start AS TIMESTAMP) + INTERVAL '5 minutes' \
+                      AND e.utm_campaign IS NOT NULL \
+                    ORDER BY e.event_ts ASC \
+                    LIMIT 1 \
+                ) AS expected_campaign \
+             FROM main.silver_sessions s",
+        )
+        .unwrap_or_else(|e| panic!("prepare expected-attribution query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query expected attribution: {e}"))
+    .collect::<Result<_, _>>()
+    .unwrap_or_else(|e| panic!("collect expected attribution: {e}"))
+}
+
+/// Day-by-day incremental build of `silver.sessions` equals one full-window
+/// rebuild on `(session_id, utm_campaign)`, campaign attribution comes only
+/// from events within the first 5 minutes of the session (verified against an
+/// independently-computed golden query over `events_parsed`), and no session
+/// exceeds the explicit max-session-length cap.
+#[test]
+fn web_analytics_session_attribution_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "session-pipeline-A",
+    );
+    let rows_a = query_session_rows(&db_path);
+    let expected_a = query_expected_attribution(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("session-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let rows_b = query_session_rows(&db_path);
+    let expected_b = query_expected_attribution(&db_path);
+
+    assert!(!rows_a.is_empty(), "Pipeline A produced no session rows");
+    assert!(!rows_b.is_empty(), "Pipeline B produced no session rows");
+
+    // ── Attribution correctness (independent golden query) ────────────────
+    for (label, rows, expected) in [
+        ("A (full rebuild)", &rows_a, &expected_a),
+        ("B (day-by-day)", &rows_b, &expected_b),
+    ] {
+        let mut mismatches = Vec::new();
+        for row in rows {
+            let want = expected.get(&row.session_id).cloned().flatten();
+            if row.utm_campaign != want {
+                mismatches.push(format!(
+                    "  session_id={} actual={:?} expected(first-5-min earliest)={:?}",
+                    row.session_id, row.utm_campaign, want
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "pipeline {label}: utm_campaign attribution mismatch \
+             (expected: earliest non-NULL campaign among events within the \
+             session's first 5 minutes):\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    // ── Cap: no session exceeds the explicit max-session-length cap (1 day) ──
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        for row in rows {
+            let start =
+                chrono::NaiveDateTime::parse_from_str(&row.session_start, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(
+                            &row.session_start,
+                            "%Y-%m-%d %H:%M:%S",
+                        )
+                    })
+                    .unwrap_or_else(|e| panic!("parse session_start {:?}: {e}", row.session_start));
+            let end =
+                chrono::NaiveDateTime::parse_from_str(&row.session_end, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(&row.session_end, "%Y-%m-%d %H:%M:%S")
+                    })
+                    .unwrap_or_else(|e| panic!("parse session_end {:?}: {e}", row.session_end));
+            let duration = end - start;
+            assert!(
+                duration <= chrono::Duration::days(1),
+                "pipeline {label}: session_id={} exceeds the max-session-length cap: \
+                 session_start={} session_end={} duration={duration}",
+                row.session_id,
+                row.session_start,
+                row.session_end,
+            );
+        }
+    }
+
+    // ── Day-by-day equals full rebuild exactly on (session_id, utm_campaign) ──
+    let set_a: std::collections::BTreeSet<_> = rows_a
+        .iter()
+        .map(|r| (r.session_id.clone(), r.utm_campaign.clone()))
+        .collect();
+    let set_b: std::collections::BTreeSet<_> = rows_b
+        .iter()
+        .map(|r| (r.session_id.clone(), r.utm_campaign.clone()))
+        .collect();
+    let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
+    let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
+    assert!(
+        only_in_a.is_empty() && only_in_b.is_empty(),
+        "silver.sessions (session_id, utm_campaign) differs between full rebuild \
+         and day-by-day replay.\nonly in A (first 10): {only_in_a:?}\n\
+         only in B (first 10): {only_in_b:?}"
+    );
+}

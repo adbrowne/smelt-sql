@@ -1305,11 +1305,11 @@ async fn goto_def_on_function_call_stays_in_same_project() {
         .expect("open sessions.sql");
     let _ = client.collect_diagnostics(1000).await;
 
-    // sessions.sql line 32 (1-indexed) = line 31 (0-indexed):
+    // sessions.sql line 45 (1-indexed) = line 44 (0-indexed):
     //   `    FROM smelt.functions.sessionize(`
     // The `sessionize` token starts at character 25 (0-indexed).
     let file_uri = format!("file://{}", target_file.display());
-    let locations = client.goto_definition(&file_uri, 31, 25).await;
+    let locations = client.goto_definition(&file_uri, 44, 25).await;
     client.shutdown().await;
 
     assert!(

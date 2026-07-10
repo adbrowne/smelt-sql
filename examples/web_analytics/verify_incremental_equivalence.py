@@ -36,6 +36,13 @@ duplicate `event_id`s in either pipeline's result, and an equal count of
 accepted-lateness events (`arrival_time` within 3 days of `event_time`)
 present in their own `event_date` partition across both pipelines.
 
+Also asserts `silver.sessions`'s campaign-attribution and max-session-length
+invariants: every session's `utm_campaign` equals the earliest non-NULL
+campaign among its own events within the first 5 minutes of session start
+(zero mismatches against an independently-computed golden query), zero
+sessions exceed the explicit max-session-length cap, and the session count
+agrees across both pipelines.
+
 Requires `smelt-datagen`, `smelt`, `duckdb` on PATH; Python 3.9+.
 """
 
@@ -228,6 +235,69 @@ def query_events_parsed_stats() -> dict:
     }
 
 
+def query_session_stats() -> dict:
+    """Campaign-attribution and max-session-length stats for
+    `main.silver_sessions` in the *current* `target/dev.duckdb`. Call this
+    right after a pipeline finishes, before the next `reset_target()` call
+    wipes the database."""
+    attribution_mismatches = query_json(
+        "SELECT COUNT(*) AS n FROM ("
+        "  SELECT s.session_id, s.utm_campaign AS actual, ("
+        "    SELECT e.utm_campaign FROM main.silver_events_parsed e"
+        "    WHERE e.device_id = s.device_id"
+        "      AND e.event_ts >= CAST(s.session_start AS TIMESTAMP)"
+        "      AND e.event_ts <= CAST(s.session_end AS TIMESTAMP)"
+        "      AND e.event_ts <= CAST(s.session_start AS TIMESTAMP) + INTERVAL '5 minutes'"
+        "      AND e.utm_campaign IS NOT NULL"
+        "    ORDER BY e.event_ts ASC LIMIT 1"
+        "  ) AS expected"
+        "  FROM main.silver_sessions s"
+        ") mismatch WHERE actual IS DISTINCT FROM expected"
+    )[0]["n"]
+    cap_violations = query_json(
+        "SELECT COUNT(*) AS n FROM main.silver_sessions"
+        " WHERE session_end - session_start > INTERVAL '1 day'"
+    )[0]["n"]
+    session_count = query_json("SELECT COUNT(*) AS n FROM main.silver_sessions")[0]["n"]
+    return {
+        "attribution_mismatches": attribution_mismatches,
+        "cap_violations": cap_violations,
+        "session_count": session_count,
+    }
+
+
+def assert_session_attribution_and_cap(stats_a: dict, stats_b: dict) -> None:
+    """`silver.sessions`'s campaign-attribution (first-5-minutes, earliest
+    non-NULL `utm_campaign`) and explicit max-session-length cap invariants,
+    checked on both pipelines, plus a lightweight cross-pipeline session-count
+    equivalence signal (the Rust harness asserts the full
+    `(session_id, utm_campaign)` set equality)."""
+    failures: list[str] = []
+    for label, stats in (("A (full rebuild)", stats_a), ("B (day-by-day)", stats_b)):
+        if stats["attribution_mismatches"] != 0:
+            failures.append(
+                f"pipeline {label}: {stats['attribution_mismatches']} session(s) "
+                f"with utm_campaign attribution not matching the earliest "
+                f"non-NULL campaign among events within the first 5 minutes"
+            )
+        if stats["cap_violations"] != 0:
+            failures.append(
+                f"pipeline {label}: {stats['cap_violations']} session(s) exceed "
+                f"the explicit max-session-length cap (1 day)"
+            )
+    if stats_a["session_count"] != stats_b["session_count"]:
+        failures.append(
+            "session count differs between pipelines: "
+            f"A={stats_a['session_count']} B={stats_b['session_count']}"
+        )
+    if failures:
+        print()
+        print("=== SESSION ATTRIBUTION/CAP MISMATCH (UNEXPECTED) ===")
+        for f in failures:
+            print(f"  {f}")
+        sys.exit(1)
+
+
 def assert_dedup_and_lateness(stats_a: dict, stats_b: dict) -> None:
     """`silver.events_parsed`'s redelivery-dedup and 3-day late-window
     acceptance invariants, checked on both pipelines."""
@@ -279,6 +349,7 @@ def main() -> int:
         "SELECT * FROM main.marts_daily_active_users_by_method ORDER BY event_date"
     )
     stats_a = query_events_parsed_stats()
+    session_stats_a = query_session_stats()
 
     reset_target()
     setup_sources()
@@ -288,6 +359,7 @@ def main() -> int:
         "SELECT * FROM main.marts_daily_active_users_by_method ORDER BY event_date"
     )
     stats_b = query_events_parsed_stats()
+    session_stats_b = query_session_stats()
 
     # The local columns must match exactly.  This is the hard invariant the
     # day-by-day pipeline preserves.
@@ -296,6 +368,10 @@ def main() -> int:
     # silver.events_parsed's redelivery-dedup and 3-day late-window
     # acceptance invariants must hold identically in both pipelines.
     assert_dedup_and_lateness(stats_a, stats_b)
+
+    # silver.sessions's campaign-attribution and max-session-length
+    # invariants must hold identically in both pipelines.
+    assert_session_attribution_and_cap(session_stats_a, session_stats_b)
 
     # Global columns are expected to differ — that's the "as-of-day-D" property
     # of incremental pipelines with global identity.  Print a summary so the

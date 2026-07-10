@@ -236,9 +236,21 @@ derives a 1-day lookback from those frames — bound derivation runs on the
 *expanded* SQL, so a frame declared inside the function body is honored — and
 widens the `silver/events_parsed` read to the previous day, so a session whose
 events straddle midnight is reconstructed as **one** row instead of being split
-at the partition boundary. The 1-day frame is also the cap — a session whose
-sub-30-minute activity chain runs longer than the lookback is clipped at the
-frame edge rather than reading unbounded history.
+at the partition boundary. This same interval is the **max-session-length
+cap**, named `max_session_length` throughout `sessionize.sql` and
+`sessions.sql`: a session whose sub-30-minute activity chain runs longer than
+the lookback is clipped at the frame edge rather than reading unbounded
+history, and it is the bound that seals old partitions for safe
+partition-level maintenance — a session cannot span more than this interval,
+so a partition older than it can never be touched by a later event.
+
+A window-frame bound must be a literal `INTERVAL '...'` — the grammar admits
+`UNBOUNDED` / `CURRENT ROW` / a number / an `INTERVAL` literal there, not a
+parameter reference — so `max_session_length` cannot be threaded through
+`sessionize` as an argument; instead `sessions.sql` restates it as an
+explicit, checkable `HAVING MAX(event_ts) - MIN(event_ts) <= INTERVAL '1 day'`
+assertion, so the cap is visible and verifiable in the emitted SQL rather than
+only implicit in the window-frame mechanics that happen to enforce it.
 
 Because the partition column `session_start_date` is *derived* and can skew
 earlier than the events that update it (a session that started yesterday gains
@@ -250,6 +262,22 @@ days stays idempotent (no duplicate rows in the lookback partition).
 
 Session identity is `(device_id, session_start_ts)` — stable across run windows,
 so a session reprocessed in a different window keeps the same `session_id`.
+
+### Session campaign attribution
+
+`silver/sessions` also tags each session with `utm_campaign`: the earliest
+non-NULL campaign among the session's own events within the first 5 minutes
+of session start, `ARG_MAX(utm_campaign, -epoch_us(event_ts)) FILTER (WHERE
+utm_campaign IS NOT NULL AND event_ts <= session_start_ts + INTERVAL '5
+minutes')` — a MIN_BY-style pick expressed with `ARG_MAX`, the recognized
+aggregate this codebase's type inference supports (see
+`gold/identity_backward_fill.sql`'s `arg_max` usage), keyed by the *negated*
+timestamp so the value returned is the one at the smallest `event_ts`. A
+campaign arriving later in a long-running session never attributes — only the
+first 5 minutes count, mirroring first-touch campaign attribution in
+production analytics pipelines. Because the 5-minute attribution window sits
+well inside the `max_session_length` cap, it never needs a wider source read
+than the sessionization already declares.
 
 ## Run locally
 
@@ -395,6 +423,10 @@ cases rather than aggregate statistics.
 - [`tests/session_boundary_invariants.test.sql`](tests/session_boundary_invariants.test.sql) —
   asserts the 30-minute inactivity rule and the platform-boundary split
   produce the expected session_id assignments on a mocked event sequence.
+  Session campaign attribution and the explicit max-session-length cap are
+  covered end-to-end by
+  `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild`
+  and by `verify_incremental_equivalence.py`'s session-attribution assertion.
 - [`tests/device_user_edges_per_day_invariants.test.sql`](tests/device_user_edges_per_day_invariants.test.sql) —
   asserts the cumulative aggregation shape (one row per `(device, user)`,
   `event_count` = SUM across days, `first_seen` = MIN, `last_seen` = MAX) and
