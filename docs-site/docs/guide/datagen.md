@@ -89,6 +89,7 @@ datasets:
   seed: 123               # Per-dataset seed (overrides global)
   partition: ...          # Optional: Hive-style date partitioning
   entity: ...             # Optional: entity pool for sticky attributes
+  redelivery: ...         # Optional: re-emit a fraction of rows as duplicates
   columns:                # Column definitions
     - name: order_id
       generator: { type: sequential_id }
@@ -248,6 +249,49 @@ Random timestamp within a range, output as `YYYY-MM-DDTHH:MM:SS` string.
 
 ```yaml
 generator: { type: timestamp, start: "2024-01-01T00:00:00", end: "2024-03-31T23:59:59" }
+```
+
+#### `timestamp_offset`
+
+Derives one clock from another: `base` names either an earlier column in the same dataset whose generator produces a timestamp, **or** this dataset's partition column (see [Partitioning](#partitioning)) — and `offset_seconds` is any generator that produces a numeric value (an int, a float, or a string that parses as one) — evaluated per row and added to `base` as seconds. Output is an ISO 8601 string, same shape as `timestamp`.
+
+The earlier-column form derives an ingestion-style clock from an occurrence-style clock:
+
+```yaml
+- name: event_time
+  generator: { type: timestamp, start: "2024-01-01T00:00:00", end: "2024-03-31T23:59:59" }
+- name: arrival_time
+  generator:
+    type: timestamp_offset
+    base: event_time
+    offset_seconds:
+      type: weighted_choice
+      values:
+        "0": 0.80        # arrives on time
+        "3600": 0.10     # 1 hour late
+        "86400": 0.05    # 1 day late
+        "259200": 0.05   # 3 days late
+```
+
+Referencing a column that comes later in `columns:`, doesn't exist, or isn't itself a timestamp-producing generator (`timestamp` or `timestamp_offset`) is a configuration error — unless `base` names the partition column instead.
+
+The partition-column form anchors an occurrence clock to the row's own partition day, so `DATE(event_time)` is always equal to the partition value — a plain `timestamp` spanning the whole dataset's date range does not give you this, since it draws independently of which partition the row lands in:
+
+```yaml
+partition:
+  column: event_date
+  start: "2024-01-01"
+  days: 90
+
+columns:
+  - name: event_time
+    generator:
+      type: timestamp_offset
+      base: event_date          # the partition column: anchors to midnight of that row's event_date
+      offset_seconds:
+        type: uniform_int
+        min: 0
+        max: 86399               # a random second within the partition day
 ```
 
 ### Boolean and nullable
@@ -439,6 +483,39 @@ Entity pools create a fixed set of "entities" (e.g., visitors, devices) whose at
 ```
 
 Each row gets a randomly selected entity from the pool. The entity's `visitor_id` and `country` are the same every time that entity appears.
+
+## Redelivery
+
+Real event pipelines deliver at-least-once: retries, buffering, and reprocessing occasionally re-emit an event that was already ingested. A `redelivery:` block under a dataset models this by re-emitting a deterministic fraction of generated rows, unchanged except for one timestamp column shifted forward:
+
+```yaml
+- name: events
+  output: data/events
+  num_rows: 1000000
+  columns:
+    - name: event_id
+      generator: { type: sequential_id }
+    - name: event_time
+      generator: { type: timestamp, start: "2024-01-01T00:00:00", end: "2024-03-31T23:59:59" }
+    - name: arrival_time
+      generator:
+        type: timestamp_offset
+        base: event_time
+        offset_seconds: { type: uniform_int, min: 0, max: 60 }
+  redelivery:
+    fraction: 0.02                 # ~2% of rows are re-emitted (once each)
+    arrival_column: arrival_time   # the ingestion-clock column shifted on the duplicate
+    delay_seconds:                 # numeric generator; added to the original arrival value
+      type: uniform_int
+      min: 3600
+      max: 172800
+```
+
+A redelivered row is byte-identical to its original — same identifiers, same business columns, same occurrence timestamps — except `arrival_column`, which is shifted forward by a per-duplicate draw from `delay_seconds`. Duplicates are appended after the primary rows, so the dataset's row count grows by `round(fraction × num_rows)`.
+
+This is the mechanism for exercising downstream deduplication: a model that dedups on the identifier column, keeping the row with the earliest `arrival_column` (e.g. `QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1`), converges to the original row — the duplicate is a genuine redelivery, not a distinct event.
+
+Selection and delay draws use a dedicated random stream, isolated from the stream that generates the primary rows — toggling `redelivery:` on or off never changes the primary rows.
 
 ## Foreign keys
 

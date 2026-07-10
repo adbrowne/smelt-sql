@@ -12,6 +12,25 @@
 
 use std::time::Duration;
 
+use smelt_logical::maintenance::emit::StatementGroup;
+
+/// Which chunk of a chunked range a [`StatementGroup`] belongs to, when the
+/// batch-safety classification (or an explicit `--batch-size`/`--per-partition`)
+/// splits a run/backbuild range into more than one window. `index` is 0-based;
+/// `total` is the count of chunks for this model; `start`/`end` are the
+/// `[start, end)` window this chunk covers, formatted as `YYYY-MM-DD`. A
+/// single-chunk range still carries a `ChunkInfo` with `total == 1` — consumers
+/// decide whether to render a boundary line (`smelt backbuild --dry-run` prints
+/// one only when `total > 1`, `docs/specs/cli.md` §"`--dry-run` prints the
+/// maintenance statements").
+#[derive(Debug, Clone)]
+pub struct ChunkInfo {
+    pub index: usize,
+    pub total: usize,
+    pub start: String,
+    pub end: String,
+}
+
 /// Sink for run-progress callbacks. Implementations are responsible for the
 /// transport (stdout, broadcast channel, log capture); the runtime emits the
 /// events.
@@ -53,6 +72,25 @@ pub trait RunReporter: Send + Sync {
     /// Default: no-op. This is the Phase 4 hook; consumers that need verbose
     /// output implement it; others inherit the default.
     fn model_compiled(&self, _run_id: &str, _model: &str, _sql: &str) {}
+
+    /// The maintenance statements a batch/chunk is about to execute (or, under
+    /// `--dry-run`, would execute), as produced by the single-owner emitters in
+    /// `smelt_logical::maintenance::emit` (`docs/specs/maintenance_plan.md`
+    /// §"Statement emission (single owner)"). Called after `model_compiled` and
+    /// before the batch's backend call (a real run) or in place of it (a
+    /// dry-run), for every maintained (non-`full`) technique this runtime lowers
+    /// to a `StatementGroup`. `chunk` names which window of a chunked range this
+    /// group covers (`None` when the technique is not region-chunked, e.g. a
+    /// keyed fold). Default: no-op; `smelt run`/`smelt backbuild --dry-run` and
+    /// statement-parity tests are the consumers.
+    fn maintenance_statements(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        _chunk: Option<&ChunkInfo>,
+        _group: &StatementGroup,
+    ) {
+    }
 
     /// One batch of an incremental model completed. `batch_index` is
     /// 0-based; `batches_total` is the count of batches in this model's

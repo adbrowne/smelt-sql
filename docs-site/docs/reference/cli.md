@@ -107,7 +107,7 @@ smelt run [OPTIONS]
 | `--target` | | string | `dev` | Target environment from smelt.yml |
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
-| `--dry-run` | | bool | `false` | Parse and validate without executing |
+| `--dry-run` | | bool | `false` | Print the maintenance statements that would run — without executing (see below) |
 | `--event-time-start` | | string | | Start of event time range for incremental models (ISO 8601: YYYY-MM-DD). Requires `--event-time-end`. |
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--start` | | string | | Alias for `--event-time-start` |
@@ -119,6 +119,9 @@ smelt run [OPTIONS]
 | `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
+| `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
+| `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
+| `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
 
 **Selector syntax:**
 
@@ -158,6 +161,41 @@ smelt run --dry-run
 smelt run --auto
 ```
 
+### `--dry-run` — inspect the maintenance statements before they run
+
+`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation would execute, the **maintenance statements** the run would execute — the region `DELETE`+`INSERT` pair (or keyed `MERGE`, etc.) a maintained model rebuilds its window with — not merely the compiled `SELECT` body. The statements are the output of the same statement emitters a real run consumes, so what you see is what would run. Region bounds are **real**: they come from the invocation's own `--event-time-start`/`--event-time-end` window, never symbolic placeholders. A transactional group is bracketed by `BEGIN`/`COMMIT` lines to show its atomicity. Nothing is executed and no backend connection is opened.
+
+`smelt backbuild --dry-run` additionally reflects the **chunking** a real backbuild performs: when a model's batch-safety classification (or an explicit `--batch-size`/`--per-partition`) splits the range, the statements print once per chunk, each introduced by a boundary line naming its `[start, end)` window and position — `-- chunk 2/4: [2026-03-08, 2026-03-15)` — in the order a real backbuild would execute them. An auto-chunked backfill is thereby fully inspectable before it runs.
+
+Division of labour with [`smelt explain <model> --show-sql`](#smelt-explain): `--show-sql` is the no-window, single-model plan-inspection surface (symbolic bounds unless `--period` is given); `--dry-run` is the "exactly what would **this invocation** do" surface — real window, real selection, real chunking.
+
+### Forward propagation with `--since-upstream`
+
+Every `refresh: incremental` model with a declared `grain:` derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (`smelt explain <model>` prints it). `--since-upstream` composes those clamps into a propagation graph and walks it forward from **caller-declared** per-source deltas: for each `--source <address> --landed <start>..<end>` pair, the delta reflects through every downstream edge, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. The dirty set is printed before anything runs, then `smelt` runs exactly those `(model, region)` pairs — never a partition outside the propagated set.
+
+`--source` and `--landed` are repeatable and pair up positionally: the first `--source` pairs with the first `--landed`, and so on. A source named without a matching `--landed` interval contributes nothing for that invocation — there is no implicit whole-table fallback and no automatic discovery of what changed. The runner (or an external poller that watches the real upstream systems) is responsible for telling `smelt` what landed; a cron tick is only the trigger to ask.
+
+An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (`bronze`), with its `sources.` breadcrumb (`sources.bronze`), or with the full `smelt.` prefix (`smelt.sources.bronze`) — all three resolve identically.
+
+`--source` also accepts an **upstream maintained model** as the delta origin — a model's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp `smelt explain` reports for it), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op.
+
+```bash
+# silver.events_parsed finished a run over Jan 3; propagate that landed
+# window to everything downstream of it (the origin model is not re-run).
+smelt run --since-upstream \
+  --source silver.events_parsed --landed 2026-01-03..2026-01-04
+```
+
+A model whose dependency graph contains a cycle, a self-reference, or a keyed-grain node (no partition axis for interval dirt) refuses the whole `--since-upstream` invocation with a named error rather than guessing.
+
+```bash
+# Two sources landed data since the last propagation; run exactly the
+# partitions each delta can affect.
+smelt run --since-upstream \
+  --source sources.raw.events --landed 2026-01-03..2026-01-04 \
+  --source sources.raw.users --landed 2026-01-07..2026-01-08
+```
+
 ---
 
 ## smelt backbuild
@@ -189,7 +227,7 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 | `--target` | | string | `dev` | Target environment from smelt.yml |
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
-| `--dry-run` | | bool | `false` | Show what would execute without running |
+| `--dry-run` | | bool | `false` | Print the maintenance statements that would run, with per-chunk boundaries — without executing ([details](#dry-run-inspect-the-maintenance-statements-before-they-run)) |
 | `--batch-size` | | integer | | Override batch size in days for backfill chunking |
 | `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
 
@@ -202,7 +240,8 @@ smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01
 # Same using scope shorthand (equivalent when scope is marts)
 smelt --scope marts backbuild +daily_revenue --start 2026-01-01 --end 2026-02-01
 
-# Preview what would be executed
+# Preview the maintenance statements — one block per auto-derived chunk —
+# without executing anything
 smelt backbuild +marts.daily_revenue --start 2026-01-01 --end 2026-02-01 --dry-run
 
 # Backbuild with per-partition execution
@@ -261,6 +300,8 @@ smelt build [OPTIONS]
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--select` | `-s` | string[] | | Select models to run (repeatable). Same syntax as `smelt run`. |
 | `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
+| `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with---include-upstreams). |
+| `--include-upstreams` | | bool | `false` | Resolve and build the target model's required upstream slices for `--period` instead of the ordinary seed+run-everything build. Requires `--period`. |
 
 **Examples:**
 
@@ -276,6 +317,26 @@ smelt build --select marts.daily_revenue --select marts.transactions
 
 # Same with scope shorthand
 smelt --scope marts build --select daily_revenue --select transactions
+
+# Bounded test/validation build: resolve and build exactly what marts.daily_revenue
+# needs for January
+smelt build marts.daily_revenue --period 2026-01-01..2026-02-01 --include-upstreams
+```
+
+### Backward resolution with `--include-upstreams`
+
+`smelt build <model> --period <start>..<end> --include-upstreams` answers the dual question to `--since-upstream`: given a target model and a requested output period, which upstream slices must exist for that period to be correct? It walks the target's ancestor sub-DAG backward through the SAME propagation graph `--since-upstream` assembles, applying each edge's derived scan clamp directly (`[s, e)` downstream requires `[s − before, e + after)` upstream), and resolves, for every ancestor, the partition interval that must exist — a data prerequisite for a raw source, a build region for an intermediate model — plus the build order those models must run in (ancestor-first, target last).
+
+The resolved-slices report — one `STAGE <source>: <interval>` or `BUILD <model>: <interval>` line per ancestor, then a `Build order: ...` line — is printed before anything runs. `smelt` then builds exactly that set, ancestor models first, the target last, through the same execution path every other run/build command uses. Raw sources are reported (so you know what must already be staged) but never built by `smelt` — sources are external data.
+
+An ancestor whose partition axis can't be sliced (an unclocked lookup/dimension source, or a model with no declared `timeseries:`) resolves to the whole table — printed as `whole table` rather than an interval — since there is no interval structure to bound it against.
+
+This is the bounded test/validation build: staging exactly the resolved slices and building bottom-up produces the same result, over the requested period, as a full build over complete history.
+
+```bash
+# Resolve and build exactly what marts.daily_revenue needs for January,
+# printing the required upstream slices and build order first.
+smelt build marts.daily_revenue --period 2026-01-01..2026-02-01 --include-upstreams
 ```
 
 ---
@@ -787,16 +848,41 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
-| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given. |
+| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given, except in combination with `--show-sql` (below). |
 | `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. Ignored when `MODEL_NAME` is given. |
+| `--show-sql` | | bool | `false` | With `MODEL_NAME`, additionally print the maintenance statements each cell executes. Never connects to a backend. |
+| `--period` | | `<start>..<end>` | | With `--show-sql`, use these real literal date bounds (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
 With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
-cell (trigger, corner, technique), the `ledger_catch_up` flag, the derived per-source scan
-clamps, each source's partition-locality verdict, any admission refusals, and the model's inbound
-edges. This only applies to incremental models (`refresh: incremental` with a `grain:` declared)
+cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
+the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
+derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
+and the model's inbound edges. This only applies to incremental models (`refresh: incremental`
+with a `grain:` declared)
 — other models print a one-line notice instead.
+
+Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell
+executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
+compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
+referenced ephemeral model is CTE-inlined, not shown as a bare table reference) and the real
+upstream column types (so aggregates over a `smelt.ref()` column cast correctly), so the printed
+SQL matches what a run would compile. Statements print in execution order; a transactional group
+(e.g. a paired region `DELETE`+`INSERT`) is bracketed by `BEGIN`/`COMMIT` lines to show its
+atomicity. `--show-sql` never connects to a backend or executes anything — it is a pure
+compile-and-render step. Combine with `--period <start>..<end>` to see the real literal bounds a
+run over that window would use; without it, the symbolic placeholders
+`{{window_start}}`/`{{window_end}}` stand in so the emitted shape is inspectable without choosing
+a window. Combined with `--json`, the per-model report is emitted as JSON with a `statements`
+array per cell (`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable
+form for documentation generators or other tooling.
+
+One narrow case still diverges from a real run's *types* (not its shape): a column aggregated
+directly off an ephemeral ref (e.g. `SUM(rate)` where `rate` comes straight from a joined
+ephemeral model) casts to the `BIGINT` default rather than its real type — this is a compile-order
+limitation in the shared compiler that a real run hits identically, so `--show-sql` still matches
+what a run executes, casting quirk included. See `docs/specs/cli.md` Known Divergences.
 
 **Examples:**
 
@@ -815,6 +901,15 @@ smelt --scope marts explain --select +daily_revenue --json
 
 # Print one incremental model's maintenance plan
 smelt explain daily_events
+
+# Also print the maintenance statements each cell executes
+smelt explain daily_events --show-sql
+
+# ...with a real window instead of the {{window_start}}/{{window_end}} placeholders
+smelt explain daily_events --show-sql --period 2024-01-01..2024-01-08
+
+# Machine-readable statements array per cell
+smelt explain daily_events --show-sql --json
 ```
 
 ```text

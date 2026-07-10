@@ -82,7 +82,7 @@ Frontmatter wins over `smelt.yml` when both set the same field. The two sources 
 | `view` | Yes |
 | `table`, `refresh: full` | Yes |
 | `table`, `refresh: incremental`, `grain: partition` | **Required** |
-| `table`, `refresh: incremental`, `grain: key` | Only when key temporal locality is established (`keyed_models.md` §"Key temporal locality"); otherwise forbidden (`KeyedForbidsTimeseries`) |
+| `table`, `refresh: incremental`, `grain: key` | **Forbidden** — the keyed output has no partition column; the rule reads partition shape from the driving source (`KeyedForbidsTimeseries`) |
 | `table`, `refresh: incremental`, `grain: key_per_partition` | **Required** — the partition axis is half the grain |
 | `table`, `refresh: materialized_view` | No — `MaterializedViewForbidsTimeseries` |
 | `ephemeral` | No — `MalformedTimeseries` |

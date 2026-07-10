@@ -1,0 +1,89 @@
+//! `smelt backbuild --dry-run` renders the emitted maintenance statements with
+//! per-chunk boundaries (`docs/specs/cli.md` §"`--dry-run` prints the
+//! maintenance statements"): when the batch-safety classification splits the
+//! range, statements print once per chunk, each chunk introduced by a boundary
+//! line naming its `[start, end)` window and position, in real execution order.
+//!
+//! Real fixture: `examples/web_analytics/silver.sessions` classifies
+//! `bounded_safe(chunk=7d,…)` (a 1-day-lookback Form-B model), so a range wider
+//! than the derived chunk width is auto-split — no `--per-partition`/`--batch-size`
+//! override is used; the classification alone forces the chunking.
+
+use std::path::Path;
+use std::process::Command;
+
+/// A 28-day range over a `bounded_safe(chunk=7d,…)` model auto-splits into
+/// four 7-day chunks; the dry-run prints one `DELETE`+`INSERT` block per chunk,
+/// each introduced by `-- chunk k/N: [start, end)` in execution order, and no
+/// backend is opened (the run succeeds against a project whose `.duckdb` target
+/// need not exist).
+#[test]
+fn chunked_range_prints_per_chunk_boundaries() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("backbuild")
+        .arg("silver.sessions")
+        .arg("--start")
+        .arg("2026-03-01")
+        .arg("--end")
+        .arg("2026-03-29")
+        .arg("--dry-run")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt backbuild silver.sessions --dry-run");
+
+    assert!(
+        output.status.success(),
+        "backbuild --dry-run failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // Each chunk introduced by its boundary line, in order.
+    for (k, (start, end)) in [
+        ("2026-03-01", "2026-03-08"),
+        ("2026-03-08", "2026-03-15"),
+        ("2026-03-15", "2026-03-22"),
+        ("2026-03-22", "2026-03-29"),
+    ]
+    .iter()
+    .enumerate()
+    {
+        let line = format!("-- chunk {}/4: [{}, {})", k + 1, start, end);
+        assert!(
+            stdout.contains(&line),
+            "expected per-chunk boundary line `{line}` in the dry-run output:\n{stdout}"
+        );
+    }
+
+    // The chunks print in execution order (chunk 1 before chunk 4).
+    let pos1 = stdout.find("-- chunk 1/4:").expect("chunk 1 present");
+    let pos4 = stdout.find("-- chunk 4/4:").expect("chunk 4 present");
+    assert!(pos1 < pos4, "chunks must print in execution order");
+
+    // Each chunk carries the emitted maintenance statements, transactionally
+    // bracketed, with real literals (no symbolic placeholders).
+    assert!(
+        stdout.contains("DELETE FROM main.silver_sessions WHERE")
+            && stdout.contains("INSERT INTO main.silver_sessions "),
+        "expected the region DELETE+INSERT for silver.sessions:\n{stdout}"
+    );
+    assert!(
+        stdout.contains("BEGIN") && stdout.contains("COMMIT"),
+        "expected transactional BEGIN/COMMIT bracketing:\n{stdout}"
+    );
+    assert!(
+        !stdout.contains("{{window_start}}") && !stdout.contains("{{window_end}}"),
+        "dry-run literals must be real, not placeholders:\n{stdout}"
+    );
+    // The real window literals appear in the DELETE predicates.
+    assert!(
+        stdout.contains("'2026-03-01'") && stdout.contains("'2026-03-22'"),
+        "expected real chunk window literals in the statements:\n{stdout}"
+    );
+}

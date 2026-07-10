@@ -1,4 +1,5 @@
 use crate::intervals::IntervalStore;
+use crate::landed_deltas::LandedDeltaStore;
 use crate::reconciliation::ReconciliationStore;
 use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
@@ -41,6 +42,10 @@ impl FileStore {
 
     fn reconciliation_path(&self) -> PathBuf {
         self.state_dir.join("reconciliation.json")
+    }
+
+    fn landed_deltas_path(&self) -> PathBuf {
+        self.state_dir.join("landed_deltas.json")
     }
 
     fn snapshots_path(&self) -> PathBuf {
@@ -173,6 +178,35 @@ impl FileStore {
             .with_context(|| "Failed to serialize reconciliation ledger")?;
         std::fs::write(&path, json)
             .with_context(|| format!("Failed to write reconciliation ledger: {:?}", path))?;
+        Ok(())
+    }
+
+    // --- Landed-delta store ---
+
+    /// Load the per-source landed-delta store from disk (`docs/specs/sources.md`
+    /// §"World-facts admission consumes"). Returns default if the file
+    /// doesn't exist — a source with no entry has never had a landing
+    /// recorded.
+    pub fn load_landed_deltas(&self) -> Result<LandedDeltaStore> {
+        let path = self.landed_deltas_path();
+        if !path.exists() {
+            return Ok(LandedDeltaStore::default());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read landed-delta store: {:?}", path))?;
+        let store = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse landed-delta store: {:?}", path))?;
+        Ok(store)
+    }
+
+    /// Save the per-source landed-delta store to disk.
+    pub fn save_landed_deltas(&self, store: &LandedDeltaStore) -> Result<()> {
+        self.init()?;
+        let path = self.landed_deltas_path();
+        let json = serde_json::to_string_pretty(store)
+            .with_context(|| "Failed to serialize landed-delta store")?;
+        std::fs::write(&path, json)
+            .with_context(|| format!("Failed to write landed-delta store: {:?}", path))?;
         Ok(())
     }
 
@@ -361,6 +395,41 @@ mod tests {
             loaded.get("daily_revenue").unwrap().covered_intervals.len(),
             1
         );
+    }
+
+    #[test]
+    fn test_landed_deltas_roundtrip() {
+        use crate::landed_deltas::LandedDeltaStore;
+
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        let mut deltas = LandedDeltaStore::default();
+        let delta = deltas
+            .get_or_create("sources.orders")
+            .record_landing("2026-01-01", "2026-01-10");
+        assert!(!delta.is_empty());
+
+        store.save_landed_deltas(&deltas).unwrap();
+
+        let loaded = store.load_landed_deltas().unwrap();
+        assert!(loaded.get("sources.orders").is_some());
+        assert_eq!(
+            loaded
+                .get("sources.orders")
+                .unwrap()
+                .covered_intervals
+                .len(),
+            1
+        );
+    }
+
+    #[test]
+    fn test_landed_deltas_empty_when_file_missing() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+        let loaded = store.load_landed_deltas().unwrap();
+        assert!(loaded.sources.is_empty());
     }
 
     #[test]

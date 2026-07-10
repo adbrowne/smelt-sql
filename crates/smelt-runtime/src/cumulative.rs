@@ -19,6 +19,7 @@ use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
+use smelt_logical::maintenance::emit::{emit_keyed_fold, MaintenanceDialect};
 use smelt_planner::{
     classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
     CumulativeClassification, KeyedDiagnostic, SourceTimeseriesMap,
@@ -193,6 +194,16 @@ pub async fn execute_cumulative_aggregate(
 /// Build a `MERGE INTO` statement that combines target and delta values
 /// per the classifier's cross-partition combiners.
 ///
+/// Thin wrapper over the single-owner emitter
+/// (`smelt_logical::maintenance::emit::emit_keyed_fold`,
+/// `docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+/// this function's only remaining job is rendering each aggregator column's
+/// `CrossPartitionCombiner` to a plain SQL expression string — the emitter
+/// itself never depends on `smelt-planner`
+/// (`docs/specs/architecture.md` §"Layered single-ownership") — then handing
+/// the rendered `(column, expression)` pairs to the emitter, which owns the
+/// `MERGE` shape.
+///
 /// Shape:
 /// ```sql
 /// MERGE INTO schema.table AS target
@@ -209,31 +220,26 @@ pub fn build_cumulative_merge_sql(
     delta_sql: &str,
     classification: &CumulativeClassification,
 ) -> String {
-    let on_clause = classification
-        .unique_key
-        .iter()
-        .map(|k| format!("target.{} = delta.{}", k, k))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-
-    let set_clause = classification
+    let folds: Vec<(String, String)> = classification
         .aggregator_columns
         .iter()
         .map(|col: &AggregatorColumn| {
             let target_col = format!("target.{}", col.output_name);
             let delta_col = format!("delta.{}", col.output_name);
             let expr = col.cross_partition_combiner.render(&target_col, &delta_col);
-            format!("{} = {}", col.output_name, expr)
+            (col.output_name.clone(), expr)
         })
-        .collect::<Vec<_>>()
-        .join(", ");
+        .collect();
 
-    format!(
-        "MERGE INTO {}.{} AS target USING ({}) AS delta ON {} \
-         WHEN MATCHED THEN UPDATE SET {} \
-         WHEN NOT MATCHED THEN INSERT *",
-        schema, table, delta_sql, on_clause, set_clause
-    )
+    let schema_table = format!("{schema}.{table}");
+    let group = emit_keyed_fold(
+        &schema_table,
+        &classification.unique_key,
+        &folds,
+        delta_sql,
+        MaintenanceDialect::DuckDb,
+    );
+    group.statements[0].sql.clone()
 }
 
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
@@ -291,6 +297,13 @@ mod tests {
         }
     }
 
+    /// `build_cumulative_merge_sql` is a thin wrapper over the single-owner
+    /// `emit_keyed_fold` emitter (`docs/specs/maintenance_plan.md`
+    /// §"Statement emission (single owner)"): this test asserts its output
+    /// is byte-identical to a direct emitter call over the same rendered
+    /// combiner expressions, not merely emitter-*shaped* (contains checks
+    /// alone would pass even if a stray character crept into the wrapper's
+    /// own formatting).
     #[test]
     fn test_build_cumulative_merge_sql() {
         let classification = CumulativeClassification {
@@ -317,12 +330,9 @@ mod tests {
                 timeseries: dummy_ts(),
             },
         };
-        let sql = build_cumulative_merge_sql(
-            "main",
-            "device_user_edges",
-            "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2",
-            &classification,
-        );
+        let delta_sql = "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2";
+        let sql =
+            build_cumulative_merge_sql("main", "device_user_edges", delta_sql, &classification);
         assert!(sql.contains("MERGE INTO main.device_user_edges"));
         assert!(sql.contains("target.device_id = delta.device_id"));
         assert!(sql.contains("target.user_id = delta.user_id"));
@@ -330,6 +340,31 @@ mod tests {
         assert!(sql.contains("first_seen = LEAST(target.first_seen, delta.first_seen)"));
         assert!(sql.contains("last_seen = GREATEST(target.last_seen, delta.last_seen)"));
         assert!(sql.contains("WHEN NOT MATCHED THEN INSERT *"));
+
+        let expected = emit_keyed_fold(
+            "main.device_user_edges",
+            &classification.unique_key,
+            &[
+                (
+                    "event_count".to_string(),
+                    "target.event_count + delta.event_count".to_string(),
+                ),
+                (
+                    "first_seen".to_string(),
+                    "LEAST(target.first_seen, delta.first_seen)".to_string(),
+                ),
+                (
+                    "last_seen".to_string(),
+                    "GREATEST(target.last_seen, delta.last_seen)".to_string(),
+                ),
+            ],
+            delta_sql,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            sql, expected.statements[0].sql,
+            "build_cumulative_merge_sql must be byte-identical to a direct emitter call"
+        );
     }
 
     /// The `WindowedKeyedRule` impl must refuse a non-monoid combiner

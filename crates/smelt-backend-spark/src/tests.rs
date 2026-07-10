@@ -151,39 +151,11 @@ fn sql_insert_into() {
     );
 }
 
-#[test]
-fn sql_merge_into_single_key() {
-    let sql = sql::merge_into(
-        "cat.db.users",
-        "SELECT 1 AS id, 'Alice' AS name",
-        &["id".to_string()],
-    );
-    assert_eq!(
-        sql,
-        "MERGE INTO cat.db.users AS target \
-         USING (SELECT 1 AS id, 'Alice' AS name) AS source \
-         ON target.id = source.id \
-         WHEN MATCHED THEN UPDATE SET * \
-         WHEN NOT MATCHED THEN INSERT *"
-    );
-}
-
-#[test]
-fn sql_merge_into_composite_key() {
-    let sql = sql::merge_into(
-        "cat.db.events",
-        "SELECT * FROM staging",
-        &["user_id".to_string(), "event_date".to_string()],
-    );
-    assert_eq!(
-        sql,
-        "MERGE INTO cat.db.events AS target \
-         USING (SELECT * FROM staging) AS source \
-         ON target.user_id = source.user_id AND target.event_date = source.event_date \
-         WHEN MATCHED THEN UPDATE SET * \
-         WHEN NOT MATCHED THEN INSERT *"
-    );
-}
+// `sql::merge_into` was removed — the column-scoped MERGE text is now
+// produced by `smelt_logical::maintenance::emit::emit_column_scoped_merge`
+// (single-owner emitter); the Spark-dialect variant's shape (byte-identical
+// to what this function used to produce) is asserted in
+// `crates/smelt-logical/tests/emit_statements.rs`.
 
 #[test]
 fn sql_insert_overwrite() {

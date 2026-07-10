@@ -14,7 +14,10 @@ use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::FromPyArrow;
 use async_trait::async_trait;
 use pyo3::prelude::*;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    emit_delete_insert, Backend, BackendCapabilities, BackendError, MaintenanceDialect,
+    PartitionRange, Region, SqlDialect,
+};
 
 mod sql;
 
@@ -471,17 +474,46 @@ impl Backend for SparkBackend {
             .await
     }
 
-    async fn merge_into(
+    /// Overrides the trait default so the emitted `DELETE`/`INSERT` text
+    /// targets the full catalog-qualified table name
+    /// (`catalog.schema.table`) — the generic default in `smelt-backend`
+    /// only sees `schema`/`name` and cannot know Spark's catalog. The text
+    /// itself still comes from `emit_delete_insert`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"); this crate builds no `DELETE`/`INSERT` string of its own.
+    /// No native multi-statement transaction here (same precedent as the
+    /// pre-Phase-1 default) — statements execute sequentially via
+    /// `execute_statement_group`'s default.
+    async fn delete_and_insert_transactional(
         &self,
         schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
     ) -> Result<(), BackendError> {
-        let table_name = self.qualified_name(schema, table);
-        self.py_execute_no_result(&sql::merge_into(&table_name, source_sql, unique_key))
-            .await
+        let table_name = self.qualified_name(schema, name);
+        let region = Region {
+            start: format!("'{}'", partition.start.replace('\'', "''")),
+            end: format!("'{}'", partition.end.replace('\'', "''")),
+        };
+        let group = emit_delete_insert(
+            &table_name,
+            &partition.column,
+            &region,
+            sql,
+            MaintenanceDialect::Spark,
+        );
+        self.execute_statement_group(&group).await
     }
+
+    // `merge_into` is not overridden here — the `Backend` trait's default
+    // implementation (build the `StatementGroup` via `smelt_logical::
+    // maintenance::emit::emit_column_scoped_merge`, then
+    // `execute_statement_group`) routes through `execute_sql` per statement,
+    // matching this backend's shape exactly (single statement, no native
+    // transaction). `docs/specs/maintenance_plan.md` §"Statement emission
+    // (single owner)" — Spark statement parity is asserted at the emitter
+    // level; the live Spark leg is gated CI, not this default routing.
 
     async fn insert_overwrite(
         &self,

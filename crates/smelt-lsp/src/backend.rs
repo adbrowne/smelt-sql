@@ -451,6 +451,7 @@ impl Backend {
                 DbCode::GrainRequiresIncremental => "grain-requires-incremental",
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
+                DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });

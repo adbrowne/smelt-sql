@@ -5,7 +5,7 @@
 //! is-monoid, needs-inverse, decomposable, value-vs-order-monotone —
 //! generalising the `cumulative` monoid allowlist into one shared classifier.
 //! This module states only the facts; the ordering of those facts into a
-//! ladder and the maintainable/delegated cutoff live in `model_maintenance.md`
+//! ladder and the maintainable/delegated cutoff live in `maintenance_plan.md`
 //! and are **not** decided here.
 
 use smelt_types::SqlFunction;
@@ -23,7 +23,7 @@ pub enum Monotone {
 }
 
 /// The raw algebraic facts of a combiner. Not the maintenance ladder — see
-/// `model_maintenance.md` §"The algebraic maintenance ladder" for how these
+/// `maintenance_plan.md` §"The algebraic maintenance ladder" for how these
 /// facts order into maintainable/delegated tiers.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Discriminants {

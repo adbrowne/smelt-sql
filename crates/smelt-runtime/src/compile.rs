@@ -31,7 +31,7 @@ use crate::fn_bodies::FnBodyMap;
 ///   `(address_segments, partition_column)`. Address segments give the full smelt path
 ///   (e.g., `["silver", "events_parsed"]`).
 /// * `horizon_ceiling` — The model's declared `horizon_ceiling:` warning ceiling, if any.
-///   Never narrows or widens the derived bound (see `docs/specs/model_maintenance.md`
+///   Never narrows or widens the derived bound (see `docs/specs/maintenance_plan.md`
 ///   §"Windowed maintenance and the horizon") — it only licenses a warning message in the
 ///   returned `Vec<String>` when a source's derived reach exceeds it.
 ///

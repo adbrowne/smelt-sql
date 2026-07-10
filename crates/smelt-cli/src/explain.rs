@@ -4,7 +4,13 @@ use serde::Serialize;
 use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::{BatchedConfig, Granularity, Materialization, ModelOriginKind};
+use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
+use smelt_logical::maintenance::{PlanCell, Technique};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
+use smelt_runtime::{
+    classify_cumulative_sql, inject_source_filters, inject_time_filter, CompilerRegistry,
+    EphemeralResolver, SourceBound, TimeRange,
+};
 use std::collections::BTreeMap;
 
 /// Top-level JSON output for `smelt explain --json`.
@@ -197,6 +203,364 @@ pub fn build_maintenance_plan_report(
     }
 
     out
+}
+
+/// How a `--show-sql` region's literal bounds are sourced
+/// (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
+/// report"): real values from `--period <start>..<end>`, or the symbolic
+/// placeholders `{{window_start}}`/`{{window_end}}` when no period is
+/// given, so the emitted shape is inspectable without choosing a window.
+#[derive(Debug, Clone)]
+pub enum RegionLiterals {
+    Period { start: String, end: String },
+    Placeholders,
+}
+
+impl RegionLiterals {
+    /// The raw (unquoted) start/end bounds. Callers quote them as needed
+    /// per the destination emitter's own literal convention (a `Region`'s
+    /// `start`/`end` are pre-quoted SQL literals; `TimeRange`'s are quoted
+    /// by `inject_time_filter` itself).
+    fn raw(&self) -> (String, String) {
+        match self {
+            RegionLiterals::Period { start, end } => (start.clone(), end.clone()),
+            RegionLiterals::Placeholders => {
+                ("{{window_start}}".to_string(), "{{window_end}}".to_string())
+            }
+        }
+    }
+
+    fn quoted_region(&self) -> smelt_logical::maintenance::emit::Region {
+        let (start, end) = self.raw();
+        smelt_logical::maintenance::emit::Region {
+            start: format!("'{}'", start.replace('\'', "''")),
+            end: format!("'{}'", end.replace('\'', "''")),
+        }
+    }
+}
+
+/// One cell's `--show-sql` statement report: the cell it belongs to
+/// (by index into `MaintenancePlanResult.plan.cells`) and either the
+/// emitted [`StatementGroup`] or a plain-language reason none could be
+/// built (`Technique::InPlaceUpdate` has no production consumer yet, or
+/// the cell's technique-specific inputs — e.g. a keyed-fold driving source
+/// — could not be classified from the discovered project).
+pub struct CellStatements {
+    pub cell_index: usize,
+    pub outcome: Result<StatementGroup, String>,
+}
+
+/// Build the [`StatementGroup`] a plan cell would execute, using the same
+/// pure emitters a run executes
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+/// this is the CLI-side "same inputs, same emitter" observation path —
+/// `--show-sql` never connects to a backend or executes anything, so every
+/// SELECT body here is compiled through the sanctioned
+/// `CompilerRegistry::get(...).compile_with_sql_and_ephemerals(...)` entry
+/// point (Run-pipeline-parity rule, `architecture.md`) and every clamp is
+/// injected via `smelt-runtime`'s existing transformer functions, never a
+/// new compile helper in `smelt-cli`.
+///
+/// Returns `Err(reason)` rather than fabricating SQL when this cell's
+/// technique-specific inputs (unique key, keyed-fold driving-source
+/// classification) cannot be assembled from the discovered project, or when
+/// the technique has no production consumer yet (`Technique::InPlaceUpdate`,
+/// `maintenance_plan.md` — no live plan cell lowers to it).
+///
+/// `resolver` must be built from the *actual* discovered project (the same
+/// way `smelt-runtime`'s dry-run compile path in `execute.rs` builds it —
+/// `SqlCompiler::build_ephemeral_resolver` over the target's ephemeral
+/// models), not `EphemeralResolver::empty()`: an empty resolver leaves any
+/// `smelt.<ephemeral>` ref in this model's SELECT body resolved as a
+/// physical table reference instead of CTE-inlined, which is what a real
+/// run would do (`docs/specs/cli.md` §"`smelt explain <model>`
+/// maintenance-plan report").
+#[allow(clippy::too_many_arguments)]
+pub fn build_cell_statement_group(
+    cell: &PlanCell,
+    model: &ModelFile,
+    schema: &str,
+    target: &str,
+    registry: &CompilerRegistry,
+    resolver: &EphemeralResolver,
+    dialect: MaintenanceDialect,
+    unique_key: &[String],
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    region: &RegionLiterals,
+) -> Result<StatementGroup, String> {
+    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+    let table_name = format!("{schema}.{}", model.db_name_owned());
+
+    match cell.technique {
+        Technique::DeleteInsert => {
+            let partition_col = model
+                .metadata
+                .as_deref()
+                .and_then(|m| m.timeseries.as_ref())
+                .map(|t| t.partition_column.clone())
+                .ok_or_else(|| {
+                    "no timeseries.partition_column declared — cannot build the region \
+                     DELETE+INSERT pair"
+                        .to_string()
+                })?;
+
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+            let (raw_start, raw_end) = region.raw();
+            let wrapped = inject_time_filter(
+                &compiled.sql,
+                &partition_col,
+                &TimeRange {
+                    start: raw_start,
+                    end: raw_end,
+                },
+            )
+            .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
+
+            Ok(smelt_logical::maintenance::emit::emit_delete_insert(
+                &table_name,
+                &partition_col,
+                &region.quoted_region(),
+                &wrapped,
+                dialect,
+            ))
+        }
+        Technique::KeyedFold => {
+            let classification =
+                classify_cumulative_sql(&model.name, &stripped_sql, source_timeseries)
+                    .map_err(|e| format!("{e}"))?;
+
+            let (raw_start, raw_end) = region.raw();
+            let time_range = TimeRange {
+                start: raw_start,
+                end: raw_end,
+            };
+            let mut bound_map = std::collections::HashMap::new();
+            bound_map.insert(
+                classification.driving_source.name.clone(),
+                SourceBound {
+                    partition_col: classification
+                        .driving_source
+                        .timeseries
+                        .partition_column
+                        .clone(),
+                    before_secs: 0,
+                    after_secs: 0,
+                },
+            );
+            let pushed = inject_source_filters(&stripped_sql, &bound_map, &time_range);
+
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+            let folds: Vec<(String, String)> = classification
+                .aggregator_columns
+                .iter()
+                .map(|col| {
+                    let target_col = format!("target.{}", col.output_name);
+                    let delta_col = format!("delta.{}", col.output_name);
+                    (
+                        col.output_name.clone(),
+                        col.cross_partition_combiner.render(&target_col, &delta_col),
+                    )
+                })
+                .collect();
+
+            Ok(smelt_logical::maintenance::emit::emit_keyed_fold(
+                &table_name,
+                &classification.unique_key,
+                &folds,
+                &compiled.sql,
+                dialect,
+            ))
+        }
+        Technique::ColumnScopedMerge => {
+            if unique_key.is_empty() {
+                return Err(
+                    "no unique_key declared — cannot build the column-scoped MERGE".to_string(),
+                );
+            }
+            let compiled = registry
+                .get(target)
+                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
+                .map_err(|e| format!("failed to compile model body: {e}"))?;
+
+            Ok(smelt_logical::maintenance::emit::emit_column_scoped_merge(
+                &table_name,
+                unique_key,
+                &compiled.sql,
+                dialect,
+            ))
+        }
+        Technique::InPlaceUpdate => Err("Technique::InPlaceUpdate has no production consumer yet \
+             (docs/specs/maintenance_plan.md § Known Divergences)"
+            .to_string()),
+    }
+}
+
+/// Build a [`CellStatements`] entry for every cell in `plan`, in the same
+/// order they appear in the report (`docs/specs/cli.md`: "Statements print
+/// in execution order").
+#[allow(clippy::too_many_arguments)]
+pub fn build_all_cell_statements(
+    plan_cells: &[PlanCell],
+    model: &ModelFile,
+    schema: &str,
+    target: &str,
+    registry: &CompilerRegistry,
+    resolver: &EphemeralResolver,
+    dialect: MaintenanceDialect,
+    unique_key: &[String],
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    region: &RegionLiterals,
+) -> Vec<CellStatements> {
+    plan_cells
+        .iter()
+        .enumerate()
+        .map(|(cell_index, cell)| CellStatements {
+            cell_index,
+            outcome: build_cell_statement_group(
+                cell,
+                model,
+                schema,
+                target,
+                registry,
+                resolver,
+                dialect,
+                unique_key,
+                source_timeseries,
+                region,
+            ),
+        })
+        .collect()
+}
+
+/// Render `statements` as the plain-text block `--show-sql` appends after
+/// each cell's report block: statements in execution order, a transactional
+/// group bracketed by `BEGIN`/`COMMIT` lines to show its atomicity (the
+/// backend supplies the real transaction mechanics at run time).
+pub fn render_cell_statements_text(statements: &[CellStatements]) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for cs in statements {
+        let _ = writeln!(out, "  cell[{}] statements:", cs.cell_index);
+        match &cs.outcome {
+            Ok(group) => {
+                out.push_str(&render_statement_group_text(group, "    "));
+            }
+            Err(reason) => {
+                let _ = writeln!(out, "    (no statements: {reason})");
+            }
+        }
+    }
+    out
+}
+
+/// Render one emitted [`StatementGroup`] as the plain-text block both
+/// `smelt explain <model> --show-sql` and `smelt run`/`smelt backbuild
+/// --dry-run` print for a maintenance statement: a transactional group is
+/// bracketed by `BEGIN`/`COMMIT` lines to show its atomicity (the backend
+/// supplies the real transaction mechanics at run time), a single-statement
+/// group prints its statement directly. `indent` prefixes every line so the
+/// caller controls nesting (`--show-sql` nests each group under its cell;
+/// `--dry-run` prints at the top level).
+pub fn render_statement_group_text(group: &StatementGroup, indent: &str) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    if group.transactional {
+        let _ = writeln!(out, "{indent}BEGIN");
+        for stmt in &group.statements {
+            let _ = writeln!(out, "{indent}  {}", stmt.sql);
+        }
+        let _ = writeln!(out, "{indent}COMMIT");
+    } else {
+        for stmt in &group.statements {
+            let _ = writeln!(out, "{indent}{}", stmt.sql);
+        }
+    }
+    out
+}
+
+/// JSON shape for one statement in `--json --show-sql`'s per-cell
+/// `statements` array (`docs/specs/cli.md`:
+/// `{"sql": "<statement>", "transactional_group": <int>}`).
+#[derive(Debug, Serialize, Clone)]
+pub struct ExplainStatementJson {
+    pub sql: String,
+    pub transactional_group: usize,
+}
+
+/// JSON shape for one cell's `--json --show-sql` entry.
+#[derive(Debug, Serialize)]
+pub struct ExplainCellJson {
+    pub group: String,
+    pub trigger: String,
+    pub corner: String,
+    pub technique: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub no_statements_reason: Option<String>,
+    pub statements: Vec<ExplainStatementJson>,
+}
+
+/// The `--json --show-sql` per-model report:
+/// `{"model": "<name>", "cells": [...]}`, each cell carrying its own
+/// `statements` array (`docs/specs/cli.md` §"`smelt explain <model>`
+/// maintenance-plan report").
+#[derive(Debug, Serialize)]
+pub struct ExplainMaintenanceJson {
+    pub model: String,
+    pub cells: Vec<ExplainCellJson>,
+}
+
+/// Build the `--json --show-sql` report from the derived plan cells and
+/// their built statement groups.
+pub fn build_maintenance_plan_json(
+    model_name: &str,
+    plan_cells: &[PlanCell],
+    statements: &[CellStatements],
+) -> ExplainMaintenanceJson {
+    let cells = plan_cells
+        .iter()
+        .zip(statements.iter())
+        .map(|(cell, cs)| {
+            let (no_statements_reason, statements) = match &cs.outcome {
+                Ok(group) => {
+                    let stmts = group
+                        .statements
+                        .iter()
+                        .map(|s| ExplainStatementJson {
+                            sql: s.sql.clone(),
+                            // Every emitter today returns exactly one
+                            // StatementGroup per cell, so every statement in
+                            // it shares transactional_group == cell_index;
+                            // statements sharing one index must run in the
+                            // same transaction (`group.transactional`).
+                            transactional_group: cs.cell_index,
+                        })
+                        .collect();
+                    (None, stmts)
+                }
+                Err(reason) => (Some(reason.clone()), Vec::new()),
+            };
+            ExplainCellJson {
+                group: cell.group.clone(),
+                trigger: format!("{:?}", cell.trigger),
+                corner: format!("{:?}", cell.corner),
+                technique: format!("{:?}", cell.technique),
+                no_statements_reason,
+                statements,
+            }
+        })
+        .collect();
+    ExplainMaintenanceJson {
+        model: model_name.to_string(),
+        cells,
+    }
 }
 
 /// Build the explain output from the dependency graph and config.

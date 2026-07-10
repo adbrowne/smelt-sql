@@ -12,10 +12,10 @@ owners: [andrew]
 > maintenance (backfills, schema evolution, general execution). Each transform
 > names the property or world-fact that licenses it, the mechanism it emits, and
 > the invariant it preserves. It defines *mechanisms*, not *modes*: it does not
-> decide when a mode selects a transform (that composition is `model_maintenance.md`),
+> decide when a mode selects a transform (that composition is `maintenance_plan.md`),
 > nor prove the properties that license one (`model_properties.md`), nor own the
 > **processed-input equivalence invariant** the transforms serve (defined once in
-> `model_maintenance.md` §"The equivalence invariant" — referenced here, never
+> `maintenance_plan.md` §"The equivalence invariant" — referenced here, never
 > redefined). Out of scope, with their own homes: mode-only transforms that are
 > meaningless outside a single `refresh:` mode (`batched_models.md`,
 > `keyed_models.md`, `versioned_models.md`); the backend capability flags a transform's lowering
@@ -67,7 +67,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 ## Semantics
 
 Every transform preserves the **processed-input equivalence invariant**
-(`model_maintenance.md`): the physical result equals what a full refresh over the
+(`maintenance_plan.md`): the physical result equals what a full refresh over the
 same processed inputs would produce. A transform that **cannot** preserve it for a
 given model is **refused with a diagnostic, never applied approximately** (see
 §Constraints). The load-bearing mechanics:
@@ -75,7 +75,7 @@ given model is **refused with a diagnostic, never applied approximately** (see
 **Keyed `merge_into` (target-as-replica).** The stored table *is* the keyed state
 (one row per key). A run computes the delta over new inputs and folds it into the
 target — matched keys update, unmatched insert — without re-reading history. Sound
-only on the monoid rungs of the ladder (`model_maintenance.md`); an invertible
+only on the monoid rungs of the ladder (`maintenance_plan.md`); an invertible
 combiner is required to *un-see* a contribution under reprocessing (handled by
 retraction-via-delta-history, not by `merge_into` alone). The step loop that
 sequences `merge_into` across driving partitions (classify → step → per-partition
@@ -219,14 +219,14 @@ text lives*, never *when it is built*.
 **A property licenses; it never chooses.** Each row names exactly the property or
 world-fact that makes the transform sound. The transform is applied only when that
 licence holds and is otherwise refused — the machinery is a validator, never a
-chooser (`model_maintenance.md` §"Validator, not chooser"). This keeps the mapping
+chooser (`maintenance_plan.md` §"Validator, not chooser"). This keeps the mapping
 property → transform auditable and forbids an approximate application when the
 licence is absent.
 
 **The ladder is the maintainable/delegated boundary.** `merge_into`,
 decomposed-state-plus-view, retraction, and the multiset are the mechanisms of
 rungs 1–4 of the algebraic ladder; delegate-to-native-IVM is what lies beyond it.
-The ladder itself (its ordering and cutoff) is owned by `model_maintenance.md`;
+The ladder itself (its ordering and cutoff) is owned by `maintenance_plan.md`;
 this spec only realises each rung as a physical transform.
 
 **Rejected: auto-widening the write window.** An earlier runtime widened the
@@ -239,7 +239,7 @@ The write window must equal the output window; only the scan may be wider.
 
 - **Equivalence or refusal.** A transform is applied only when its licensing
   property is proven or declared. A transform that cannot preserve the
-  processed-input equivalence invariant (`model_maintenance.md`) for a given model
+  processed-input equivalence invariant (`maintenance_plan.md`) for a given model
   is **refused with a diagnostic** — never applied approximately, and never with a
   silent fallback to a default.
 - **Write window = output window; scan window ⊇ output window.** Any widened-scan
@@ -338,7 +338,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   bound-derivation orchestration entry point (`derive_and_classify_bounds`), so a
   transform reads the derived bound from exactly one code path.
 - **Horizon settled-delay / tail-rewrite is now catalogued (unbuilt).** Because the
-  derived horizon is a core part of the maintenance contract (`model_maintenance.md`
+  derived horizon is a core part of the maintenance contract (`maintenance_plan.md`
   §"Windowed maintenance and the horizon"), the forward-reach settle/tail-rewrite
   mechanism is catalogued above rather than deferred; only its implementation is
   outstanding, tracked by the same plan.
@@ -355,4 +355,4 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Tests**: the batched per-partition full-refresh-equivalence harness; the cumulative end-state-equivalence harness; the pushdown/clamp unit tests in `smelt-runtime/src/transformer.rs`; the generative soundness oracle.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`.
-- **Related specs**: `model_maintenance.md`, `model_properties.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.
+- **Related specs**: `maintenance_plan.md`, `model_properties.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.

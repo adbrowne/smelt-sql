@@ -1063,6 +1063,20 @@ fn cte_ref_outside_test_diagnostics(
     diags
 }
 
+/// Lowercase display of a `Granularity` for diagnostic messages (matches the
+/// wire/frontmatter spelling, e.g. `granularity: day`).
+fn granularity_lower(g: smelt_core::Granularity) -> &'static str {
+    use smelt_core::Granularity as G;
+    match g {
+        G::Hour => "hour",
+        G::Day => "day",
+        G::Week => "week",
+        G::Month => "month",
+        G::Quarter => "quarter",
+        G::Year => "year",
+    }
+}
+
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
 /// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
 /// (`architecture.md` §"Planner scope").
@@ -1188,6 +1202,58 @@ fn ref_source_info(
         .iter()
         .find(|s| s.address_segments == segments)
         .cloned()
+}
+
+/// Resolve `ref_str` to an upstream **maintained-model edge**
+/// (`maintenance_plan.md` §"Upstream model edges") when it addresses another
+/// maintained (non-`full`, non-view) model in this project — `None` when the
+/// ref doesn't resolve, resolves to a source/seed/function, or resolves to a
+/// `full`-mode or view model (which delivers no incremental delta and so
+/// contributes neither a creation cell nor a refusal). Sibling of
+/// [`ref_source_info`]; reused by [`maintenance_plan_report`] to assemble the
+/// [`smelt_logical::maintenance::derive::ModelEdge`]s the plan derivation
+/// reads. `clock_col` is the upstream's own validated
+/// `timeseries.partition_column`, or `None` when it declares none — the
+/// derivation records that as a `MaintenanceReachNotDerivable` refusal.
+fn ref_model_edge(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    ref_str: &str,
+) -> Option<smelt_logical::maintenance::derive::ModelEdge> {
+    let stripped = ref_str.strip_prefix("smelt.")?;
+    let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+    let leaf = segments.last()?.clone();
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    if resolved.kind != RefKind::Model {
+        return None;
+    }
+    let file = resolved.source_file?;
+    let text = file.text(db);
+    // Extract the addressed model's own `refresh:`/`timeseries:`.
+    let meta = match extract_file_metadata(text) {
+        Ok(FileMetadata::Single { metadata, .. }) => *metadata,
+        Ok(FileMetadata::Multi { models }) => {
+            models
+                .into_iter()
+                .find(|s| s.metadata.name.as_deref() == Some(leaf.as_str()))?
+                .metadata
+        }
+        // Generator-emitted upstreams: their maintenance metadata lives on the
+        // emitted model, not the generator file's frontmatter. Not exercised
+        // by any current maintained-upstream fixture; resolving it is deferred.
+        _ => return None,
+    };
+    // Only a maintained (`refresh: incremental`) upstream delivers an
+    // incremental delta to receive; a `full`-mode or view upstream is
+    // excluded (no creation cell, no refusal).
+    if meta.refresh != Some(smelt_core::config::RefreshStrategy::Incremental) {
+        return None;
+    }
+    let clock_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    Some(smelt_logical::maintenance::derive::ModelEdge {
+        name: stripped.to_string(),
+        clock_col,
+    })
 }
 
 /// Thin Salsa wrapper around
@@ -1319,6 +1385,14 @@ pub fn maintenance_plan_report(
         })
         .collect();
 
+    // Upstream maintained-model edges (`maintenance_plan.md` §"Upstream model
+    // edges"): the model refs that resolve to another maintained model in
+    // this project, each carrying that upstream's own validated clock.
+    let model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = refs
+        .iter()
+        .filter_map(|r| ref_model_edge(db, workspace, r))
+        .collect();
+
     let project_scan_bounds = project
         .and_then(|p| {
             smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
@@ -1355,12 +1429,13 @@ pub fn maintenance_plan_report(
         .map(|(name, _)| name.clone())
         .collect();
 
-    crate::queries::maintenance::derive_model_maintenance_plan(
+    crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
         &metadata,
         &sources,
         &explicitly_mutable,
+        &model_edges,
     )
 }
 
@@ -1870,6 +1945,21 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: violation.clone(),
                 range: rowan::TextRange::empty(body_start),
                 code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        if let Some(mismatch) = &plan_diags.granularity_mismatch {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "declared timeseries.granularity ({}) is contradicted by the model's own \
+                     partition-column grouping, which derives to {}",
+                    granularity_lower(mismatch.declared),
+                    granularity_lower(mismatch.actual),
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceGranularityMismatch),
                 data: None,
             })
             .accumulate(db);

@@ -27,7 +27,8 @@ use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, Region,
+    emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, MaintenanceDialect,
+    Region, StatementGroup,
 };
 use smelt_logical::maintenance::propagate::{propagate, DayInterval, Edge};
 use smelt_logical::maintenance::{
@@ -44,11 +45,24 @@ fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-fn batch(conn: &Connection, statements: &[String]) {
-    for sql in statements {
-        conn.execute_batch(sql)
-            .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
+fn batch_group(conn: &Connection, group: &StatementGroup) {
+    for stmt in &group.statements {
+        conn.execute_batch(&stmt.sql)
+            .unwrap_or_else(|e| panic!("statement failed: {e}\n{}", stmt.sql));
     }
+}
+
+/// Test-only stand-in for the runtime's output-clamp injection
+/// (`smelt-runtime/src/transformer.rs`): the single-owner emitter contract
+/// requires the caller to fold the region predicate into the body it hands
+/// `emit_delete_insert` — the emitter itself no longer adds one
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn clamped(body: &str, col: &str, region: &Region) -> String {
+    format!(
+        "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
+        start = region.start,
+        end = region.end,
+    )
 }
 
 /// Day ordinals: epoch day 0 = 2026-01-01. Regions/predicates are built as
@@ -164,8 +178,12 @@ fn clamp_for<'a>(scans: &'a [ScanClamp], source: &str) -> &'a ScanClamp {
 /// conversions under the derived widened window.
 fn repair_conversion_score(conn: &Connection, clamp: &ScanClamp, region: &Region) {
     let scan = widened_scan_predicate(clamp, region);
+    // The source projects the full target row (event_id, user_id, event_ts,
+    // event_date, conversion_score) — the caller-side full-row-projection
+    // contract `UPDATE SET *` relies on — carrying every column but
+    // `conversion_score` through unchanged from `silver_events` itself.
     let source_select = format!(
-        "SELECT e.event_id, e.event_date, \
+        "SELECT e.event_id, e.user_id, e.event_ts, e.event_date, \
          (SELECT c.score FROM conversions c \
            WHERE c.event_id = e.event_id \
              AND c.conversion_ts >= e.event_ts \
@@ -174,15 +192,13 @@ fn repair_conversion_score(conn: &Connection, clamp: &ScanClamp, region: &Region
            ORDER BY c.conversion_ts LIMIT 1) AS conversion_score \
          FROM silver_events e"
     );
-    batch(
+    batch_group(
         conn,
         &emit_column_scoped_merge(
             "silver_events",
             &strings(&["event_id", "event_date"]),
-            &strings(&["conversion_score"]),
             &source_select,
-            Some("event_date"),
-            Some(region),
+            MaintenanceDialect::DuckDb,
         ),
     );
 }
@@ -292,9 +308,16 @@ fn landed_upstream_days_propagate_to_exactly_the_partitions_that_must_run() {
         repair_conversion_score(&conn, &conv_clamp, &region_of(iv));
     }
     for iv in &result.per_edge[&("daily_conv_rate".to_string(), "silver_events".to_string())] {
-        batch(
+        let region = region_of(iv);
+        batch_group(
             &conn,
-            &emit_delete_insert("daily_conv_rate", "event_date", &region_of(iv), ROLLUP_BODY),
+            &emit_delete_insert(
+                "daily_conv_rate",
+                "event_date",
+                &region,
+                &clamped(ROLLUP_BODY, "event_date", &region),
+                MaintenanceDialect::DuckDb,
+            ),
         );
     }
     assert!(multiset_equal(
@@ -337,15 +360,28 @@ fn landed_upstream_days_propagate_to_exactly_the_partitions_that_must_run() {
             "{silver} AND {}",
             widened_scan_predicate(&bronze_clamp, &region)
         );
-        batch(
+        batch_group(
             &conn,
-            &emit_delete_insert("silver_events", "event_date", &region, &body),
+            &emit_delete_insert(
+                "silver_events",
+                "event_date",
+                &region,
+                &clamped(&body, "event_date", &region),
+                MaintenanceDialect::DuckDb,
+            ),
         );
     }
     for iv in &result2.per_edge[&("daily_conv_rate".to_string(), "silver_events".to_string())] {
-        batch(
+        let region = region_of(iv);
+        batch_group(
             &conn,
-            &emit_delete_insert("daily_conv_rate", "event_date", &region_of(iv), ROLLUP_BODY),
+            &emit_delete_insert(
+                "daily_conv_rate",
+                "event_date",
+                &region,
+                &clamped(ROLLUP_BODY, "event_date", &region),
+                MaintenanceDialect::DuckDb,
+            ),
         );
     }
     assert!(multiset_equal(
@@ -505,18 +541,32 @@ fn build_sandbox(
         "CREATE TABLE silver_events AS SELECT * FROM ({silver}) WHERE FALSE;"
     ))
     .expect("empty silver");
-    batch(
+    let silver_region = region_of(period);
+    batch_group(
         conn,
-        &emit_delete_insert("silver_events", "event_date", &region_of(period), &silver),
+        &emit_delete_insert(
+            "silver_events",
+            "event_date",
+            &silver_region,
+            &clamped(&silver, "event_date", &silver_region),
+            MaintenanceDialect::DuckDb,
+        ),
     );
     let rollup = sb_rollup_body("silver_events");
     conn.execute_batch(&format!(
         "CREATE TABLE daily_conv_rate AS SELECT * FROM ({rollup}) WHERE FALSE;"
     ))
     .expect("empty rollup");
-    batch(
+    let rollup_region = region_of(period);
+    batch_group(
         conn,
-        &emit_delete_insert("daily_conv_rate", "event_date", &region_of(period), &rollup),
+        &emit_delete_insert(
+            "daily_conv_rate",
+            "event_date",
+            &rollup_region,
+            &clamped(&rollup, "event_date", &rollup_region),
+            MaintenanceDialect::DuckDb,
+        ),
     );
 }
 
@@ -767,9 +817,15 @@ fn a_dirty_day_rebuilds_exactly_its_containing_month_downstream() {
             start: format!("DATE '{}'", ordinal_to_iso(iv.start)),
             end: format!("DATE '{}'", ordinal_to_iso(iv.end)),
         };
-        batch(
+        batch_group(
             &conn,
-            &emit_delete_insert("monthly_report", "report_month", &region, monthly_body),
+            &emit_delete_insert(
+                "monthly_report",
+                "report_month",
+                &region,
+                &clamped(monthly_body, "report_month", &region),
+                MaintenanceDialect::DuckDb,
+            ),
         );
     }
     assert!(multiset_equal(

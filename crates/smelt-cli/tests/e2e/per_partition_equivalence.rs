@@ -654,3 +654,551 @@ fn test_runs_under_test_harness() {
         datagen_bin()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: silver/events_parsed dedup over the 3-day late window
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `docs/plans/20260710-web-analytics-maintenance-demo.md` Phase 5: the
+// redelivery/lateness datagen shape (Phase 4) means `raw.events` contains
+// byte-identical duplicate rows (same `event_id`, later `arrival_time`) and
+// events whose `arrival_time` trails `event_time` by up to 3 days.
+// `silver/events_parsed` absorbs both: `QUALIFY ROW_NUMBER() OVER (PARTITION
+// BY event_id ORDER BY arrival_time) = 1` drops the redelivered duplicate,
+// and the Form B filter `event_date BETWEEN CAST(arrival_time AS DATE) -
+// INTERVAL '3 days' AND CAST(arrival_time AS DATE)` accepts late arrivals up
+// to that window — a genuine 3-day lookback the planner derives from the
+// filter text (visible via `smelt explain silver.events_parsed --json`).
+
+/// One `(event_id, event_date)` pair from `main.silver_events_parsed`.
+fn query_events_parsed_ids(db_path: &Path) -> Vec<(i64, String)> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare("SELECT event_id, event_date::VARCHAR FROM main.silver_events_parsed")
+        .unwrap_or_else(|e| panic!("prepare events_parsed query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query events_parsed rows: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_or_else(|e| panic!("collect events_parsed rows: {e}"))
+}
+
+/// Every `(event_id, event_date)` in `raw.events` whose lateness
+/// (`arrival_time - event_time`) is within the accepted 3-day window — the
+/// set `silver.events_parsed`'s acceptance filter must retain (at least the
+/// earliest-arriving copy of each `event_id`).
+fn query_acceptable_event_ids(db_path: &Path) -> std::collections::BTreeSet<(i64, String)> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT event_id, event_date::VARCHAR \
+             FROM raw.events \
+             WHERE CAST(arrival_time AS TIMESTAMP) \
+                 <= CAST(event_time AS TIMESTAMP) + INTERVAL '3 days'",
+        )
+        .unwrap_or_else(|e| panic!("prepare acceptable-events query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query acceptable events: {e}"))
+    .collect::<Result<_, _>>()
+    .unwrap_or_else(|e| panic!("collect acceptable events: {e}"))
+}
+
+/// Day-by-day incremental build of `silver.events_parsed` equals one
+/// full-window rebuild: zero duplicate `event_id`s in the result, and every
+/// event within the accepted 3-day late window is present in its own
+/// `event_date` partition — in both pipelines.
+#[test]
+fn web_analytics_dedup_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "dedup-pipeline-A",
+    );
+    let rows_a = query_events_parsed_ids(&db_path);
+    let acceptable = query_acceptable_event_ids(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("dedup-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let rows_b = query_events_parsed_ids(&db_path);
+
+    assert!(
+        !rows_a.is_empty(),
+        "Pipeline A produced no events_parsed rows"
+    );
+    assert!(
+        !rows_b.is_empty(),
+        "Pipeline B produced no events_parsed rows"
+    );
+
+    // ── Zero duplicate event_ids in either pipeline's result ──────────────
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        for (event_id, _) in rows {
+            *counts.entry(*event_id).or_insert(0) += 1;
+        }
+        let dups: Vec<_> = counts.iter().filter(|(_, &c)| c > 1).collect();
+        assert!(
+            dups.is_empty(),
+            "pipeline {label} has duplicate event_ids in silver.events_parsed: {dups:?}"
+        );
+    }
+
+    // ── Day-by-day equals full rebuild exactly (set of (event_id, event_date)) ──
+    let set_a: std::collections::BTreeSet<_> = rows_a.iter().cloned().collect();
+    let set_b: std::collections::BTreeSet<_> = rows_b.iter().cloned().collect();
+    let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
+    let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
+    assert!(
+        only_in_a.is_empty() && only_in_b.is_empty(),
+        "silver.events_parsed differs between full rebuild and day-by-day replay.\n\
+         only in A (first 10): {only_in_a:?}\nonly in B (first 10): {only_in_b:?}"
+    );
+
+    // ── Every accepted-lateness event is present in its own event_date
+    //    partition, in both pipelines (within the [START_DATE,
+    //    END_DATE_EXCLUSIVE) window the harness runs) ───────────────────────
+    let window_acceptable: Vec<_> = acceptable
+        .iter()
+        .filter(|(_, d)| d.as_str() >= START_DATE && d.as_str() < END_DATE_EXCLUSIVE)
+        .collect();
+    assert!(
+        !window_acceptable.is_empty(),
+        "no acceptable-lateness events found in the run window — check datagen output"
+    );
+    for (event_id, event_date) in &window_acceptable {
+        assert!(
+            set_a.contains(&(*event_id, event_date.clone())),
+            "event_id={event_id} (event_date={event_date}, within the 3-day late window) \
+             missing from pipeline A's silver.events_parsed"
+        );
+        assert!(
+            set_b.contains(&(*event_id, event_date.clone())),
+            "event_id={event_id} (event_date={event_date}, within the 3-day late window) \
+             missing from pipeline B's silver.events_parsed"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: session campaign attribution matches full rebuild + respects the cap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One row from `silver.sessions`, projected for attribution + cap checks.
+#[derive(Debug, Clone)]
+struct SessionRow {
+    session_id: String,
+    device_id: i64,
+    session_start: String,
+    session_end: String,
+    utm_campaign: Option<String>,
+}
+
+fn query_session_rows(db_path: &Path) -> Vec<SessionRow> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                session_id, \
+                device_id, \
+                CAST(session_start AS VARCHAR), \
+                CAST(session_end AS VARCHAR), \
+                utm_campaign \
+             FROM main.silver_sessions \
+             ORDER BY session_id",
+        )
+        .unwrap_or_else(|e| panic!("prepare sessions query: {e}"));
+    stmt.query_map([], |row| {
+        Ok(SessionRow {
+            session_id: row.get::<_, String>(0)?,
+            device_id: row.get::<_, i64>(1)?,
+            session_start: row.get::<_, String>(2)?,
+            session_end: row.get::<_, String>(3)?,
+            utm_campaign: row.get::<_, Option<String>>(4)?,
+        })
+    })
+    .unwrap_or_else(|e| panic!("query session rows: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_or_else(|e| panic!("collect session rows: {e}"))
+}
+
+/// For every session row, the earliest non-NULL `utm_campaign` among the
+/// events that actually belong to that session (`event_ts` within
+/// `[session_start, session_end]`, the model's own, independently-tested
+/// session boundaries — see `tests/session_boundary_invariants.test.sql`)
+/// and within the first 5 minutes of session start. This is a golden
+/// attribution query computed independently of the model's own `ARG_MAX`
+/// aggregation, via a correlated subquery straight against `events_parsed`;
+/// it does not re-derive session *membership* (that has its own dedicated
+/// invariant test), only the attribution rule given membership.
+fn query_expected_attribution(db_path: &Path) -> std::collections::HashMap<String, Option<String>> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                s.session_id, \
+                ( \
+                    SELECT e.utm_campaign \
+                    FROM main.silver_events_parsed e \
+                    WHERE e.device_id = s.device_id \
+                      AND e.event_ts >= CAST(s.session_start AS TIMESTAMP) \
+                      AND e.event_ts <= CAST(s.session_end AS TIMESTAMP) \
+                      AND e.event_ts <= CAST(s.session_start AS TIMESTAMP) + INTERVAL '5 minutes' \
+                      AND e.utm_campaign IS NOT NULL \
+                    ORDER BY e.event_ts ASC \
+                    LIMIT 1 \
+                ) AS expected_campaign \
+             FROM main.silver_sessions s",
+        )
+        .unwrap_or_else(|e| panic!("prepare expected-attribution query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query expected attribution: {e}"))
+    .collect::<Result<_, _>>()
+    .unwrap_or_else(|e| panic!("collect expected attribution: {e}"))
+}
+
+/// Day-by-day incremental build of `silver.sessions` equals one full-window
+/// rebuild on `(session_id, utm_campaign)`, campaign attribution comes only
+/// from events within the first 5 minutes of the session (verified against an
+/// independently-computed golden query over `events_parsed`), and no session
+/// exceeds the explicit max-session-length cap.
+#[test]
+fn web_analytics_session_attribution_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "session-pipeline-A",
+    );
+    let rows_a = query_session_rows(&db_path);
+    let expected_a = query_expected_attribution(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("session-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let rows_b = query_session_rows(&db_path);
+    let expected_b = query_expected_attribution(&db_path);
+
+    assert!(!rows_a.is_empty(), "Pipeline A produced no session rows");
+    assert!(!rows_b.is_empty(), "Pipeline B produced no session rows");
+
+    // ── Attribution correctness (independent golden query) ────────────────
+    for (label, rows, expected) in [
+        ("A (full rebuild)", &rows_a, &expected_a),
+        ("B (day-by-day)", &rows_b, &expected_b),
+    ] {
+        let mut mismatches = Vec::new();
+        for row in rows {
+            let want = expected.get(&row.session_id).cloned().flatten();
+            if row.utm_campaign != want {
+                mismatches.push(format!(
+                    "  session_id={} actual={:?} expected(first-5-min earliest)={:?}",
+                    row.session_id, row.utm_campaign, want
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "pipeline {label}: utm_campaign attribution mismatch \
+             (expected: earliest non-NULL campaign among events within the \
+             session's first 5 minutes):\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    // ── Cap: no session exceeds the explicit max-session-length cap (1 day) ──
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        for row in rows {
+            let start =
+                chrono::NaiveDateTime::parse_from_str(&row.session_start, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(
+                            &row.session_start,
+                            "%Y-%m-%d %H:%M:%S",
+                        )
+                    })
+                    .unwrap_or_else(|e| panic!("parse session_start {:?}: {e}", row.session_start));
+            let end =
+                chrono::NaiveDateTime::parse_from_str(&row.session_end, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(&row.session_end, "%Y-%m-%d %H:%M:%S")
+                    })
+                    .unwrap_or_else(|e| panic!("parse session_end {:?}: {e}", row.session_end));
+            let duration = end - start;
+            assert!(
+                duration <= chrono::Duration::days(1),
+                "pipeline {label}: session_id={} exceeds the max-session-length cap: \
+                 session_start={} session_end={} duration={duration}",
+                row.session_id,
+                row.session_start,
+                row.session_end,
+            );
+        }
+    }
+
+    // ── Day-by-day equals full rebuild exactly on (session_id, utm_campaign) ──
+    let set_a: std::collections::BTreeSet<_> = rows_a
+        .iter()
+        .map(|r| (r.session_id.clone(), r.utm_campaign.clone()))
+        .collect();
+    let set_b: std::collections::BTreeSet<_> = rows_b
+        .iter()
+        .map(|r| (r.session_id.clone(), r.utm_campaign.clone()))
+        .collect();
+    let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
+    let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
+    assert!(
+        only_in_a.is_empty() && only_in_b.is_empty(),
+        "silver.sessions (session_id, utm_campaign) differs between full rebuild \
+         and day-by-day replay.\nonly in A (first 10): {only_in_a:?}\n\
+         only in B (first 10): {only_in_b:?}"
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: silver/events_enriched — event-grain narrow update at model-upstream
+// creation cells
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `docs/plans/20260710-web-analytics-maintenance-demo.md` Phase 7:
+// `silver/events_enriched` joins `silver.events_parsed` and `silver.sessions`
+// (two maintained-model upstreams) back onto the event grain, `grain:
+// partition` on `event_date`. Its creation cells are clamped by each
+// upstream's own derived reach (`docs/specs/maintenance_plan.md` §"Upstream
+// model edges") — see `crates/smelt-cli/tests/explain_model.rs
+// ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
+// static evidence. These tests exercise the *dynamic* consequence on a real
+// fixture: incremental equals full rebuild, and a run touching one arrival
+// day only ever changes `event_date` partitions within the derived window.
+
+/// One row from `main.silver_events_enriched`, keyed for equivalence checks.
+type EventEnrichedRow = (i64, Option<String>, Option<String>); // (event_id, session_id, session_utm_campaign)
+
+/// Every `silver.events_enriched` row grouped by its `event_date` partition.
+fn query_events_enriched_by_partition(
+    db_path: &Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<EventEnrichedRow>> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign \
+             FROM main.silver_events_enriched",
+        )
+        .unwrap_or_else(|e| panic!("prepare events_enriched query: {e}"));
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .unwrap_or_else(|e| panic!("query events_enriched rows: {e}"))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| panic!("collect events_enriched rows: {e}"));
+
+    let mut by_partition: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<EventEnrichedRow>,
+    > = std::collections::BTreeMap::new();
+    for (event_date, event_id, session_id, session_utm_campaign) in rows {
+        by_partition.entry(event_date).or_default().insert((
+            event_id,
+            session_id,
+            session_utm_campaign,
+        ));
+    }
+    by_partition
+}
+
+/// Day-by-day incremental build of `silver.events_enriched` equals a
+/// full-window rebuild exactly, per partition — the per-partition
+/// equivalence contract (`docs/specs/incremental_models.md`) applied to a
+/// model whose creation trigger reads two model upstreams rather than a
+/// single source.
+#[test]
+fn web_analytics_events_enriched_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "enriched-pipeline-A",
+    );
+    let by_partition_a = query_events_enriched_by_partition(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("enriched-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let by_partition_b = query_events_enriched_by_partition(&db_path);
+
+    assert!(
+        !by_partition_a.is_empty(),
+        "Pipeline A produced no silver.events_enriched rows"
+    );
+    assert_eq!(
+        by_partition_a.keys().collect::<Vec<_>>(),
+        by_partition_b.keys().collect::<Vec<_>>(),
+        "silver.events_enriched partition sets (event_date) differ between \
+         full rebuild and day-by-day replay"
+    );
+
+    let mut mismatches = Vec::new();
+    for (partition, rows_a) in &by_partition_a {
+        let rows_b = by_partition_b.get(partition);
+        if rows_b != Some(rows_a) {
+            mismatches.push(format!(
+                "  partition {partition}: A has {} rows, B has {:?} rows",
+                rows_a.len(),
+                rows_b.map(|r| r.len())
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "silver.events_enriched differs between full rebuild and day-by-day \
+         replay on at least one partition:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Snapshot `silver.events_enriched`'s partitions after a day-by-day replay
+/// through day 6, then run one additional arrival day (day 7) and assert the
+/// change is exactly narrow: `event_date`'s output partition column is not
+/// write-rebased by either upstream edge (`silver.events_parsed`'s own
+/// creation-cell clamp is `Bounded(0,0)` — a direct 1:1 read — and
+/// `silver.sessions`'s ±1-day session-cap clamp only widens the *read*, not
+/// the write footprint; see `crates/smelt-cli/tests/explain_model.rs
+/// ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
+/// static clamp evidence), so a single-day run touches exactly its own
+/// `event_date` partition and no other. Verified empirically against the
+/// real fixture: running the day-7 window changes only the 2026-03-25
+/// partition; every one of the six previously-written partitions
+/// (2026-03-19 .. 2026-03-24) is byte-identical before and after. Asserted
+/// on observed partition contents (row sets), never on implementation logs.
+#[test]
+fn web_analytics_events_enriched_narrow_update() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+    repopulate_sources(&db_path, &setup_abs);
+
+    // Replay the first 6 of the 7 configured days (2026-03-19 .. 2026-03-25).
+    let (initial_windows, remaining_windows) = DAY_WINDOWS.split_at(DAY_WINDOWS.len() - 1);
+    for (ws, we) in initial_windows {
+        smelt_run(&workspace, ws, we, &format!("narrow-before [{ws}..{we})"));
+    }
+    let before = query_events_enriched_by_partition(&db_path);
+    assert!(
+        !before.is_empty(),
+        "no silver.events_enriched rows after the initial 6-day replay"
+    );
+    assert_eq!(
+        before.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "2026-03-19",
+            "2026-03-20",
+            "2026-03-21",
+            "2026-03-22",
+            "2026-03-23",
+            "2026-03-24",
+        ],
+        "unexpected partition set after the initial 6-day replay"
+    );
+
+    // Run the one additional arrival day (day 7: 2026-03-25 .. 2026-03-26).
+    for (ws, we) in remaining_windows {
+        smelt_run(&workspace, ws, we, &format!("narrow-after [{ws}..{we})"));
+    }
+    let after = query_events_enriched_by_partition(&db_path);
+
+    // Exactly one new partition appears (2026-03-25), and every
+    // previously-written partition is byte-identical.
+    assert_eq!(
+        after.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "2026-03-19",
+            "2026-03-20",
+            "2026-03-21",
+            "2026-03-22",
+            "2026-03-23",
+            "2026-03-24",
+            "2026-03-25",
+        ],
+        "expected exactly one new partition (2026-03-25) after the additional \
+         arrival day"
+    );
+
+    let mut unexpected_changes = Vec::new();
+    for partition in before.keys() {
+        if before.get(partition) != after.get(partition) {
+            unexpected_changes.push(partition.clone());
+        }
+    }
+    assert!(
+        unexpected_changes.is_empty(),
+        "narrow update touched previously-written partition(s) it should not \
+         have (a run touching only 2026-03-25 must not rewrite earlier \
+         partitions): {unexpected_changes:?}"
+    );
+}

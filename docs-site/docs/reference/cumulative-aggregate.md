@@ -92,7 +92,7 @@ Reordering merges across source partitions does not change the final state (for 
 | `KeyedForbidsWindowFunctions` | Outer-body `OVER (...)` clause |
 | `KeyedForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
 | `KeyedMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
-| `KeyedForbidsTimeseries` | Model declares a `timeseries:` block without key temporal locality being established |
+| `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block |
 | `KeyedForbidsBatched` | Model declares both `grain: key` and a `batched:` block |
 | `KeyedSnapshotPostureUnsupported` | Interim: no clocked driving source is found and the snapshot-reconcile executor is not yet built — a not-yet-supported refusal, not a model error |
 

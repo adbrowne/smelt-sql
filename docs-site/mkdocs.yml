@@ -99,6 +99,7 @@ nav:
     - Editor Features: guide/editor-features.md
   - Examples:
     - Web Analytics: examples/web_analytics.md
+    - Web Analytics Maintenance Demo: examples/web-analytics-maintenance.md
   - Reference:
     - CLI Commands: reference/cli.md
     - Project Configuration: reference/smelt-yml.md

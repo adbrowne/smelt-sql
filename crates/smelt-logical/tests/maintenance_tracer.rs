@@ -11,7 +11,8 @@ use std::collections::BTreeSet;
 use smelt_logical::analysis::model_diff::{additive_only_diff, ColumnDef};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold, Region,
+    emit_column_scoped_merge, emit_delete_insert, emit_in_place_update, emit_keyed_fold,
+    MaintenanceDialect, Region,
 };
 use smelt_logical::maintenance::grouping::derive_column_groups;
 use smelt_logical::maintenance::skeleton::skeleton_columns;
@@ -125,24 +126,35 @@ fn ex02_new_data_and_backfill_are_partition_local_recompute_region() {
 }
 
 #[test]
-fn ex02_delete_insert_carries_the_partition_predicate_on_both_statements() {
+fn ex02_delete_insert_carries_the_partition_predicate_on_the_delete_and_the_clamped_body() {
     let region = Region {
         start: "DATE '2026-01-01'".to_string(),
         end: "DATE '2026-01-08'".to_string(),
     };
-    let stmts = emit_delete_insert(
+    // The caller (the runtime's output clamp — `model_transforms.md` §"the
+    // two clamps") is responsible for folding the region predicate into the
+    // body it hands the emitter; the emitter does not add a second, outer
+    // WHERE to the INSERT (`maintenance_plan.md` §"Statement emission
+    // (single owner)").
+    let body = "SELECT event_id, user_id, event_date, event_ts, page, referrer FROM events \
+                WHERE event_date >= DATE '2026-01-01' AND event_date < DATE '2026-01-08'";
+    let group = emit_delete_insert(
         "clickstream",
         "event_date",
         &region,
-        "SELECT event_id, user_id, event_date, event_ts, page, referrer FROM events",
+        body,
+        MaintenanceDialect::DuckDb,
     );
-    assert_eq!(stmts.len(), 2);
-    assert!(stmts[0].starts_with("DELETE FROM clickstream WHERE"));
-    for stmt in &stmts {
+    assert_eq!(group.statements.len(), 2);
+    assert!(group.statements[0]
+        .sql
+        .starts_with("DELETE FROM clickstream WHERE"));
+    for stmt in &group.statements {
         assert!(
-            stmt.contains("event_date >= DATE '2026-01-01'")
-                && stmt.contains("event_date < DATE '2026-01-08'"),
-            "partition predicate missing from: {stmt}"
+            stmt.sql.contains("event_date >= DATE '2026-01-01'")
+                && stmt.sql.contains("event_date < DATE '2026-01-08'"),
+            "partition predicate missing from: {}",
+            stmt.sql
         );
     }
 }
@@ -387,17 +399,20 @@ fn ex24_mutable_source_fails_the_faithful_fold_condition() {
 
 #[test]
 fn ex24_keyed_fold_sql_combines_matched_and_inserts_unseen_keys() {
-    let stmts = emit_keyed_fold(
+    let group = emit_keyed_fold(
         "lifetime_spend",
         &strings(&["user_id"]),
-        &strings(&["lifetime_spend"]),
-        &strings(&["user_id", "lifetime_spend"]),
+        &[(
+            "lifetime_spend".to_string(),
+            "target.lifetime_spend + delta.lifetime_spend".to_string(),
+        )],
         "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments_delta GROUP BY user_id",
+        MaintenanceDialect::DuckDb,
     );
-    let sql = &stmts[0];
-    assert!(sql.contains("ON t.user_id = s.user_id"));
-    assert!(sql.contains("lifetime_spend = t.lifetime_spend + s.lifetime_spend"));
-    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT (user_id, lifetime_spend)"));
+    let sql = &group.statements[0].sql;
+    assert!(sql.contains("ON target.user_id = delta.user_id"));
+    assert!(sql.contains("lifetime_spend = target.lifetime_spend + delta.lifetime_spend"));
+    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT *"));
 }
 
 // ---------------------------------------------------------------------------
@@ -546,25 +561,46 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
     assert!(cell.ledger_catch_up);
 }
 
+/// `emit_column_scoped_merge`'s production shape (`docs/specs/
+/// maintenance_plan.md` §"Statement emission (single owner)"): `UPDATE
+/// SET *`, keyed on `unique_key`, no column-list `SET` and no predicate of
+/// its own on either the scan or the write target — partition-scoping, when
+/// the technique is not the declared full-scan case, is folded into
+/// `source_select` by the caller (the same convention `emit_delete_insert`'s
+/// `body` follows). The caller therefore carries the sibling column
+/// (`revenue`) through unchanged in the projection rather than relying on
+/// the emitter to leave it untouched via an explicit column list — this
+/// replaces the old column-list `SET` form, which never matched production.
 #[test]
-fn ex40_column_merge_sql_prunes_scan_and_target_and_leaves_siblings_alone() {
+fn ex40_column_merge_sql_is_set_star_over_the_callers_full_row_projection() {
     let region = Region {
         start: "DATE '2026-01-01'".to_string(),
         end: "DATE '2026-01-02'".to_string(),
     };
-    let stmts = emit_column_scoped_merge(
+    // The caller projects the full target row — `revenue` passed through
+    // unchanged from the existing state via a join, `order_count`
+    // re-derived — and folds the region predicate into the scan itself.
+    let source_select = format!(
+        "SELECT p.pay_date, d.revenue, COUNT(*) AS order_count \
+         FROM payments p JOIN daily_revenue d ON d.pay_date = p.pay_date \
+         WHERE p.pay_date >= {start} AND p.pay_date < {end} \
+         GROUP BY p.pay_date, d.revenue",
+        start = region.start,
+        end = region.end,
+    );
+    let group = emit_column_scoped_merge(
         "daily_revenue",
         &strings(&["pay_date"]),
-        &strings(&["order_count"]),
-        "SELECT pay_date, COUNT(*) AS order_count FROM payments GROUP BY pay_date",
-        Some("pay_date"),
-        Some(&region),
+        &source_select,
+        MaintenanceDialect::DuckDb,
     );
-    let sql = &stmts[0];
-    // Partition predicate on the scan side and the write target.
-    assert_eq!(sql.matches("pay_date >= DATE '2026-01-01'").count(), 2);
-    assert!(sql.contains("t.pay_date >= DATE '2026-01-01'"));
-    // Writes only the new field; the sibling column is untouched.
-    assert!(sql.contains("UPDATE SET order_count = s.order_count"));
-    assert!(!sql.contains("revenue = "));
+    assert_eq!(group.statements.len(), 1);
+    let sql = &group.statements[0].sql;
+    assert!(sql.contains("pay_date >= DATE '2026-01-01'"));
+    assert!(sql.contains("ON target.pay_date = source.pay_date"));
+    assert!(sql.contains("WHEN MATCHED THEN UPDATE SET *"));
+    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT *"));
+    // No explicit column-list SET — `revenue` flows through the source
+    // projection itself, not through emitter-side sibling exclusion.
+    assert!(!sql.contains("order_count = s.order_count"));
 }

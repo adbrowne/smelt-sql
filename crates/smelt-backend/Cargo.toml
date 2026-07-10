@@ -14,6 +14,12 @@ smelt-dialect = { path = "../smelt-dialect" }
 # Core types (IncrementalStrategy, BatchedConfig)
 smelt-core = { path = "../smelt-core" }
 
+# Maintenance-statement data model (`MaintenanceStatement`/`StatementGroup`) —
+# the single-owner emitters live in smelt-logical; smelt-backend only needs
+# the plain-data type the emitters produce (`docs/specs/maintenance_plan.md`
+# §"Statement emission (single owner)").
+smelt-logical = { path = "../smelt-logical" }
+
 # Async runtime
 tokio.workspace = true
 

@@ -425,9 +425,154 @@ async fn explain_maintenance_plan(
     let upstream = graph.get_upstream(&canonical);
 
     let report = build_maintenance_plan_report(&canonical, &result, &upstream);
+
+    if !args.show_sql {
+        println!("{}", report);
+        return Ok(());
+    }
+
+    // `--show-sql`: print, after the report, the maintenance statements
+    // each cell executes — built from the same pure emitters a run
+    // executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    // (single owner)"). Never connects to a backend: `CompilerRegistry`
+    // only needs `smelt.yml` target metadata, not a live connection.
+    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
+    let schema = config
+        .targets
+        .get(&target)
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let dialect = config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+        .map(backend_type_to_maintenance_dialect)
+        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+
+    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
+    let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
+    registry.set_function_bodies_all(fn_bodies);
+
+    // Wire real upstream-column typing so `apply_type_casts` sees the
+    // actual `smelt.ref()` column types instead of falling through to the
+    // `BigInt` default cast for fractional aggregates over upstream refs.
+    // `UpstreamSchemas::from_database` is purely Salsa/type-inference
+    // derived (`resolved_model_schema`) — no backend connection, so this is
+    // safe inside `explain` (`docs/specs/cli.md` §"`smelt explain <model>`
+    // maintenance-plan report").
+    match smelt_runtime::UpstreamSchemas::from_database(&db, &project_dir, &models) {
+        Ok(upstream_schemas) => {
+            registry.set_upstream_schemas_all(std::sync::Arc::new(upstream_schemas));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "explain --show-sql: upstream schema derivation failed ({e}); \
+                 printed casts may fall back to BIGINT defaults"
+            );
+        }
+    }
+
+    // Wire a real ephemeral resolver (mirrors `smelt-runtime::execute.rs`'s
+    // dry-run compile block) so a `smelt.<ephemeral>` ref in this model's
+    // SELECT body is CTE-inlined exactly as a run would inline it, instead
+    // of resolving as a physical table reference.
+    // Keyed by the underscore-joined `db_name_owned()` form (matching
+    // `SmeltRef::to_path().join("_")`, the key `compile_with_sql_and_ephemerals`
+    // looks referenced ephemerals up by) — not the dotted `canonical_path()`,
+    // which would silently miss multi-segment ephemeral refs.
+    let ephemeral_models: Vec<(String, String)> = models
+        .iter()
+        .filter(|m| {
+            config.get_materialization_with_metadata(&m.canonical_path(), m.metadata.as_deref())
+                == smelt_core::config::Materialization::Ephemeral
+        })
+        .map(|m| (m.db_name_owned(), m.content.clone()))
+        .collect();
+    let resolver = registry
+        .get(&target)
+        .build_ephemeral_resolver(&ephemeral_models, &schema);
+
+    let unique_key: Vec<String> = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.batched.as_ref())
+        .map(|b| b.unique_key.clone())
+        .unwrap_or_default();
+
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);
+
+    let region = match &args.period {
+        Some(p) => {
+            let (start, end) = parse_period(p)?;
+            smelt_cli::explain::RegionLiterals::Period { start, end }
+        }
+        None => smelt_cli::explain::RegionLiterals::Placeholders,
+    };
+
+    let statements = smelt_cli::explain::build_all_cell_statements(
+        &result.plan.cells,
+        model,
+        &schema,
+        &target,
+        &registry,
+        &resolver,
+        dialect,
+        &unique_key,
+        &source_timeseries,
+        &region,
+    );
+
+    if args.json {
+        let json = smelt_cli::explain::build_maintenance_plan_json(
+            &canonical,
+            &result.plan.cells,
+            &statements,
+        );
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
     println!("{}", report);
+    print!(
+        "{}",
+        smelt_cli::explain::render_cell_statements_text(&statements)
+    );
 
     Ok(())
+}
+
+/// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
+/// `smelt_backend::maintenance_dialect` takes the richer `SqlDialect`
+/// (which also has `PostgreSQL`); this is the narrow bridge from a target's
+/// declared backend to the maintenance-statement dialect tag.
+fn backend_type_to_maintenance_dialect(
+    backend_type: smelt_core::config::BackendType,
+) -> smelt_logical::maintenance::emit::MaintenanceDialect {
+    let dialect = match backend_type {
+        smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
+        smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+    };
+    smelt_backend::maintenance_dialect(dialect)
+}
+
+/// Parse `--period <start>..<end>` (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive)
+/// into raw literal date strings. A named CLI error (never a panic) on a
+/// malformed range — mirrors `smelt_runtime::propagation::parse_landed_range`'s
+/// grammar and error shape for the sibling `--landed` flag.
+fn parse_period(value: &str) -> Result<(String, String)> {
+    let (start, end) = value
+        .split_once("..")
+        .with_context(|| format!("malformed --period range '{value}': expected <start>..<end>"))?;
+    let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .with_context(|| format!("malformed --period range '{value}': invalid start date"))?;
+    let end_date = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .with_context(|| format!("malformed --period range '{value}': invalid end date"))?;
+    if end_date < start_date {
+        anyhow::bail!("malformed --period range '{value}': end is before start");
+    }
+    Ok((start_date.to_string(), end_date.to_string()))
 }
 
 #[cfg(test)]

@@ -109,6 +109,48 @@ datasets:
       - name: seconds_in_day
         generator: { type: uniform_int, min: 0, max: 86399 }
 
+      # Occurrence clock: when the event actually happened. Day-anchored to
+      # this row's own event_date partition (base: names the partition
+      # column, not an earlier regular column — see docs/specs/datagen.md
+      # §"Generator types", timestamp_offset) plus a random intraday offset,
+      # so DATE(event_time) always equals event_date. A plain `timestamp`
+      # spanning the whole 60-day window would draw independently of the
+      # partition a row lands in and sever that alignment.
+      - name: event_time
+        generator:
+          type: timestamp_offset
+          base: event_date
+          offset_seconds:
+            type: uniform_int
+            min: 0
+            max: 86399
+
+      # Ingestion clock: when the event was received. Mostly arrives with
+      # event_time (no lateness), with a tail of late arrivals up to 3 days —
+      # the realistic shape for at-least-once event pipelines with retries
+      # and buffering. Values are seconds, added to event_time.
+      - name: arrival_time
+        generator:
+          type: timestamp_offset
+          base: event_time
+          offset_seconds:
+            type: weighted_choice
+            values:
+              "0": 0.80
+              "3600": 0.10 # 1 hour late
+              "86400": 0.05 # 1 day late
+              "259200": 0.05 # 3 days late (the lateness tail)
+
+      # Campaign attribution, present only for traffic that arrived via a
+      # tracked marketing link.
+      - name: utm_campaign
+        generator:
+          type: optional
+          prob: 0.35
+          inner:
+            type: one_of
+            values: [spring_sale, brand_lift, retargeting, referral_program]
+
       # JSON-encoded event payload.  Silver extracts these fields into a typed
       # struct via the parse_event_payload smelt function.
       - name: payload
@@ -137,3 +179,15 @@ datasets:
                 "https://example.com/cart": 0.15
                 "https://example.com/checkout": 0.10
                 "https://example.com/account": 0.05
+
+    # Models at-least-once ingestion: ~2% of events are redelivered, arriving
+    # again with a shifted arrival_time. Downstream dedup keyed on event_id
+    # (QUALIFY ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time)
+    # = 1) converges to a single row per event.
+    redelivery:
+      fraction: 0.02
+      arrival_column: arrival_time
+      delay_seconds:
+        type: uniform_int
+        min: 3600
+        max: 172800

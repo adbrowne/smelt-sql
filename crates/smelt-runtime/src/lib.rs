@@ -26,6 +26,7 @@ pub mod fn_bodies;
 pub mod gate;
 pub mod maintenance_driver;
 pub mod meta_eval;
+pub mod propagation;
 pub mod python;
 pub mod reporter;
 pub mod safety;
@@ -50,7 +51,7 @@ pub use execute::{build_source_timeseries_map, execute_project, BackendFactory, 
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use gate::{format_gate_errors, gate_diagnostics, GateDiagnostic};
 pub use python::discover_python_models;
-pub use reporter::{NoOpReporter, RunReporter};
+pub use reporter::{ChunkInfo, NoOpReporter, RunReporter};
 pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{
     inject_source_filters, inject_time_filter, is_transparent_single_source, SourceBound,

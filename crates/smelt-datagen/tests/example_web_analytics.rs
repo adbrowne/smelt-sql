@@ -269,6 +269,169 @@ fn test_datagen_runs_at_small_scale() {
     }
 }
 
+/// Verifies the lateness/redelivery/campaign columns of the `events` dataset
+/// (`docs/specs/datagen.md` §"Generator types" `timestamp_offset`,
+/// §"Redelivery (duplicate emission)"):
+/// - `arrival_time >= event_time` for every row (an ingestion clock cannot
+///   precede the occurrence clock).
+/// - Some rows are >= 1 day late; none are > 3 days late (the configured
+///   lateness tail).
+/// - Duplicate `event_id`s exist (the `redelivery:` block re-emits ~2% of rows).
+/// - `utm_campaign` is non-null for a strict subset of rows (an `optional`
+///   payload field — neither always-null nor always-populated).
+#[test]
+fn web_analytics_has_lateness_duplicates_and_campaigns() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let src_config = repo_root().join("examples/web_analytics/datagen.yaml");
+    let dest_config = tmp_path.join("datagen.yaml");
+    rewrite_outputs(&src_config, &dest_config, tmp_path);
+
+    let (ok, combined) = run_datagen(&dest_config, 0.05);
+    assert!(ok, "smelt-datagen exited non-zero:\n{combined}");
+
+    let events_dir = tmp_path.join("events");
+    let event_files = find_parquet_files(&events_dir);
+    assert!(
+        !event_files.is_empty(),
+        "no event parquet partitions found under {events_dir:?}"
+    );
+
+    let mut event_id_counts: std::collections::HashMap<i32, usize> =
+        std::collections::HashMap::new();
+    // Per event_id, the minimum observed lateness across all rows sharing
+    // that id. A redelivered duplicate's arrival_time is the *original*
+    // arrival shifted further forward by `redelivery.delay_seconds`, so its
+    // lateness can legitimately exceed the 3-day tail configured on
+    // `timestamp_offset` — the minimum per event_id isolates the primary
+    // row's lateness, which is what the configured tail bounds.
+    let mut min_lateness_by_id: std::collections::HashMap<i32, i64> =
+        std::collections::HashMap::new();
+    let mut utm_non_null = 0usize;
+    let mut utm_null = 0usize;
+    let mut total_rows = 0usize;
+
+    for path in &event_files {
+        let file = fs::File::open(path).expect("open event parquet");
+        let reader = SerializedFileReader::new(file).expect("parse event parquet");
+        let schema = reader.metadata().file_metadata().schema();
+        let fields = schema.get_fields();
+        let id_idx = fields
+            .iter()
+            .position(|f| f.name() == "event_id")
+            .expect("event_id column must exist");
+        let et_idx = fields
+            .iter()
+            .position(|f| f.name() == "event_time")
+            .expect("event_time column must exist");
+        let at_idx = fields
+            .iter()
+            .position(|f| f.name() == "arrival_time")
+            .expect("arrival_time column must exist");
+        let utm_idx = fields
+            .iter()
+            .position(|f| f.name() == "utm_campaign")
+            .expect("utm_campaign column must exist");
+        let date_idx = fields
+            .iter()
+            .position(|f| f.name() == "event_date")
+            .expect("event_date partition column must exist");
+
+        for row_result in reader.get_row_iter(None).expect("row iter") {
+            let row = row_result.expect("row");
+            total_rows += 1;
+
+            let event_id = row
+                .get_int(id_idx)
+                .expect("event_id must be non-null Int32");
+            *event_id_counts.entry(event_id).or_insert(0) += 1;
+
+            let event_time_str = row
+                .get_string(et_idx)
+                .expect("event_time must be non-null Utf8");
+            let arrival_time_str = row
+                .get_string(at_idx)
+                .expect("arrival_time must be non-null Utf8");
+            let event_dt =
+                chrono::NaiveDateTime::parse_from_str(event_time_str, "%Y-%m-%dT%H:%M:%S")
+                    .unwrap_or_else(|e| panic!("event_time {event_time_str:?} not ISO 8601: {e}"));
+            let arrival_dt =
+                chrono::NaiveDateTime::parse_from_str(arrival_time_str, "%Y-%m-%dT%H:%M:%S")
+                    .unwrap_or_else(|e| {
+                        panic!("arrival_time {arrival_time_str:?} not ISO 8601: {e}")
+                    });
+
+            let lateness = (arrival_dt - event_dt).num_seconds();
+            assert!(
+                lateness >= 0,
+                "arrival_time ({arrival_time_str}) must not precede event_time ({event_time_str})"
+            );
+
+            // Partition alignment: DATE(event_time) must equal the row's
+            // event_date partition value. `event_time` is generated via
+            // `timestamp_offset` anchored to the partition column (see
+            // examples/web_analytics/datagen.yaml), so this must hold for
+            // every row — including redelivered duplicates, which keep the
+            // original row's event_time by construction (only arrival_time
+            // is shifted on redelivery).
+            let event_date_str = row
+                .get_string(date_idx)
+                .expect("event_date must be non-null Utf8");
+            let event_date = chrono::NaiveDate::parse_from_str(event_date_str, "%Y-%m-%d")
+                .unwrap_or_else(|e| panic!("event_date {event_date_str:?} not YYYY-MM-DD: {e}"));
+            assert_eq!(
+                event_dt.date(),
+                event_date,
+                "DATE(event_time) ({}) must equal the event_date partition value ({event_date_str}) \
+                 for event_id {event_id}",
+                event_dt.date(),
+            );
+            min_lateness_by_id
+                .entry(event_id)
+                .and_modify(|min| *min = (*min).min(lateness))
+                .or_insert(lateness);
+
+            if row.get_string(utm_idx).is_ok() {
+                utm_non_null += 1;
+            } else {
+                utm_null += 1;
+            }
+        }
+    }
+
+    let max_primary_lateness_secs = min_lateness_by_id.values().copied().max().unwrap_or(0);
+    let any_at_least_one_day_late = min_lateness_by_id.values().any(|&l| l >= 86_400);
+
+    assert!(total_rows > 0, "no event rows were read");
+    assert!(
+        any_at_least_one_day_late,
+        "expected some rows with >= 1 day of lateness (max primary lateness observed: \
+         {max_primary_lateness_secs}s)"
+    );
+    assert!(
+        max_primary_lateness_secs <= 259_200,
+        "no primary row should be more than 3 days (259200s) late; observed max \
+         {max_primary_lateness_secs}s"
+    );
+
+    let duplicate_ids = event_id_counts.values().filter(|&&c| c > 1).count();
+    assert!(
+        duplicate_ids > 0,
+        "expected some duplicate event_ids from the redelivery block, found none \
+         across {total_rows} rows"
+    );
+
+    assert!(
+        utm_non_null > 0,
+        "utm_campaign should be non-null for at least some rows"
+    );
+    assert!(
+        utm_null > 0,
+        "utm_campaign should be null for at least some rows (it's an optional field)"
+    );
+}
+
 /// Pool-snapshot test: build the `device_user` linked pool directly using the
 /// public `LinkedPool::new` API and verify the anonymous fraction and
 /// deterministic reproducibility.
@@ -682,9 +845,12 @@ fn test_parse_event_payload_function_compiles() {
 // ---------------------------------------------------------------------------
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
-/// `smelt build`, then verify that `main.silver_events_parsed` has the same row
-/// count as `raw.events` and that the JSON-extracted `event_name` / `platform`
-/// / `url` columns are non-null for at least one row.
+/// `smelt build`, then verify that `main.silver_events_parsed` has exactly one
+/// row per distinct `event_id` in `raw.events` (its redelivery-dedup QUALIFY
+/// collapses redelivered duplicates, so its row count is `COUNT(DISTINCT
+/// event_id)`, not `COUNT(*)`, on `raw.events`) and that the JSON-extracted
+/// `event_name` / `platform` / `url` columns are non-null for at least one
+/// row.
 ///
 /// `models/silver/events_parsed.sql` address segments are `["silver",
 /// "events_parsed"]`, so smelt materializes the view as `silver_events_parsed`
@@ -722,11 +888,20 @@ fn test_end_to_end_smelt_build() {
     conn.execute_batch(&sql)
         .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
 
-    // Capture total event row count for later comparison.
+    // Capture total event row count and distinct event_id count for later
+    // comparison — silver.events_parsed's redelivery dedup collapses
+    // `raw.events`'s row count down to its distinct-event_id count.
     let events_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM raw.events", [], |row| row.get(0))
         .expect("count raw.events");
     assert!(events_count > 0, "raw.events has 0 rows before smelt build");
+    let distinct_event_ids: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT event_id) FROM raw.events",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count distinct event_id in raw.events");
 
     // Close connection so smelt build can open the file exclusively.
     drop(conn);
@@ -753,7 +928,7 @@ fn test_end_to_end_smelt_build() {
         String::from_utf8_lossy(&build_out.stderr),
     );
 
-    // --- Step 5: verify silver_events_parsed row count matches events ---
+    // --- Step 5: verify silver_events_parsed row count matches distinct event_ids ---
     let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
 
     let silver_count: i64 = conn2
@@ -765,8 +940,26 @@ fn test_end_to_end_smelt_build() {
         .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_events_parsed: {e}"));
 
     assert_eq!(
-        silver_count, events_count,
-        "silver_events_parsed row count ({silver_count}) should equal raw.events row count ({events_count})"
+        silver_count, distinct_event_ids,
+        "silver_events_parsed row count ({silver_count}) should equal raw.events' distinct \
+         event_id count ({distinct_event_ids}) — the redelivery-dedup QUALIFY keeps exactly one \
+         row per event_id (out of {events_count} total raw.events rows, including redelivered \
+         duplicates)"
+    );
+
+    let dup_event_ids: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (\
+                SELECT event_id FROM main.silver_events_parsed \
+                GROUP BY event_id HAVING COUNT(*) > 1\
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count duplicate event_ids in silver_events_parsed: {e}"));
+    assert_eq!(
+        dup_event_ids, 0,
+        "silver_events_parsed must have zero duplicate event_ids after dedup"
     );
 
     // --- Step 6: verify JSON-extracted fields are non-null in at least one row ---

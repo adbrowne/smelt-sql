@@ -120,6 +120,21 @@ zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
     start: YYYY-MM-DDTHH:MM:SS
     end: YYYY-MM-DDTHH:MM:SS
 
+  timestamp_offset
+    base: <column>        Name of an earlier column in this dataset whose
+                          generator produces a timestamp (timestamp or
+                          timestamp_offset), OR the dataset's partition
+                          column (anchors to midnight of the partition day —
+                          the day-anchored form used to keep an occurrence
+                          clock aligned with its own partition). Referencing
+                          a later or non-timestamp, non-partition column is
+                          a config error.
+    offset_seconds: <gen> Any generator producing a numeric value (int,
+                          float, or a string that parses as one — e.g.
+                          weighted_choice over numeric-looking keys),
+                          evaluated per row and added to `base` as seconds.
+                          Output is an ISO 8601 string, like timestamp.
+
   string_pattern
     template: <str>       Template with `{sequential_id}`, `{uuid}`,
                           `{uniform_int:MIN-MAX}`, `{one_of:a,b,c}`
@@ -146,6 +161,18 @@ zero or more parameters. Parameters listed as `(default: ...)` may be omitted.
                           user_id pairs with realistic co-occurrence).
 
 Dataset-level (not a generator, but documented here for discoverability):
+
+  redelivery               Re-emits a deterministic fraction of generated
+    fraction: <float>      rows to model at-least-once delivery. `fraction`
+    arrival_column: <col>  is the share re-emitted (once each); arrival_column
+    delay_seconds: <gen>   names the timestamp column shifted forward on the
+                          duplicate; delay_seconds is a numeric generator
+                          added (in seconds) to the original arrival value.
+                          A redelivered row is byte-identical to its
+                          original except arrival_column. Duplicates are
+                          appended after the primary rows. Selection + delay
+                          draws use a dedicated RNG stream, isolated from
+                          the primary row stream.
 
   linked_pools             Pre-computed joint-distribution pools. Each
     - name: <pool_name>    pool has a pool_size, optional per-pool seed,

@@ -273,7 +273,7 @@ pub struct ModelMetadata {
     /// contribution); this declaration never relaxes or narrows the derived
     /// clamp. It only licenses a compile-time warning when the derived
     /// horizon would exceed the declared ceiling. See
-    /// `docs/specs/model_maintenance.md` §"Windowed maintenance and the
+    /// `docs/specs/maintenance_plan.md` §"Windowed maintenance and the
     /// horizon". Reuses `crate::config::DataLatency`'s existing fail-loud
     /// interval parser — no new interval grammar.
     #[serde(default, skip_serializing_if = "Option::is_none")]

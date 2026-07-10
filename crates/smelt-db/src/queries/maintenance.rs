@@ -19,6 +19,7 @@ use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
 use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
+use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
@@ -248,6 +249,49 @@ pub fn derive_model_maintenance_plan(
     })
 }
 
+/// Like [`derive_model_maintenance_plan`], but additionally folds the
+/// creation-trigger cells (and `MaintenanceReachNotDerivable` refusals) for
+/// the model's **upstream maintained-model edges** into the plan
+/// (`maintenance_plan.md` §"Upstream model edges").
+///
+/// `model_edges` is assembled by the caller from each upstream model's own
+/// already-validated metadata (the leading `smelt.` stripped from the ref
+/// name; `clock_col` from the upstream's `timeseries.partition_column`, or
+/// `None` when it declares none). View/`full` upstreams deliver no
+/// incremental delta and must not appear here — the caller excludes them, so
+/// they contribute neither a creation cell nor a refusal.
+///
+/// Kept as a wrapper over [`derive_model_maintenance_plan`] so the many
+/// source-only callers (`smelt-runtime`'s maintenance driver and propagation
+/// walk) are unchanged; both entry points still call one pure derivation.
+pub fn derive_model_maintenance_plan_with_edges(
+    sql: &str,
+    table: &str,
+    metadata: &ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &std::collections::HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+) -> Option<MaintenancePlanResult> {
+    let mut result =
+        derive_model_maintenance_plan(sql, table, metadata, sources, explicitly_mutable)?;
+    // Model edges only clamp against a partition-addressed output axis; a
+    // key-addressed downstream contributes none (deferred).
+    let output_partition_col = match metadata.grain {
+        Some(ConfigGrain::Partition) => metadata
+            .timeseries
+            .as_ref()
+            .map(|t| t.partition_column.as_str()),
+        _ => None,
+    };
+    smelt_logical::maintenance::derive::append_model_edge_cells(
+        &mut result.plan,
+        sql,
+        output_partition_col,
+        model_edges,
+    );
+    Some(result)
+}
+
 /// A `maintenance.cells[]` entry whose declared `columns` span more than one
 /// derived column group — an error, since it would silently re-partition
 /// the plan (`maintenance_plan.md` §Surface "Frontmatter"). Returns one
@@ -323,6 +367,15 @@ pub enum MaintenanceRefusal {
 pub struct MaintenancePlanDiagnostics {
     pub refusals: Vec<MaintenanceRefusal>,
     pub cell_column_group_violations: Vec<String>,
+    /// The declared-`timeseries.granularity`-vs-derived-grouping check
+    /// (`maintenance_plan.md` §Design "Grain is declared"), when the model
+    /// declares a `timeseries:` block and a mismatch was positively
+    /// derived. `None` when the model has no `timeseries:` block, the
+    /// projection couldn't be located, or its shape didn't resolve to a
+    /// known grid unit (undecidable, not a positive disproof) —
+    /// [`smelt_logical::maintenance::granularity::check_declared_granularity`]'s
+    /// own fail-open posture.
+    pub granularity_mismatch: Option<GranularityMismatch>,
 }
 
 /// Assemble inputs (resolved source facts, declared output shape,
@@ -357,10 +410,17 @@ pub fn maintenance_plan_diagnostics(
         })
         .map(|(name, _)| name.clone())
         .collect();
+    let granularity_mismatch = metadata
+        .timeseries
+        .as_ref()
+        .and_then(|ts| check_declared_granularity(sql, &ts.partition_column, ts.granularity));
     let Some(result) =
         derive_model_maintenance_plan(sql, table, metadata, &sources, &explicitly_mutable)
     else {
-        return MaintenancePlanDiagnostics::default();
+        return MaintenancePlanDiagnostics {
+            granularity_mismatch,
+            ..Default::default()
+        };
     };
     let refusals = result
         .plan
@@ -383,6 +443,13 @@ pub fn maintenance_plan_diagnostics(
             // phase (no `ColumnAdded` trigger is derived yet); leave
             // unmapped so a future phase's own diagnostic lands it.
             smelt_logical::maintenance::Refusal::SkeletonColumnAdded { .. } => None,
+            // An underivable upstream-model clock. Recorded in the plan (and
+            // surfaced by `smelt explain`'s Refusals section), but not yet
+            // folded into `file_diagnostics()` — `MaintenanceReachNotDerivable`
+            // has no `DiagnosticCode` variant yet (`diagnostics.md` §Known
+            // divergences). Leave unmapped so a future phase's own diagnostic
+            // lands it, exactly as `SkeletonColumnAdded` above.
+            smelt_logical::maintenance::Refusal::ReachNotDerivable { .. } => None,
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -393,6 +460,7 @@ pub fn maintenance_plan_diagnostics(
     MaintenancePlanDiagnostics {
         refusals,
         cell_column_group_violations,
+        granularity_mismatch,
     }
 }
 

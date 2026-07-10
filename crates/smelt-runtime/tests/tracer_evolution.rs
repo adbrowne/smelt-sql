@@ -22,7 +22,8 @@ use duckdb::Connection;
 
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, ModelInputs};
 use smelt_logical::maintenance::emit::{
-    emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, Region,
+    emit_column_scoped_merge, emit_delete_insert, widened_scan_predicate, MaintenanceDialect,
+    Region, StatementGroup,
 };
 use smelt_logical::maintenance::{
     ColumnGroup, Grain, MutationProfile, OutputSpec, PartitionLocal, ScanClamp, SourceFacts,
@@ -39,11 +40,24 @@ fn set(items: &[&str]) -> std::collections::BTreeSet<String> {
     items.iter().map(|s| s.to_string()).collect()
 }
 
-fn batch(conn: &Connection, statements: &[String]) {
-    for sql in statements {
-        conn.execute_batch(sql)
-            .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
+fn batch_group(conn: &Connection, group: &StatementGroup) {
+    for stmt in &group.statements {
+        conn.execute_batch(&stmt.sql)
+            .unwrap_or_else(|e| panic!("statement failed: {e}\n{}", stmt.sql));
     }
+}
+
+/// Test-only stand-in for the runtime's output-clamp injection
+/// (`smelt-runtime/src/transformer.rs`): the single-owner emitter contract
+/// requires the caller to fold the region predicate into the body it hands
+/// `emit_delete_insert` — the emitter itself no longer adds one
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+fn clamped(body: &str, col: &str, region: &Region) -> String {
+    format!(
+        "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
+        start = region.start,
+        end = region.end,
+    )
 }
 
 fn day(d: &str) -> String {
@@ -215,13 +229,18 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         start: day("2026-01-01"),
         end: day("2026-01-02"),
     };
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r1,
-            &v2_body(&widened_scan_predicate(&clamp, &r1)),
+            &clamped(
+                &v2_body(&widened_scan_predicate(&clamp, &r1)),
+                "event_date",
+                &r1,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM silver_events", &full));
@@ -239,13 +258,18 @@ fn v2_incremental_with_derived_arrival_scan_equals_full_refresh() {
         start: day("2026-01-01"),
         end: day("2026-01-03"),
     };
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r2,
-            &v2_body(&widened_scan_predicate(&clamp, &r2)),
+            &clamped(
+                &v2_body(&widened_scan_predicate(&clamp, &r2)),
+                "event_date",
+                &r2,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM silver_events", &full));
@@ -301,13 +325,18 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
         start: day("2026-01-01"),
         end: day("2026-01-02"),
     };
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r1,
-            &v3_body(&widened_scan_predicate(&clamp, &r1)),
+            &clamped(
+                &v3_body(&widened_scan_predicate(&clamp, &r1)),
+                "event_date",
+                &r1,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
 
@@ -319,13 +348,18 @@ fn v3_dedup_is_stable_under_incremental_maintenance() {
            (1, 10, TIMESTAMP '2026-01-01 10:00:00', TIMESTAMP '2026-01-02 09:00:00', DATE '2026-01-02', '/dup');",
     )
     .expect("duplicate delivery");
-    batch(
+    batch_group(
         &conn,
         &emit_delete_insert(
             "silver_events",
             "event_date",
             &r1,
-            &v3_body(&widened_scan_predicate(&clamp, &r1)),
+            &clamped(
+                &v3_body(&widened_scan_predicate(&clamp, &r1)),
+                "event_date",
+                &r1,
+            ),
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(&conn, "SELECT * FROM silver_events", &full));
@@ -396,8 +430,13 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
             end: day(end),
         };
         let scan = widened_scan_predicate(&clamp, &region);
+        // The source projects the full target row — every v3 column carried
+        // through unchanged from `silver_events` itself, `session_id`
+        // re-derived — per the full-row-projection contract `UPDATE SET *`
+        // relies on.
         let source_select = format!(
-            "SELECT e.event_id, e.event_date, s.session_id \
+            "SELECT e.event_id, e.user_id, e.event_ts, e.arrival_ts, e.event_date, e.page, \
+             s.session_id \
              FROM silver_events e \
              LEFT JOIN sessions s \
                ON s.user_id = e.user_id \
@@ -405,15 +444,13 @@ fn v4_session_field_introduction_catches_up_with_the_derived_lookback() {
               AND e.event_ts < s.session_end_ts \
               AND {scan}"
         );
-        batch(
+        batch_group(
             &conn,
             &emit_column_scoped_merge(
                 "silver_events",
                 &strings(&["event_id", "event_date"]),
-                &strings(&["session_id"]),
                 &source_select,
-                Some("event_date"),
-                Some(&region),
+                MaintenanceDialect::DuckDb,
             ),
         );
     }
@@ -499,8 +536,13 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
 
     let merge_region = |conn: &Connection, region: &Region| {
         let scan = widened_scan_predicate(&clamp, region);
+        // The source projects the full target row — every v4 column carried
+        // through unchanged from `silver_events` itself, `conversion_score`
+        // re-derived — per the full-row-projection contract `UPDATE SET *`
+        // relies on.
         let source_select = format!(
-            "SELECT e.event_id, e.event_date, \
+            "SELECT e.event_id, e.user_id, e.event_ts, e.arrival_ts, e.event_date, e.page, \
+             e.session_id, \
              (SELECT c.score FROM conversions c \
                WHERE c.event_id = e.event_id \
                  AND c.conversion_ts >= e.event_ts \
@@ -509,15 +551,13 @@ fn v5_conversion_field_introduction_and_late_conversion_repair() {
                ORDER BY c.conversion_ts LIMIT 1) AS conversion_score \
              FROM silver_events e"
         );
-        batch(
+        batch_group(
             conn,
             &emit_column_scoped_merge(
                 "silver_events",
                 &strings(&["event_id", "event_date"]),
-                &strings(&["conversion_score"]),
                 &source_select,
-                Some("event_date"),
-                Some(region),
+                MaintenanceDialect::DuckDb,
             ),
         );
     };

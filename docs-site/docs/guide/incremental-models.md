@@ -492,6 +492,24 @@ WHERE col >= run_start - before
 
 This filter is applied **per source reference** before compilation — each `smelt.<path>` reference in the model SQL gets its own pushdown WHERE. The outer model WHERE (constraining the model's output to the run window using the model's own `partition_column`) is unchanged and applied separately.
 
+### Model-to-model chains
+
+A ref to **another incremental model** in the same project is a maintenance-plan edge of the same standing as a source ref. When an incremental model reads another incremental model, the downstream model derives a **creation-trigger cell** for that upstream, clocked by the upstream model's own `timeseries:` declaration — the same clock the upstream maintains itself. Scan bounds compose down the chain exactly as they do for sources: the downstream cell reads the upstream over `[start − before, end + after)`.
+
+`smelt explain <model>` shows these edges. For a model that joins an upstream `silver.events_parsed`, the report lists a creation cell whose trigger names the upstream and whose scan clamp is anchored to the upstream's clock column:
+
+```
+Cells (…):
+  - group {*} on trigger NewData { source: "silver.events_parsed" }
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      locality:  partition_local
+      scan clamps:
+        - source=silver.events_parsed column=event_date before=… after=…
+```
+
+If the upstream is a maintained model that declares **no** `timeseries:` clock (and none can be inferred), the edge cannot be clamped. smelt records this as a refusal naming the edge in the plan's `Refusals` section rather than silently dropping the upstream — surfacing that the chain needs a clock to maintain the downstream incrementally. A ref to a `full`-refresh model or a view contributes no creation cell (there is no incremental delta to receive).
+
 **Example.** A sessions model that reads `smelt.silver.events_parsed` (partition column `event_date`) with a derived bound of `PT0S`/`PT0S` (partition-local, no lookback) for a run window `[2024-01-15, 2024-01-16)`:
 
 ```sql
@@ -707,7 +725,13 @@ maintenance:
         allow_full_scan: true
 ```
 
-Once the cell is admitted (and the target table already exists), `smelt run` dispatches through the column-scoped `MERGE` automatically on every run over the fact table's own event-time window — no separate "a dimension changed" signal is required. What's not built yet is a *cheaper, change-aware* trigger: `smelt run` cannot tell whether the dimension actually changed since the last run, so it re-derives the `MERGE` on every run rather than skipping one where nothing upstream moved (forward propagation, `smelt run --since-upstream`, unbuilt). If the plan hasn't admitted a cell for your model yet (an unbounded scan, a missing `mutation_profile` declaration, or a backend without column-scoped `MERGE` support), the run falls back to the region-recompute technique (`DELETE`+`INSERT`), which re-reads the dimension's current contents and is always correct, just not column-scoped. `smelt explain` is the way to see today which of your models already have a targeted-write cell derived and ready.
+Once the cell is admitted (and the target table already exists), a plain `smelt run` dispatches through the column-scoped `MERGE` on every run over the fact table's own event-time window — no separate "a dimension changed" signal is required, so it re-derives the `MERGE` every time rather than skipping one where nothing upstream moved. To skip runs where the dimension didn't change, declare the landed delta explicitly with [forward propagation](../reference/cli.md#forward-propagation-with---since-upstream) (`smelt run --since-upstream --source raw.users --landed <a>..<b>`), which composes the maintenance plan's per-source scan clamps into a propagation graph and runs only the `(model, region)` pairs that delta can actually affect. If the plan hasn't admitted a cell for your model yet (an unbounded scan, a missing `mutation_profile` declaration, or a backend without column-scoped `MERGE` support), the run falls back to the region-recompute technique (`DELETE`+`INSERT`), which re-reads the dimension's current contents and is always correct, just not column-scoped. `smelt explain` is the way to see today which of your models already have a targeted-write cell derived and ready.
+
+### The reconciliation ledger
+
+Some maintenance cells — the column-scoped `MERGE` above is one — are **additive keyed folds**: each run applies a source delta on top of the target's existing state rather than recomputing a region from scratch. To make that safe across retries, backfills, and out-of-order runs, smelt records, per output region × column group, which source deltas are already reflected in that region. An already-reflected delta is refused rather than folded a second time (it would double-count), and recomputing a region — a full `DELETE`+`INSERT` of that region, whether from `--full-refresh`, a fallback to region-recompute, or an explicit rebuild — resets the region's ledger entry, since the recompute already incorporates everything up to that point.
+
+The ledger is backend-resident: it lives alongside the target table for the transactional keyed-merge path, not in a separate smelt-managed store. You don't declare or configure it directly; `smelt explain <model>` shows whether a given cell routes through it via the `ledger_catch_up` flag on that cell.
 
 ## grain: partition vs grain: key
 

@@ -1,6 +1,6 @@
 //! `horizon_ceiling` declaration — compile-time warning wiring (DC4 of
 //! `docs/plans/20260704-model-updates-l3-declarations.md`;
-//! `docs/specs/model_maintenance.md` §"Windowed maintenance and the
+//! `docs/specs/maintenance_plan.md` §"Windowed maintenance and the
 //! horizon").
 //!
 //! Loads the real `examples/horizon_ceiling_comfortable` and

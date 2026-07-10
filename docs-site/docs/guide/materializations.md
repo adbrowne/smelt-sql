@@ -109,7 +109,7 @@ When `refresh:` is omitted, `full` is assumed — the model always rebuilds comp
 | `grain:` | A stored row is… | Identity | `timeseries:` |
 |---|---|---|---|
 | `partition` | one row of a complete, partition-addressed table | `unique_key` optional (within-partition dedup aid only) | **required** |
-| `key` | the end-state per key | `unique_key` **required**, composite-valued | admitted only when key temporal locality is established |
+| `key` | the end-state per key | `unique_key` **required**, composite-valued | **forbidden** — the output has no partition column; partition shape is read from the source |
 | `key_per_partition` | the trajectory: one row per `(key, partition)` | `unique_key` **required** | **required** — the partition axis is half the grain |
 
 There is no per-model `strategy:` knob that says "delete+insert", "merge", or "fold" — how each part of the output is maintained under each kind of change is *derived* per `(column-group × trigger)` cell (the maintenance plan) and reported by `smelt explain`. One model is routinely append-driven, merge-driven, and recompute-driven at different cells.
@@ -190,10 +190,10 @@ Best for:
 
 - Running counts and identity edge sets (e.g. `(device, user)` co-occurrence)
 - Per-key rollups where each run should be cheap — proportional to the new window's source rows, not the full source history
-- Tables consumed downstream as a lookup (no `partition_column` on the output, unless key temporal locality is established)
+- Tables consumed downstream as a lookup (no `partition_column` on the output — the output has no partition column at all)
 
 !!! warning "Forbidden combinations"
-    `grain: key` models cannot declare a `timeseries:` block unless key temporal locality is established (the output has no partition column by default — the partition shape comes from the source) and cannot declare a `batched:` block (`grain: key` and `grain: partition` are sibling refresh strategies with different equivalence contracts). Combining them produces a `KeyedForbidsTimeseries` or `KeyedForbidsBatched` error. `refresh: incremental` on an `ephemeral` model is also a hard error.
+    `grain: key` models cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare a `batched:` block (`grain: key` and `grain: partition` are sibling refresh strategies with different equivalence contracts). Combining them produces a `KeyedForbidsTimeseries` or `KeyedForbidsBatched` error. `refresh: incremental` on an `ephemeral` model is also a hard error.
 
 !!! note "Reprocessing"
     Reprocessing an already-merged window is refused when detected. If a past window's data changes, run with `--full-refresh` to truncate and rebuild from scratch.
@@ -238,7 +238,7 @@ Both shapes are time-aware, but they uphold different contracts:
 |---|---|---|
 | Frontmatter | `materialization: table` + `refresh: incremental` + `grain: partition` + `timeseries:` | `materialization: table` + `refresh: incremental` + `grain: key` |
 | Output shape | One row per `(partition_column, …)` — partitioned | One row per `GROUP BY` key — collapsed (by default) |
-| Declares `timeseries:`? | Yes (the model's output is a timeseries) | Only when key temporal locality is established (otherwise forbidden; reads partition shape from source) |
+| Declares `timeseries:`? | Yes (the model's output is a timeseries) | Never — forbidden (`KeyedForbidsTimeseries`); reads partition shape from the source |
 | Equivalence contract | Per-partition equivalence with full refresh | End-state equivalence under any admitted window ordering |
 | Re-running a past window | Idempotent (DELETE+INSERT) | Refused when detected; use `--full-refresh` |
 | Backend primitive | `DELETE` + `INSERT` per partition | `MERGE INTO` with per-column combiners |
