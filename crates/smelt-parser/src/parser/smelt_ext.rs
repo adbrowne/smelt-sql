@@ -53,7 +53,8 @@ impl<'a> Parser<'a> {
             if self.at(FROM_KW) {
                 // Bare FROM-first pipe query body.
                 if seen_model {
-                    break;
+                    self.trailing_top_level_content_error();
+                    continue;
                 }
                 self.parse_pipe_query();
                 seen_model = true;
@@ -66,7 +67,8 @@ impl<'a> Parser<'a> {
                 // Peek ahead: if the body after all CTEs begins with FROM_KW, it
                 // is a pipe query; otherwise it is a standard SELECT.
                 if seen_model {
-                    break;
+                    self.trailing_top_level_content_error();
+                    continue;
                 }
                 if self.peek_from_first_after_with() {
                     self.parse_pipe_query();
@@ -79,12 +81,12 @@ impl<'a> Parser<'a> {
             }
 
             if self.at(SELECT_KW) {
-                // Bare SELECT model body. We only parse the first one; any
-                // following top-level tokens are consumed silently (preserving
-                // pre-Phase-1 behavior for statements the child parser does not
-                // fully consume, e.g. comma-separated FROM lists).
+                // Bare SELECT model body. A file has at most one model body;
+                // a second SELECT (or any other top-level content) after it
+                // is trailing content and produces a diagnostic.
                 if seen_model {
-                    break;
+                    self.trailing_top_level_content_error();
+                    continue;
                 }
                 self.parse_select_stmt();
                 seen_model = true;
@@ -94,7 +96,8 @@ impl<'a> Parser<'a> {
 
             if self.at(VALUES_KW) {
                 if seen_model {
-                    break;
+                    self.trailing_top_level_content_error();
+                    continue;
                 }
                 self.parse_values_clause();
                 seen_model = true;
@@ -103,25 +106,32 @@ impl<'a> Parser<'a> {
             }
 
             // Unknown content at top level. If we've already parsed a model
-            // body, silently swallow the remainder (matches the legacy
-            // single-statement parser's behavior). Otherwise, emit an error
-            // and resync to the next top-level declaration.
+            // body, this is trailing content and produces a diagnostic.
+            // Otherwise, emit an error and resync to the next top-level
+            // declaration.
             if seen_model {
-                break;
+                self.trailing_top_level_content_error();
+                continue;
             }
             self.error("Expected smelt.define or SELECT statement".to_string());
             self.sync_to_top_level();
             self.skip_trivia();
         }
 
-        // Consume any remaining tokens (trivia or otherwise) without emitting
-        // further errors — this preserves the pre-Phase-1 behavior of silently
-        // absorbing leftover content at the end of a file.
-        while !self.at(EOF) {
-            self.advance();
-        }
-
         self.finish_node();
+    }
+
+    /// Emit a `TrailingTopLevelContent`-shaped parse error for content
+    /// encountered after the file's (at most one) model body, then resync so
+    /// the parser makes progress. Every token skipped by [`sync_to_top_level`]
+    /// is wrapped in its own `ERROR` node — never dropped — so the CST stays
+    /// lossless and a zero-error parse still accounts for every input token.
+    ///
+    /// [`sync_to_top_level`]: Self::sync_to_top_level
+    pub(super) fn trailing_top_level_content_error(&mut self) {
+        self.error("unexpected content after model body".to_string());
+        self.sync_to_top_level();
+        self.skip_trivia();
     }
 
     /// Peek forward (skipping trivia) to check whether the current position is

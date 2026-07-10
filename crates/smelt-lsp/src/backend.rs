@@ -259,6 +259,7 @@ impl Backend {
         let code = diag.code.map(|c| {
             let code_str = match c {
                 DbCode::ParseError => "parse-error",
+                DbCode::TrailingTopLevelContent => "trailing-top-level-content",
                 DbCode::InvalidModel => "invalid-model",
                 DbCode::UndefinedModelRef => "undefined-model-ref",
                 DbCode::UndefinedSource => "undefined-source",

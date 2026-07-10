@@ -1600,21 +1600,26 @@ pub fn check_select_list_spreads(
 /// IN-list, VALUES rows, list-literal body). When a `...` appears in a
 /// forbidden position (e.g. `WHERE ...preds`), the parser's error-recovery
 /// ejects the `DOT_DOT_DOT` token outside the `WHERE_CLAUSE` node (typically
-/// as a sibling of the `SELECT_STMT` at the `FILE` level). This function
-/// detects both cases:
+/// as a sibling of the `SELECT_STMT` at the `FILE` level). Trailing content
+/// past the model body is wrapped one-token-per-`ERROR`-node (never left as a
+/// loose token), so the ejected `DOT_DOT_DOT` shows up as a child token of an
+/// `ERROR` node rather than as a bare sibling token. This function detects all
+/// three cases:
 ///
 /// 1. `LIST_SPREAD` nodes that somehow appear inside a `WHERE_CLAUSE`
 ///    descendant (future-proofing).
 /// 2. Orphaned `DOT_DOT_DOT` tokens at the parent node level when the
 ///    `SelectStmt` has a `WHERE` clause — these represent spread-in-WHERE
 ///    parse errors.
+/// 3. `DOT_DOT_DOT` tokens wrapped in a trailing-content `ERROR` node at the
+///    parent level (the shape the ejected token takes today).
 ///
 /// Pure function — no Salsa dependency.
 pub fn check_forbidden_position_spreads(
     select_stmt: &smelt_parser::ast::SelectStmt,
     _ctx: &TypeContext,
 ) -> Vec<crate::Diagnostic> {
-    use smelt_parser::SyntaxKind::{DOT_DOT_DOT, LIST_SPREAD, WHERE_CLAUSE};
+    use smelt_parser::SyntaxKind::{DOT_DOT_DOT, ERROR, LIST_SPREAD, WHERE_CLAUSE};
 
     let mut diags = Vec::new();
 
@@ -1711,6 +1716,29 @@ pub fn check_forbidden_position_spreads(
                             code: Some(crate::DiagnosticCode::MetaSpreadInForbiddenPosition),
                             data: None,
                         });
+                    }
+                    // Trailing-content ERROR nodes wrap the ejected token
+                    // one-per-node; look inside for a DOT_DOT_DOT token.
+                    if node.kind() == ERROR {
+                        for tok in node.children_with_tokens().filter_map(|c| c.into_token()) {
+                            if tok.kind() == DOT_DOT_DOT {
+                                let range = tok.text_range();
+                                diags.push(crate::Diagnostic {
+                                    severity: crate::DiagnosticSeverity::Error,
+                                    message: crate::meta_list_diagnostic_message(
+                                        crate::DiagnosticCode::MetaSpreadInForbiddenPosition,
+                                        None,
+                                        None,
+                                        Some(SplicePosition::Where.forbidden_position_name()),
+                                    ),
+                                    range,
+                                    code: Some(
+                                        crate::DiagnosticCode::MetaSpreadInForbiddenPosition,
+                                    ),
+                                    data: None,
+                                });
+                            }
+                        }
                     }
                 }
             }

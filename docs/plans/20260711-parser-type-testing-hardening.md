@@ -64,7 +64,7 @@ A 2026-07-11 review found that the parser silently absorbs all top-level tokens 
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | 69c1f9fc | 2026-07-11 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |

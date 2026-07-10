@@ -18,6 +18,8 @@ FROM table_references
 [OFFSET n]
 ```
 
+A model file contains at most one query body. Any content after it — a second `SELECT`, stray tokens, or the tail of an unsupported construct — is an error, surfaced as a `trailing-top-level-content` diagnostic; it is never silently ignored.
+
 ## smelt extensions
 
 ### smelt.&lt;path&gt;

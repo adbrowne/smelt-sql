@@ -10,11 +10,15 @@
 //! check: it asserts the exact two named properties the plan phase commits
 //! to, using only the crate's public API — no internal test-only helpers.
 
-use smelt_core::config::{CellTechnique, MaintenanceCellConfig, MaintenanceDefaults, TechniquePreference};
+use smelt_core::config::{
+    CellTechnique, MaintenanceCellConfig, MaintenanceDefaults, TechniquePreference,
+};
 use smelt_logical::maintenance::choice::{
     effective_override, resolve_cell_choice, ChosenTechnique, EffectiveOverride,
 };
-use smelt_logical::maintenance::{Corner, MaintenancePlan, PartitionLocal, PlanCell, Technique, Trigger};
+use smelt_logical::maintenance::{
+    Corner, MaintenancePlan, PartitionLocal, PlanCell, Technique, Trigger,
+};
 
 /// A plan admitting exactly one `ColumnScopedMerge` cell for `source`'s
 /// mutation trigger — the shape `derive_mutation` produces for a live
@@ -119,7 +123,12 @@ fn ladder_narrower_scope_wins() {
 
     // Broad default alone (no matching cells[] entry): the model-wide
     // `prefer: fold` applies.
-    let broad_only = effective_override(Some(&defaults), &[], "sources.raw.users", &["user_name".to_string()]);
+    let broad_only = effective_override(
+        Some(&defaults),
+        &[],
+        "sources.raw.users",
+        &["user_name".to_string()],
+    );
     assert_eq!(broad_only.prefer, Some(TechniquePreference::Fold));
 
     // Narrower cells[] entry present: it wins over the broad default, even
@@ -158,10 +167,10 @@ fn ladder_narrower_scope_wins() {
     let trigger = Trigger::UpstreamMutation {
         source: "sources.raw.users".to_string(),
     };
-    let broad_choice = resolve_cell_choice(&plan, &trigger, &broad_only, true)
-        .expect("soft prefer never refuses");
-    let narrow_choice = resolve_cell_choice(&plan, &trigger, &narrowed, true)
-        .expect("soft prefer never refuses");
+    let broad_choice =
+        resolve_cell_choice(&plan, &trigger, &broad_only, true).expect("soft prefer never refuses");
+    let narrow_choice =
+        resolve_cell_choice(&plan, &trigger, &narrowed, true).expect("soft prefer never refuses");
     assert_eq!(
         broad_choice,
         ChosenTechnique::Admitted(Technique::ColumnScopedMerge)

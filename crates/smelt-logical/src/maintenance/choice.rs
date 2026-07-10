@@ -22,7 +22,9 @@
 //! admission failure ([`ChoiceRefusal`]), never a silent override — the
 //! spec's "a pin bypasses the cost model, never admission."
 
-use smelt_core::config::{CellTechnique, MaintenanceCellConfig, MaintenanceDefaults, TechniquePreference};
+use smelt_core::config::{
+    CellTechnique, MaintenanceCellConfig, MaintenanceDefaults, TechniquePreference,
+};
 
 use super::{MaintenancePlan, Technique, Trigger};
 
@@ -168,7 +170,11 @@ pub fn resolve_cell_choice(
     });
 
     if let Some(pin) = overrides.technique {
-        return if admits(pin, admitted_technique, backend_supports_column_scoped_merge) {
+        return if admits(
+            pin,
+            admitted_technique,
+            backend_supports_column_scoped_merge,
+        ) {
             match pin {
                 CellTechnique::Recompute => Ok(ChosenTechnique::RegionRecompute),
                 CellTechnique::Fold | CellTechnique::RederiveColumns => {
@@ -380,12 +386,19 @@ mod tests {
             "sources.users",
             &["tier".to_string()],
         );
-        assert_eq!(effective_pin.technique, Some(CellTechnique::RederiveColumns));
+        assert_eq!(
+            effective_pin.technique,
+            Some(CellTechnique::RederiveColumns)
+        );
 
         // End-to-end: the ladder's resolved override feeds
         // `resolve_cell_choice` and actually changes the outcome versus the
         // broad default alone.
-        let plan = admitted_plan("sources.users", Technique::ColumnScopedMerge, Corner::ColumnMerge);
+        let plan = admitted_plan(
+            "sources.users",
+            Technique::ColumnScopedMerge,
+            Corner::ColumnMerge,
+        );
         let trigger = Trigger::UpstreamMutation {
             source: "sources.users".to_string(),
         };

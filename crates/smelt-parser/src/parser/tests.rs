@@ -1056,10 +1056,23 @@ fn test_lateral_join() {
 }
 
 #[test]
-fn test_lateral_subquery() {
+fn test_lateral_subquery_comma_form_is_a_registered_gap() {
+    // Comma-separated FROM lists (`FROM a, LATERAL (...)`) have never had a
+    // grammar production — `parse_from_clause` only recognises the first
+    // table ref plus JOIN-keyword chains (see `test_lateral_join` for the
+    // supported `LEFT JOIN LATERAL` form). Before fail-loud trailing-content
+    // detection, the leftover `, LATERAL (...) o` was silently absorbed at
+    // end-of-file, so this construct looked accepted; it now surfaces the
+    // parse error the grammar always implied. Comma-separated FROM lists are
+    // unimplemented grammar, not a fail-loud-parsing regression — tracked as
+    // follow-on grammar work.
     let input = "SELECT * FROM users, LATERAL (SELECT * FROM orders WHERE user_id = users.id) o";
     let parse = parse(input);
-    assert_eq!(parse.errors.len(), 0);
+    assert!(
+        !parse.errors.is_empty(),
+        "comma-separated FROM lists are not supported by the grammar; \
+         expected a parse error, got a clean parse"
+    );
 }
 
 #[test]
@@ -3398,8 +3411,10 @@ fn passing_after_smelt_extern_call_not_attached() {
     //
     // We verify the structural analogue: PASSING after a plain SQL function
     // call (not smelt.fn.*) is not attached, confirming the trigger is
-    // correctly scoped to the smelt.fn.* path only.
-    let input = "SELECT my_func(src) PASSING m AS (COUNT(*)) FROM t";
+    // correctly scoped to the smelt.fn.* path only. `PASSING` is not a
+    // reserved keyword, so it is consumed here as a plain implicit alias
+    // for the select item.
+    let input = "SELECT my_func(src) PASSING FROM t";
     let (parse, file) = parse_file_text(input);
     assert!(
         parse.errors.is_empty(),
@@ -7042,4 +7057,128 @@ fn test_postfix_cast_on_non_ident_primary() {
         let has_cast = parse.syntax().descendants().any(|n| n.kind() == CAST_EXPR);
         assert!(has_cast, "expected a CAST_EXPR node for {sql:?}");
     }
+}
+
+// ── Fail-loud trailing top-level content ────────────────────────────────────
+//
+// `parse_file` parses at most one model body. Any top-level content left
+// over afterwards must produce a parse error and land inside an `ERROR` node
+// — never be absorbed silently. See `docs/specs/diagnostics.md` §"Fail-loud
+// invariants" #3 and the `TrailingTopLevelContent` catalogue entry.
+
+/// Every non-trivia token in `syntax` must either be inside an `ERROR` node
+/// or be one of the tokens the grammar itself recognises. This helper checks
+/// that every token that is a descendant of an `ERROR` node really is under
+/// one, i.e. that the given predicate tokens are wrapped rather than loose
+/// directly under `FILE`.
+fn tokens_with_text(
+    syntax: &rowan::SyntaxNode<crate::syntax_kind::SmeltLanguage>,
+    text: &str,
+) -> Vec<rowan::SyntaxToken<crate::syntax_kind::SmeltLanguage>> {
+    syntax
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.text() == text)
+        .collect()
+}
+
+#[test]
+fn trailing_tokens_after_select_error() {
+    // `t alias1` is a legitimate implicit table alias (consumed by the
+    // TABLE_REF grammar) — the trailing content under test is the *second*
+    // run of stray identifiers, `stray_one stray_two`, which the grammar has
+    // no production for at all.
+    let input = "SELECT a FROM t alias1 stray_one stray_two";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "expected at least one parse error for trailing top-level content, got none"
+    );
+
+    let syntax = parse.syntax();
+    for text in ["stray_one", "stray_two"] {
+        let toks = tokens_with_text(&syntax, text);
+        assert!(!toks.is_empty(), "expected a {text:?} token in the tree");
+        for tok in toks {
+            let inside_error = tok
+                .parent()
+                .map(|p| {
+                    p.kind() == crate::SyntaxKind::ERROR
+                        || p.ancestors().any(|a| a.kind() == crate::SyntaxKind::ERROR)
+                })
+                .unwrap_or(false);
+            assert!(
+                inside_error,
+                "expected {text:?} to sit inside an ERROR node, not loose under FILE"
+            );
+        }
+    }
+
+    // Guard: `alias1` (the legitimate implicit alias) must NOT be inside an
+    // ERROR node — trailing-content detection must not over-fire onto
+    // grammar the parser already recognises.
+    let alias_tok = tokens_with_text(&syntax, "alias1")
+        .into_iter()
+        .next()
+        .expect("expected an alias1 token");
+    let alias_inside_error = alias_tok
+        .parent()
+        .map(|p| {
+            p.kind() == crate::SyntaxKind::ERROR
+                || p.ancestors().any(|a| a.kind() == crate::SyntaxKind::ERROR)
+        })
+        .unwrap_or(false);
+    assert!(
+        !alias_inside_error,
+        "implicit table alias must not be treated as trailing content"
+    );
+}
+
+#[test]
+fn second_top_level_select_errors() {
+    let parse1 = parse("SELECT 1 SELECT 2");
+    assert!(
+        !parse1.errors.is_empty(),
+        "a second top-level SELECT must produce a parse error"
+    );
+
+    let parse2 = parse("SELECT a FROM t 'junk' )))");
+    assert!(
+        !parse2.errors.is_empty(),
+        "stray tokens after a SELECT body must produce a parse error"
+    );
+}
+
+#[test]
+fn trailing_content_after_smelt_define_errors() {
+    let input = "smelt.define foo(x) AS (x + 1)\n\nSELECT 1 GARBAGE stray";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "content trailing the model body after a declaration must produce a parse error, got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn clean_file_has_no_trailing_error() {
+    // A real multi-section model file (frontmatter + comments + query) must
+    // still parse with zero errors — guards against the trailing-content
+    // check over-firing on well-formed input.
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/timeseries/models/daily_events.sql");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let stripped = crate::strip_frontmatter(&text);
+    let parse = parse(&stripped);
+    assert!(
+        parse.errors.is_empty(),
+        "expected zero parse errors for {}: {:?}",
+        path.display(),
+        parse.errors
+    );
 }

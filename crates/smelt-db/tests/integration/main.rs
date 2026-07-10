@@ -56,6 +56,7 @@ mod tableexpr_arg_shapes;
 mod tableexpr_body_check;
 mod tier2_body_check;
 mod tier2_tier1_expansion;
+mod trailing_top_level_content;
 mod ts_function_returns;
 mod ts_mixing;
 mod values_derived_table_typing;

@@ -45,6 +45,40 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // pattern_match_operators gap removed - regex operators now supported (March 2026)
     // string_concat_operator gap removed - || is now supported (January 2026)
     // any_all_some gap removed - ANY/ALL/SOME comparisons now supported (March 2026)
+    // The three gaps below were exposed by fail-loud trailing-content parsing
+    // (July 2026): the parser previously swallowed the unparsed tail of these
+    // constructs silently, so they appeared "supported" while the trailing
+    // clause was dropped. They now fail loudly.
+    KnownGap {
+        id: "grouping_sets",
+        description: "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (CUBE/ROLLUP are)",
+        category: "smelt_fails",
+        dialect: "all",
+        patterns: &[r"(?i)\bGROUPING\s+SETS\s*\("],
+        severity: "medium",
+        planned_fix: true,
+    },
+    KnownGap {
+        id: "at_time_zone",
+        description: "AT TIME ZONE operator is not parsed",
+        category: "smelt_fails",
+        dialect: "all",
+        patterns: &[r"(?i)\bAT\s+TIME\s+ZONE\b"],
+        severity: "medium",
+        planned_fix: true,
+    },
+    KnownGap {
+        id: "for_update",
+        description: "FOR UPDATE / FOR SHARE row-locking clauses are not parsed",
+        category: "smelt_fails",
+        dialect: "pg",
+        patterns: &[
+            r"(?i)\bFOR\s+(NO\s+KEY\s+)?UPDATE\b",
+            r"(?i)\bFOR\s+(KEY\s+)?SHARE\b",
+        ],
+        severity: "low",
+        planned_fix: false,
+    },
     KnownGap {
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",
@@ -374,9 +408,14 @@ mod tests {
 
     #[test]
     fn test_gaps_by_category() {
-        // All smelt_fails gaps have been resolved (March 2026)
+        // smelt_fails gaps: fail-loud trailing-content parsing (July 2026)
+        // exposed constructs whose tails were previously swallowed silently
+        // (grouping_sets, at_time_zone, for_update).
         let smelt_gaps = get_gaps_by_category("smelt_fails");
-        assert!(smelt_gaps.is_empty());
+        assert_eq!(smelt_gaps.len(), 3);
+        for gap in smelt_gaps {
+            assert_eq!(gap.category, "smelt_fails");
+        }
 
         // pg_fails gaps still exist (smelt extensions)
         let pg_gaps = get_gaps_by_category("pg_fails");
