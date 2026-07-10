@@ -836,9 +836,11 @@ smelt explain [MODEL_NAME] [OPTIONS]
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
 With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance plan**: every
-cell (trigger, corner, technique), the `ledger_catch_up` flag, the derived per-source scan
-clamps, each source's partition-locality verdict, any admission refusals, and the model's inbound
-edges. This only applies to incremental models (`refresh: incremental` with a `grain:` declared)
+cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
+the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
+derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
+and the model's inbound edges. This only applies to incremental models (`refresh: incremental`
+with a `grain:` declared)
 — other models print a one-line notice instead.
 
 **Examples:**

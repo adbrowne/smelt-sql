@@ -1,21 +1,29 @@
 # smelt explain
 
-Inspect the logical and physical execution plan for a project.
+Inspect the logical and physical execution plan for a project, or the derived maintenance plan for a single incremental model.
 
 ```bash
-smelt explain [--json] [--project-dir <path>]
+smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>]
 ```
 
 ## Options
 
 | Flag | Description |
 |---|---|
-| `--json` | Output as JSON instead of human-readable text. |
+| `MODEL_NAME` | Optional. Name of a single model to print the maintenance-plan report for instead of the whole-project graph. |
+| `--json` | Output as JSON instead of human-readable text. Ignored when `MODEL_NAME` is given. |
+| `--select` | Select models to include (repeatable). Ignored when `MODEL_NAME` is given. |
 | `--project-dir` | Path to the smelt project root. Defaults to the current directory. |
 
 ## Human-readable output
 
-Without `--json`, smelt prints a summary of the logical graph (models, dependencies, materialization, incremental config) followed by the physical graph (planner optimisations, execution order, per-model strategy).
+Without `--json` or a `MODEL_NAME`, smelt prints a summary of the logical graph (models, dependencies, materialization, incremental config) followed by the physical graph (planner optimisations, execution order, per-model strategy).
+
+## Per-model maintenance plan
+
+`smelt explain <model>` prints that model's derived **maintenance plan** instead of the whole-project graph: every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the derived per-source scan clamps, each source's partition-locality verdict, any admission refusals, and the model's inbound propagation edges. This only applies to `refresh: incremental` models with a `grain:` declared — other models print a one-line notice instead.
+
+See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report.
 
 ## JSON output schema
 
@@ -45,7 +53,7 @@ Each entry in `models` has:
 
 ### `incremental` object
 
-Present on a model when `incremental: enabled: true` is set and a `timeseries:` block is declared.
+Present on a model when `refresh: incremental` and `grain:` are set and a `timeseries:` block is declared.
 
 | Field | Type | Description |
 |---|---|---|

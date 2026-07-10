@@ -13,6 +13,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | `default_materialization` | string | no | `"view"` | Default materialization for all models |
 | `models` | map | no | `{}` | Per-model configuration overrides (see [Model Configuration](#model-configuration)) |
 | `python` | string | no | | Path to Python interpreter. Can also be set via the `SMELT_PYTHON` environment variable, which takes precedence over this field. |
+| `maintenance` | object | no | | Project-level maintenance-plan baseline (today only `scan_bounds`); a per-model `maintenance:` block in SQL frontmatter refines it (see [Maintenance Configuration](#maintenance-configuration)) |
 
 ---
 
@@ -143,7 +144,7 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `timeseries` | object | no | | Time-dimension declaration for `grain: partition` / `grain: key_per_partition` models, or key-temporal-locality-admitted `grain: key` models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `timeseries` | object | no | | Time-dimension declaration for `grain: partition` / `grain: key_per_partition` models. Forbidden on `grain: key` models (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
 | `grain` | string | no | | Required with `refresh: incremental`: `partition`, `key`, or `key_per_partition` |
 | `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
@@ -157,7 +158,7 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models (bare `grain: key` models do not declare `timeseries:` unless key temporal locality is established). The `timeseries:` and `batched:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. `grain: key` models must **not** declare `timeseries:` — the keyed output has no partition column, and the rule reads partition shape from the driving source instead (declaring both is a hard error, `KeyedForbidsTimeseries`). The `timeseries:` and `batched:` keys are siblings, not nested.
 
 ```yaml
 models:
@@ -239,6 +240,30 @@ Smelt validates incremental models to ensure they produce the same results wheth
 | `allow_subqueries` | bool | `false` | Allow subqueries which may reference data outside the current partition |
 | `allow_nondeterministic` | bool | `false` | Allow nondeterministic functions (e.g., `RANDOM()`, `NOW()`) |
 | `allow_distinct` | bool | `false` | Allow DISTINCT which may produce different results when data is split across partitions |
+
+### Maintenance Configuration
+
+`maintenance:` is a sibling of `timeseries:`/`batched:` in SQL frontmatter (it is not a `smelt.yml` per-model field). It constrains the derived maintenance plan — the per-`(column-group × trigger)` cell matrix `smelt explain <model>` prints — without ever choosing a strategy the derivation didn't already admit.
+
+```yaml
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.users:
+        allow_full_scan: true
+```
+
+The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, which names your acceptance of a full read of an unclocked source (one with no `partition_column` to bound a scan by). Some maintenance cells — e.g. a column-scoped `MERGE` driven by a mutable dimension's `UpstreamMutation` trigger — can only be admitted by reading that dimension in full; without this acceptance, the plan refuses the cell and `smelt run` falls back to region-recompute (`DELETE`+`INSERT`) instead. See [Enrichment joins and dimension updates](../guide/incremental-models.md#enrichment-joins-and-dimension-updates) for the full example.
+
+#### Maintenance Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scan_bounds.require` | string | no | `partition_local` | The partition-locality guardrail: `partition_local` or `none`. |
+| `scan_bounds.on_violation` | string | no | `error` | What to do when the derived plan exceeds the stated expectation: `error` or `warn`. |
+| `scan_bounds.per_source.<address>.allow_full_scan` | bool | no | `false` | Named acceptance of a full (unbounded) read of the source at `<address>`. |
+
+A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
 
 ---
 
