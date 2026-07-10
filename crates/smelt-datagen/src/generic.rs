@@ -30,6 +30,19 @@ pub struct RowContext<'a> {
     /// Per-row map of pool name → the pool-entry index drawn for this row.
     /// Populated once per row before column iteration.
     pub pool_samples: &'a PoolSamples<'a>,
+    /// The `(column_name, value)` pairs already generated earlier in this row
+    /// (in column declaration order, not including the column currently being
+    /// generated). `timestamp_offset`'s `base:` reference resolves against
+    /// this — see `apply_spec`'s `GeneratorSpec::TimestampOffset` arm.
+    pub row_so_far: &'a [(String, GenericValue)],
+    /// This dataset's `(partition_column_name, partition_date_value)` for the
+    /// row currently being generated, when the dataset is partitioned.
+    /// `timestamp_offset`'s `base:` may name the partition column instead of
+    /// an earlier regular column — see `apply_spec`'s
+    /// `GeneratorSpec::TimestampOffset` arm. `None` for unpartitioned
+    /// datasets and for the pool/entity-building contexts, which never see a
+    /// partition.
+    pub partition_col: Option<(&'a str, &'a str)>,
 }
 
 /// Per-row map of pool name → the selected pool-entry index for this row.
@@ -96,17 +109,20 @@ impl EntityPool {
         let mut rng = ChaCha8Rng::seed_from_u64(seed);
         let mut rows = Vec::with_capacity(count);
         for i in 0..count {
-            let ctx = RowContext {
-                row_index: i,
-                fk_counts,
-                pools: &empty_pools,
-                pool_samples: &empty_samples,
-            };
-            let row: Result<Vec<_>> = col_specs
-                .iter()
-                .map(|c| apply_spec(&mut rng, &c.generator, &ctx))
-                .collect();
-            rows.push(row?);
+            let mut row_so_far: Vec<(String, GenericValue)> = Vec::with_capacity(col_specs.len());
+            for c in col_specs {
+                let ctx = RowContext {
+                    row_index: i,
+                    fk_counts,
+                    pools: &empty_pools,
+                    pool_samples: &empty_samples,
+                    row_so_far: &row_so_far,
+                    partition_col: None,
+                };
+                let value = apply_spec(&mut rng, &c.generator, &ctx)?;
+                row_so_far.push((c.name.clone(), value));
+            }
+            rows.push(row_so_far.into_iter().map(|(_, v)| v).collect());
         }
         Ok(Self { rows })
     }
@@ -180,6 +196,8 @@ impl LinkedPool {
                         fk_counts,
                         pools: &empty_pools,
                         pool_samples: &empty_samples,
+                        row_so_far: &[],
+                        partition_col: None,
                     };
                     let val = apply_spec(&mut rng, spec, &ctx)?;
                     sticky_values.insert(field_name.as_str(), val);
@@ -200,6 +218,8 @@ impl LinkedPool {
                             fk_counts,
                             pools: &empty_pools,
                             pool_samples: &empty_samples,
+                            row_so_far: &[],
+                            partition_col: None,
                         };
                         apply_spec(&mut rng, spec, &ctx)?
                     };
@@ -259,9 +279,20 @@ pub fn generate_row(
         }
     }
 
-    // Regular columns
+    // Regular columns. Each column sees the columns already generated
+    // earlier in this row (entity columns plus prior regular columns) via
+    // `row_so_far`, so `timestamp_offset` can reference an earlier column by
+    // name.
     for col in col_specs {
-        let value = apply_spec(rng, &col.generator, ctx)?;
+        let col_ctx = RowContext {
+            row_index: ctx.row_index,
+            fk_counts: ctx.fk_counts,
+            pools: ctx.pools,
+            pool_samples: ctx.pool_samples,
+            row_so_far: &row,
+            partition_col,
+        };
+        let value = apply_spec(rng, &col.generator, &col_ctx)?;
         row.push((col.name.clone(), value));
     }
 
@@ -398,6 +429,73 @@ pub fn apply_spec(
                 ts.format("%Y-%m-%dT%H:%M:%S").to_string(),
             ))
         }
+        GeneratorSpec::TimestampOffset {
+            base,
+            offset_seconds,
+        } => {
+            // `base` may name the dataset's partition column instead of an
+            // earlier regular column — the day-anchored form used to derive
+            // an occurrence clock that stays aligned with its own partition
+            // (`DATE(event_time) == event_date`). See `docs/specs/datagen.md`
+            // §"Generator types" (`timestamp_offset`, "partition-anchored").
+            let base_dt = match ctx.partition_col.filter(|(name, _)| name == base) {
+                Some((_, date_str)) => {
+                    let date = NaiveDate::parse_from_str(date_str, "%Y-%m-%d").map_err(|e| {
+                        anyhow!(
+                            "timestamp_offset base '{base}' names this dataset's partition \
+                             column, but its value {date_str:?} is not a valid YYYY-MM-DD \
+                             date: {e}"
+                        )
+                    })?;
+                    date.and_hms_opt(0, 0, 0).ok_or_else(|| {
+                        anyhow!(
+                            "timestamp_offset base '{base}': midnight is not a valid time for \
+                             partition date {date_str:?} (unreachable for a valid NaiveDate)"
+                        )
+                    })?
+                }
+                None => {
+                    let (_, base_value) = ctx
+                        .row_so_far
+                        .iter()
+                        .find(|(name, _)| name == base)
+                        .ok_or_else(|| {
+                            anyhow!(
+                                "timestamp_offset base column '{base}' was not found among the \
+                                 columns already generated in this row, nor does it name this \
+                                 dataset's partition column — `base:` must name an earlier \
+                                 column in the same dataset or the partition column \
+                                 (validate_config should have rejected this configuration)"
+                            )
+                        })?;
+                    let GenericValue::Str(base_str) = base_value else {
+                        anyhow::bail!(
+                            "timestamp_offset base column '{base}' did not produce a timestamp \
+                             string (got {base_value:?})"
+                        );
+                    };
+                    chrono::NaiveDateTime::parse_from_str(base_str, "%Y-%m-%dT%H:%M:%S").map_err(
+                        |e| {
+                            anyhow!(
+                                "timestamp_offset base column '{base}' value {base_str:?} is \
+                                 not a valid ISO 8601 timestamp: {e}"
+                            )
+                        },
+                    )?
+                }
+            };
+            let offset_value = apply_spec(rng, offset_seconds, ctx)?;
+            let offset_secs = generic_value_as_i64(&offset_value).ok_or_else(|| {
+                anyhow!(
+                    "timestamp_offset `offset_seconds` must produce a numeric value \
+                     (got {offset_value:?})"
+                )
+            })?;
+            let ts = base_dt + chrono::Duration::seconds(offset_secs);
+            Ok(GenericValue::Str(
+                ts.format("%Y-%m-%dT%H:%M:%S").to_string(),
+            ))
+        }
         GeneratorSpec::StringPattern { template } => {
             let result = apply_string_pattern(rng, template, ctx.row_index);
             Ok(GenericValue::Str(result))
@@ -437,6 +535,25 @@ pub fn apply_spec(
                 anyhow!("linked_choice field {field:?} missing in pool {pool:?} at index {idx}")
             })
         }
+    }
+}
+
+/// Coerce a [`GenericValue`] into an `i64` count of seconds, for use by
+/// `timestamp_offset`'s `offset_seconds` and `redelivery`'s `delay_seconds` —
+/// both numeric generators per `docs/specs/datagen.md`.
+///
+/// `Int` and `Float` (rounded) coerce directly. `Str` also coerces by parsing
+/// as an integer, because the canonical way to express a weighted mix of
+/// lateness values is `weighted_choice` over numeric-looking string keys
+/// (e.g. `values: { "0": 0.8, "259200": 0.2 }`) — `weighted_choice` always
+/// produces a `Str`. Any other value (`Bool`, `Null`, `JsonRaw`) is not a
+/// numeric value and returns `None`.
+pub(crate) fn generic_value_as_i64(value: &GenericValue) -> Option<i64> {
+    match value {
+        GenericValue::Int(i) => Some(*i as i64),
+        GenericValue::Float(f) => Some(f.round() as i64),
+        GenericValue::Str(s) => s.parse::<i64>().ok(),
+        GenericValue::Bool(_) | GenericValue::Null | GenericValue::JsonRaw(_) => None,
     }
 }
 
@@ -612,6 +729,8 @@ mod tests {
             fk_counts: fk,
             pools: EMPTY_POOLS.get().unwrap(),
             pool_samples: EMPTY_SAMPLES.get().unwrap(),
+            row_so_far: &[],
+            partition_col: None,
         }
     }
 
@@ -848,6 +967,8 @@ fields:
                 fk_counts: &fk,
                 pools: &empty_pools,
                 pool_samples: &empty_samples,
+                row_so_far: &[],
+                partition_col: None,
             };
             let GenericValue::JsonRaw(a) = apply_spec(&mut rng_a, &spec, &ctx).unwrap() else {
                 unreachable!()

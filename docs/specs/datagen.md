@@ -1,7 +1,7 @@
 ---
 feature: datagen
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
@@ -97,7 +97,7 @@ datasets:
 |------|------------|-------------|
 | `date` | `start`, `end` (YYYY-MM-DD) | Random date in `[start, end)`; output as `YYYY-MM-DD` string |
 | `timestamp` | `start`, `end` (YYYY-MM-DDTHH:MM:SS) | Random timestamp in range; output as ISO 8601 string |
-| `timestamp_offset` | `base: <column>`, `offset_seconds: <numeric generator>` | Emits `base + offset` where `base` names an **earlier column in the same dataset** whose generator produces a timestamp, and `offset_seconds` is any numeric generator (e.g. `weighted_choice` over `0` and multi-day delays, or `log_normal`) evaluated per row and added as seconds. Output is an ISO 8601 string like `timestamp`. Referencing a later or non-timestamp column is a config error. The canonical use is an ingestion clock derived from an occurrence clock: `arrival_time = event_time + lateness`. |
+| `timestamp_offset` | `base: <column>`, `offset_seconds: <numeric generator>` | Emits `base + offset` where `base` names either **an earlier column in the same dataset** whose generator produces a timestamp, or **this dataset's partition column** (the partition-anchored form — `base` resolves to midnight of that row's partition date), and `offset_seconds` is any numeric generator (e.g. `weighted_choice` over `0` and multi-day delays, or `log_normal`) evaluated per row and added as seconds. Output is an ISO 8601 string like `timestamp`. Referencing a later column, a non-timestamp column, or a name that is neither an earlier column nor the partition column, is a config error. The canonical uses are an ingestion clock derived from an occurrence clock (`arrival_time = event_time + lateness`), and an occurrence clock anchored to its own partition day (`event_time = <partition column> + intraday offset`), which keeps `DATE(event_time)` equal to the partition value even though the two are drawn independently. |
 
 **Boolean and nullable:**
 
@@ -254,6 +254,8 @@ When `partition:` is configured:
 - The partition column is a row-level column of type `DATE` string.
 - Sequential IDs and foreign keys are assigned globally across all partitions (not restarted per partition).
 
+**Anchoring a timestamp column to its own partition.** A dataset partitioned on a date column (e.g. `event_date`) that also generates an occurrence-clock timestamp column (e.g. `event_time`) needs the two to agree: `DATE(event_time)` must equal the row's `event_date` partition value, or downstream partition/occurrence-alignment reasoning (grain, lookback windows, lateness) is unsound from the first row. A plain `timestamp` generator spanning the whole dataset's date range does **not** provide this — it draws independently of which partition the row lands in. Use `timestamp_offset` with `base:` set to the partition column name (see §"Generator types") to derive the timestamp from the row's own partition day plus an intraday offset; this is the day-anchored form and is the only generator that reads the partition value.
+
 ### `json_object` encoding
 
 The `json_object` generator emits one `Utf8` column whose every value is a syntactically valid JSON object:
@@ -353,10 +355,6 @@ A raw tuple-list mode was rejected for v1 because it provides no abstraction ove
 
 ## Known Divergences / Open Questions
 
-- **`timestamp_offset` and `redelivery:` are not yet implemented.** The lateness/redelivery
-  surface (§"Generator types" dates table, §"Redelivery (duplicate emission)") is specified but
-  `smelt-datagen` does not yet parse or generate it. Tracked in
-  `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **`json_object` has no array / list field type.** A field whose JSON value is an array (e.g. an `items: [...]` cart payload) cannot be expressed in v1. A `json_array` companion generator is the planned extension; until then, callers needing array-valued fields must shape them as count-prefixed scalars (`item_count`, `item_0_sku`, etc.) or post-process the JSON in a model.
 - **`json_object` produces a `Utf8` column, not a Parquet `Struct`.** This is the documented design choice (see §Design), but engines that prefer typed nested data (Spark, Iceberg readers) lose the schema. A native `parquet_struct` companion generator is an open question — tracked alongside the `json_array` extension.
 - **`json_object` floats use Rust `f64` `Display`.** Cross-locale formatting (e.g. comma decimal separators) is not a concern because Rust's `f64` `Display` is locale-independent, but the exact textual form (e.g. `1.0` vs `1`, when an integer-valued float is produced by a non-integer sub-generator) is not pinned across smelt-datagen versions — the determinism guarantee covers a single binary version.
