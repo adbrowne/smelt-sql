@@ -13,6 +13,8 @@
 //! - The bound is `bounded` type.
 
 use smelt_cli::{build_dependency_graph, build_explain_output, Config};
+use smelt_logical::analysis::source_bounds::Seconds;
+use smelt_logical::analysis::walk::model_partition_skew;
 use std::collections::HashMap;
 use std::path::Path;
 
@@ -25,6 +27,26 @@ fn examples_dir() -> &'static Path {
             .unwrap()
             .join("examples"),
     ))
+}
+
+/// Strip the `---`-delimited YAML frontmatter block from a model file's raw
+/// text, returning just the SQL body. Mirrors the delimiter convention every
+/// other model fixture in this repo uses (see `smelt_core::frontmatter`);
+/// duplicated here rather than pulled in because this test only needs a
+/// trivial split, not the full frontmatter parser.
+fn strip_frontmatter(text: &str) -> &str {
+    let mut lines = text.lines();
+    if lines.next() != Some("---") {
+        return text;
+    }
+    let mut offset = 4; // "---\n"
+    for line in lines {
+        offset += line.len() + 1;
+        if line == "---" {
+            return text[offset..].trim_start();
+        }
+    }
+    text
 }
 
 #[test]
@@ -175,5 +197,37 @@ fn test_explain_json_events_parsed_late_window_bound() {
         inc.batch_safety.contains("context=3d"),
         "events_parsed batch_safety must report a 3-day context; got: {}",
         inc.batch_safety
+    );
+}
+
+/// Real fixture: `examples/web_analytics/models/silver/sessions.sql`
+/// declares `partition_column: session_start_date` and filters `WHERE
+/// event_date BETWEEN session_start_date - INTERVAL '1 day' AND
+/// session_start_date + INTERVAL '1 day'` — a Form B relation anchored on
+/// the model's own partition column (`docs/specs/model_transforms.md`
+/// §Semantics "The output window is derived, never assumed"). The
+/// walk-composed skew fold (`model_partition_skew`, the property-composition
+/// walk's entry) must read this as a symmetric 1-day skew bound.
+#[test]
+fn sessions_skew_bound_derived() {
+    let sessions_sql_path = examples_dir()
+        .join("web_analytics")
+        .join("models")
+        .join("silver")
+        .join("sessions.sql");
+    let raw = std::fs::read_to_string(&sessions_sql_path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", sessions_sql_path.display()));
+    let sql = strip_frontmatter(&raw);
+
+    let skew = model_partition_skew(sql, "session_start_date");
+    assert_eq!(
+        skew.before,
+        Seconds::days(1),
+        "sessions.sql must derive a 1-day backward skew"
+    );
+    assert_eq!(
+        skew.after,
+        Seconds::days(1),
+        "sessions.sql must derive a 1-day forward skew"
     );
 }
