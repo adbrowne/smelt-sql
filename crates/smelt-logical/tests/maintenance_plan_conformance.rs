@@ -216,16 +216,19 @@ fn described_technique_matches_execution_keyed_fold() {
 
     conn.execute_batch("INSERT INTO payments VALUES (3, 10, DATE '2026-01-02', 2.0);")
         .expect("delta");
-    batch(
+    batch_group(
         &conn,
         &emit_keyed_fold(
             "lifetime_spend",
             &strings(&["user_id"]),
-            &strings(&["lifetime_spend"]),
-            &strings(&["user_id", "lifetime_spend"]),
+            &[(
+                "lifetime_spend".to_string(),
+                "target.lifetime_spend + delta.lifetime_spend".to_string(),
+            )],
             "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments \
              WHERE pay_date >= DATE '2026-01-02' AND pay_date < DATE '2026-01-03' \
              GROUP BY user_id",
+            MaintenanceDialect::DuckDb,
         ),
     );
     assert!(multiset_equal(
@@ -364,13 +367,6 @@ fn described_technique_matches_execution_ex18_group_by_coarser_write_window() {
         multiset_equal(&conn, "SELECT * FROM weekly_finance", body),
         "recompute of the week-rounded region must reproduce a full refresh"
     );
-}
-
-fn batch(conn: &Connection, statements: &[String]) {
-    for sql in statements {
-        conn.execute_batch(sql)
-            .unwrap_or_else(|e| panic!("statement failed: {e}\n{sql}"));
-    }
 }
 
 fn batch_group(conn: &Connection, group: &StatementGroup) {

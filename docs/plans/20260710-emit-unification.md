@@ -61,8 +61,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | done     |        | 2026-07-10 |
-| 2     | pending  |        |      |
+| 1     | done     | e589e179 | 2026-07-10 |
+| 2     | done     |        | 2026-07-10 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -236,6 +236,9 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 2:** `Grade::Additive` keyed folds execute their MERGE inside `fold_ledger_delta` (raw-string ledger interleaving), which is not observable at `execute_statement_group` — so the keyed parity test uses a self-contained idempotent keyed fixture instead of `examples/web_analytics` `device_user_edges` (Additive via its COUNT column). Asserting parity *inside* the Additive ledger transaction would need a recording hook on `fold_ledger_delta`; revisit in Phase 4 if the conformance upgrade wants it.
+- **Phase 2:** `WindowedKeyedRule::merge_sql` still returns `String` (consumed as `action_sql` by the Additive ledger arm); collapsing it to return `StatementGroup` was left out to avoid touching the ledger plumbing.
 
 ## Verification
 

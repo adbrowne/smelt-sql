@@ -24,7 +24,9 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Config, Target};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
-use smelt_logical::maintenance::emit::{emit_delete_insert, MaintenanceDialect, Region};
+use smelt_logical::maintenance::emit::{
+    emit_create_table_as, emit_delete_insert, emit_keyed_fold, MaintenanceDialect, Region,
+};
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
 use smelt_runtime::types::ExecuteRequest;
 use tokio_util::sync::CancellationToken;
@@ -513,4 +515,161 @@ async fn region_recompute_statements_come_from_the_emitter() {
             "executed group must be byte-identical to a direct emitter call over the same inputs"
         );
     }
+}
+
+/// The keyed fold family (`refresh: keyed`, `grain: key`): every statement
+/// `execute_project` sends for the windowed-keyed-maintenance driver's
+/// steps — the first-run `CREATE TABLE … AS` and each following step's
+/// `MERGE` — must be byte-identical to `emit_create_table_as`/
+/// `emit_keyed_fold` called directly with that step's own inputs.
+///
+/// The fixture uses only `MIN`/`MAX` aggregator columns (no `SUM`), so the
+/// cell grades `Grade::Idempotent`
+/// (`WindowedKeyedRule::ledger_grade` — "additive iff any combiner is
+/// `Sum`") and every step's create-or-merge action routes through
+/// `Backend::execute_statement_group`, the same funnel the region family
+/// uses — the `Grade::Additive` ledger-interleaved path
+/// (`Backend::fold_ledger_delta`) is untouched by this phase
+/// (`docs/plans/20260710-emit-unification.md` Phase 2 implementation
+/// shape).
+#[tokio::test]
+async fn keyed_fold_statements_come_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models")).unwrap();
+
+    write_model(
+        project_dir,
+        "events",
+        "---\n\
+         materialization: table\n\
+         timeseries:\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT * FROM (VALUES \
+         (DATE '2024-01-01', 1, TIMESTAMP '2024-01-01 01:00:00'), \
+         (DATE '2024-01-02', 1, TIMESTAMP '2024-01-02 02:00:00'), \
+         (DATE '2024-01-02', 2, TIMESTAMP '2024-01-02 03:00:00')) \
+         AS t(event_date, device_id, event_ts)",
+    );
+    write_model(
+        project_dir,
+        "device_user_edges",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         ---\n\
+         SELECT device_id, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen \
+         FROM smelt.events GROUP BY device_id",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: keyed_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    // One window covering both driving-source partitions: step 1
+    // (2024-01-01) hits the first-run CREATE arm; step 2 (2024-01-02) hits
+    // the MERGE arm.
+    let request = make_request("dev", "2024-01-01", "2024-01-03");
+    let outcome = execute_project(
+        "keyed-statement-parity-run".to_string(),
+        request,
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute_project (keyed)");
+
+    assert!(
+        outcome.models.contains_key("device_user_edges"),
+        "device_user_edges must have run: {:?}",
+        outcome.models.keys().collect::<Vec<_>>()
+    );
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        2,
+        "two steps must each execute exactly one statement group: {:?}",
+        groups
+    );
+
+    // Step 1: first-run CREATE TABLE ... AS.
+    let create_sql = &groups[0].statements[0].sql;
+    assert_eq!(groups[0].statements.len(), 1);
+    assert!(
+        create_sql.starts_with("CREATE TABLE main.device_user_edges AS "),
+        "unexpected create statement: {create_sql}"
+    );
+    let create_select = create_sql
+        .strip_prefix("CREATE TABLE main.device_user_edges AS ")
+        .expect("create shape");
+    let expected_create = emit_create_table_as(
+        "main.device_user_edges",
+        create_select,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected_create, &groups[0],
+        "executed CREATE group must be byte-identical to a direct emitter call"
+    );
+
+    // Step 2: combiner-aware MERGE.
+    let merge_sql = &groups[1].statements[0].sql;
+    assert_eq!(groups[1].statements.len(), 1);
+    let prefix = "MERGE INTO main.device_user_edges AS target USING (";
+    let suffix = ") AS delta ON target.device_id = delta.device_id \
+                  WHEN MATCHED THEN UPDATE SET first_seen = LEAST(target.first_seen, delta.first_seen), \
+                  last_seen = GREATEST(target.last_seen, delta.last_seen) \
+                  WHEN NOT MATCHED THEN INSERT *";
+    assert!(
+        merge_sql.starts_with(prefix) && merge_sql.ends_with(suffix),
+        "unexpected merge statement: {merge_sql}"
+    );
+    let delta_select = &merge_sql[prefix.len()..merge_sql.len() - suffix.len()];
+    let expected_merge = emit_keyed_fold(
+        "main.device_user_edges",
+        &["device_id".to_string()],
+        &[
+            (
+                "first_seen".to_string(),
+                "LEAST(target.first_seen, delta.first_seen)".to_string(),
+            ),
+            (
+                "last_seen".to_string(),
+                "GREATEST(target.last_seen, delta.last_seen)".to_string(),
+            ),
+        ],
+        delta_select,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected_merge, &groups[1],
+        "executed MERGE group must be byte-identical to a direct emitter call"
+    );
 }

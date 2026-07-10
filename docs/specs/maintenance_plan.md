@@ -603,24 +603,30 @@ disagree; one per node cannot). Deeper rationale:
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Statement emission is single-owner for the region recompute family; the keyed-fold and
-  column-scoped-MERGE families are not yet unified.** The region `DELETE`+`INSERT` pair
+- **Statement emission is single-owner for the region recompute and keyed-fold families; the
+  column-scoped-MERGE family is not yet unified.** The region `DELETE`+`INSERT` pair
   (`IncrementalStrategy::DeleteInsert`) is produced by `emit_delete_insert` in
   `crates/smelt-logical/src/maintenance/emit.rs` and executed, never authored, by the backends
   (`smelt-backend`'s `execute_statement_group`, overridden by `smelt-backend-duckdb` for a real
   transaction and by `smelt-backend-spark` for its catalog-qualified table name); the
   `crates/smelt-runtime/tests/statement_parity.rs` gate diffs a real `execute_project` run's
   executed statements against a direct emitter call over the same inputs. The keyed fold `MERGE`
-  still comes from `smelt-runtime::cumulative::build_cumulative_merge_sql` (combiner-aware, unlike
-  the additive-only `emit_keyed_fold`), the column-scoped `MERGE` still comes from the backends'
-  `merge_into` (DuckDB's `UPDATE SET *` full-row-projection shape, unlike `emit_column_scoped_merge`'s
-  column-list shape), and the first-run `CREATE TABLE … AS` still comes from
-  `smelt-runtime::maintenance_driver`. Consequently the conformance suite's technique-equivalence
-  legs (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`) prove the *emitters*
-  equivalent to full refresh for these two families, not the production statements, and
+  (combiner-aware `UPDATE SET`, `INSERT *`) and the windowed-keyed-maintenance driver's first-run
+  `CREATE TABLE … AS` are likewise produced by `emit_keyed_fold`/`emit_create_table_as` and
+  executed via `execute_statement_group`; the caller (`smelt-runtime::cumulative`) renders each
+  aggregator column's `CrossPartitionCombiner` to a plain expression string before calling the
+  emitter, keeping `smelt-logical` free of any dependency on `smelt-planner`. The ledger-graded
+  (`Grade::Additive`) fold path still interleaves the emitted action statement with the
+  reconciliation ledger's own DDL/DML via `Backend::fold_ledger_delta`, unchanged — that
+  interleaving is spec-excluded bookkeeping, not itself a maintenance statement. The
+  column-scoped `MERGE` still comes from the backends' `merge_into` (DuckDB's `UPDATE SET *`
+  full-row-projection shape, unlike `emit_column_scoped_merge`'s column-list shape). Consequently
+  the conformance suite's technique-equivalence legs
+  (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`) prove the *emitters* equivalent
+  to full refresh for the column-scoped-MERGE family only, not its production statements, and
   `--show-sql` does not exist yet. No live plan cell lowers to `emit_in_place_update` today (the
   schema-evolution column backfill's `UPDATE … FROM` in `smelt-runtime::backfill` is a separate
-  surface). Unification of the remaining families is tracked in
+  surface). Unification of the remaining family is tracked in
   `docs/plans/20260710-emit-unification.md`.
 - **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
   footprint reflection, partition-locality projection, faithful-fold conditions, and

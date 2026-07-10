@@ -180,37 +180,72 @@ pub fn emit_in_place_update(
     )]
 }
 
-/// Fold-a-delta into keyed end-state (top-left): `MERGE` the delta aggregate
-/// into stored key state, combining additively on matched keys and inserting
-/// unseen keys. `delta_select` computes the model's aggregate over exactly
-/// the delta (the never-fold-twice obligation is the ledger's, not this
-/// statement's).
+/// Fold-a-delta into keyed end-state (top-left): the combiner-aware `MERGE`
+/// production actually executes for `refresh: keyed` (`keyed_models.md`,
+/// `crate::cumulative::execute_cumulative_aggregate`'s `WindowedKeyedRule`
+/// impl) — combine every aggregator column on matched keys via its own
+/// cross-partition combiner, insert unseen keys wholesale.
+///
+/// `folds` is plain data: `(output_column, rendered_combine_expression)`
+/// pairs, e.g. `("event_count", "target.event_count + delta.event_count")`
+/// or `("first_seen", "LEAST(target.first_seen, delta.first_seen)")`. The
+/// caller renders `CrossPartitionCombiner` (`smelt-planner`) to these
+/// expression strings *before* calling this emitter — `smelt-logical` sits
+/// below `smelt-planner` in the crate layering
+/// (`docs/specs/architecture.md` §"Layered single-ownership") and must
+/// never depend on it, so the emitter only assembles plain strings it is
+/// handed, never chooses or renders a combiner itself.
+///
+/// `dialect` is accepted for signature symmetry with the other emitters in
+/// this module; the keyed-fold `MERGE` shape is currently dialect-invariant
+/// (no branch reads it yet).
 pub fn emit_keyed_fold(
-    table: &str,
+    schema_table: &str,
     key: &[String],
-    add_columns: &[String],
-    all_columns: &[String],
+    folds: &[(String, String)],
     delta_select: &str,
-) -> Vec<String> {
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
     let on = key
         .iter()
-        .map(|k| format!("t.{k} = s.{k}"))
+        .map(|k| format!("target.{k} = delta.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
-    let sets = add_columns
+    let sets = folds
         .iter()
-        .map(|c| format!("{c} = t.{c} + s.{c}"))
+        .map(|(col, expr)| format!("{col} = {expr}"))
         .collect::<Vec<_>>()
         .join(", ");
-    let cols = all_columns.join(", ");
-    let vals = all_columns
-        .iter()
-        .map(|c| format!("s.{c}"))
-        .collect::<Vec<_>>()
-        .join(", ");
-    vec![format!(
-        "MERGE INTO {table} t USING ({delta_select}) s ON {on} \
-         WHEN MATCHED THEN UPDATE SET {sets} \
-         WHEN NOT MATCHED THEN INSERT ({cols}) VALUES ({vals})"
-    )]
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
+             WHEN MATCHED THEN UPDATE SET {sets} \
+             WHEN NOT MATCHED THEN INSERT *"
+        ))],
+        transactional: false,
+    }
+}
+
+/// First-run `CREATE TABLE … AS` for a windowed-keyed-maintenance cell
+/// (`maintenance_driver::run_windowed_keyed_maintenance`'s create arm): the
+/// target table does not exist yet, so the first step's delta becomes the
+/// table wholesale — no read of prior state, no `MERGE`.
+///
+/// `table` is already fully qualified (`schema.table`); `select_sql` is the
+/// caller's already-compiled delta `SELECT` for that step, unmodified.
+///
+/// `dialect` is accepted for signature symmetry with the other emitters in
+/// this module; `CREATE TABLE … AS SELECT …` is dialect-invariant across
+/// DuckDB and Spark for this family.
+pub fn emit_create_table_as(
+    table: &str,
+    select_sql: &str,
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "CREATE TABLE {table} AS {select_sql}"
+        ))],
+        transactional: false,
+    }
 }

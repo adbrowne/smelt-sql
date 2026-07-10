@@ -399,17 +399,20 @@ fn ex24_mutable_source_fails_the_faithful_fold_condition() {
 
 #[test]
 fn ex24_keyed_fold_sql_combines_matched_and_inserts_unseen_keys() {
-    let stmts = emit_keyed_fold(
+    let group = emit_keyed_fold(
         "lifetime_spend",
         &strings(&["user_id"]),
-        &strings(&["lifetime_spend"]),
-        &strings(&["user_id", "lifetime_spend"]),
+        &[(
+            "lifetime_spend".to_string(),
+            "target.lifetime_spend + delta.lifetime_spend".to_string(),
+        )],
         "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments_delta GROUP BY user_id",
+        MaintenanceDialect::DuckDb,
     );
-    let sql = &stmts[0];
-    assert!(sql.contains("ON t.user_id = s.user_id"));
-    assert!(sql.contains("lifetime_spend = t.lifetime_spend + s.lifetime_spend"));
-    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT (user_id, lifetime_spend)"));
+    let sql = &group.statements[0].sql;
+    assert!(sql.contains("ON target.user_id = delta.user_id"));
+    assert!(sql.contains("lifetime_spend = target.lifetime_spend + delta.lifetime_spend"));
+    assert!(sql.contains("WHEN NOT MATCHED THEN INSERT *"));
 }
 
 // ---------------------------------------------------------------------------
