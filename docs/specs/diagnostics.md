@@ -36,6 +36,11 @@ The diagnostic system enforces a *fail-loud* discipline:
    classified as *legitimate* (a deliberate meta-language placeholder) or
    covered by a diagnostic (the guard test
    `crates/smelt-types/tests/unknown_census.rs` enforces this).
+3. The parser consumes its entire input. Any top-level content left over after
+   the declarations and the model body have been parsed produces a diagnostic
+   (`TrailingTopLevelContent`); leftover tokens are wrapped in an `ERROR` node
+   in the CST, never absorbed silently. A file that parses with zero errors
+   therefore has every input token accounted for by the grammar.
 
 ## Catalogue
 
@@ -53,7 +58,8 @@ Owned by `docs/specs/models.md` and the core analysis queries in
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `ParseError` | Error | The SQL source file could not be parsed (syntax error). |
+| `ParseError` | Error | The SQL source file could not be parsed (syntax error). Includes lexer-level failures such as a numeric literal immediately followed by identifier characters (`1_000_000`, `0x1F` where the literal form is unsupported) — the lexer never splits a malformed literal into a number-plus-alias pair silently. |
+| `TrailingTopLevelContent` | Error | Top-level content remains after the declarations and the (at most one) model body have been parsed — e.g. a second `SELECT`, stray tokens after the query, or the tail of a construct the grammar does not support. The leftover tokens are wrapped in an `ERROR` node; they are never absorbed silently. |
 | `InvalidModel` | Error | The model's frontmatter or structure violates a structural rule. |
 | `MalformedSectionDelimiter` | Error | A multi-model section header (`--- name: model_name ---`) is malformed, or SQL content appears before the first section delimiter in a multi-model file. |
 | `UnclosedFrontmatter` | Error | A frontmatter block opened with `---` (or a `--- name: … ---` section header) is missing its closing `---`. |
