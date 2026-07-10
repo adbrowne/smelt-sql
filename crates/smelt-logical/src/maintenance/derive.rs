@@ -49,6 +49,119 @@ pub struct FoldSpec {
     pub combiner: SqlFunction,
 }
 
+/// One upstream **maintained-model** edge (`maintenance_plan.md` §"Upstream
+/// model edges"): a downstream maintained model's ref to another maintained
+/// model in the same project. Built by the caller from the upstream's own
+/// already-validated metadata — the derivation never re-resolves the ref.
+#[derive(Debug, Clone)]
+pub struct ModelEdge {
+    /// The upstream model's address as it appears in the downstream ref, with
+    /// the leading `smelt.` stripped (e.g. `silver.events_parsed`). Used as
+    /// the edge's `Trigger::NewData` source name and the clamp's source.
+    pub name: String,
+    /// The upstream's own validated `timeseries.partition_column`, when it
+    /// declares (or infers) one. `None` ⇒ the clock is not derivable ⇒ a
+    /// recorded [`Refusal::ReachNotDerivable`] naming the edge, never a
+    /// silent drop.
+    pub clock_col: Option<String>,
+}
+
+/// Append the creation-trigger cells (and refusals) for `model_edges` to an
+/// already-derived `plan` (`maintenance_plan.md` §"Upstream model edges").
+///
+/// Kept separate from [`derive_maintenance_plan`] so every existing
+/// source-only caller is unaffected: the assembler calls both and merges the
+/// results into one plan (still one derivation, purely data-in/data-out).
+///
+/// A clocked upstream contributes a `{*}` creation cell whose scan clamp is
+/// anchored to the downstream's output partition axis via the same
+/// [`link_source`] rule sources use; an upstream with no derivable clock is a
+/// [`Refusal::ReachNotDerivable`] naming the edge. Model edges only
+/// contribute to a **partition-addressed** downstream (`output_partition_col`
+/// is `Some`); a key-addressed downstream's model-edge creation is a keyed
+/// fold, out of scope here.
+pub fn append_model_edge_cells(
+    plan: &mut MaintenancePlan,
+    sql: &str,
+    output_partition_col: Option<&str>,
+    model_edges: &[ModelEdge],
+) {
+    if model_edges.is_empty() {
+        return;
+    }
+    // A key-addressed downstream has no partition axis to clamp a creation
+    // cell to; its model-edge creation would be a keyed fold, deferred.
+    let Some(output_partition_col) = output_partition_col else {
+        return;
+    };
+
+    // Derive per-edge bounds over the downstream SQL, keyed by each clocked
+    // edge's clock column — the same Form A/B extraction sources use.
+    let mut ctx = BoundContext::new();
+    for edge in model_edges {
+        if let Some(clock) = &edge.clock_col {
+            ctx.add_source(&edge.name, clock);
+        }
+    }
+    let bounds = derive_model_bounds(sql, &ctx);
+
+    for edge in model_edges {
+        let Some(clock) = &edge.clock_col else {
+            plan.refusals.push(Refusal::ReachNotDerivable {
+                edge: edge.name.clone(),
+                why: format!(
+                    "upstream maintained model '{}' declares no timeseries clock and none is \
+                     inferable — its creation-trigger edge cannot be clamped to the output \
+                     partition axis",
+                    edge.name
+                ),
+            });
+            continue;
+        };
+        let facts = SourceFacts {
+            name: edge.name.clone(),
+            mutation: MutationProfile::AppendOnly,
+            partition_col: Some(clock.clone()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        };
+        // A creation-trigger recompute is unconditionally valid (like the
+        // `NewData`/`Backfill` region recompute), so an unlinked edge records
+        // a non-local verdict but is never refused under the K8 guardrail —
+        // only the *underivable-clock* case above refuses.
+        let (partition_local, scans) =
+            match link_source(Some(output_partition_col), &bounds, &facts) {
+                SourceLink::Clamp(clamp) => (PartitionLocal::Yes, vec![clamp]),
+                SourceLink::Unlinked { why } => (
+                    PartitionLocal::No {
+                        source: edge.name.clone(),
+                        why,
+                    },
+                    vec![],
+                ),
+                // Unreachable: `facts.partition_col` is `Some` by construction.
+                SourceLink::Unclocked => (
+                    PartitionLocal::No {
+                        source: edge.name.clone(),
+                        why: "model edge lost its clock column".to_string(),
+                    },
+                    vec![],
+                ),
+            };
+        plan.cells.push(PlanCell {
+            group: "{*}".to_string(),
+            trigger: Trigger::NewData {
+                source: edge.name.clone(),
+            },
+            corner: Corner::RecomputeRegion,
+            technique: Technique::DeleteInsert,
+            partition_local,
+            scans,
+            ledger_catch_up: false,
+        });
+    }
+}
+
 /// Everything the v0 derivation reads. `column_groups` and
 /// `output.skeleton_columns` are hand-supplied (the deferred classifiers);
 /// the rest is derived from `sql` and the source declarations.

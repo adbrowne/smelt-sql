@@ -559,12 +559,24 @@ disagree; one per node cannot). Deeper rationale:
 
 ## Known Divergences / Open Questions
 
-- **Upstream model edges do not yet derive creation-trigger cells.** §"Upstream model edges"
-  specifies that a maintained-model ref derives a creation cell clocked by the upstream's
-  `timeseries:` declaration, with an underivable clock recorded as a `MaintenanceReachNotDerivable`
-  refusal; today the per-model derivation resolves refs against `sources.*` only and a model
-  upstream silently drops out (no cell, no refusal). `--source <model-address>` for forward
-  propagation is likewise unimplemented. Tracked in
+- **The propagation graph does not yet consume the edge-aware plan derivation for model refs, and
+  `--source <model-address>` is not yet accepted.** §"Upstream model edges" specifies that a
+  model-to-model ref should be admitted (or refused) by the same per-cell derivation that produces
+  the creation cells `smelt explain` reports, and that `--source <address>` should accept either a
+  declared source or an upstream maintained model. Today the per-model derivation used for
+  `smelt explain` resolves a maintained-model upstream into a creation-trigger cell clocked by the
+  upstream's `timeseries:` declaration (with an underivable clock recorded as a
+  `MaintenanceReachNotDerivable` refusal naming the edge). The forward-propagation graph
+  (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`), by contrast, derives model-ref
+  edges through a separate, non-refusing path: it synthesizes a `SourceFacts { mutation:
+  MutableSnapshot, allow_full_scan: true }` for the upstream ref and calls the plain (non-edge-aware)
+  `derive_model_maintenance_plan`, so a missing or underivable clock on the upstream never surfaces
+  as a refusal here, and the clamp the propagation graph computes for that edge can disagree with
+  the clamp the creation cells report. The gap is symmetric on the execution side: `execute.rs`'s
+  technique resolution excludes model refs entirely, so no execution technique currently keys off
+  a model-ref cell either. Because the graph does not yet route model-ref deltas through
+  edge-aware derivation, a landed delta also cannot be declared directly on a maintained model via
+  `--source <model-address>` — `--source` accepts only declared sources today. Tracked in
   `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **The plan has three live consumers: diagnostics, `smelt explain`, and one execution
   technique.** `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) is
