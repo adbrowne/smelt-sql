@@ -119,8 +119,22 @@ model's maintenance plan (`maintenance_plan.md` §Surface "The plan (derived, re
 of the whole-project graph: every cell (its trigger, corner, technique, and `ledger_catch_up`
 flag), the derived per-source scan clamps, the per-source partition-locality verdict, any
 admission refusals, and the model's inbound edges (upstream dependencies). The report is
-read-only and plain text — it does not (yet) have a `--json` form. `--select` and `--json` are
-ignored when a model-name argument is given.
+read-only and plain text. `--select` and `--json` are ignored when a model-name argument is
+given, except `--json` combined with `--show-sql` (below).
+
+**`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
+that cell executes — the output of the same pure emitters a run executes
+(`maintenance_plan.md` §"Statement emission (single owner)"), so the printed SQL cannot drift
+from the executed SQL. Statements print in execution order; a transactional group is bracketed
+by `BEGIN`/`COMMIT` lines in the printout to show its atomicity (the backend supplies the real
+transaction mechanics at run time). Region literals come from `--period <start>..<end>` when
+given; without `--period`, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand
+in, so the emitted shape is inspectable without choosing a window. `--show-sql` never connects
+to a backend and never executes anything. With `--json` alongside `--show-sql` (the one case
+where `--json` is honored together with a model-name argument), the per-model report is emitted
+as JSON with a `statements` array per cell
+(`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable form
+documentation generators embed.
 
 A model with no maintenance plan (not `refresh: incremental`, or no `grain:` declared) prints a
 one-line notice rather than an error, and exits `0`.
@@ -369,6 +383,11 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
 - **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
 - **Most of the maintenance CLI surface is specified but not wired into the CLI parser.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`maintenance_plan.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for `sources.*` refs and for refs to another incremental model in the workspace (the latter composing across a chain the same way, though a real chain's clamps depend on `derive_model_maintenance_plan`'s own scan-bound derivation reaching that ref). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is still unwired; tracked in `docs/plans/20260707-maintenance-plan-impl.md` phase MP13. `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
+- **`smelt explain <model> --show-sql` is specified but not yet implemented.** The per-model
+  report today prints the plan cells only; no CLI surface prints maintenance statements, and
+  `smelt run --dry-run` prints only the compiled SELECT body. Blocked on maintenance-statement
+  emission becoming single-owner (`maintenance_plan.md` §Known Divergences "Statement emission
+  is not yet single-owner"); tracked in `docs/plans/20260710-emit-unification.md`.
 - **Generator-emitted model `origin` field in `smelt explain --json` is landed.** The `origin` field in §"`smelt explain --json` output schema" surfaces generator emissions distinctly from hand-authored models (per `meta_language.md` §"Multi-model production"). The `ModelOriginKind::Generated { generator_file, generator_name }` enum in `smelt-core/src/origin.rs` is the production type; `ExplainModel.origin` and `CatalogModel.origin` carry it. The `generator_file:<path>` selector parses via `SelectionMethod::GeneratorFile` and resolves against the `emitted_models()` survivor set. The `smelt docs generate` Markdown renderer includes a `**Source**:` line for emitted models. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References

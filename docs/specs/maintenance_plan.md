@@ -87,6 +87,9 @@ maintenance:
 ### CLI
 
 - `smelt explain <model>` — prints the plan (cells, clamps, locality, guarantee ledger, edges).
+  With `--show-sql`, additionally prints each cell's emitted maintenance statements — the same
+  emitters' output a run executes (§"Statement emission (single owner)"; flag surface in
+  `cli.md` §"`smelt explain <model>` maintenance-plan report").
 - `smelt run --since-upstream --source <address> --landed <start>..<end>` (`--source`/`--landed`
   repeatable, one pair per source) — forward propagation: the runner (or an external poller)
   declares what landed for each source since it last propagated; the graph reflects those
@@ -242,6 +245,30 @@ layer cannot prune by). Under the default `scan_bounds` (`require: partition_loc
 `on_violation: error`), a non-local cell refuses (`MaintenanceScanUnbounded`) unless the source
 carries `allow_full_scan: true`; `max_lookback` additionally refuses a derived span wider than the
 operator's stated expectation. The guardrail never modifies a clamp.
+
+### Statement emission (single owner)
+
+The physical statements a run executes for a cell — the region `DELETE`+`INSERT` pair, the keyed
+fold `MERGE`, the column-scoped `MERGE`, the in-place `UPDATE`, the first-run `CREATE TABLE … AS`
+— are produced by pure emitter functions in the maintenance layer (`smelt-logical`): the plan's
+statement-level counterpart of "one derivation, many consumers". An emitter is a pure function
+from plain data — target table, region literals, key columns, combiner-rendered set expressions,
+the compiled/clamped SELECT body, a dialect tag — to an ordered statement group plus its
+transactional requirement (a paired `DELETE`+`INSERT` is one transaction: a failed `INSERT` must
+roll back its `DELETE`). Backends *execute* emitted statements (connections, transactions,
+blocking dispatch) and never author maintenance-statement text of their own; dialect differences
+(e.g. a `MERGE … UPDATE SET *` requiring a full-row source projection versus an explicit
+column-list `SET`) live in the emitters as dialect-keyed variants, not in backend string
+construction.
+
+Two deliberate exclusions: the reconciliation ledger's DDL/DML (§"The reconciliation ledger") is
+state bookkeeping owned per dialect by `smelt-state` — it is *interleaved* transactionally with
+an emitted fold statement but is not itself a maintenance statement; and non-maintenance SQL
+(introspection, seed loading, schema-evolution DDL) is outside this rule.
+
+Single ownership is what makes maintenance SQL *observable*: the same emitters serve execution,
+the conformance equivalence gates, and `smelt explain <model> --show-sql`, so printed SQL cannot
+drift from executed SQL.
 
 ### The definition-change trigger
 
@@ -492,6 +519,10 @@ disagree; one per node cannot). Deeper rationale:
 - **The plan is pure data, derived by pure functions, in one place** (`smelt-logical`);
   consumers — diagnostics, planner application, runtime lowering, the graph layer — never
   re-derive it. (Also recorded as an invariant in `architecture.md`.)
+- **Maintenance statements have one author.** Every maintenance statement a run executes is the
+  output of a pure emitter in the maintenance layer (§"Statement emission (single owner)");
+  backends execute, never author. Printed (`--show-sql`), gate-verified, and executed SQL are the
+  same emitters' output by construction.
 - **Never fold a delta already reflected in the state.** Every fold consults the ledger; every
   region recompute resets the entries it overwrote. No path may merge a window twice.
 - **Write window = output window**, per cell: the DELETE/merge target and the output clamp range
@@ -572,6 +603,21 @@ disagree; one per node cannot). Deeper rationale:
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
+- **Statement emission is not yet single-owner.** The emitters in
+  `crates/smelt-logical/src/maintenance/emit.rs` are exercised only by the tracer/conformance
+  tests; production runs author their maintenance SQL elsewhere — the region `DELETE`+`INSERT`
+  inside the backends (`smelt-backend-duckdb`'s `delete_and_insert_transactional`,
+  `smelt-backend-spark`'s `sql.rs`), the keyed fold `MERGE` in
+  `smelt-runtime::cumulative::build_cumulative_merge_sql` (combiner-aware, unlike the
+  additive-only `emit_keyed_fold`), the column-scoped `MERGE` in the backends' `merge_into`
+  (DuckDB's `UPDATE SET *` full-row-projection shape, unlike `emit_column_scoped_merge`'s
+  column-list shape), and the first-run `CREATE TABLE … AS` in
+  `smelt-runtime::maintenance_driver`. Consequently the conformance suite's
+  technique-equivalence legs (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`)
+  prove the *emitters* equivalent to full refresh, not the production statements, and
+  `--show-sql` does not exist yet. No live plan cell lowers to `emit_in_place_update` today (the
+  schema-evolution column backfill's `UPDATE … FROM` in `smelt-runtime::backfill` is a separate
+  surface). Unification is tracked in `docs/plans/20260710-emit-unification.md`.
 - **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
   footprint reflection, partition-locality projection, faithful-fold conditions, and
   definition-change column classification. Column-group-scoped dirt, gated by provenance, today
