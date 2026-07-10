@@ -65,8 +65,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 | 2     | done     | 3db5a0c6 | 2026-07-10 |
 | 3     | done     | 329aeebf | 2026-07-10 |
 | 4     | done     | 37271fd6 | 2026-07-10 |
-| 5     | done     |        | 2026-07-10 |
-| 6     | pending  |        |      |
+| 5     | done     | 356fcfb4 | 2026-07-10 |
+| 6     | done     |        | 2026-07-10 |
 
 ---
 
@@ -224,6 +224,7 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 
 **Critical files (allowed to touch in this phase).**
 - `docs/specs/maintenance_plan.md`, `docs/specs/architecture.md`, `docs/specs/cli.md` — Known Divergences only
+- `CLAUDE.md` — the invariant-12 mirror sentence only (it restates the architecture.md clause this phase flips)
 
 **Review checklist** (material findings only):
 - [ ] Every divergence claim matches HEAD behavior (spot-check against code, not memory)

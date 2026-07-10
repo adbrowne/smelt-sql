@@ -604,7 +604,7 @@ disagree; one per node cannot). Deeper rationale:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
 - **Statement emission is single-owner for the region-recompute, keyed-fold, and
-  column-scoped-MERGE families; the conformance gate and `--show-sql` are not yet wired to
+  column-scoped-MERGE families, and both the conformance gate and `--show-sql` are wired to
   prove/print it.** The region `DELETE`+`INSERT` pair (`IncrementalStrategy::DeleteInsert`) is
   produced by `emit_delete_insert` in `crates/smelt-logical/src/maintenance/emit.rs` and
   executed, never authored, by the backends (`smelt-backend`'s `execute_statement_group`,
@@ -625,13 +625,36 @@ disagree; one per node cannot). Deeper rationale:
   fact+dimension fixture through a recording backend). The ledger-graded (`Grade::Additive`) fold
   path still interleaves the emitted action statement with the reconciliation ledger's own
   DDL/DML via `Backend::fold_ledger_delta`, unchanged — that interleaving is spec-excluded
-  bookkeeping, not itself a maintenance statement. What remains: the conformance suite's
-  technique-equivalence legs (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`) still
-  prove the *emitters* equivalent to full refresh rather than diffing a real `execute_project`
-  run's statements, and `--show-sql` does not exist yet — both tracked in
-  `docs/plans/20260710-emit-unification.md`. No live plan cell lowers to `emit_in_place_update`
-  today (the schema-evolution column backfill's `UPDATE … FROM` in `smelt-runtime::backfill` is a
-  separate surface).
+  bookkeeping, not itself a maintenance statement. `crates/smelt-runtime/tests/statement_parity.rs`
+  additionally carries a structural gate
+  (`no_maintenance_statement_authoring_outside_the_emitter`) that scans every production `.rs`
+  file for the forbidden `DELETE FROM`/`MERGE INTO`/`UPDATE … SET` shapes outside the emitter
+  module, allowlisting only the DuckDB/Spark `DELETE` strings the dead
+  `delete_partitions`/`insert_overwrite` paths still hand-format (tracked below); every other file
+  that matches is a hard test failure. The conformance suite's technique-equivalence legs
+  (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`) prove the *emitters* equivalent to
+  full refresh (the HOLDS legs) and each such leg's doc string additionally names the
+  `statement_parity.rs` case that grounds the same family's production-execution byte+result
+  parity, so the two suites together close the loop from "the emitter is correct" to "the emitter
+  is what actually ran". `smelt explain <model> --show-sql` (`cli.md` §"`smelt explain <model>`
+  maintenance-plan report") prints each cell's statements by calling the same emitters `smelt run`
+  calls. What genuinely remains open: `emit_in_place_update`
+  (`crates/smelt-logical/src/maintenance/emit.rs`) has no production consumer — no live plan cell
+  lowers to it, so its own leg exists only in `crates/smelt-logical/tests/maintenance_tracer.rs`
+  and `crates/smelt-runtime/tests/tracer_maintenance.rs` (the schema-evolution column backfill's
+  `UPDATE … FROM` in `smelt-runtime::backfill` is a separate, untouched surface); the
+  `Grade::Additive` keyed fold's MERGE-inside-the-ledger-transaction interior
+  (`Backend::fold_ledger_delta`) is not observable at `execute_statement_group`, so its
+  `statement_parity.rs` leg proves parity against a self-contained idempotent keyed fixture rather
+  than a real Additive-graded model (e.g. `examples/web_analytics`'s `device_user_edges`); and
+  `Backend::delete_partitions`/`insert_overwrite` (DuckDB and Spark) still author a
+  hand-formatted `DELETE`+`INSERT`/`INSERT OVERWRITE` shape for `IncrementalStrategy::InsertOverwrite`
+  even though that strategy is unreachable in production — `resolve_incremental_strategy` and every
+  backend's `resolve_strategy` only ever yield `DeleteInsert`, so `insert_overwrite`/
+  `delete_partitions` are dead code, allowlisted in the structural gate with justification
+  comments rather than emitter-backed. Deleting the dead `InsertOverwrite` strategy (or routing it
+  through an emitter if it is ever revived) is follow-up work outside
+  `docs/plans/20260710-emit-unification.md`.
 - **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
   footprint reflection, partition-locality projection, faithful-fold conditions, and
   definition-change column classification. Column-group-scoped dirt, gated by provenance, today
