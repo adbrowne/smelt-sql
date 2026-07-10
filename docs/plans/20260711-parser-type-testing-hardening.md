@@ -3,7 +3,7 @@
 **Date**: 2026-07-11
 **Spec**: [`docs/specs/architecture.md`](../specs/architecture.md) (§Constraints & Invariants #13 "SQL dialect conformance testing", §Fail-loud discipline) and [`docs/specs/diagnostics.md`](../specs/diagnostics.md) (§Fail-loud invariants #3, `TrailingTopLevelContent`)
 **Spec diff**: uncommitted working tree (2026-07-11) — adds fail-loud invariant #3 + `TrailingTopLevelContent` to `diagnostics.md`; adds invariant #13 and a Known Divergences entry to `architecture.md`
-**Tracking PR / branch**: `parser-type-testing-hardening`
+**Tracking PR / branch**: PR [#154](https://github.com/adbrowne/smelt-sql/pull/154), branch `parser-type-testing-hardening`
 **Docs**: code+docs
 
 ---
