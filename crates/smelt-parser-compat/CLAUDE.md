@@ -13,7 +13,37 @@ SQLGLOT_AVAILABLE=1 cargo test -p smelt-parser-compat
 
 # Type-checking tests (require Docker — run explicitly)
 cargo test -p smelt-parser-compat type_checking -- --ignored
+
+# DuckDB differential harness (both dialect-conformance directions).
+# Needs the DuckDB system shared library on the linker/loader path:
+export DUCKDB_LIB_DIR=~/.local/lib/duckdb
+export LD_LIBRARY_PATH=~/.local/lib/duckdb:$LD_LIBRARY_PATH
+cargo test -p smelt-parser-compat --test duckdb_differential
 ```
+
+## DuckDB differential harness
+
+`tests/duckdb_differential.rs` + `src/duckdb_oracle.rs` enforce architecture
+spec §Constraints #13 against a real in-memory DuckDB:
+
+- **Accept direction** — every statement in `tests/corpus/duckdb_seed.sql` that
+  DuckDB accepts must parse cleanly in smelt or match a `gaps.rs` entry
+  (categories `duckdb_fails_to_parse` / `roundtrip_mismatch`).
+- **Fidelity direction** — every seed statement smelt parses cleanly is printed
+  back and *executed* on DuckDB; a rejection is a silent-mis-parse bug unless
+  registered. A `proptest` variant runs the same fidelity check over the
+  generators.
+- **Gap ratchet** — `.claude/parser-gaps-baseline.txt` pins the registered
+  seed-gap count (mirrors `.claude/hardening-baseline.txt`). The count may only
+  shrink; the `gap_count_ratchet` test fails on both an unregistered increase
+  and a stale (too-high) baseline. To add a gap: add a `gaps.rs` entry AND raise
+  the baseline in the same reviewer-visible change. To close one: remove the
+  entry AND lower the baseline.
+
+Every seed line must be valid DuckDB SQL against the schema prelude in
+`src/duckdb_oracle.rs` (table `t(a INTEGER, b VARCHAR, c DOUBLE, d DATE,
+ts TIMESTAMP)`); statements DuckDB itself rejects create no accept-direction
+pressure.
 
 ## Gotchas
 
