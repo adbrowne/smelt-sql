@@ -845,9 +845,12 @@ fn test_parse_event_payload_function_compiles() {
 // ---------------------------------------------------------------------------
 
 /// Full pipeline test: run `smelt-datagen`, execute `setup_sources.sql`, invoke
-/// `smelt build`, then verify that `main.silver_events_parsed` has the same row
-/// count as `raw.events` and that the JSON-extracted `event_name` / `platform`
-/// / `url` columns are non-null for at least one row.
+/// `smelt build`, then verify that `main.silver_events_parsed` has exactly one
+/// row per distinct `event_id` in `raw.events` (its redelivery-dedup QUALIFY
+/// collapses redelivered duplicates, so its row count is `COUNT(DISTINCT
+/// event_id)`, not `COUNT(*)`, on `raw.events`) and that the JSON-extracted
+/// `event_name` / `platform` / `url` columns are non-null for at least one
+/// row.
 ///
 /// `models/silver/events_parsed.sql` address segments are `["silver",
 /// "events_parsed"]`, so smelt materializes the view as `silver_events_parsed`
@@ -885,11 +888,20 @@ fn test_end_to_end_smelt_build() {
     conn.execute_batch(&sql)
         .unwrap_or_else(|e| panic!("execute setup_sources_abs.sql: {e}\nSQL:\n{sql}"));
 
-    // Capture total event row count for later comparison.
+    // Capture total event row count and distinct event_id count for later
+    // comparison — silver.events_parsed's redelivery dedup collapses
+    // `raw.events`'s row count down to its distinct-event_id count.
     let events_count: i64 = conn
         .query_row("SELECT COUNT(*) FROM raw.events", [], |row| row.get(0))
         .expect("count raw.events");
     assert!(events_count > 0, "raw.events has 0 rows before smelt build");
+    let distinct_event_ids: i64 = conn
+        .query_row(
+            "SELECT COUNT(DISTINCT event_id) FROM raw.events",
+            [],
+            |row| row.get(0),
+        )
+        .expect("count distinct event_id in raw.events");
 
     // Close connection so smelt build can open the file exclusively.
     drop(conn);
@@ -916,7 +928,7 @@ fn test_end_to_end_smelt_build() {
         String::from_utf8_lossy(&build_out.stderr),
     );
 
-    // --- Step 5: verify silver_events_parsed row count matches events ---
+    // --- Step 5: verify silver_events_parsed row count matches distinct event_ids ---
     let conn2 = duckdb::Connection::open(&db_path).unwrap_or_else(|e| panic!("reopen duckdb: {e}"));
 
     let silver_count: i64 = conn2
@@ -928,8 +940,26 @@ fn test_end_to_end_smelt_build() {
         .unwrap_or_else(|e| panic!("SELECT COUNT(*) FROM main.silver_events_parsed: {e}"));
 
     assert_eq!(
-        silver_count, events_count,
-        "silver_events_parsed row count ({silver_count}) should equal raw.events row count ({events_count})"
+        silver_count, distinct_event_ids,
+        "silver_events_parsed row count ({silver_count}) should equal raw.events' distinct \
+         event_id count ({distinct_event_ids}) — the redelivery-dedup QUALIFY keeps exactly one \
+         row per event_id (out of {events_count} total raw.events rows, including redelivered \
+         duplicates)"
+    );
+
+    let dup_event_ids: i64 = conn2
+        .query_row(
+            "SELECT COUNT(*) FROM (\
+                SELECT event_id FROM main.silver_events_parsed \
+                GROUP BY event_id HAVING COUNT(*) > 1\
+             )",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap_or_else(|e| panic!("count duplicate event_ids in silver_events_parsed: {e}"));
+    assert_eq!(
+        dup_event_ids, 0,
+        "silver_events_parsed must have zero duplicate event_ids after dedup"
     );
 
     // --- Step 6: verify JSON-extracted fields are non-null in at least one row ---

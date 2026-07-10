@@ -818,11 +818,11 @@ async fn find_references_on_function_call_in_web_analytics() {
     // Drain initial diagnostics so subsequent requests don't race with them.
     let _ = client.collect_diagnostics(1000).await;
 
-    // models/silver/events_parsed.sql line 27 (1-indexed):
+    // models/silver/events_parsed.sql line 57 (1-indexed):
     //     smelt.functions.parse_event_payload(payload).*
     // Cursor on "parse_event_payload" word — char 25 is inside the token.
     let file_uri = format!("file://{}", target_file.display());
-    let locations = client.references(&file_uri, 26, 25).await;
+    let locations = client.references(&file_uri, 56, 25).await;
     client.shutdown().await;
 
     assert!(
@@ -1049,11 +1049,11 @@ async fn hover_on_per_entity_source_renders_columns() {
         .expect("open raw_events.sql");
     let _ = client.collect_diagnostics(1000).await;
 
-    // raw_events.sql line 10 (1-indexed) = line 9 (0-indexed):
+    // raw_events.sql line 31 (1-indexed) = line 30 (0-indexed):
     //   `FROM smelt.sources.raw.events`
     // Character 25 lands inside the `events` token.
     let file_uri = format!("file://{}", target_file.display());
-    let hover = client.hover(&file_uri, 9, 25).await;
+    let hover = client.hover(&file_uri, 30, 25).await;
     client.shutdown().await;
 
     let content = hover.expect("hover on smelt.sources.raw.events must return content");

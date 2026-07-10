@@ -32,6 +32,54 @@ has an identity, but two events on the same anonymous device share a `'d:'`
 identity, and two signed-in events from the same user on different devices
 share a `'u:'` identity.
 
+### Redelivery and lateness
+
+`bronze/raw_events` is materialized as a table (rather than the project's
+default view) so that `silver/events_parsed`'s `QUALIFY` window function
+sees a real base table instead of an inlined view definition — see the
+inline comment in
+[`models/bronze/raw_events.sql`](models/bronze/raw_events.sql) for the
+DuckDB binder defect this sidesteps.
+
+`silver/events_parsed` is also where the raw feed's ingestion noise gets
+cleaned up, upstream of every identity refinement below. Two independent
+concerns land in one model:
+
+- **Redelivery.** The bronze feed is at-least-once — a small fraction of
+  events arrive twice, byte-identical except for `arrival_time` (the
+  redelivered copy's arrival is later than the original). `QUALIFY
+  ROW_NUMBER() OVER (PARTITION BY event_id ORDER BY arrival_time) = 1` keeps
+  the earliest-arriving copy per `event_id` and drops the rest. Because
+  `silver.events_parsed` carries `safety_overrides.allow_window_functions:
+  true`, the analyzer accepts this window even though it partitions by
+  `event_id` rather than the model's own `event_date` partition column —
+  safe here because a redelivered duplicate is always written into the
+  *same* `event_date` partition as its original (the datagen redelivery
+  post-pass never moves a row across partition files), so the window never
+  needs to see across a partition boundary to resolve one event_id's
+  duplicates.
+- **Lateness.** An event's ingestion clock (`arrival_time`) can trail its
+  occurrence clock (`event_time`) by up to 3 days. The model accepts an
+  event into its `event_date` partition only when `event_date BETWEEN
+  CAST(arrival_time AS DATE) - INTERVAL '3 days' AND CAST(arrival_time AS
+  DATE)` — a Form B filter the planner reads as a genuine 3-day lookback on
+  the `bronze.raw_events` source, *derived* from the SQL rather than
+  declared in YAML (`docs/specs/batched_models.md` §"Derive lookback from
+  the model's SQL, not from frontmatter"). Run `smelt explain
+  silver.events_parsed --json` (whole-project form, not the single-model
+  report) to see it surfaced: `source_bounds.bronze.raw_events` reports
+  `before: "P3D", after: "PT0S"`, and `batch_safety` reports
+  `bounded_safe(chunk=…,context=3d)`.
+
+Because DELETE+INSERT is idempotent, a partition that gets rebuilt more than
+once (e.g. a later daily run re-touching an earlier partition once a
+previously-missing late arrival lands) converges to the same result as a
+single full-window rebuild — this is exactly what
+`web_analytics_dedup_matches_full_rebuild`
+(`crates/smelt-cli/tests/e2e/per_partition_equivalence.rs`) asserts: zero
+duplicate `event_id`s and identical `(event_id, event_date)` sets between the
+day-by-day pipeline and a one-shot rebuild.
+
 ### Forward-only
 
 Within-session refinement. Each session's identifiable events are tagged with
@@ -62,7 +110,7 @@ possible future extension.
 ## Pipeline
 
 ```
-bronze/raw_events                  (view; passthrough)
+bronze/raw_events                  (table; passthrough)
   └── silver/events_parsed         (INCR by event_date)
         ├── silver/sessions        (INCR by session_start_date; 1-day lookback)
         │     └── gold/identity_forward_only         (INCR by session_start_date)
@@ -92,8 +140,8 @@ Source files:
 
 ## Incremental shape
 
-Five models are incremental, one is a cumulative aggregate (`refresh: keyed`), and the rest are
-views.
+Five models are incremental, one is a cumulative aggregate (`refresh: keyed`), one is a
+plain (non-incremental) table, and the rest are views.
 
 | Model                                         | Materialization     | Partition column     |
 |-----------------------------------------------|---------------------|----------------------|
@@ -103,7 +151,7 @@ views.
 | `gold/identity_forward_only`                  | INCR table          | `session_start_date` |
 | `gold/eventstream_with_identity`              | INCR table          | `event_date`         |
 | `marts/daily_active_users_by_method`          | INCR table          | `event_date`         |
-| `bronze/raw_events`                           | view                | —                    |
+| `bronze/raw_events`                           | table               | —                    |
 | `gold/identity_backward_fill`                 | view                | —                    |
 | `gold/identity_connected_components`          | view                | —                    |
 | `marts/identity_method_comparison`            | view                | —                    |
@@ -396,3 +444,6 @@ incremental model:
 
 Multi-session implementation tracked in
 [`docs/plans/20260517-web-analytics-example.md`](../../docs/plans/20260517-web-analytics-example.md).
+The redelivery/lateness dedup, session campaign attribution, and event-grain
+enrichment extensions are tracked in
+[`docs/plans/20260710-web-analytics-maintenance-demo.md`](../../docs/plans/20260710-web-analytics-maintenance-demo.md).

@@ -654,3 +654,150 @@ fn test_runs_under_test_harness() {
         datagen_bin()
     );
 }
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: silver/events_parsed dedup over the 3-day late window
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `docs/plans/20260710-web-analytics-maintenance-demo.md` Phase 5: the
+// redelivery/lateness datagen shape (Phase 4) means `raw.events` contains
+// byte-identical duplicate rows (same `event_id`, later `arrival_time`) and
+// events whose `arrival_time` trails `event_time` by up to 3 days.
+// `silver/events_parsed` absorbs both: `QUALIFY ROW_NUMBER() OVER (PARTITION
+// BY event_id ORDER BY arrival_time) = 1` drops the redelivered duplicate,
+// and the Form B filter `event_date BETWEEN CAST(arrival_time AS DATE) -
+// INTERVAL '3 days' AND CAST(arrival_time AS DATE)` accepts late arrivals up
+// to that window — a genuine 3-day lookback the planner derives from the
+// filter text (visible via `smelt explain silver.events_parsed --json`).
+
+/// One `(event_id, event_date)` pair from `main.silver_events_parsed`.
+fn query_events_parsed_ids(db_path: &Path) -> Vec<(i64, String)> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare("SELECT event_id, event_date::VARCHAR FROM main.silver_events_parsed")
+        .unwrap_or_else(|e| panic!("prepare events_parsed query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query events_parsed rows: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_or_else(|e| panic!("collect events_parsed rows: {e}"))
+}
+
+/// Every `(event_id, event_date)` in `raw.events` whose lateness
+/// (`arrival_time - event_time`) is within the accepted 3-day window — the
+/// set `silver.events_parsed`'s acceptance filter must retain (at least the
+/// earliest-arriving copy of each `event_id`).
+fn query_acceptable_event_ids(db_path: &Path) -> std::collections::BTreeSet<(i64, String)> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT event_id, event_date::VARCHAR \
+             FROM raw.events \
+             WHERE CAST(arrival_time AS TIMESTAMP) \
+                 <= CAST(event_time AS TIMESTAMP) + INTERVAL '3 days'",
+        )
+        .unwrap_or_else(|e| panic!("prepare acceptable-events query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query acceptable events: {e}"))
+    .collect::<Result<_, _>>()
+    .unwrap_or_else(|e| panic!("collect acceptable events: {e}"))
+}
+
+/// Day-by-day incremental build of `silver.events_parsed` equals one
+/// full-window rebuild: zero duplicate `event_id`s in the result, and every
+/// event within the accepted 3-day late window is present in its own
+/// `event_date` partition — in both pipelines.
+#[test]
+fn web_analytics_dedup_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "dedup-pipeline-A",
+    );
+    let rows_a = query_events_parsed_ids(&db_path);
+    let acceptable = query_acceptable_event_ids(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("dedup-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let rows_b = query_events_parsed_ids(&db_path);
+
+    assert!(
+        !rows_a.is_empty(),
+        "Pipeline A produced no events_parsed rows"
+    );
+    assert!(
+        !rows_b.is_empty(),
+        "Pipeline B produced no events_parsed rows"
+    );
+
+    // ── Zero duplicate event_ids in either pipeline's result ──────────────
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        for (event_id, _) in rows {
+            *counts.entry(*event_id).or_insert(0) += 1;
+        }
+        let dups: Vec<_> = counts.iter().filter(|(_, &c)| c > 1).collect();
+        assert!(
+            dups.is_empty(),
+            "pipeline {label} has duplicate event_ids in silver.events_parsed: {dups:?}"
+        );
+    }
+
+    // ── Day-by-day equals full rebuild exactly (set of (event_id, event_date)) ──
+    let set_a: std::collections::BTreeSet<_> = rows_a.iter().cloned().collect();
+    let set_b: std::collections::BTreeSet<_> = rows_b.iter().cloned().collect();
+    let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
+    let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
+    assert!(
+        only_in_a.is_empty() && only_in_b.is_empty(),
+        "silver.events_parsed differs between full rebuild and day-by-day replay.\n\
+         only in A (first 10): {only_in_a:?}\nonly in B (first 10): {only_in_b:?}"
+    );
+
+    // ── Every accepted-lateness event is present in its own event_date
+    //    partition, in both pipelines (within the [START_DATE,
+    //    END_DATE_EXCLUSIVE) window the harness runs) ───────────────────────
+    let window_acceptable: Vec<_> = acceptable
+        .iter()
+        .filter(|(_, d)| d.as_str() >= START_DATE && d.as_str() < END_DATE_EXCLUSIVE)
+        .collect();
+    assert!(
+        !window_acceptable.is_empty(),
+        "no acceptable-lateness events found in the run window — check datagen output"
+    );
+    for (event_id, event_date) in &window_acceptable {
+        assert!(
+            set_a.contains(&(*event_id, event_date.clone())),
+            "event_id={event_id} (event_date={event_date}, within the 3-day late window) \
+             missing from pipeline A's silver.events_parsed"
+        );
+        assert!(
+            set_b.contains(&(*event_id, event_date.clone())),
+            "event_id={event_id} (event_date={event_date}, within the 3-day late window) \
+             missing from pipeline B's silver.events_parsed"
+        );
+    }
+}

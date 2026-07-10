@@ -31,6 +31,11 @@ Columns that are EXPECTED to differ:
   - dau_backward_fill, identified_events_backward_fill         (global)
   - dau_connected_components, identified_events_connected_components (global)
 
+Also asserts the `silver.events_parsed` dedup/lateness invariant: zero
+duplicate `event_id`s in either pipeline's result, and an equal count of
+accepted-lateness events (`arrival_time` within 3 days of `event_time`)
+present in their own `event_date` partition across both pipelines.
+
 Requires `smelt-datagen`, `smelt`, `duckdb` on PATH; Python 3.9+.
 """
 
@@ -195,6 +200,59 @@ def report_global_column_divergence(rows_a: list[dict], rows_b: list[dict]) -> N
         print(f"  {col}: {count}/{len(rows_a)} rows differ between pipelines")
 
 
+def query_events_parsed_stats() -> dict:
+    """Dedup/lateness stats for `main.silver_events_parsed` in the *current*
+    `target/dev.duckdb`. Call this right after a pipeline finishes, before
+    the next `reset_target()` call wipes the database."""
+    duplicate_event_ids = query_json(
+        "SELECT COUNT(*) AS n FROM ("
+        "  SELECT event_id FROM main.silver_events_parsed"
+        "  GROUP BY event_id HAVING COUNT(*) > 1"
+        ")"
+    )[0]["n"]
+    accepted_late_present = query_json(
+        "SELECT COUNT(*) AS n FROM ("
+        "  SELECT DISTINCT event_id, event_date FROM raw.events"
+        "  WHERE CAST(arrival_time AS TIMESTAMP)"
+        "      <= CAST(event_time AS TIMESTAMP) + INTERVAL '3 days'"
+        ") accepted"
+        " WHERE EXISTS ("
+        "   SELECT 1 FROM main.silver_events_parsed p"
+        "   WHERE p.event_id = accepted.event_id"
+        "     AND p.event_date = CAST(accepted.event_date AS DATE)"
+        " )"
+    )[0]["n"]
+    return {
+        "duplicate_event_ids": duplicate_event_ids,
+        "accepted_late_events_present": accepted_late_present,
+    }
+
+
+def assert_dedup_and_lateness(stats_a: dict, stats_b: dict) -> None:
+    """`silver.events_parsed`'s redelivery-dedup and 3-day late-window
+    acceptance invariants, checked on both pipelines."""
+    failures: list[str] = []
+    for label, stats in (("A (full rebuild)", stats_a), ("B (day-by-day)", stats_b)):
+        if stats["duplicate_event_ids"] != 0:
+            failures.append(
+                f"pipeline {label}: {stats['duplicate_event_ids']} duplicate "
+                f"event_id(s) in silver.events_parsed (expected 0 — redelivery "
+                f"dedup should have collapsed them)"
+            )
+    if stats_a["accepted_late_events_present"] != stats_b["accepted_late_events_present"]:
+        failures.append(
+            "accepted-lateness event presence count differs between pipelines: "
+            f"A={stats_a['accepted_late_events_present']} "
+            f"B={stats_b['accepted_late_events_present']}"
+        )
+    if failures:
+        print()
+        print("=== DEDUP/LATENESS MISMATCH (UNEXPECTED) ===")
+        for f in failures:
+            print(f"  {f}")
+        sys.exit(1)
+
+
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     parser.add_argument(
@@ -220,6 +278,7 @@ def main() -> int:
     rows_a = query_json(
         "SELECT * FROM main.marts_daily_active_users_by_method ORDER BY event_date"
     )
+    stats_a = query_events_parsed_stats()
 
     reset_target()
     setup_sources()
@@ -228,10 +287,15 @@ def main() -> int:
     rows_b = query_json(
         "SELECT * FROM main.marts_daily_active_users_by_method ORDER BY event_date"
     )
+    stats_b = query_events_parsed_stats()
 
     # The local columns must match exactly.  This is the hard invariant the
     # day-by-day pipeline preserves.
     assert_local_columns_match(rows_a, rows_b)
+
+    # silver.events_parsed's redelivery-dedup and 3-day late-window
+    # acceptance invariants must hold identically in both pipelines.
+    assert_dedup_and_lateness(stats_a, stats_b)
 
     # Global columns are expected to differ — that's the "as-of-day-D" property
     # of incremental pipelines with global identity.  Print a summary so the

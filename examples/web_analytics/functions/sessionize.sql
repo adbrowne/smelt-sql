@@ -21,7 +21,7 @@
 smelt.define sessionize(
     source: TableExpr,
     partition_col: Expr<Integer>,
-    ts_col: Expr<Date>,
+    ts_col: Expr<Timestamp>,
     platform_col: Expr<Text>
 ) -> TableExpr AS (
     WITH _marked AS (

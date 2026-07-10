@@ -72,8 +72,8 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
 | 1     | done     | d245da69 | 2026-07-10 |
 | 2     | done     | d98af84b | 2026-07-10 |
 | 3     | done     | d6effc7a | 2026-07-10 |
-| 4     | done     |        | 2026-07-11 |
-| 5     | pending  |        |      |
+| 4     | done     | 12ea3508 | 2026-07-11 |
+| 5     | done     |        | 2026-07-11 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 | 8     | pending  |        |      |
@@ -341,6 +341,13 @@ The maintenance-plan work (MP series + emit unification + `smelt explain --show-
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- DuckDB 1.5.0 binder defect: `QUALIFY ROW_NUMBER() OVER (...)` mis-binds a
+  window function's column type when the immediate FROM is a view whose own
+  SELECT list carries type-conforming CASTs (not reproducible on the v1.4.4
+  CLI). Worked around by materializing `bronze/raw_events` as a table
+  instead of a view; revisit — and consider reverting to the default view
+  materialization — once the pinned DuckDB library moves past 1.5.0.
 
 ## Verification
 
