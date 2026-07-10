@@ -410,6 +410,21 @@ struct ExplainArgs {
     /// Select models to include (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
     #[arg(long = "select", short = 's')]
     select: Vec<String>,
+
+    /// Print, after each cell's report block, the maintenance statements
+    /// that cell executes — the output of the same pure emitters a run
+    /// executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    /// (single owner)"). Only meaningful with a positional model-name
+    /// argument. Never connects to a backend.
+    #[arg(long = "show-sql")]
+    show_sql: bool,
+
+    /// Region literal bounds for `--show-sql`, `<start>..<end>`
+    /// (`YYYY-MM-DD`, end exclusive). Without this flag, the printed
+    /// statements use the symbolic placeholders `{{window_start}}`/
+    /// `{{window_end}}` instead of real literals.
+    #[arg(long = "period", requires = "show_sql")]
+    period: Option<String>,
 }
 
 #[derive(Parser)]

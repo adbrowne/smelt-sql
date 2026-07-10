@@ -124,8 +124,13 @@ given, except `--json` combined with `--show-sql` (below).
 
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes
-(`maintenance_plan.md` §"Statement emission (single owner)"), so the printed SQL cannot drift
-from the executed SQL. Statements print in execution order; a transactional group is bracketed
+(`maintenance_plan.md` §"Statement emission (single owner)"). Each cell's SELECT body is compiled
+through the same `CompilerRegistry` apparatus a real run uses — the real discovered project's
+ephemeral resolver (so a `smelt.<ephemeral>` ref is CTE-inlined, not resolved as a physical table
+reference) and the real upstream column typing derived from static type inference (so `SUM`/`AVG`
+over a `smelt.ref()` column casts to that column's actual type instead of the `BIGINT` default) —
+so the printed SQL matches what a run would compile for the same model and inputs (see Known
+Divergences for the one residual gap: a column aggregated directly off an ephemeral ref). Statements print in execution order; a transactional group is bracketed
 by `BEGIN`/`COMMIT` lines in the printout to show its atomicity (the backend supplies the real
 transaction mechanics at run time). Region literals come from `--period <start>..<end>` when
 given; without `--period`, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand
@@ -383,11 +388,32 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
 - **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
 - **Most of the maintenance CLI surface is specified but not wired into the CLI parser.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`maintenance_plan.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for `sources.*` refs and for refs to another incremental model in the workspace (the latter composing across a chain the same way, though a real chain's clamps depend on `derive_model_maintenance_plan`'s own scan-bound derivation reaching that ref). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is still unwired; tracked in `docs/plans/20260707-maintenance-plan-impl.md` phase MP13. `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
-- **`smelt explain <model> --show-sql` is specified but not yet implemented.** The per-model
-  report today prints the plan cells only; no CLI surface prints maintenance statements, and
-  `smelt run --dry-run` prints only the compiled SELECT body. Blocked on maintenance-statement
-  emission becoming single-owner (`maintenance_plan.md` §Known Divergences "Statement emission
-  is not yet single-owner"); tracked in `docs/plans/20260710-emit-unification.md`.
+- **A `Trigger::NewData` cell is derived only for a `sources.*`-declared driving input.** The
+  per-model maintenance-plan derivation (`smelt-db`'s `maintenance_plan_report`) resolves a
+  model's `smelt.<path>` refs against declared `sources.*` entities only; a ref to another
+  incremental *model* in the same project silently drops out of the trigger derivation (no cell,
+  no refusal) rather than deriving a `KeyedFold`/`DeleteInsert` cell for it. Separately, the
+  keyed-grain fold-candidate detector admits only a single aggregate projection — a `grain: key`
+  model with two or more aggregate columns falls back to `Trigger::Backfill`'s recompute cell
+  with a `NoAdmissibleTechnique` refusal recorded for `NewData`, even though the same model's
+  actual `refresh: keyed` execution path (`keyed_models.md`) supports arbitrarily many aggregate
+  columns via `smelt-planner`'s `classify_cumulative`. Widening the plan-level derivation to match
+  is tracked as follow-up work; `smelt explain <model> --show-sql` renders whatever cells the
+  current derivation admits — it does not paper over this gap by admitting a cell independently.
+- **`--show-sql` casts a column aggregated directly off an ephemeral ref to the `BIGINT`
+  default, not its real type.** `smelt-runtime`'s shared compiler
+  (`SqlCompiler::compile_with_sql_and_ephemerals`) applies output type casts to a model's SELECT
+  body *before* prepending the resolved ephemeral CTEs, so a column like `SUM(rate)` where `rate`
+  comes straight off a joined ephemeral model cannot be typed from the real upstream schema at
+  cast time regardless of how the caller wires `UpstreamSchemas` — it falls through to the
+  `BIGINT` fallback. This is a compile-order limitation in the shared compiler, not an
+  `explain`-vs-run divergence: a real `smelt run --dry-run` on the same model produces the
+  identical `BIGINT` cast, since both consumers share the one compile path (Run pipeline parity
+  rule, `architecture.md`). `--show-sql` therefore still faithfully reproduces what a run would
+  execute, casting bug included. A column aggregated off a *non-ephemeral* upstream model ref, or
+  an ephemeral ref used outside an aggregate, types correctly. Fixing the underlying ordering is
+  tracked as follow-up `smelt-runtime` work; not addressed by
+  `docs/plans/20260710-emit-unification.md`.
 - **Generator-emitted model `origin` field in `smelt explain --json` is landed.** The `origin` field in §"`smelt explain --json` output schema" surfaces generator emissions distinctly from hand-authored models (per `meta_language.md` §"Multi-model production"). The `ModelOriginKind::Generated { generator_file, generator_name }` enum in `smelt-core/src/origin.rs` is the production type; `ExplainModel.origin` and `CatalogModel.origin` carry it. The `generator_file:<path>` selector parses via `SelectionMethod::GeneratorFile` and resolves against the `emitted_models()` survivor set. The `smelt docs generate` Markdown renderer includes a `**Source**:` line for emitted models. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References

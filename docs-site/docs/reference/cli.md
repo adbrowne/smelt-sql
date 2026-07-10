@@ -830,8 +830,10 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
-| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given. |
+| `--json` | | bool | `false` | Output as JSON (required for machine consumption). Ignored when `MODEL_NAME` is given, except in combination with `--show-sql` (below). |
 | `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. Ignored when `MODEL_NAME` is given. |
+| `--show-sql` | | bool | `false` | With `MODEL_NAME`, additionally print the maintenance statements each cell executes. Never connects to a backend. |
+| `--period` | | `<start>..<end>` | | With `--show-sql`, use these real literal date bounds (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
@@ -842,6 +844,27 @@ derived per-source scan clamps, each source's partition-locality verdict, any ad
 and the model's inbound edges. This only applies to incremental models (`refresh: incremental`
 with a `grain:` declared)
 — other models print a one-line notice instead.
+
+Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell
+executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
+compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
+referenced ephemeral model is CTE-inlined, not shown as a bare table reference) and the real
+upstream column types (so aggregates over a `smelt.ref()` column cast correctly), so the printed
+SQL matches what a run would compile. Statements print in execution order; a transactional group
+(e.g. a paired region `DELETE`+`INSERT`) is bracketed by `BEGIN`/`COMMIT` lines to show its
+atomicity. `--show-sql` never connects to a backend or executes anything — it is a pure
+compile-and-render step. Combine with `--period <start>..<end>` to see the real literal bounds a
+run over that window would use; without it, the symbolic placeholders
+`{{window_start}}`/`{{window_end}}` stand in so the emitted shape is inspectable without choosing
+a window. Combined with `--json`, the per-model report is emitted as JSON with a `statements`
+array per cell (`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable
+form for documentation generators or other tooling.
+
+One narrow case still diverges from a real run's *types* (not its shape): a column aggregated
+directly off an ephemeral ref (e.g. `SUM(rate)` where `rate` comes straight from a joined
+ephemeral model) casts to the `BIGINT` default rather than its real type — this is a compile-order
+limitation in the shared compiler that a real run hits identically, so `--show-sql` still matches
+what a run executes, casting quirk included. See `docs/specs/cli.md` Known Divergences.
 
 **Examples:**
 
@@ -860,6 +883,15 @@ smelt --scope marts explain --select +daily_revenue --json
 
 # Print one incremental model's maintenance plan
 smelt explain daily_events
+
+# Also print the maintenance statements each cell executes
+smelt explain daily_events --show-sql
+
+# ...with a real window instead of the {{window_start}}/{{window_end}} placeholders
+smelt explain daily_events --show-sql --period 2024-01-01..2024-01-08
+
+# Machine-readable statements array per cell
+smelt explain daily_events --show-sql --json
 ```
 
 ```text

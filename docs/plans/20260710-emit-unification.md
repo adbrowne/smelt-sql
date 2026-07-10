@@ -64,8 +64,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 | 1     | done     | e589e179 | 2026-07-10 |
 | 2     | done     | 3db5a0c6 | 2026-07-10 |
 | 3     | done     | 329aeebf | 2026-07-10 |
-| 4     | done     |        | 2026-07-10 |
-| 5     | pending  |        |      |
+| 4     | done     | 37271fd6 | 2026-07-10 |
+| 5     | done     |        | 2026-07-10 |
 | 6     | pending  |        |      |
 
 ---
@@ -240,6 +240,8 @@ The 2026-07-10 MP-series review found the maintenance-SQL layer has two owners: 
 - **Phase 2:** `Grade::Additive` keyed folds execute their MERGE inside `fold_ledger_delta` (raw-string ledger interleaving), which is not observable at `execute_statement_group` — so the keyed parity test uses a self-contained idempotent keyed fixture instead of `examples/web_analytics` `device_user_edges` (Additive via its COUNT column). Asserting parity *inside* the Additive ledger transaction would need a recording hook on `fold_ledger_delta`; revisit in Phase 4 if the conformance upgrade wants it.
 - **Phase 4:** `Backend::delete_partitions`/`insert_overwrite` (DuckDB + Spark) still author a DELETE-range shape for `IncrementalStrategy::InsertOverwrite` — verified dead code (no live path selects InsertOverwrite; `resolve_incremental_strategy` only yields DeleteInsert). Allowlisted in the structural gate with justification comments and documented in `architecture.md` Known Divergences; deleting the dead strategy is follow-up work outside this plan.
 - **Phase 4:** `statement_parity.rs` carries a third small `multiset_equal`/`EXCEPT ALL` oracle copy (the existing ones in `smelt-maintenance-testkit::oracle` and `smelt-runtime/tests/oracle/` need a raw sync `duckdb::Connection`, which `RecordingBackend` doesn't expose). Consolidation opportunity, not blocking.
+- **Phase 5 (latent pre-existing bug, smelt-runtime):** `execute.rs`'s two dry-run resolver-building blocks key the `EphemeralResolver` by the dotted `canonical_path()` graph key, but `compile_with_sql_and_ephemerals` looks referenced ephemerals up by the underscore-joined `to_path().join("_")` form — a multi-segment ephemeral (e.g. `lookup/regions.sql`) would silently miss CTE-inlining in dry-run compiles. `commands/explain.rs` deliberately keys by `db_name_owned()` (the form actually looked up). Fix belongs in `smelt-runtime`, outside this plan's file scope.
+- **Phase 5:** trigger derivation gaps documented in `docs/specs/cli.md` Known Divergences: `source_refs` drops refs to upstream models (only declared `sources.*` produce triggers) and `derive_fold_spec` requires exactly one aggregate projection — so e.g. `web_analytics` `device_user_edges` shows only its backfill cell. Fixes live in `smelt-db`/`smelt-logical` derivation.
 - **Phase 2:** `WindowedKeyedRule::merge_sql` still returns `String` (consumed as `action_sql` by the Additive ledger arm); collapsing it to return `StatementGroup` was left out to avoid touching the ledger plumbing.
 
 ## Verification
