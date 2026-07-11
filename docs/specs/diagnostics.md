@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-07-05
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
