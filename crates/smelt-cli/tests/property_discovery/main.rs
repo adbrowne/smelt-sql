@@ -26,6 +26,7 @@ mod g_09_union_all_append_only;
 mod g_10_composite_key_join_fan_out;
 mod g_11_self_ref_ambiguous_column;
 mod g_12_keyed_merge_reprocessed_window;
+mod g_13_self_ref_derived_output_window;
 mod p0_2_run_schedule;
 mod p0_4_mutation_profile_selfcheck;
 mod sc_1_correlated_exists;

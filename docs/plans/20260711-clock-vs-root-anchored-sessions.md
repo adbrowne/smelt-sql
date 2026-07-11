@@ -61,7 +61,7 @@ The current `silver.sessions` enforces its length cap in `sessionize`'s window f
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | (see date) | 2026-07-11 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -83,7 +83,9 @@ The current `silver.sessions` enforces its length cap in `sessionize`'s window f
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-runtime/src/windowing.rs` — anchor-aware derivation for `Ordered`
-- `crates/smelt-cli/tests/property_discovery/g_12_self_ref_derived_output_window.rs` — new
+- `crates/smelt-logical/src/analysis/walk.rs` (and the `model_partition_skew` entry point it exposes) — the self-source exclusion lives in the skew walk as a structural, per-scope exclusion (property-composition-walk rule: composition-relevant bounds are produced by the walk, never by a downstream text scan)
+- `crates/smelt-logical/tests/` — unit coverage for the exclusion (alias scoping, UNION branches, comma joins)
+- `crates/smelt-cli/tests/property_discovery/g_13_self_ref_derived_output_window.rs` — new (g_12 was already taken; plan updated to match)
 - `crates/smelt-runtime/tests/windowing_ordered.rs` — new/extended unit coverage
 - `docs/specs/batched_models.md` — composition statement
 

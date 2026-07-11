@@ -1230,8 +1230,20 @@ use crate::analysis::source_bounds::{derive_partition_skew, Skew};
 /// subtrees that are walk nodes of their own); verdicts compose by
 /// [`Skew::union`] (max before, max after), since a Form B relation in any
 /// scope can push rows into a neighbouring partition.
+///
+/// `exclude_source` names the model's own source path (dotted, as it appears
+/// in a `smelt.<path>` self-reference) for a self-referential model
+/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// models": the self-edge is never a skew anchor). When set, each scope's
+/// region text is filtered by [`own_region_text_excluding_self_relations`]
+/// before the leaf classifier runs: the scope's own alias→source map
+/// (`NodeCx::aliases`, resolved structurally per scope by the walk) decides
+/// which aliases are the self-reference *in that scope*, so a nested
+/// subquery or set-operation arm reusing the same short alias for a
+/// different source keeps its genuine relations intact.
 pub struct SkewTransfer<'a> {
     pub partition_column: &'a str,
+    pub exclude_source: Option<&'a str>,
 }
 
 impl Transfer for SkewTransfer<'_> {
@@ -1241,13 +1253,19 @@ impl Transfer for SkewTransfer<'_> {
         Skew::ZERO
     }
 
-    fn operator(&self, op: &OpNode<'_>, children: &[Skew], _cx: &NodeCx) -> Skew {
+    fn operator(&self, op: &OpNode<'_>, children: &[Skew], cx: &NodeCx) -> Skew {
         let acc = children
             .iter()
             .fold(Skew::ZERO, |acc, child| acc.union(*child));
         match op {
             OpNode::Select(sn) => {
-                let own = own_region_text(&sn.select);
+                let own = match self.exclude_source {
+                    Some(self_name) => {
+                        let quals = scope_self_qualifiers(cx, self_name);
+                        own_region_text_excluding_self_relations(&sn.select, &quals)
+                    }
+                    None => own_region_text(&sn.select),
+                };
                 acc.union(derive_partition_skew(&own, self.partition_column))
             }
             OpNode::SetOp(_) => acc,
@@ -1259,6 +1277,182 @@ impl Transfer for SkewTransfer<'_> {
     }
 }
 
+/// The qualifiers under which this scope's FROM items reference the model's
+/// own source (`self_name`): each alias (or bare-name key) whose resolved
+/// [`RelationSource::Table`] is the self source, per the walk's own per-scope
+/// alias map — never a cross-scope accumulation, so an unrelated scope
+/// reusing the same alias text for a different source is unaffected. For an
+/// unaliased dotted self-reference the map key is the full dotted path; its
+/// last segment is added as well, since an unaliased table's columns are
+/// qualified by the bare table name.
+fn scope_self_qualifiers(cx: &NodeCx, self_name: &str) -> Vec<String> {
+    let mut quals = Vec::new();
+    for (key, source) in &cx.aliases {
+        let RelationSource::Table(name) = source else {
+            continue;
+        };
+        if !name.eq_ignore_ascii_case(self_name) {
+            continue;
+        }
+        quals.push(key.clone());
+        if let Some(last) = key.rsplit('.').next() {
+            if last != key {
+                quals.push(last.to_string());
+            }
+        }
+    }
+    quals
+}
+
+/// [`own_region_text`], minus the self-edge's own bounding relations: every
+/// top-level `AND`-separated condition — of the scope's `WHERE` clause and of
+/// each join's `ON` expression — that references one of `self_quals` (a
+/// `qual.`-qualified column of the self source, per this scope's own alias
+/// resolution) is omitted from the returned text, so the skew leaf classifier
+/// never reads the self-edge's bound as a partition-column skew anchor
+/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// models"). Conditions that do not reference a self qualifier — including a
+/// genuine Form B relation sharing the same `WHERE` clause — survive
+/// verbatim. A condition containing an `OR` anywhere within it is never
+/// omitted, even when it references a self qualifier (the disjunction may
+/// mix a self bound with a genuine relation; keeping it can only over-widen
+/// the derived output window, never narrow it — [`conjunct_contains_or`]).
+fn own_region_text_excluding_self_relations(select: &SelectStmt, self_quals: &[String]) -> String {
+    use smelt_parser::syntax_kind::SyntaxNode;
+    use smelt_parser::SyntaxKind::{SELECT_STMT, SUBQUERY, TABLE_REF, WITH_CLAUSE};
+    use smelt_parser::TextRange;
+
+    if self_quals.is_empty() {
+        return own_region_text(select);
+    }
+
+    // Collect the ranges of self-referencing conditions in this scope's own
+    // WHERE clause and join ON expressions.
+    let mut excluded: Vec<TextRange> = Vec::new();
+    if let Some(where_clause) = select.where_clause() {
+        if let Some(expr) = where_clause.expression() {
+            collect_self_conjunct_ranges(expr.syntax(), self_quals, &mut excluded);
+        }
+    }
+    if let Some(from_clause) = select.from_clause() {
+        for join in from_clause.joins() {
+            if let Some(on_expr) = join.condition().and_then(|c| c.on_expression()) {
+                collect_self_conjunct_ranges(on_expr.syntax(), self_quals, &mut excluded);
+            }
+        }
+    }
+
+    fn collect(node: &SyntaxNode, root: &SyntaxNode, excluded: &[TextRange], out: &mut String) {
+        for element in node.children_with_tokens() {
+            let range = element.text_range();
+            if excluded.iter().any(|ex| ex.contains_range(range)) {
+                // A skipped region is replaced by one space so neighbouring
+                // tokens never fuse into a new identifier.
+                out.push(' ');
+                continue;
+            }
+            if let Some(token) = element.as_token() {
+                out.push_str(token.text());
+            } else if let Some(child) = element.as_node() {
+                match child.kind() {
+                    WITH_CLAUSE => {}
+                    SELECT_STMT if node == root => {}
+                    SUBQUERY if node.kind() == TABLE_REF => {}
+                    _ => collect(child, root, excluded, out),
+                }
+            }
+        }
+    }
+
+    let root = select.syntax();
+    let mut out = String::new();
+    collect(root, root, &excluded, &mut out);
+    out
+}
+
+/// Split `node` (a `WHERE`/`ON` expression) into its top-level
+/// `AND`-separated conditions — structurally, by descending `BINARY_EXPR`
+/// nodes whose own operator token is `AND` (a `BETWEEN`'s `AND` lives inside
+/// its own `BETWEEN_EXPR` node and is never split) — and record the range of
+/// each condition that references one of `self_quals`.
+///
+/// A condition containing an `OR` anywhere in its subtree is **never**
+/// recorded, even when it references a self qualifier: an `OR` may
+/// disjunctively mix the self bound with a genuine relation, and dropping
+/// the whole disjunction would silently under-widen the derived output
+/// window. Keeping it can only over-widen — the fail-safe direction.
+fn collect_self_conjunct_ranges(
+    node: &smelt_parser::syntax_kind::SyntaxNode,
+    self_quals: &[String],
+    out: &mut Vec<smelt_parser::TextRange>,
+) {
+    use smelt_parser::SyntaxKind::{AND_KW, BINARY_EXPR, EXPRESSION};
+
+    // Unwrap EXPRESSION wrappers.
+    if node.kind() == EXPRESSION {
+        let children: Vec<_> = node.children().collect();
+        if children.len() == 1 {
+            return collect_self_conjunct_ranges(&children[0], self_quals, out);
+        }
+    }
+
+    let is_and = node.kind() == BINARY_EXPR
+        && node
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == AND_KW);
+    if is_and {
+        for child in node.children() {
+            collect_self_conjunct_ranges(&child, self_quals, out);
+        }
+        return;
+    }
+
+    if !conjunct_contains_or(node) && conjunct_references_qualifier(node, self_quals) {
+        out.push(node.text_range());
+    }
+}
+
+/// Whether the condition's subtree contains an `OR` operator token — the
+/// structural guard behind [`collect_self_conjunct_ranges`]'s never-exclude
+/// rule for disjunctions. Token-kind based: an `'or'` inside a string
+/// literal is one `STRING` token and never matches.
+fn conjunct_contains_or(node: &smelt_parser::syntax_kind::SyntaxNode) -> bool {
+    use smelt_parser::SyntaxKind::OR_KW;
+    node.descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .any(|t| t.kind() == OR_KW)
+}
+
+/// Whether one already-isolated condition references any of `self_quals` as
+/// a column qualifier — structurally, over the condition's own token stream:
+/// an `IDENT` token whose text equals a qualifier (case-insensitive),
+/// immediately followed (ignoring trivia) by a `DOT` token, i.e. a real
+/// `qual.column` reference. String-literal contents are single `STRING`
+/// tokens and can never match, and token identity makes partial-identifier
+/// matches (`total_bal.d` for qualifier `bal`) impossible. Invoked by
+/// [`collect_self_conjunct_ranges`] over a single conjunct the structural
+/// split has already bounded; the qualifiers themselves come from the walk's
+/// per-scope alias resolution.
+fn conjunct_references_qualifier(
+    node: &smelt_parser::syntax_kind::SyntaxNode,
+    self_quals: &[String],
+) -> bool {
+    use smelt_parser::SyntaxKind::{DOT, IDENT};
+    let tokens: Vec<_> = node
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .collect();
+    tokens.windows(2).any(|pair| {
+        pair[0].kind() == IDENT
+            && pair[1].kind() == DOT
+            && self_quals
+                .iter()
+                .any(|qual| pair[0].text().eq_ignore_ascii_case(qual))
+    })
+}
+
 /// Convenience entry: the model's own partition-column skew bound, composed
 /// per walk-enumerated scope by [`SkewTransfer`]. Falls back to the
 /// whole-text [`derive_partition_skew`] when the tree normalization cannot
@@ -1267,10 +1461,35 @@ impl Transfer for SkewTransfer<'_> {
 /// so exact whole-tree coverage wins over fail-closed rejection here (the
 /// [`QueryNode::has_unsupported`] consumer pattern).
 pub fn model_partition_skew(sql: &str, partition_column: &str) -> Skew {
+    model_partition_skew_excluding_self(sql, partition_column, None)
+}
+
+/// [`model_partition_skew`] with an optional self-source exclusion for
+/// self-referential models: relations arising from a reference to
+/// `self_name` (the model's own dotted path) never contribute skew anchors
+/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// models" — the self-edge is never a skew anchor). Exclusion is resolved
+/// per scope by the shared walk (see [`SkewTransfer`]), so an unrelated
+/// scope reusing the self-edge's alias text for a different source keeps its
+/// genuine relations.
+///
+/// When the tree normalization cannot model the SQL, the whole-text fallback
+/// runs **without** the exclusion: it cannot resolve aliases per scope, and
+/// omitting the exclusion can only over-widen the derived output window (a
+/// correct, wider rebase), never narrow it — the fail-safe direction.
+pub fn model_partition_skew_excluding_self(
+    sql: &str,
+    partition_column: &str,
+    self_name: Option<&str>,
+) -> Skew {
     match QueryTree::from_sql(sql) {
-        Some(tree) if !tree.root.has_unsupported() => {
-            walk(&tree, &SkewTransfer { partition_column })
-        }
+        Some(tree) if !tree.root.has_unsupported() => walk(
+            &tree,
+            &SkewTransfer {
+                partition_column,
+                exclude_source: self_name,
+            },
+        ),
         _ => derive_partition_skew(sql, partition_column),
     }
 }
