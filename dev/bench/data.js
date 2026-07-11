@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783768841097,
+  "lastUpdate": 1783768843834,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -27524,6 +27524,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.78987464102877,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "bf881006156e0d3142bbd3c34e47eeefe834b532",
+          "message": "fix(db): cache smelt.yml parse for maintenance/state queries, fix O(N) CI bench regression\n\nmaintenance_plan, maintenance_plan_report, and the state.mode widening\ncheck each re-parsed smelt.yml's full YAML text on every per-file Salsa\nquery instead of going through a cached tracked query. On the 2000-model\nbench workspace (all refresh: incremental) this reran serde_yaml parsing\nonce per model, driving initial_load_ms/full_diagnostics_ms from ~700ms\nto ~15s and tripping the CI regression gate. Added project_maintenance_config\nand project_state_mode tracked queries (mirroring project_paths) so the\nconfig is parsed once per revision and reused.\n\nLocally: initial_load_ms 6190ms -> 391ms, full_diagnostics_ms 6116ms -> 332ms\non the 2000-model bench workspace.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-11T21:15:34+10:00",
+          "tree_id": "bd4be8f75cc8983d59ebb3ccd88bb1196d3b0cf3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bf881006156e0d3142bbd3c34e47eeefe834b532"
+        },
+        "date": 1783768842929,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.35456199123697,
             "unit": "MB/s"
           }
         ]
