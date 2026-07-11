@@ -66,7 +66,7 @@ The materialization-three-axes work left two follow-ups in `testing.md`. First, 
 | 2     | done     | 46f6358d | 2026-06-28 |
 | 3     | done     | df18c355 | 2026-06-28 |
 | 4     | done     | bba20794 | 2026-06-28 |
-| 5     | done     | (this commit) | 2026-07-11 |
+| 5     | done     | 1a777c96 | 2026-07-11 |
 
 ---
 

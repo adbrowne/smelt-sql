@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
@@ -290,7 +290,7 @@ The cwd-derived scope is informational at command start and does not change mid-
 
 `smelt check` executes each `smelt.check` declaration's failing-rows query against the project's **configured target** (not in-memory DuckDB — a check asserts on the real materialized data; see `testing.md` §"Check execution model"). A check passes iff its query returns **zero rows**; returned rows are violations. The command reports `PASS`/`FAIL`/`WARN` per check with the violation row count and a capped inline sample of violating rows, and exits per §"Exit codes" (`error`-severity violations → `1`; `warn`-only → `0`). A check that references an unbuilt model fails with `CheckTargetNotBuilt` rather than passing silently.
 
-`smelt check --select` resolves like `smelt test --select` (same selection contract). Unlike the build-integrated check pass (`smelt build` step 7), standalone `smelt check` runs against whatever is currently materialized and applies no downstream skip-cascade — it is a pure validation pass.
+`smelt check --select` is a **substring match on the check name** (repeatable; a check runs if any `--select` value is a substring of its name). It does not use the full selector syntax — no `tag:`/`generator_file:` methods, no `+` graph operators — and a selection that matches no check prints `No checks matched the selection.` and exits `0` rather than hard-erroring. Unlike the build-integrated check pass (`smelt build` step 7), standalone `smelt check` runs against whatever is currently materialized and applies no downstream skip-cascade — it is a pure validation pass.
 
 ### `smelt docs generate` output
 
@@ -369,11 +369,15 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `crates/smelt-cli/src/commands/` — per-command implementation
   - `crates/smelt-cli/src/commands/build.rs` — `--show-plan` dispatch
   - `crates/smelt-cli/src/logical_graph.rs` — `LogicalGraph::build()`
+- **Tests**:
+  - `crates/smelt-cli/tests/check_command.rs` — `smelt check` exit codes, severity gating, `--select` substring, unbuilt-target loudness
+  - `crates/smelt-cli/tests/build_checks.rs` — `smelt build` check gate: error-severity skip-cascade, warn transparency
 - **User docs**:
   - `docs-site/docs/reference/cli.md` — full flag reference
   - `docs-site/docs/guide/model-selection.md` — selector syntax
 - **Plans (history)**:
   - `docs/plans/20260502-smelt-loop-findings.md` — TB-1 and TB-4 fixes, TB-3 deferred
+  - `docs/plans/20260628-data-checks.md` — `smelt check` command and the `smelt build` check gate
 - **Related specs**:
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `model_selection.md` — `--select` / `--exclude` semantics

@@ -1,7 +1,7 @@
 ---
 feature: testing
 status: experimental
-last_reviewed: 2026-06-26
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
@@ -282,7 +282,11 @@ A `smelt.check` runs against the project's **configured target** — the same co
 - **Stored check failures.** Violating rows are reported as a capped inline sample only; they are not persisted to a warehouse audit table (dbt's `store_failures_as`). Whether to add opt-in persistence for post-hoc inspection is open.
 - **Generic / reusable checks.** A `smelt.check` is a one-off failing-rows query. There is no parameterized, reusable check template (dbt generic tests, SQLMesh built-in audits like `not_null(columns := ...)`). smelt's `smelt.define` fragment functions are a plausible substrate for reusable check bodies; whether and how to expose generic checks is open.
 - **Check severity is the only build-gating dial.** `error` blocks downstream during `build`; `warn` does not. There is no per-environment override (block in CI, warn in dev) and no equivalent of SQLMesh's plan-vs-run distinction for checks. Open.
-- **`smelt check` selector is substring-only.** Like `smelt test`, `smelt check --select` matches a plain substring against check names; the full `tag:`/`path:`/`+upstream` selector grammar does not apply. Aligning this with `smelt run`/`build` is the same open work tracked in `model_selection.md` Known Divergences.
+- **`smelt check` selector is substring-only.** `smelt check --select` matches a plain substring against check names; the full `tag:`/`path:`/`+upstream` selector grammar does not apply (unlike `smelt test --select`, which does use the full selector syntax — see `cli.md`). A selection matching no check exits `0` with a "no checks matched" notice rather than hard-erroring. Aligning this with `smelt run`/`build` is the same open work tracked in `model_selection.md` Known Divergences.
+- **`CheckTargetNotBuilt` pre-check skip-list is narrower than the dependency-graph exclusion list.** The existence pre-check skips only `sources`/`functions` references before probing the target, whereas graph construction also excludes `seeds`, `config`, and the `models.*` meta-accessors — so a check body that directly references `smelt.seeds.*`, `smelt.config.var(...)`, or `smelt.models.*` can surface a spurious `CheckTargetNotBuilt`. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
+- **One `smelt.check` per file.** The check runner processes only the first check declaration in a file (the `smelt.test` runner loops over all declarations in a file). Whether multi-check files should be supported is open. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
+- **A check referencing multiple models runs before all of them are built.** During `smelt build`, a check is registered under every model it references and runs as soon as the first of them materializes; if another referenced model is later in the build order, the check can surface a spurious `CheckTargetNotBuilt`/skip. Single-model checks (all current examples) are unaffected. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
+- **`NonStandaloneTestModel` detection covers only `smelt.config.var`.** The pre-inline detector recognizes the one in-body non-standalone construct that exists today (incremental/watermark declarations live in frontmatter, which is stripped before inlining, so they leave no in-body marker). Any other standalone-compile failure of the composed test query still fails loud, but as a generic `TestCompilationError` anchored at the test body's start rather than an attributed `NonStandaloneTestModel`; `TestCompilationError` and the cycle guard `TestInliningDepthExceeded` are not in the `diagnostics.md` catalogue. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
 
 ## References
 

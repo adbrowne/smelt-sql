@@ -11,9 +11,10 @@ data for their dependencies via `PASSING` clauses, and states the expected outpu
 standalone SQL query with mock data substituted for dependencies, executes it against an
 in-memory DuckDB instance, and compares the actual output to the expected rows.
 
-Tests are discovered the same way as models — by scanning the directories listed in `paths:`
-in your `smelt.yml`. They can live in a dedicated `tests/` directory or co-located in
-model files.
+Tests are discovered the same way as models — by the project-wide scan of every
+non-excluded directory (`paths:` in `smelt.yml` affects how addresses are derived,
+not what gets scanned). They can live in a dedicated `tests/` directory or co-located
+in model files.
 
 ## smelt.test declarations
 
@@ -384,12 +385,13 @@ Floating-point values are compared with an epsilon of 1e-6. For example, an actu
 
 ### Type coercion
 
-YAML values are automatically converted to SQL types:
+Literal values are automatically converted to SQL types:
 
-| YAML value | SQL type | Example |
-|------------|----------|---------|
+| Literal value | SQL type | Example |
+|---------------|----------|---------|
 | Integer | INTEGER | `42` |
 | Float | DOUBLE | `3.14` |
+| Decimal-shaped string (has `.`, no exponent) | DECIMAL | `'300.00'` |
 | String | VARCHAR | `hello` or `'hello'` |
 | Boolean | BOOLEAN | `true`, `false` |
 | Null | NULL | `null` |
