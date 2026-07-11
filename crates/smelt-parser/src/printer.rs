@@ -363,6 +363,31 @@ impl Display for NamedWindow {
 
 impl Display for OrderByClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // DuckDB `ORDER BY ALL [ASC|DESC] [NULLS FIRST|LAST]`: the clause carries
+        // a bare ALL_KW marker with an optional direction / NULLS ordering and
+        // no per-key OrderByItem children.
+        if self.is_all() {
+            write!(f, "ORDER BY ALL")?;
+            let tokens: Vec<_> = self
+                .syntax()
+                .children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .collect();
+            let mut seen_all = false;
+            for token in tokens {
+                match token.kind() {
+                    ALL_KW => seen_all = true,
+                    ASC_KW if seen_all => write!(f, " ASC")?,
+                    DESC_KW if seen_all => write!(f, " DESC")?,
+                    NULLS_KW if seen_all => write!(f, " NULLS")?,
+                    FIRST_KW if seen_all => write!(f, " FIRST")?,
+                    LAST_KW if seen_all => write!(f, " LAST")?,
+                    _ => {}
+                }
+            }
+            return Ok(());
+        }
+
         write!(f, "ORDER BY ")?;
         let items: Vec<_> = self.items().collect();
         for (i, item) in items.iter().enumerate() {
@@ -579,6 +604,16 @@ impl Display for LambdaExpr {
 
 /// Extract GROUP BY expressions from syntax node
 fn extract_group_by_expressions(node: &SyntaxNode) -> String {
+    // DuckDB `GROUP BY ALL`: the clause carries a bare ALL_KW marker and no
+    // grouping-key expressions.
+    let is_all = node
+        .children_with_tokens()
+        .filter_map(|e| e.into_token())
+        .any(|t| t.kind() == ALL_KW);
+    if is_all {
+        return "ALL".to_string();
+    }
+
     let mut expressions = Vec::new();
     for child in node.children() {
         if child.kind() == EXPRESSION || child.kind() == BINARY_EXPR {

@@ -1056,10 +1056,23 @@ fn test_lateral_join() {
 }
 
 #[test]
-fn test_lateral_subquery() {
+fn test_lateral_subquery_comma_form_is_a_registered_gap() {
+    // Comma-separated FROM lists (`FROM a, LATERAL (...)`) have never had a
+    // grammar production — `parse_from_clause` only recognises the first
+    // table ref plus JOIN-keyword chains (see `test_lateral_join` for the
+    // supported `LEFT JOIN LATERAL` form). Before fail-loud trailing-content
+    // detection, the leftover `, LATERAL (...) o` was silently absorbed at
+    // end-of-file, so this construct looked accepted; it now surfaces the
+    // parse error the grammar always implied. Comma-separated FROM lists are
+    // unimplemented grammar, not a fail-loud-parsing regression — tracked as
+    // follow-on grammar work.
     let input = "SELECT * FROM users, LATERAL (SELECT * FROM orders WHERE user_id = users.id) o";
     let parse = parse(input);
-    assert_eq!(parse.errors.len(), 0);
+    assert!(
+        !parse.errors.is_empty(),
+        "comma-separated FROM lists are not supported by the grammar; \
+         expected a parse error, got a clean parse"
+    );
 }
 
 #[test]
@@ -3398,8 +3411,10 @@ fn passing_after_smelt_extern_call_not_attached() {
     //
     // We verify the structural analogue: PASSING after a plain SQL function
     // call (not smelt.fn.*) is not attached, confirming the trigger is
-    // correctly scoped to the smelt.fn.* path only.
-    let input = "SELECT my_func(src) PASSING m AS (COUNT(*)) FROM t";
+    // correctly scoped to the smelt.fn.* path only. `PASSING` is not a
+    // reserved keyword, so it is consumed here as a plain implicit alias
+    // for the select item.
+    let input = "SELECT my_func(src) PASSING FROM t";
     let (parse, file) = parse_file_text(input);
     assert!(
         parse.errors.is_empty(),
@@ -7028,6 +7043,142 @@ fn test_scientific_notation_number() {
 }
 
 #[test]
+fn number_followed_by_ident_without_space_errors() {
+    // Oracle: DuckDB does not have real hex-integer-literal grammar in this
+    // position either — `duckdb -c "SELECT 0x1F;"` prints a column named
+    // `x1F` with value `0` (i.e. DuckDB itself silently reads this as `0`
+    // implicitly aliased to `x1F`; a following `AS a` then fails as a
+    // syntax error, since the alias slot is already filled). smelt refuses
+    // to reproduce that silent split: the whole malformed blob must surface
+    // as a single ERROR token / parse error rather than being read as
+    // `0 AS x1F`.
+    //
+    // Oracle: `1_000_000` **is** a genuine numeric literal in DuckDB
+    // (`duckdb -c "SELECT 1_000_000 AS a, typeof(1_000_000);"` returns
+    // `a = 1000000`, `typeof = INTEGER`, no ambiguity with an alias).
+    // Digit-separator literal *support* is deferred grammar work; this
+    // phase only guarantees the lexer does not silently split it into `1`
+    // aliased to `_000_000`.
+    for (sql, blob) in [("SELECT 0x1F", "0x1F"), ("SELECT 1_000_000", "1_000_000")] {
+        let parse = parse(sql);
+        assert!(
+            !parse.errors.is_empty(),
+            "{sql:?} must produce a parse error, not a silent number+identifier split"
+        );
+
+        let error_tokens: Vec<_> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == crate::SyntaxKind::ERROR)
+            .collect();
+        assert!(
+            error_tokens.iter().any(|t| t.text() == blob),
+            "expected a single ERROR token spanning the whole blob {blob:?}, got: {:?}",
+            error_tokens
+        );
+
+        // Guard: the blob must never appear as a NUMBER token (i.e. it was
+        // never silently split into a shorter numeric prefix).
+        let numbers: Vec<String> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == NUMBER)
+            .map(|t| t.text().to_string())
+            .collect();
+        assert!(
+            !numbers.iter().any(|n| blob.starts_with(n.as_str())),
+            "{sql:?} must not split off a leading NUMBER token, got NUMBER tokens: {numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn is_not_distinct_from_parses() {
+    // `IS [NOT] DISTINCT FROM` is a standard SQL null-safe comparison; the
+    // planner's cube_split rule generates it in join conditions. Before the
+    // trailing-content check (fail-loud) landed, the parser silently
+    // absorbed the `DISTINCT FROM …` tail; it must now parse as part of the
+    // comparison, not error.
+    for sql in [
+        "SELECT 1 FROM a t0 JOIN b t1 ON t0.x IS NOT DISTINCT FROM t1.x",
+        "SELECT 1 FROM a t0 JOIN b t1 ON t0.x IS DISTINCT FROM t1.x",
+        "SELECT x IS NOT DISTINCT FROM y FROM t",
+    ] {
+        let parse = parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} must parse without errors, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn number_then_space_then_ident_is_alias() {
+    // Guard: whitespace before the identifier means this is a legitimate
+    // implicit alias (`expr alias`), not a malformed literal blob — the
+    // fail-loud check must not over-fire onto grammar the parser already
+    // recognises.
+    let (parse, select) = parse_select("SELECT 1 x");
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let item = select
+        .select_list()
+        .expect("select list")
+        .items()
+        .next()
+        .expect("one select item");
+    assert_eq!(item.alias(), Some("x".to_string()));
+}
+
+#[test]
+fn prefixed_string_literals_not_split() {
+    // Oracle: DuckDB accepts both forms as string literals without error —
+    // `duckdb -c "select E'a\nb', typeof(E'a\nb');"` returns a VARCHAR value
+    // (DuckDB additionally applies backslash-escape processing to the body,
+    // e.g. `\n` becomes a real newline — `length(E'a\nb') = 3`); and
+    // `duckdb -c "select B'0101', typeof(B'0101');"` likewise returns a
+    // VARCHAR value with no parse error. smelt must not silently split
+    // either form into an orphan `E`/`B` identifier followed by an
+    // unrelated string literal (which would misparse as `E` aliased next
+    // to a bare string, or read as two separate tokens with no connection
+    // to each other) — accepting the whole thing as one STRING token is
+    // preferred over erroring, and is what this phase implements.
+    for sql in ["SELECT E'\\n'", "SELECT B'0101'"] {
+        let parse = parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?}: expected the prefixed string literal to lex as one token \
+             (or, at minimum, no silent identifier+orphan-string split); got errors: {:?}",
+            parse.errors
+        );
+
+        // No lone `E`/`B` IDENT token immediately followed by a STRING
+        // token — that would be the silent split this phase forbids.
+        let tokens: Vec<_> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() != WHITESPACE)
+            .collect();
+        for w in tokens.windows(2) {
+            let split = w[0].kind() == IDENT
+                && (w[0].text() == "E"
+                    || w[0].text() == "e"
+                    || w[0].text() == "B"
+                    || w[0].text() == "b")
+                && w[1].kind() == crate::SyntaxKind::STRING;
+            assert!(
+                !split,
+                "{sql:?} must not silently split into an `{}` identifier followed by an orphan string token",
+                w[0].text()
+            );
+        }
+    }
+}
+
+#[test]
 fn test_postfix_cast_on_non_ident_primary() {
     // PostgreSQL-style `expr::type` must parse for non-IDENT primaries
     // (number, string, parenthesized expr, function-call result) into a
@@ -7042,6 +7193,228 @@ fn test_postfix_cast_on_non_ident_primary() {
         let has_cast = parse.syntax().descendants().any(|n| n.kind() == CAST_EXPR);
         assert!(has_cast, "expected a CAST_EXPR node for {sql:?}");
     }
+}
+
+// ── Fail-loud trailing top-level content ────────────────────────────────────
+//
+// `parse_file` parses at most one model body. Any top-level content left
+// over afterwards must produce a parse error and land inside an `ERROR` node
+// — never be absorbed silently. See `docs/specs/diagnostics.md` §"Fail-loud
+// invariants" #3 and the `TrailingTopLevelContent` catalogue entry.
+
+/// Every non-trivia token in `syntax` must either be inside an `ERROR` node
+/// or be one of the tokens the grammar itself recognises. This helper checks
+/// that every token that is a descendant of an `ERROR` node really is under
+/// one, i.e. that the given predicate tokens are wrapped rather than loose
+/// directly under `FILE`.
+fn tokens_with_text(
+    syntax: &rowan::SyntaxNode<crate::syntax_kind::SmeltLanguage>,
+    text: &str,
+) -> Vec<rowan::SyntaxToken<crate::syntax_kind::SmeltLanguage>> {
+    syntax
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| t.text() == text)
+        .collect()
+}
+
+#[test]
+fn trailing_tokens_after_select_error() {
+    // `t alias1` is a legitimate implicit table alias (consumed by the
+    // TABLE_REF grammar) — the trailing content under test is the *second*
+    // run of stray identifiers, `stray_one stray_two`, which the grammar has
+    // no production for at all.
+    let input = "SELECT a FROM t alias1 stray_one stray_two";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "expected at least one parse error for trailing top-level content, got none"
+    );
+
+    let syntax = parse.syntax();
+    for text in ["stray_one", "stray_two"] {
+        let toks = tokens_with_text(&syntax, text);
+        assert!(!toks.is_empty(), "expected a {text:?} token in the tree");
+        for tok in toks {
+            let inside_error = tok
+                .parent()
+                .map(|p| {
+                    p.kind() == crate::SyntaxKind::ERROR
+                        || p.ancestors().any(|a| a.kind() == crate::SyntaxKind::ERROR)
+                })
+                .unwrap_or(false);
+            assert!(
+                inside_error,
+                "expected {text:?} to sit inside an ERROR node, not loose under FILE"
+            );
+        }
+    }
+
+    // Guard: `alias1` (the legitimate implicit alias) must NOT be inside an
+    // ERROR node — trailing-content detection must not over-fire onto
+    // grammar the parser already recognises.
+    let alias_tok = tokens_with_text(&syntax, "alias1")
+        .into_iter()
+        .next()
+        .expect("expected an alias1 token");
+    let alias_inside_error = alias_tok
+        .parent()
+        .map(|p| {
+            p.kind() == crate::SyntaxKind::ERROR
+                || p.ancestors().any(|a| a.kind() == crate::SyntaxKind::ERROR)
+        })
+        .unwrap_or(false);
+    assert!(
+        !alias_inside_error,
+        "implicit table alias must not be treated as trailing content"
+    );
+}
+
+#[test]
+fn second_top_level_select_errors() {
+    let parse1 = parse("SELECT 1 SELECT 2");
+    assert!(
+        !parse1.errors.is_empty(),
+        "a second top-level SELECT must produce a parse error"
+    );
+
+    let parse2 = parse("SELECT a FROM t 'junk' )))");
+    assert!(
+        !parse2.errors.is_empty(),
+        "stray tokens after a SELECT body must produce a parse error"
+    );
+}
+
+#[test]
+fn trailing_content_after_smelt_define_errors() {
+    let input = "smelt.define foo(x) AS (x + 1)\n\nSELECT 1 GARBAGE stray";
+    let parse = parse(input);
+    assert!(
+        !parse.errors.is_empty(),
+        "content trailing the model body after a declaration must produce a parse error, got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn clean_file_has_no_trailing_error() {
+    // A real multi-section model file (frontmatter + comments + query) must
+    // still parse with zero errors — guards against the trailing-content
+    // check over-firing on well-formed input.
+    let path = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/timeseries/models/daily_events.sql");
+    let text = std::fs::read_to_string(&path)
+        .unwrap_or_else(|e| panic!("failed to read {}: {e}", path.display()));
+    let stripped = crate::strip_frontmatter(&text);
+    let parse = parse(&stripped);
+    assert!(
+        parse.errors.is_empty(),
+        "expected zero parse errors for {}: {:?}",
+        path.display(),
+        parse.errors
+    );
+}
+
+// ===== Phase 7: High-value grammar gaps =====
+// TRY_CAST, GROUP BY ALL, ORDER BY ALL, IGNORE/RESPECT NULLS.
+
+#[test]
+fn try_cast_parses() {
+    let input = "SELECT TRY_CAST(a AS INTEGER) FROM t";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+
+    let cast_node = parsed
+        .syntax()
+        .descendants()
+        .find_map(CastExpr::cast)
+        .expect("TRY_CAST should produce a cast-shaped node");
+    assert!(cast_node.is_try_cast(), "should be marked as TRY_CAST");
+    assert!(!cast_node.is_double_colon_cast());
+    assert!(cast_node.expression().is_some(), "should have expression");
+    let type_spec = cast_node.type_spec().expect("should have type spec");
+    assert_eq!(type_spec.type_name().as_deref(), Some("INTEGER"));
+
+    // Plain CAST must NOT be flagged as a TRY_CAST.
+    let plain = parse("SELECT CAST(a AS INTEGER) FROM t");
+    let plain_cast = plain
+        .syntax()
+        .descendants()
+        .find_map(CastExpr::cast)
+        .expect("should have a CastExpr");
+    assert!(!plain_cast.is_try_cast());
+}
+
+#[test]
+fn group_by_all_parses() {
+    let input = "SELECT a, count(*) AS n FROM t GROUP BY ALL";
+    let (_, select) = parse_select(input);
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    assert!(group_by.is_all(), "GROUP BY ALL should be flagged as ALL");
+    // No expression items for the bare ALL form.
+    assert_eq!(group_by.expressions().count(), 0);
+}
+
+#[test]
+fn order_by_all_parses() {
+    let (_, select) = parse_select("SELECT a FROM t ORDER BY ALL");
+    let order_by = select.order_by_clause().expect("should have ORDER BY");
+    assert!(order_by.is_all(), "ORDER BY ALL should be flagged as ALL");
+
+    // ORDER BY ALL DESC round-trips through the printer unchanged.
+    let (_, select_desc) = parse_select("SELECT a FROM t ORDER BY ALL DESC");
+    let order_by_desc = select_desc.order_by_clause().expect("should have ORDER BY");
+    assert!(order_by_desc.is_all());
+    assert!(
+        select_desc
+            .to_string()
+            .to_uppercase()
+            .contains("ORDER BY ALL DESC"),
+        "printed: {}",
+        select_desc
+    );
+}
+
+#[test]
+fn ignore_nulls_in_window_parses() {
+    let input = "SELECT last_value(a IGNORE NULLS) OVER (ORDER BY a) AS x FROM t";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+
+    let call = parsed
+        .syntax()
+        .descendants()
+        .find_map(FunctionCall::cast)
+        .expect("should have a FunctionCall");
+    assert!(
+        call.syntax()
+            .text()
+            .to_string()
+            .to_uppercase()
+            .contains("IGNORE NULLS"),
+        "call should retain IGNORE NULLS: {}",
+        call.syntax().text()
+    );
+
+    // RESPECT NULLS is the complementary form.
+    let respect = parse("SELECT first_value(a RESPECT NULLS) OVER (ORDER BY a) AS x FROM t");
+    assert!(
+        respect.errors.is_empty(),
+        "RESPECT NULLS parse errors: {:?}",
+        respect.errors
+    );
 }
 
 // ===== Phase 1 (data-checks): smelt.check declaration grammar =====

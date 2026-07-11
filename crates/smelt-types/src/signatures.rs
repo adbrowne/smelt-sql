@@ -3934,7 +3934,9 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         "LENGTH",
         vec![],
         vec![concrete(DataType::Text)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+        // BigInt (not Integer) to match the hand-written arm — DuckDB returns
+        // a 64-bit length and the migrated typing path must reproduce it.
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
     insert(Signature::new(
         "SUBSTRING",
@@ -3982,7 +3984,8 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 with_timezone: false,
             }),
         ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer)),
+        // BigInt to match the hand-written arm.
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
     insert(Signature::new(
         "DATE",
@@ -4369,7 +4372,9 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         "SIGN",
         vec![],
         vec![concrete(DataType::Double)],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        // SmallInt to match the hand-written arm (DuckDB `sign` returns a
+        // small signed integer, not a float).
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::SmallInt)),
     ));
     insert(Signature::new(
         "SIN",
@@ -4437,7 +4442,9 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 with_timezone: false,
             }),
         ],
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        // BigInt to match the hand-written arm (the date-part extraction
+        // family — YEAR/MONTH/DAY/… — all return BigInt).
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
     insert(Signature::new(
         "DATE_ADD",
@@ -4488,6 +4495,169 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             }),
         ],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
+    ));
+
+    // ─── Function-registry consolidation: remaining recognised built-ins ─────
+    //
+    // Every name recognised by `SqlFunction::from_name` must resolve here so
+    // the registry is the single authoritative home for recognition,
+    // classification (`kind`), and — for migrated functions — typing. The
+    // consistency gate `every_recognized_function_is_registry_backed`
+    // (smelt-db integration tests) enforces this. Argument shapes here are
+    // deliberately permissive (`Any`-variadic) for functions whose typing
+    // still lives in the hand-written match; migrating a function tightens
+    // both its parameter constraints and its return type to match the legacy
+    // arm exactly.
+    let any_args = || {
+        vec![SigParam::Variadic(Box::new(SigParam::Concrete(
+            TypeConstraint::Any,
+        )))]
+    };
+
+    // Extended statistical / distribution aggregates → Double.
+    for name in [
+        "CORR",
+        "COVAR_POP",
+        "COVAR_SAMP",
+        "REGR_SLOPE",
+        "PERCENTILE_CONT",
+        "PERCENTILE_DISC",
+    ] {
+        insert(
+            Signature::new(
+                name,
+                vec![],
+                any_args(),
+                TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+            )
+            .with_kind(ExprKind::Agg),
+        );
+    }
+    // Boolean aggregate.
+    insert(
+        Signature::new(
+            "EVERY",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    // Text-returning aggregate.
+    insert(
+        Signature::new(
+            "GROUP_CONCAT",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        )
+        .with_kind(ExprKind::Agg),
+    );
+    // First-argument identity aggregates (typing stays in the exception list).
+    for name in ["FIRST", "LAST", "MODE"] {
+        insert(
+            Signature::new(
+                name,
+                vec![tp("T", TypeConstraint::Any)],
+                vec![var("T")],
+                TypeExpr::Var("T".into()),
+            )
+            .with_kind(ExprKind::Agg),
+        );
+    }
+
+    // Extended math / trig scalars → Double.
+    for name in [
+        "ACOS", "ASIN", "POW", "CEILING", "RANDOM", "TRUNC", "TRUNCATE",
+    ] {
+        insert(Signature::new(
+            name,
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Double)),
+        ));
+    }
+    // Extended text scalars → Text.
+    for name in [
+        "INITCAP",
+        "QUOTE_IDENT",
+        "QUOTE_LITERAL",
+        "REVERSE",
+        "TO_CHAR",
+        "TRANSLATE",
+    ] {
+        insert(Signature::new(
+            name,
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        ));
+    }
+    // 1-based string search position → BigInt.
+    insert(Signature::new(
+        "POSITION",
+        vec![],
+        any_args(),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+    ));
+    // Date-part extraction scalars → BigInt.
+    for name in ["DAY", "DAYOFWEEK", "MONTH", "QUARTER", "YEAR"] {
+        insert(Signature::new(
+            name,
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+        ));
+    }
+    // Temporal constructors.
+    insert(Signature::new(
+        "MAKE_TIME",
+        vec![],
+        any_args(),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Time)),
+    ));
+    insert(Signature::new(
+        "MAKE_TIMESTAMPTZ",
+        vec![],
+        any_args(),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Timestamp {
+            with_timezone: true,
+        })),
+    ));
+    // JSON built-ins.
+    for name in [
+        "JSON_OBJECT",
+        "JSON_ARRAY",
+        "TO_JSON",
+        "JSON_EXTRACT",
+        "JSON_EXTRACT_TEXT",
+    ] {
+        insert(Signature::new(
+            name,
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+        ));
+    }
+    insert(Signature::new(
+        "JSON_ARRAY_LENGTH",
+        vec![],
+        any_args(),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
+    ));
+    insert(Signature::new(
+        "JSON_OBJECT_KEYS",
+        vec![],
+        any_args(),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Array(Box::new(
+            DataType::Text,
+        )))),
+    ));
+    insert(Signature::new(
+        "JSON_CONTAINS",
+        vec![],
+        any_args(),
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
     ));
 
     // ─── Phase 50: Operator stubs ────────────────────────────────────────────
@@ -5083,7 +5253,7 @@ mod tests {
         );
         assert_eq!(
             length.return_type,
-            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Integer))
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt))
         );
 
         let abs = BuiltinRegistry::resolve("ABS").expect("ABS present");

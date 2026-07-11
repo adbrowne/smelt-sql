@@ -717,6 +717,16 @@ impl<'a> super::Parser<'a> {
         self.expect(GROUP_KW);
         self.expect(BY_KW);
 
+        // `GROUP BY ALL` (DuckDB) — group by every non-aggregate select item.
+        // The bare `ALL` keyword is kept as a marker token; there are no
+        // grouping-key expressions to parse.
+        self.skip_trivia();
+        if self.at(ALL_KW) {
+            self.advance(); // ALL marker
+            self.finish_node();
+            return;
+        }
+
         // Parse comma-separated column list
         loop {
             self.skip_trivia();
@@ -837,6 +847,30 @@ impl<'a> super::Parser<'a> {
         self.start_node(ORDER_BY_CLAUSE);
         self.expect(ORDER_KW);
         self.expect(BY_KW);
+
+        // `ORDER BY ALL` (DuckDB) — order by every select item, left to right.
+        // The bare `ALL` keyword is a marker; an optional direction and NULLS
+        // ordering may follow (`ORDER BY ALL DESC`, `ORDER BY ALL NULLS LAST`).
+        self.skip_trivia();
+        if self.at(ALL_KW) {
+            self.advance(); // ALL marker
+            self.skip_trivia();
+            if self.at(ASC_KW) || self.at(DESC_KW) {
+                self.advance();
+                self.skip_trivia();
+            }
+            if self.at(NULLS_KW) {
+                self.advance();
+                self.skip_trivia();
+                if self.at(FIRST_KW) || self.at(LAST_KW) {
+                    self.advance();
+                } else {
+                    self.error("Expected FIRST or LAST after NULLS".to_string());
+                }
+            }
+            self.finish_node();
+            return;
+        }
 
         // Comma-separated order items
         loop {

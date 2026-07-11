@@ -1,0 +1,19 @@
+# DuckDB differential parser-gap ratchet baseline
+# Updated: 2026-07-11
+#
+# Format: <metric> <count>
+#
+# `duckdb_seed_gaps` is the number of statements in
+# `crates/smelt-parser-compat/tests/corpus/duckdb_seed.sql` that DuckDB accepts
+# (or that smelt prints to SQL DuckDB rejects) AND that smelt does not yet handle
+# cleanly, so they are recorded in the known-gaps registry
+# (`crates/smelt-parser-compat/src/gaps.rs`, categories `duckdb_fails_to_parse` /
+# `roundtrip_mismatch`).
+#
+# This is a RATCHET, mirroring `.claude/hardening-baseline.txt`:
+#   - The count may only go DOWN as grammar support lands (fewer gaps).
+#   - Raising it requires editing this file with a reviewer-visible justification
+#     and a new registry entry — never a silent skip.
+# The `gap_count_ratchet` test in `tests/duckdb_differential.rs` enforces exact
+# match (a decrease is a "stale baseline" failure prompting you to tighten here).
+duckdb_seed_gaps 8

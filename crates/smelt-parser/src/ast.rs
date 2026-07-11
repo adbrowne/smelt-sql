@@ -2826,6 +2826,16 @@ impl CastExpr {
             .filter_map(|e| e.into_token())
             .any(|t| t.kind() == DOUBLE_COLON)
     }
+
+    /// Check if this is a `TRY_CAST(...)` (DuckDB error-tolerant cast) rather
+    /// than a plain `CAST(...)` / `::` cast. A `TRY_CAST` returns NULL on a
+    /// failed conversion, so its result is always nullable.
+    pub fn is_try_cast(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == TRY_CAST_KW)
+    }
 }
 
 /// EXTRACT expression (EXTRACT(field FROM expr))
@@ -3086,6 +3096,16 @@ impl GroupByClause {
     pub fn expressions(&self) -> impl Iterator<Item = Expr> + '_ {
         self.0.children().filter_map(Expr::cast)
     }
+
+    /// True for the DuckDB `GROUP BY ALL` form — group by every non-aggregate
+    /// select item. In this form there are no explicit grouping-key
+    /// expressions ([`expressions`](Self::expressions) is empty).
+    pub fn is_all(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == ALL_KW)
+    }
 }
 
 /// HAVING clause
@@ -3200,6 +3220,24 @@ impl OrderByClause {
 
     pub fn items(&self) -> impl Iterator<Item = OrderByItem> + '_ {
         self.0.children().filter_map(OrderByItem::cast)
+    }
+
+    /// True for the DuckDB `ORDER BY ALL` form — order by every select item,
+    /// left to right. In this form there are no explicit `OrderByItem`
+    /// children ([`items`](Self::items) is empty); an optional direction /
+    /// NULLS ordering may still follow the `ALL` marker.
+    pub fn is_all(&self) -> bool {
+        // The `ALL` marker is a direct token child of the clause (the ordinary
+        // form wraps each key in an ORDER_BY_ITEM, so a bare ALL_KW token here
+        // unambiguously signals `ORDER BY ALL`).
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .any(|t| t.kind() == ALL_KW)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 }
 

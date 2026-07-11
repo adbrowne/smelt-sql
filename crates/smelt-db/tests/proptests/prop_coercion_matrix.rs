@@ -748,11 +748,18 @@ fn smoke_decimal_mul_decimal() {
     let actual = duckdb.query_types(sql).unwrap();
 
     assert!(matches!(inferred[0].1, DataType::Decimal { .. }));
+    // Strict comparator: smelt's Spark-style Decimal(21,4) differs from DuckDB's
+    // physically-clamped Decimal(18,4), so this is a Mismatch routed through the
+    // named `decimal_arithmetic_model` divergence (same pattern as the other
+    // decimal smoke tests above).
+    let divergences = known_divergences();
     let m = compare_types(&inferred[0].1, &actual[0].1);
-    assert!(
-        matches!(m, TypeMatch::Exact | TypeMatch::Compatible { .. }),
-        "smelt={:?}, duckdb={:?}",
-        inferred[0].1,
-        actual[0].1
-    );
+    if matches!(m, TypeMatch::Mismatch) {
+        assert!(
+            find_divergence(&inferred[0].1, &actual[0].1, "duckdb", &divergences).is_some(),
+            "unregistered decimal mismatch: smelt={:?}, duckdb={:?}",
+            inferred[0].1,
+            actual[0].1
+        );
+    }
 }

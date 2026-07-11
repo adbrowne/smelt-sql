@@ -45,6 +45,128 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // pattern_match_operators gap removed - regex operators now supported (March 2026)
     // string_concat_operator gap removed - || is now supported (January 2026)
     // any_all_some gap removed - ANY/ALL/SOME comparisons now supported (March 2026)
+    // The three gaps below were exposed by fail-loud trailing-content parsing
+    // (July 2026): the parser previously swallowed the unparsed tail of these
+    // constructs silently, so they appeared "supported" while the trailing
+    // clause was dropped. They now fail loudly.
+    KnownGap {
+        id: "grouping_sets",
+        description: "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (CUBE/ROLLUP are)",
+        category: "smelt_fails",
+        dialect: "all",
+        patterns: &[r"(?i)\bGROUPING\s+SETS\s*\("],
+        severity: "medium",
+        planned_fix: true,
+    },
+    KnownGap {
+        id: "at_time_zone",
+        description: "AT TIME ZONE operator is not parsed",
+        category: "smelt_fails",
+        dialect: "all",
+        patterns: &[r"(?i)\bAT\s+TIME\s+ZONE\b"],
+        severity: "medium",
+        planned_fix: true,
+    },
+    KnownGap {
+        id: "for_update",
+        description: "FOR UPDATE / FOR SHARE row-locking clauses are not parsed",
+        category: "smelt_fails",
+        dialect: "pg",
+        patterns: &[
+            r"(?i)\bFOR\s+(NO\s+KEY\s+)?UPDATE\b",
+            r"(?i)\bFOR\s+(KEY\s+)?SHARE\b",
+        ],
+        severity: "low",
+        planned_fix: false,
+    },
+    // ===== DuckDB differential gaps (accept + fidelity directions) =====
+    // These are seeded from the DuckDB execution oracle (`duckdb_oracle.rs`) and
+    // the seed corpus (`tests/corpus/duckdb_seed.sql`). Each entry names a
+    // construct DuckDB accepts but smelt does not yet parse cleanly. As grammar
+    // support lands the entries are removed and the ratchet baseline shrinks.
+    //
+    // Category `duckdb_fails_to_parse`: DuckDB accepts, smelt fails to parse.
+    // Category `roundtrip_mismatch`: smelt parses cleanly but the printed SQL is
+    // rejected/mis-evaluated by DuckDB (the silent-mis-parse class). No seed
+    // statement currently falls in this category — Phase 1/2 fail-loud parsing
+    // converted the former silent mis-parses (`GLOB`, dollar-quoted, `MAP {…}`)
+    // into loud parse failures, so they register as `duckdb_fails_to_parse`.
+    // TRY_CAST, GROUP BY ALL, ORDER BY ALL, and IGNORE/RESPECT NULLS were
+    // formerly registered here; smelt now parses, prints, and (for TRY_CAST)
+    // infers them, so their entries were removed and the ratchet baseline
+    // shrank accordingly.
+    KnownGap {
+        id: "duckdb_trim_modifier",
+        description: "SQL-standard trim(BOTH|LEADING|TRAILING … FROM …) form is not parsed",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\btrim\s*\(\s*(BOTH|LEADING|TRAILING)\b"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_substring_from_for",
+        description: "SQL-standard substring(x FROM i FOR n) form is not parsed",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\bsubstring\s*\([^)]*\bFROM\b"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_position_in",
+        description: "SQL-standard position(sub IN str) form is not parsed",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\bposition\s*\([^)]*\bIN\b"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_dollar_quoted_string",
+        description: "Dollar-quoted string literals ($$…$$) are not lexed",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"\$\$"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_list_comprehension",
+        description: "List comprehensions [expr FOR x IN list] are not parsed",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\bFOR\s+\w+\s+IN\s+\["],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_map_literal",
+        description: "MAP {k: v, …} literals are not parsed",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\bMAP\s*\{"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_glob_operator",
+        description: "GLOB pattern-match operator is not parsed (formerly silently mis-parsed)",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\bGLOB\b"],
+        severity: "medium",
+        planned_fix: false,
+    },
+    KnownGap {
+        id: "duckdb_underscore_digit_separator",
+        description: "Underscore digit separators (1_000_000) are not lexed as one numeric literal",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"\b\d+_\d"],
+        severity: "low",
+        planned_fix: false,
+    },
     KnownGap {
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",
@@ -374,9 +496,14 @@ mod tests {
 
     #[test]
     fn test_gaps_by_category() {
-        // All smelt_fails gaps have been resolved (March 2026)
+        // smelt_fails gaps: fail-loud trailing-content parsing (July 2026)
+        // exposed constructs whose tails were previously swallowed silently
+        // (grouping_sets, at_time_zone, for_update).
         let smelt_gaps = get_gaps_by_category("smelt_fails");
-        assert!(smelt_gaps.is_empty());
+        assert_eq!(smelt_gaps.len(), 3);
+        for gap in smelt_gaps {
+            assert_eq!(gap.category, "smelt_fails");
+        }
 
         // pg_fails gaps still exist (smelt extensions)
         let pg_gaps = get_gaps_by_category("pg_fails");

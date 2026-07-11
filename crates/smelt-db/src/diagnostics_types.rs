@@ -8,6 +8,12 @@ use rowan::TextRange;
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum DiagnosticCode {
     ParseError,
+    /// Top-level content remains after the declarations and the (at most one)
+    /// model body have been parsed — e.g. a second `SELECT`, stray tokens
+    /// after the query, or the tail of a construct the grammar does not
+    /// support. The leftover tokens are wrapped in an `ERROR` node in the
+    /// CST; they are never absorbed silently.
+    TrailingTopLevelContent,
     InvalidModel,
     UndefinedModelRef,
     UndefinedSource,

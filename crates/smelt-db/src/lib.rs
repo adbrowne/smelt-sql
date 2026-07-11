@@ -1115,6 +1115,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
 /// - `"pipe operator '<kw>' is not supported — …"` → `PipeOperatorUnsupported`
 /// - `"unknown pipe operator '<kw>'"` → `PipeUnknownOperator`
 /// - `"malformed '<kw>' pipe stage"` → `PipeStageMalformed`
+/// - `"unexpected content after model body"` → `TrailingTopLevelContent`
 /// - anything else → `ParseError` (unchanged)
 fn remap_pipe_parse_error_code(message: &str) -> DiagnosticCode {
     if message.starts_with("pipe operator '") && message.contains("is not supported") {
@@ -1123,6 +1124,8 @@ fn remap_pipe_parse_error_code(message: &str) -> DiagnosticCode {
         DiagnosticCode::PipeUnknownOperator
     } else if message.starts_with("malformed '") && message.contains("pipe stage") {
         DiagnosticCode::PipeStageMalformed
+    } else if message == "unexpected content after model body" {
+        DiagnosticCode::TrailingTopLevelContent
     } else {
         DiagnosticCode::ParseError
     }

@@ -185,10 +185,27 @@ impl PartitionAlignment {
     }
 }
 
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): the DuckDB `GROUP BY ALL` expansion — every non-aggregate select
+/// item of this one already-classified scope becomes a grouping key, mirroring
+/// DuckDB's own semantics. It reasons only over the caller's already-bounded
+/// `items`, never over raw SQL text, so it is the single source of expansion
+/// truth shared by both the AST path ([`resolve_scope_group_by`]) and the
+/// text-scan path ([`analyze_select`]).
+fn group_by_all_keys(items: &[SelectItemKind]) -> Vec<String> {
+    items
+        .iter()
+        .filter(|item| matches!(item, SelectItemKind::GroupByKey { .. }))
+        .map(|item| item_expr(item).text().trim().to_string())
+        .collect()
+}
+
 /// Resolve `select`'s own `GROUP BY` expressions against **its own**
 /// select-list `items` — ordinal references (`GROUP BY 1, 2`) resolve to
-/// this scope's projections, not an outer query's. Returns an empty `Vec`
-/// when the scope has no `GROUP BY` clause.
+/// this scope's projections, not an outer query's. `GROUP BY ALL` expands to
+/// the scope's non-aggregate select items (DuckDB semantics). Returns an empty
+/// `Vec` when the scope has no `GROUP BY` clause (or a `GROUP BY ALL` over an
+/// aggregates-only projection — single-group semantics).
 pub fn resolve_scope_group_by(
     select: &smelt_parser::SelectStmt,
     items: &[SelectItemKind],
@@ -196,6 +213,14 @@ pub fn resolve_scope_group_by(
     let Some(group_by) = select.group_by_clause() else {
         return Vec::new();
     };
+    // DuckDB `GROUP BY ALL`: the clause carries no explicit key expressions —
+    // it groups by every non-aggregate select item. Expand to those items'
+    // expression text so the walk sees the real grouping keys (never a phantom
+    // `ALL` key). An aggregates-only projection yields an empty key set, i.e.
+    // single-group semantics, identical to a plain aggregate without GROUP BY.
+    if group_by.is_all() {
+        return group_by_all_keys(items);
+    }
     group_by
         .expressions()
         .map(|expr| {
@@ -396,8 +421,16 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
         }
     });
 
-    // Extract GROUP BY expressions from raw text, resolving ordinals
-    let group_by_exprs = extract_group_by_from_text(stripped, &select_item_exprs);
+    // Extract GROUP BY expressions. `GROUP BY ALL` (DuckDB) carries no explicit
+    // key expressions — expand it to the non-aggregate select items via the
+    // shared leaf classifier so it is analyzed identically to its explicit
+    // twin, never as a phantom `["ALL"]` key. The `is_all()` check reads the
+    // parsed clause marker, not a raw-text scan.
+    let group_by_exprs = if select.group_by_clause().is_some_and(|gb| gb.is_all()) {
+        group_by_all_keys(&items)
+    } else {
+        extract_group_by_from_text(stripped, &select_item_exprs)
+    };
 
     // Check for smelt:cube_split annotation in comments
     let has_cube_split_annotation = check_cube_split_annotation(stripped);

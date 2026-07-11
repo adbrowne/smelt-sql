@@ -22,6 +22,7 @@
 //! cargo test -p smelt-parser-compat type_checking -- --ignored
 //! ```
 
+pub mod duckdb_oracle;
 pub mod gaps;
 pub mod generators;
 pub mod normalize;
