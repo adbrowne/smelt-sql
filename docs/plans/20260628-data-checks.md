@@ -65,8 +65,8 @@ The materialization-three-axes work left two follow-ups in `testing.md`. First, 
 | 1     | done     | 204b0f31 | 2026-06-28 |
 | 2     | done     | 46f6358d | 2026-06-28 |
 | 3     | done     | df18c355 | 2026-06-28 |
-| 4     | done     |        | 2026-06-28 |
-| 5     | pending  |        |      |
+| 4     | done     | bba20794 | 2026-06-28 |
+| 5     | done     | (this commit) | 2026-07-11 |
 
 ---
 
@@ -253,6 +253,7 @@ The materialization-three-axes work left two follow-ups in `testing.md`. First, 
 - **Phase 3 — `CheckTargetNotBuilt` skip-list is narrower than the graph dep-exclusion list.** The `smelt check` pre-check (`commands/check.rs`) skips only `sources`/`functions` refs before calling `backend.table_exists`, whereas `DependencyGraph::build` also excludes `seeds`, `config`, and the `models.with_tag`/`models.all` meta-accessors. A check body that directly references `smelt.seeds.*`, `smelt.config.var(...)`, or `smelt.models.*` could surface a spurious `CheckTargetNotBuilt`. Not triggered by any current fixture; align the skip-list with `graph.rs` in a follow-up.
 - **Phase 3 — single `smelt.check` per file.** The `smelt check` loop processes only the first check declaration in a file (`AstFile::checks().next()`), unlike the `smelt.test` runner which loops over all. The spec does not address multi-check files; if supported later, loop over all `checks()`.
 - **Phase 4 — a check guarding multiple models runs before all of them are built.** During `smelt build`, `checks_by_model` keys a check under every model it references, so a check reading `smelt.a` and `smelt.b` (build order A→B) runs after A materialises while B is still unbuilt → a spurious `CheckTargetNotBuilt`/skip. All current spec examples and fixtures use single-model checks. Fix later by running a check only once all its referenced models are built (e.g. register it under the last of its refs in topological order, or gate on all-refs-built).
+- **Phase 5 — `NonStandaloneTestModel` detection covers only `smelt.config.var`.** The pre-inline detector (`contains_non_standalone_construct`) matches the one in-body non-standalone construct that exists today; incremental/watermark-ness lives in frontmatter, which is stripped before inlining, so there is no in-body marker for it. Any other standalone-compile failure of the composed query still fails loud, but as a generic `TestCompilationError` anchored at the test body's start rather than at a specific upstream ref (attribution to one ref is not possible post-composition). Extend the detector as new in-body constructs are introduced. Relatedly, `TestCompilationError` and `TestInliningDepthExceeded` are rendered in `error[CODE]:` form but are not in the `diagnostics.md` catalogue (pre-existing pattern, same as `UnknownTestInput`); catalogue them in a follow-up if the registry is meant to be exhaustive.
 
 ## Verification
 

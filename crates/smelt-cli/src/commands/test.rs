@@ -10,6 +10,36 @@ use tracing::{debug, warn};
 use crate::helpers::{print_property_test_result, print_test_result};
 use crate::TestArgs;
 
+/// Format a `TestInliningError` as an anchored diagnostic string for terminal
+/// output, e.g.:
+/// ```text
+/// /path/to/tests/test_ambiguous.sql:2:25: error[AmbiguousTestModel]: ...
+/// ```
+///
+/// Computes the file-level byte offset of the offending ref by adding
+/// `body_select_file_start` (the offset of the body SELECT within the file)
+/// to the ref's body-relative offset from `e.body_ref_range.0`, then
+/// converts to `(line, col)` via `LineIndex`.
+#[cfg(feature = "duckdb")]
+fn format_inlining_diagnostic(
+    e: &smelt_cli::test_compiler::TestInliningError,
+    test_model: &smelt_cli::ModelFile,
+    body_select_file_start: usize,
+) -> String {
+    use line_index::{LineIndex, TextSize};
+    let file_offset = body_select_file_start + e.body_ref_range.0;
+    let line_index = LineIndex::new(&test_model.content);
+    let lc = line_index.line_col(TextSize::from(file_offset as u32));
+    format!(
+        "{}:{}:{}: error[{}]: {}",
+        test_model.path.display(),
+        lc.line + 1,
+        lc.col + 1,
+        e.code,
+        e.message
+    )
+}
+
 #[cfg(feature = "duckdb")]
 pub async fn run_tests(args: TestArgs) -> Result<()> {
     use smelt_cli::test_compiler::{
@@ -244,9 +274,13 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                             .and_then(|t| t.cases)
                             .unwrap_or(10);
 
-                        // Get the body SELECT text.
-                        let body_select = match smelt_test.body_select() {
-                            Some(s) => s.syntax().text().to_string(),
+                        // Get the body SELECT text and its start offset within the
+                        // file (for anchoring inlining diagnostics to file:line:col).
+                        let (body_select, body_select_file_start) = match smelt_test.body_select() {
+                            Some(s) => {
+                                let file_start: usize = s.syntax().text_range().start().into();
+                                (s.syntax().text().to_string(), file_start)
+                            }
                             None => {
                                 let result = smelt_cli::test_runner::TestResult {
                                     name: test_name.clone(),
@@ -434,6 +468,11 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                                 results.push(result);
                             }
                             Err(e) => {
+                                let anchored_msg = format_inlining_diagnostic(
+                                    &e,
+                                    test_model,
+                                    body_select_file_start,
+                                );
                                 let result = smelt_cli::test_runner::TestResult {
                                     name: test_name.clone(),
                                     model: test_model.name.clone(),
@@ -441,7 +480,10 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
                                     passed: false,
                                     duration: std::time::Duration::from_secs(0),
                                     compiled_sql: String::new(),
-                                    error: Some(TestError::CompilationError(e)),
+                                    error: Some(TestError::InliningDiagnostic {
+                                        code: e.code,
+                                        message: anchored_msg,
+                                    }),
                                 };
                                 failed += 1;
                                 if !args.json {
