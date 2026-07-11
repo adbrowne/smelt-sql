@@ -1,19 +1,32 @@
 ---
 feature: maintenance_plan
 status: experimental
-last_reviewed: 2026-07-07
+last_reviewed: 2026-07-10
 owners: [andrew]
 ---
 
 # The Maintenance Plan
 
-> **What this is.** A normative spec for the **maintenance plan**: the derived, per-model object that says how each part of a model's output is kept current under each kind of change — a matrix indexed by `(output-column-group × trigger)` whose cells choose maintenance techniques — and the **graph layer** built on it: given what landed upstream, which partitions of which downstream models must run (forward propagation), and given a requested output period, which upstream slices must exist (backward resolution). Out of scope: the equivalence invariant, the algebraic ladder, the horizon, and validator-not-chooser (`model_maintenance.md` — this spec *consumes* that contract); the properties a model's SQL can be proven to have (`model_properties.md`); the physical transform mechanisms themselves (`model_transforms.md`); the `refresh:` axis and declaration law (`models.md`); source world-fact declarations (`sources.md`); per-mode surface (`batched_models.md`, `keyed_models.md`, `versioned_models.md`).
+> **What this is.** A normative spec for **model maintenance**: the contract every maintained (non-`full`) model upholds — the equivalence invariant, the algebraic ladder, the windowed-scan/horizon contract, validator-not-chooser, and the composition contract the shape-profile specs build on — and the **maintenance plan**: the derived, per-model object that says how each part of a model's output is kept current under each kind of change — a matrix indexed by `(output-column-group × trigger)` whose cells choose maintenance techniques — and the **graph layer** built on it: given what landed upstream, which partitions of which downstream models must run (forward propagation), and given a requested output period, which upstream slices must exist (backward resolution). Out of scope: the properties a model's SQL can be proven to have (`model_properties.md`); the physical transform mechanisms themselves (`model_transforms.md`); the `refresh:` axis, the declaration law, and the litmus rule (`models.md`); source world-fact declarations (`sources.md`); per-profile surface (`batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`); backend capability flags (`multi_backend.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
 > **Timeless-oracle rule.** This spec describes the feature as if it has always existed. Implementation status lives in §Known Divergences (behaviour + plan link) or §References → Plans (history).
 
 ## Surface
+
+### The composition contract
+
+This section is **system surface**: its callers are the shape-profile specs (`batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`) and the planner/analysis layer, not the modeller directly.
+
+A maintained model is a **composition** of three kinds of thing:
+
+- **Properties** — what a model's SQL can be proven (or declared) to be: the monotonicity trace, the algebraic discriminants, partition alignment, and the rest (`model_properties.md`).
+- **Transforms** — the physical mechanisms a property licenses: keyed `merge_into`, source-filter pushdown, partition DELETE+INSERT, and the rest (`model_transforms.md`).
+- **Output shape** — declared via `grain:` (`models.md` §"Refresh axis"): partition-addressed (a complete table with a `partition_column`) or key-addressed (one row per key; optionally time-partitioned under key temporal locality — `keyed_models.md`).
+- **Scope maps** — the per-input dispatch: for each input of a model, the derived mapping from that input's delta to the affected output addresses and the transform that runs for it. The driving source's delta engages the windowed fold; a mutable dimension's delta engages the delta-driven probe + dimension-driven horizon-bounded MERGE; a self-edge engages ordered execution; a model-definition diff engages the targeted column backfill (all `model_transforms.md`). Which map applies follows from input-delta discovery (`model_properties.md`) and the input's declared world-facts (`sources.md`); a run is the union of its inputs' scope maps — "what runs when *this* input changes" is a first-class, per-input answer, surfaced by `smelt explain`.
+
+Every shape-profile spec must present a **composition table** stating, for that profile: the properties it requires, the world-facts it consumes, the transforms it drives — differentiated per input class where they differ (the profile's scope maps) — and its output shape. A profile spec's normative content is exactly (a) that composition table, referencing shared capabilities **by name**, plus (b) the profile's own **local** machinery, defined in full. It must not re-specify a capability that a capability spec owns.
 
 ### The plan (derived, reported)
 
@@ -42,6 +55,23 @@ Four trigger classes index the plan's columns:
 - **mutation** — a post-creation delta in a source some column group is mutation-sensitive to;
 - **definition change** — the model gained output fields while sources stood still;
 - **backfill** — an explicit region recompute from replayable input.
+
+### Upstream model edges
+
+A maintained model's ref to **another maintained model in the same project** is a plan edge of
+the same standing as a `sources.*` ref. The upstream model's own `timeseries:` declaration —
+already validated by that model's plan — supplies the event-time clock the downstream
+creation-trigger cell is clamped by, and scan bounds compose through the chain exactly as the
+propagation graph composes them (§"The graph layer"). Deriving the cell requires nothing the
+plan does not already hold: the upstream's clock column, granularity, and the downstream's scan
+reach over that ref. An upstream-model ref whose clock cannot be derived (the upstream declares
+no `timeseries:` and none is inferable) is a **recorded refusal** on that cell
+(`MaintenanceReachNotDerivable`, naming the edge) — never a silent drop. A ref to a `full`-mode
+or view upstream derives no creation cell (there is no incremental delta to receive); it
+participates in mutation/backfill triggers only.
+
+For forward propagation, `--source <address>` accepts either a declared source or an upstream
+maintained model; a model's landed delta is the output window a completed run wrote for it.
 
 ### Frontmatter
 
@@ -74,8 +104,15 @@ maintenance:
 ### CLI
 
 - `smelt explain <model>` — prints the plan (cells, clamps, locality, guarantee ledger, edges).
-- `smelt run --since-upstream` — forward propagation: compute per-source deltas from the recorded
-  state, run exactly the propagated per-edge regions with their trigger cells. Opt-in; the
+  With `--show-sql`, additionally prints each cell's emitted maintenance statements — the same
+  emitters' output a run executes (§"Statement emission (single owner)"; flag surface in
+  `cli.md` §"`smelt explain <model>` maintenance-plan report").
+- `smelt run --since-upstream --source <address> --landed <start>..<end>` (`--source`/`--landed`
+  repeatable, one pair per source) — forward propagation: the runner (or an external poller)
+  declares what landed for each source since it last propagated; the graph reflects those
+  declared per-source deltas through the edges and runs exactly the propagated per-edge regions
+  with their trigger cells. No per-invocation delta is computed automatically — a source named
+  without a matching `--landed` delta propagates nothing for that invocation. Opt-in; the
   intended default posture once trusted. Prints the dirty set before acting.
 - `smelt build <model> --period <start>..<end> --include-upstreams` — backward resolution: print
   the per-ancestor required slices and build order; optionally execute the bounded build.
@@ -97,6 +134,60 @@ maintenance:
 
 ## Semantics
 
+### The equivalence invariant
+
+This is the parent contract of the whole family. Every maintained (non-`full`) model upholds **one** invariant, stated over an abstract **processed-input set**: **an incremental run produces the result a full refresh would, restricted to the inputs it has processed so far.** Formally, for the processed input set `S`, `incremental_state(S) == full_refresh(source | input ∈ S)`. `S` is a set of *source rows/partitions the run has scanned*, not necessarily a clock-addressed partition set — the **partition-set form** (`source | partition_col ∈ S`, the form used throughout the rest of this spec and the profile specs) is the **clocked specialisation** of this invariant, available whenever the driving source carries a `timeseries:` clock; an unclocked (snapshot) source has no partition set to slice by, and its specialisation is stated per shape profile (e.g. `keyed_models.md` §"End-state equivalence" states it over "keys present in the current snapshot").
+
+**Order/set-determinacy is a corollary, and it holds for every shape profile — the partition grain included.** The right-hand side depends only on the *set* `S`, never the order it was processed, so any conforming profile is order-independent. This is not special to the key-addressed shapes: a partition-grain model's partitions are disjoint, so its combiner is disjoint union (a commutative monoid) and the property is trivial — but it is present.
+
+The shape profiles differ not in *which* equivalence they satisfy but in **how the output is addressed for update** — the axis that actually drives the physical transform and the identity requirement:
+
+- **Partition-addressed** (identity-free — `grain: partition`): output is addressed by `partition_column`; a source partition maps to an output partition rewritten wholesale (DELETE+INSERT), no row identity needed. Here equivalence is additionally checkable slice-by-slice — *per-partition equivalence* — a **strengthening** of the one invariant, available because each output slice depends only on its own source partition (partition-local).
+- **Key-addressed** (identity-requiring — `grain: key`, `versioning: interval`, `refresh: materialized_view`): output is addressed by a key; each processed input contributes a delta merged into the keyed state (`merge_into`). The write reaches stored rows **by key, wherever they live** — it is *not* bounded by the incoming data's time window. The interval-versioned profile (SCD2, `versioning: interval`) is the sharp case: admitting a new value for a key requires closing the previously-open version, a row whose timestamp lies arbitrarily far outside the current input window — which is exactly why a key-addressed output cannot be maintained as a per-partition rewrite. Equivalence is checked on the end-state.
+
+Key-addressing admits a **derived refinement**: a key-addressed output that also carries a `timeseries:` partition column, admitted when **key temporal locality** is established — every stored row a run's deltas can touch provably lies within a derived slice of the output's time axis (`keyed_models.md` §"Key temporal locality"). The write is still a keyed `merge_into`; locality licenses pruning the merge's *target scan* to the slice, and makes **per-slice equivalence** — the keyed analogue of per-partition equivalence — available as the same kind of strengthening. SCD2's close-out is why this is a per-model *established fact*, not a key-grain default: some key-addressed writes intrinsically escape every time window.
+
+So per-partition equivalence is not a peer of some separate "end-state equivalence" — it is a strengthening of the single invariant that partition-addressed, partition-local output enjoys. The key-addressed shapes discharge the *same* invariant on their end-state because their writes are keyed rather than partition-local. Every property is proven in service of this invariant; every transform is licensed **because it preserves it**. For the smelt-driven shapes the invariant is discharged by the generative equivalence oracle (§References), the family's regression net; for `materialized_view` it is discharged by the **engine's** native IVM, not the smelt oracle (smelt runs no combiner for that shape — §"Validator, not chooser").
+
+**The replayability split.** Full equivalence — an executable `full_refresh` oracle a test can actually run — holds only for **replayable inputs**: a set `S` the model can re-evaluate its own SQL over (a clocked source's processed partitions; a snapshot's keys currently present). v1 admits **only** combinations whose oracle is executable this way (this is exactly what `keyed_models.md` §"Admission matrix" enforces per column). The designed-but-unshipped **third column** for the combinations that are not admitted — a non-replayable input under a partitioned output, or a fold family that would need to have observed history it cannot replay — is an **observer / prefix-consistency contract**: a different, weaker equivalence (a property of the *observation sequence*, not a re-runnable full refresh) that a future opt-in could state and admit explicitly, rather than being smuggled in under the executable-oracle invariant this spec states. It is not specified here; each shape profile's Known Divergences records where it would apply.
+
+**Two named carve-outs.** Every admitted keyed model's executable oracle carries exactly two carve-outs, both **named consequences of the executable-oracle requirement, not gaps in it**:
+
+- **Retained departed keys** under an unclocked (snapshot-reconcile) posture: a key present in the stored state but absent from the current snapshot is retained, not deleted, so the stored table is *the oracle's rows plus retained departed keys* — a documented divergence from a hypothetical delete-on-absence oracle (`keyed_models.md` §"The two run shapes", §"End-state equivalence").
+- **Ordering-key ties** on an order-monotone overwrite column (`MAX_BY`/`MIN_BY`): equivalence holds up to ties on the ordering expression, because the classifier cannot statically prove ordering-key uniqueness (`keyed_models.md` §"Ordering ties").
+
+The interval-versioned profile's oracle is its end-state equivalence in the **interval-keyed specialisation** — the user-visible set of `(key, version, validity interval)` rows equals what a full rebuild would compute from the same processed snapshots, independent of merge order (`versioned_models.md` §Semantics).
+
+### The algebraic maintenance ladder
+
+What a key-addressed model can maintain is fixed by the **algebra of its combiners**, not by any backend feature. The ladder is a partial order whose ordering criterion **is** invertibility → maintainability — which is why it lives here (with the invariant) and not in `model_properties.md`: the *discriminants* it reads (is-monoid, needs-inverse, decomposable, value-vs-order-monotone) are raw properties of the SQL and are owned by `model_properties.md`; the ladder — the ordering *and* the maintainable-vs-delegated cutoff — is the maintenance consequence and is owned here. The equivalence invariant holds unconditionally on every rung; only the state representation and its size change across rungs, never the fidelity of the user value.
+
+1. **Direct monoid.** The stored column *is* the answer; the combiner is a commutative monoid (associative, commutative, identity = empty partition): `SUM`/`COUNT` (`+`, 0), `MIN`/`MAX` (±∞), `BOOL_*`, `BIT_*`.
+2. **Decomposed monoid.** The user value is `π(state)` for a richer monoid element and a pure presentation map `π`: `AVG` = `(sum, count)` presented `sum/count`; variance = a Welford triple; approximate distinct = an HLL register vector. Kept in a state table, exposed through a presentation view.
+3. **Group.** When inputs can change (corrections, reprocessing, deletes) the combiner must be **invertible** — a commutative group (`SUM`, `COUNT`, `BIT_XOR`). Monoids that are not groups (`MIN`/`MAX`/`BOOL_*`/`BIT_AND`/`BIT_OR`) cannot un-see a contribution and so cannot be reprocessed without a full refresh.
+4. **Opt-in bounded-domain multiset.** Holistic aggregates needing all rows (exact `MEDIAN`/`PERCENTILE`/`MODE`/quantiles, exact `COUNT(DISTINCT)`, and `DISTINCT`-modified aggregates) are maintained by storing the per-key value→count multiset (a bounded-domain Z-set). Its **signed** (Z-set) form makes retraction free even for the otherwise-irreversible `MIN`/`MAX` — the multiset carries the underlying values a bare monoid discards. **Opt-in and fail-loud**: state is `O(active domain)`, so an unbounded-state aggregate is default-refused (suggesting the approximate form or `refresh: full`) unless the modeller supplies a bounded-domain budget, and the runtime caps the multiset with a full-refresh fallback.
+
+The ladder is the boundary: rungs 1–4 are what smelt maintains itself (a `merge_into` loop, optionally with a presentation view). Beyond it — general-operator retraction over joins, unbounded non-additive state — is **not** smelt-driven-maintainable and is delegated to the engine's native incremental-view maintenance via `refresh: materialized_view`.
+
+### Windowed maintenance and the horizon
+
+Maintenance runs over a **bounded input window by default** — a full scan is the degenerate fallback, not the baseline. A run reasons about two windows, always with `scan ⊇ write`:
+
+- the **write window** — the partitions or keys written this run;
+- the **scan window** — the input rows read to produce that write window correctly.
+
+The scan window is bounded **where the model carries a `timeseries:` clock**: input-delta discovery is window-forward, so only the new window (plus a lookback) is read and stored state stands in for history. Without a clock the source can only be snapshot-diffed, so the scan degrades to a full read (`models.md` §"Input-consumption axis"). This is orthogonal to output addressing: a clocked *key-addressed* model still windows its **scan** even though its **write** reaches back by key outside that window (the SCD2 close-out above). Bounding the scan never weakens the invariant — the engine evaluates the model, joins included, over the widened scan window and the write is **clamped** to the exact write window (`model_transforms.md`, "widened scan + exact clamp"), leaving join optimisation to the engine rather than smelt hand-computing a minimal delta.
+
+The **horizon**, as a **write-eligibility clamp** (a bound on which keys/partitions a run may *write to*), is a concept that applies only to the **partition grain**: the far edge of the maintained window, the point past which inputs are no longer folded in. It is **derived**, never trusted from a declaration: the clamp bounds are computed from the model's own reach (its lookback, window frames, and join contribution — `model_properties.md`), because a declared horizon smaller than the true reach would make the clamp drop rows that should have been rewritten. A modeller **may** declare a horizon *ceiling* (frontmatter key `horizon_ceiling:`, e.g. `horizon_ceiling: '30 days'`) — smelt warns at compile time when the derived horizon would exceed it — but the clamp always uses the derived value.
+
+Because the horizon is *derived*, the clamp is the model's own SQL: a genuinely late arrival — one that lands after its natural partition has passed the horizon — is **silently excluded** from the maintenance run, not diagnosed. smelt cannot fail loud on a row it never scans; the invariant's "inputs processed so far" is exactly the scan window bounded by the derived horizon, and rows outside it are outside "so far" by construction. **Surfacing lateness is therefore a model-author concern, not a maintenance guarantee.** The available pattern is to fold the late row into the current partition — re-stamping its partition time — carrying a lateness/validity flag so its *data still flows*, and let a data-quality check raise on the flagged rows while valid data passes through. The maintenance layer clamps; it does not police lateness.
+
+**The key grain has no write-eligibility clamp.** Unlike the partition grain, a `grain: key` run merges **every** delta row it scans, into whatever key it names, however old that key is — there is no bound on which keys a run may touch (`keyed_models.md` §"No write-eligibility clamp"). A **derived forward reach** is still computed and reported (via `smelt explain`) for observability, but it never gates admission and never bounds a write. This is a deliberate difference from the partition-grain horizon above, not an oversight: the keyed write is proportional to delta size regardless of how far back the touched keys live, so a write clamp buys nothing for correctness and would silently drop scanned inputs — the one thing the equivalence invariant forbids. What a keyed clamp would buy (settled-key GC, a bounded working set) is deferred optimisation that, if ever introduced, must ship together with late-fact accounting (`docs/research/20260705-keyed-collapse-application.md` D6). The narrow principle beneath both stances: **only proofs prune; a declared bound is admitted only checked (fail-loud on violation); no unproven bound ever refuses a write.** Target-scan slice pruning under established key temporal locality (`keyed_models.md` §"Key temporal locality") conforms — the derived routes prune by proof, the declared key-recurrence route prunes only under a transactional runtime check, and every scanned delta row still merges. Two `model_transforms.md`-catalogued transforms read a **derived** (never declared) forward reach without being write clamps: the dimension-driven horizon-bounded MERGE (a *scan/recompute* bound on the enrichment recompute, not the write) and the horizon settled-delay/tail-rewrite mechanism, which remains partition-grain forward-reach machinery.
+
+### Validator, not chooser
+
+The machinery **validates** the declared `refresh:`/`grain:` shape against the derived properties and rejects (fail-loud) when the SQL cannot uphold the shape's contract. It **never chooses or silently switches** the shape. A full refresh is the honest fallback surfaced as a diagnostic, never an automatic downgrade. (Per-cell technique choice among proven-interchangeable techniques — §"Per-cell admission" — operates strictly inside this rule: it may change freshness, never observable bits at a fixed processed-input set.)
+
 ### The plan matrix
 
 The plan factors the output columns into **column groups** by shared mutation-sensitivity
@@ -114,9 +205,15 @@ region's full upstream input) × **write scope** (targeted addresses vs region o
 | **read: full-input** | column-scoped re-derivation | recompute-a-region |
 
 Recompute-a-region is contract-agnostic and unconditionally valid over replayable input; the
-fold corner is contract-specific (it needs a combiner algebra — the ladder,
-`model_maintenance.md`). Where the interchangeability conditions below hold, a recompute of a
+fold corner is contract-specific (it needs a combiner algebra — §"The algebraic maintenance
+ladder"). Where the interchangeability conditions below hold, a recompute of a
 region **supersedes** and resets what folds had written there.
+
+"Unconditionally valid" is a correctness claim, not an admission or cost claim — it holds even in
+the degenerate case where no partition bound exists and the region is the whole table (a
+whole-table recompute is exactly a region taken to its limit). Whether that degenerate recompute
+is *admitted* into the plan at all is a separate question, gated by the partition-locality
+guardrail: see **"Partition-local maintenance (the K8 guardrail)"** below.
 
 ### Per-cell admission
 
@@ -145,7 +242,7 @@ an unrecognised construct refuses, never defaults). The obligations, each with i
 
 **Interchangeability and choice.** Two techniques may serve one cell interchangeably iff, at a
 fixed processed-input set `S`, they produce identical state on the columns that decide which rows
-exist (the `S`-indexed refinement of `model_maintenance.md`'s invariant; `S` is a **per-input
+exist (the `S`-indexed refinement of §"The equivalence invariant"; `S` is a **per-input
 vector** once the plan factors). For faithful idempotent columns the choice is bit-preserving;
 for additive columns it is state-preserving **modulo the ledger**, whose real obligation is
 *never fold a delta already reflected in the state* — fold-then-recompute is safe (the recompute
@@ -165,6 +262,30 @@ layer cannot prune by). Under the default `scan_bounds` (`require: partition_loc
 `on_violation: error`), a non-local cell refuses (`MaintenanceScanUnbounded`) unless the source
 carries `allow_full_scan: true`; `max_lookback` additionally refuses a derived span wider than the
 operator's stated expectation. The guardrail never modifies a clamp.
+
+### Statement emission (single owner)
+
+The physical statements a run executes for a cell — the region `DELETE`+`INSERT` pair, the keyed
+fold `MERGE`, the column-scoped `MERGE`, the in-place `UPDATE`, the first-run `CREATE TABLE … AS`
+— are produced by pure emitter functions in the maintenance layer (`smelt-logical`): the plan's
+statement-level counterpart of "one derivation, many consumers". An emitter is a pure function
+from plain data — target table, region literals, key columns, combiner-rendered set expressions,
+the compiled/clamped SELECT body, a dialect tag — to an ordered statement group plus its
+transactional requirement (a paired `DELETE`+`INSERT` is one transaction: a failed `INSERT` must
+roll back its `DELETE`). Backends *execute* emitted statements (connections, transactions,
+blocking dispatch) and never author maintenance-statement text of their own; dialect differences
+(e.g. a `MERGE … UPDATE SET *` requiring a full-row source projection versus an explicit
+column-list `SET`) live in the emitters as dialect-keyed variants, not in backend string
+construction.
+
+Two deliberate exclusions: the reconciliation ledger's DDL/DML (§"The reconciliation ledger") is
+state bookkeeping owned per dialect by `smelt-state` — it is *interleaved* transactionally with
+an emitted fold statement but is not itself a maintenance statement; and non-maintenance SQL
+(introspection, seed loading, schema-evolution DDL) is outside this rule.
+
+Single ownership is what makes maintenance SQL *observable*: the same emitters serve execution,
+the conformance equivalence gates, and `smelt explain <model> --show-sql`, so printed SQL cannot
+drift from executed SQL.
 
 ### The definition-change trigger
 
@@ -248,11 +369,19 @@ wrong-and-quiet).
 
 ### Interactions
 
-- The equivalence invariant, ladder, horizon, and validator-not-chooser are owned by
-  `model_maintenance.md`; this spec's per-cell theorem is the `S`-vector refinement of that
-  invariant, and per-cell choice operates strictly inside its validator-not-chooser rule.
+- The equivalence invariant, ladder, horizon, and validator-not-chooser are owned above
+  (§Semantics); the plan's per-cell theorem is the `S`-vector refinement of the invariant, and
+  per-cell choice operates strictly inside the validator-not-chooser rule.
 - Output shape/grain declaration and the refresh trichotomy are owned by `models.md`; the plan
-  validates against them.
+  validates against them. The **declaration law and litmus rule** (`models.md` §Design) — whether
+  a fact is declared, derived, or implied, and whether a proposed combination earns a new peer
+  shape — are likewise owned there; this spec consumes them.
+- **Input-consumption** (`models.md` §"Input-consumption axis"): which input rows are new is a
+  derived, cross-cutting axis (mutation-profile world-fact → input-delta-discovery proof in
+  `model_properties.md` → re-scan/probe transform in `model_transforms.md`). Moving along it never
+  changes the equivalence contract, only what is scanned. The **default** is windowed (clocked
+  source → window-forward); full scan is the fallback for a clockless snapshot source — see
+  §"Windowed maintenance and the horizon".
 - Source postures (`mutation_profile`, lateness, retention, delta identity, unique keys) are
   declared in `sources.md` and consumed by admission; their runtime tripwires live there.
 - The technique primitives (`merge_into`, DELETE+INSERT, column-scoped merge, targeted backfill)
@@ -300,21 +429,117 @@ contract-preserving at fixed `S`, smelt may measure alternative physical plans o
 offline and pin the cheapest (`smelt bakeoff`) — a capability per-query optimisers structurally
 lack (01 §11).
 
+**One invariant, not two; addressing is the real axis.** An earlier cut split the contract into
+"per-partition equivalence" (partition grain) and "end-state equivalence" (key grain), one per
+output shape. That split was miscast: order/set-determinacy falls out of the single invariant for
+*every* shape (the partition grain included), and per-partition equivalence is a *strengthening*
+of that one invariant, not a peer of it. What actually distinguishes the shapes — and drives the
+physical transform — is how the output is **addressed for update**: partition-addressed
+(identity-free, whole-partition rewrite) versus key-addressed (identity-requiring `merge_into`,
+writes reaching stored rows by key outside the input window). SCD2 is the proof that this is an
+*addressing* distinction, not a source-clock one: its close-out write escapes the input
+time-window intrinsically, so it can never be a per-partition rewrite regardless of whether its
+source is clocked.
+
+**Addressing stays binary; locality is a refinement, not a third pole.** Partition-addressed vs
+key-addressed remains the load-bearing distinction (identity-free rewrite vs identity-requiring
+merge). Key temporal locality does not change how output is addressed — the write is still a
+keyed `merge_into` — it adds a proof about *where* addressed rows can live, licensing target
+pruning, a time-partitioned keyed output, and per-slice equivalence. Promoting it to a third axis
+pole was rejected: it would suggest a different write primitive and identity requirement where
+there is none, and it would misplace a per-model derived/declared fact as a shape property
+(`docs/research/20260705-keyed-time-superset.md`).
+
+**Scope maps name the per-input dispatch.** Without the name, the run shape reads as a property
+of the *model*, hiding that different inputs changing engage different targeted recomputes (a
+fact delta folds forward; a dimension delta probes and horizon-merges; a definition diff
+backfills columns; a self-edge forces ordering). Naming the dispatch makes "what runs when this
+input changes" an explainable, per-input answer, and gives the per-input world-fact verdicts and
+any future multi-clock driving-source work a stable home
+(`docs/research/20260705-keyed-time-superset.md` §5).
+
+**Windowed by default; full scan is the fallback.** Treating full-table recomputation as the
+baseline and windowing as a per-shape optimisation inverts the real economics: a clocked model
+can always be maintained over a bounded scan window, and only the absence of a clock forces a
+wider read. Making windowing the default and full scan the *surfaced* fallback keeps the common
+case scalable and pushes join optimisation to the engine over a safe widened scan, rather than
+smelt hand-computing minimal deltas. Output addressing (partition vs key) is orthogonal to scan
+windowing: a key-addressed model windows its scan yet writes back by key.
+
+**The horizon is derived, not declared.** Trusting a declared horizon risks an under-estimate
+that silently corrupts the clamp — dropping rows still within the model's reach. Deriving it from
+the model's reach keeps clamps correct by construction; a declaration is admitted only as a
+*ceiling* that warns when the derived value would exceed it. Because the derived clamp *is* the
+model's SQL, a late arrival beyond the horizon is silently excluded rather than diagnosed —
+surfacing lateness is a model-author + data-quality-check concern, not a maintenance guarantee
+(§"Windowed maintenance and the horizon"). This can be softened later if a legitimate need to
+widen beyond the derived reach appears, but the safe default is derive-for-correctness —
+consistent with derive-else-declare (`models.md` §Design).
+
+**Validator, never chooser.** Auto-selecting or silently downgrading the declared shape was
+rejected: it reproduces dbt's `strategy:` footgun where the effective contract is invisible. The
+declared shape is authoritative; the machinery only proves or refuses it.
+
+**Placement is definitional, not consumer-counted.** A capability whose verdict is stateable
+**without naming a shape profile** lives in a capability spec (`model_properties.md` /
+`model_transforms.md`); a capability meaningful **only inside a profile** lives in that profile's
+spec. (So pushdown-depth is a SQL property and lives in `model_properties.md`; backfill chunking,
+meaningless outside partition-grain execution, stays in `batched_models.md`.) This gives every
+capability exactly one home — what lets `smelt:validate` catch drift — without a mechanical
+≥N-consumer rule; because these capabilities are broadly useful, building one before a second
+consumer exists is fine. The invariant and ladder live *here* because every shape profile cites
+them as its contract; keeping them inside one profile's spec would force the others to reach into
+a sibling for their own contract. `keyed_models.md` remains the reference implementation of the
+key-addressed maintenance path (retraction, reprocessing, presentation-purity) with its
+column-family catalogue — see its §Surface and §Semantics for a worked composition-contract
+example.
+
 **Rejected alternatives**, briefly: a `strategy:` sub-knob (dbt's invisible-contract footgun); a
 new `smelt-maintenance` crate (the derivation needs the tightest coupling to the sibling
 classifiers; module boundary kept extraction-mechanical instead — `08-code-placement.md` §2.1);
 qualifying the output clamp to a resolved inner alias (answers a question the output clamp must
 never ask — `03-design-forks.md` F1); a third addressing pole for locality (it changes no write
-primitive — `model_maintenance.md` §Design); per-edge grain declarations (two declarations can
+primitive — §"Addressing stays binary" above); per-edge grain declarations (two declarations can
 disagree; one per node cannot). Deeper rationale:
 `docs/research/20260705-refresh-as-maintenance-plan/` (parts 01–10, with ratification records in
 09 §1 and 10 §11).
 
 ## Constraints & Invariants
 
+- The **equivalence invariant** holds for every non-`full` model and on every ladder rung; a
+  transform that cannot preserve it for a given model is refused, never applied approximately.
+  Order/set-determinacy is a corollary of it for **every** shape (the partition grain included);
+  per-partition equivalence is a *strengthening* of it, not a separate contract.
+- **Output addressing** is the load-bearing axis: partition-addressed shapes (identity-free)
+  rewrite whole partitions; key-addressed shapes (identity-requiring) `merge_into` by key and may
+  write outside the input time-window. This distinction is intrinsic to the shape (SCD2's
+  retroactive close-out), independent of the source clock. Key temporal locality, where
+  established, refines key-addressing with a derived slice bound — target-scan pruning and
+  per-slice equivalence — without changing the addressing or the write primitive
+  (`keyed_models.md` §"Key temporal locality").
+- Maintenance is **windowed by default** where the model is clocked; a full scan is a surfaced
+  fallback, never the silent baseline. Always `scan window ⊇ write window`.
+- The **horizon is derived** from the model's reach; a declared horizon is a warning ceiling only
+  and never relaxes the clamp. Because the derived clamp is the model's SQL, late arrivals beyond
+  the horizon are silently excluded — surfacing them is a model-author + data-check concern, not
+  a maintenance guarantee.
+- **One home per capability and per rule.** The invariant, ladder, composition contract, and the
+  plan are owned here; properties in `model_properties.md`, transforms in `model_transforms.md`,
+  the declaration law and litmus rule in `models.md`. No spec re-specifies another's.
+- **Proofs are fail-closed** (owned in `model_properties.md`, relied on here): an undecidable
+  construct rejects; a declared escape hatch may only *widen* eligibility, never substitute for a
+  proof's default reject.
+- The declared **`refresh:` + `grain:` shape is the only declared strategy surface**;
+  input-consumption is derived from the source, never declared per model. No `strategy:`
+  sub-knob. The machinery **validates, never chooses** the shape; a fallback to full refresh is a
+  surfaced diagnostic, never an automatic switch.
 - **The plan is pure data, derived by pure functions, in one place** (`smelt-logical`);
   consumers — diagnostics, planner application, runtime lowering, the graph layer — never
   re-derive it. (Also recorded as an invariant in `architecture.md`.)
+- **Maintenance statements have one author.** Every maintenance statement a run executes is the
+  output of a pure emitter in the maintenance layer (§"Statement emission (single owner)");
+  backends execute, never author. Printed (`--show-sql`), gate-verified, and executed SQL are the
+  same emitters' output by construction.
 - **Never fold a delta already reflected in the state.** Every fold consults the ledger; every
   region recompute resets the entries it overwrote. No path may merge a window twice.
 - **Write window = output window**, per cell: the DELETE/merge target and the output clamp range
@@ -334,6 +559,20 @@ disagree; one per node cannot). Deeper rationale:
 
 ## Known Divergences / Open Questions
 
+- **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
+  is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
+  graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a
+  maintained-model upstream through the SAME edge-aware derivation
+  (`derive_model_maintenance_plan_with_edges`), so the propagation clamp for a model edge equals
+  the creation cell's clamp and an underivable upstream clock is a `MaintenanceReachNotDerivable`
+  refusal (contributing no walkable edge) rather than a silently permissive whole-table synthesis;
+  and `--source <address>` accepts either a declared source or an upstream maintained model as the
+  delta origin (the origin model itself is never re-run — its landed delta is the window a
+  completed run already wrote for it). What remains is the execution side: `execute.rs`'s technique
+  resolution excludes model refs entirely, so a maintained-model creation cell drives forward
+  propagation and `smelt explain`, but no per-cell *execution* technique keys off it yet (the
+  propagated region is materialized by the ordinary incremental run loop over the reflected
+  window). Tracked in `docs/plans/20260710-web-analytics-maintenance-demo.md`.
 - **The plan has three live consumers: diagnostics, `smelt explain`, and one execution
   technique.** `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) is
   production code, not a tracer: full per-cell admission (`§"Per-cell admission"` obligations
@@ -395,24 +634,81 @@ disagree; one per node cannot). Deeper rationale:
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **Five of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
-  footprint reflection, partition-locality projection, faithful-fold conditions, the
-  grain-alignment check (the tracer takes edge-declared grains instead — a shortcut ratified away
-  by P3), and definition-change column classification. Column-group-scoped dirt, gated by
-  provenance, today coarsens to whole-partition — safe, over-running. Hour granularity is declared
-  surface (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are
-  deferred. **Per-column mutation-sensitivity/column provenance and skeleton-role extraction are
-  built**, as leaf classifiers over a model's own single top-level `SELECT` scope
-  (`crates/smelt-logical/src/maintenance/grouping.rs`, `.../skeleton.rs`): a model composed
-  through a CTE, set operation, derived-table `FROM` item, or an unqualified reference ambiguous
-  among more than one joined source is outside what either classifier resolves, and both fail
-  closed on such a shape — mutation-sensitivity grouping collapses every non-skeleton column into
-  one group sensitive to every declared source rather than guessing, and the caller may still
-  hand-supply `ColumnGroup`/`skeleton_columns` for a shape wider than this. Full verdict
-  definitions: `model_properties.md` §Surface "Derived proofs" (the `not-yet` rows). Build order
-  and code placement: `docs/plans/20260707-maintenance-plan-impl.md` phases MP5 (footprint
-  reflection, partition-locality), MP6 (faithful-fold, grain-alignment), and MP14
-  (definition-change classification). `09-spec-readiness.md` §2.
+- **Statement emission is single-owner for the region-recompute, keyed-fold, and
+  column-scoped-MERGE families, and both the conformance gate and `--show-sql` are wired to
+  prove/print it.** The region `DELETE`+`INSERT` pair (`IncrementalStrategy::DeleteInsert`) is
+  produced by `emit_delete_insert` in `crates/smelt-logical/src/maintenance/emit.rs` and
+  executed, never authored, by the backends (`smelt-backend`'s `execute_statement_group`,
+  overridden by `smelt-backend-duckdb` for a real transaction and by `smelt-backend-spark` for
+  its catalog-qualified table name). The keyed fold `MERGE` (combiner-aware `UPDATE SET`,
+  `INSERT *`) and the windowed-keyed-maintenance driver's first-run `CREATE TABLE … AS` are
+  likewise produced by `emit_keyed_fold`/`emit_create_table_as`; the caller
+  (`smelt-runtime::cumulative`) renders each aggregator column's `CrossPartitionCombiner` to a
+  plain expression string before calling the emitter, keeping `smelt-logical` free of any
+  dependency on `smelt-planner`. The column-scoped `MERGE` (`Technique::ColumnScopedMerge`) is
+  produced by `emit_column_scoped_merge` — `UPDATE SET *`/`INSERT *`, dialect-keyed but
+  currently dialect-invariant text (DuckDB and Spark's pre-unification `merge_into` text were
+  byte-identical) — with `Backend::merge_into`'s default implementation building the
+  `StatementGroup` and routing it through `execute_statement_group`; no backend overrides
+  `merge_into` any more. Every family's `crates/smelt-runtime/tests/statement_parity.rs` leg
+  diffs a real `execute_project` run's executed statements against a direct emitter call over the
+  same inputs (the column-scoped-MERGE leg re-runs `examples/timeseries/daily_events_enriched`'s
+  fact+dimension fixture through a recording backend). The ledger-graded (`Grade::Additive`) fold
+  path still interleaves the emitted action statement with the reconciliation ledger's own
+  DDL/DML via `Backend::fold_ledger_delta`, unchanged — that interleaving is spec-excluded
+  bookkeeping, not itself a maintenance statement. `crates/smelt-runtime/tests/statement_parity.rs`
+  additionally carries a structural gate
+  (`no_maintenance_statement_authoring_outside_the_emitter`) that scans every production `.rs`
+  file for the forbidden `DELETE FROM`/`MERGE INTO`/`UPDATE … SET` shapes outside the emitter
+  module, allowlisting only the DuckDB/Spark `DELETE` strings the dead
+  `delete_partitions`/`insert_overwrite` paths still hand-format (tracked below); every other file
+  that matches is a hard test failure. The conformance suite's technique-equivalence legs
+  (`crates/smelt-logical/tests/maintenance_plan_conformance.rs`) prove the *emitters* equivalent to
+  full refresh (the HOLDS legs) and each such leg's doc string additionally names the
+  `statement_parity.rs` case that grounds the same family's production-execution byte+result
+  parity, so the two suites together close the loop from "the emitter is correct" to "the emitter
+  is what actually ran". `smelt explain <model> --show-sql` (`cli.md` §"`smelt explain <model>`
+  maintenance-plan report") prints each cell's statements by calling the same emitters `smelt run`
+  calls. What genuinely remains open: `emit_in_place_update`
+  (`crates/smelt-logical/src/maintenance/emit.rs`) has no production consumer — no live plan cell
+  lowers to it, so its own leg exists only in `crates/smelt-logical/tests/maintenance_tracer.rs`
+  and `crates/smelt-runtime/tests/tracer_maintenance.rs` (the schema-evolution column backfill's
+  `UPDATE … FROM` in `smelt-runtime::backfill` is a separate, untouched surface); the
+  `Grade::Additive` keyed fold's MERGE-inside-the-ledger-transaction interior
+  (`Backend::fold_ledger_delta`) is not observable at `execute_statement_group`, so its
+  `statement_parity.rs` leg proves parity against a self-contained idempotent keyed fixture rather
+  than a real Additive-graded model (e.g. `examples/web_analytics`'s `device_user_edges`); and
+  `Backend::delete_partitions`/`insert_overwrite` (DuckDB and Spark) still author a
+  hand-formatted `DELETE`+`INSERT`/`INSERT OVERWRITE` shape for `IncrementalStrategy::InsertOverwrite`
+  even though that strategy is unreachable in production — `resolve_incremental_strategy` and every
+  backend's `resolve_strategy` only ever yield `DeleteInsert`, so `insert_overwrite`/
+  `delete_partitions` are dead code, allowlisted in the structural gate with justification
+  comments rather than emitter-backed. Deleting the dead `InsertOverwrite` strategy (or routing it
+  through an emitter if it is ever revived) is follow-up work outside
+  `docs/plans/20260710-emit-unification.md`.
+- **Four of the seven maintenance-plan proofs are unbuilt** and hand-supplied in the tracer:
+  footprint reflection, partition-locality projection, faithful-fold conditions, and
+  definition-change column classification. Column-group-scoped dirt, gated by provenance, today
+  coarsens to whole-partition — safe, over-running. Hour granularity is declared surface
+  (`timeseries.granularity`) but the propagation layer is day-ordinal; sub-day axes are deferred.
+  **Per-column mutation-sensitivity/column provenance, skeleton-role extraction, and the
+  grain-alignment check are built**, as leaf classifiers over a model's own single top-level
+  `SELECT` scope (`crates/smelt-logical/src/maintenance/grouping.rs`, `.../skeleton.rs`,
+  `.../granularity.rs`): a model composed through a CTE, set operation, derived-table `FROM` item,
+  or an unqualified reference ambiguous among more than one joined source is outside what any of
+  the three classifiers resolves, and all fail closed on such a shape — mutation-sensitivity
+  grouping collapses every non-skeleton column into one group sensitive to every declared source
+  rather than guessing, and the caller may still hand-supply `ColumnGroup`/`skeleton_columns` for a
+  shape wider than this. The grain-alignment check itself only *checks* the declaration against the
+  model's own derived truncation/grouping unit (widen-never-narrow: a declaration coarser than or
+  equal to the derived unit is a safe widen, never flagged; strictly finer is refused,
+  `MaintenanceGranularityMismatch`) — the graph layer's edges still take the declaration directly,
+  never derive it (P3 stands; the check only narrows how much a wrong declaration can go
+  unnoticed). Full verdict definitions: `model_properties.md` §Surface "Derived proofs" (the
+  `not-yet` rows). Build order and code placement: `docs/plans/20260707-maintenance-plan-impl.md`
+  phases MP5 (footprint reflection, partition-locality), MP6 (faithful-fold), and MP14
+  (grain-alignment check). Definition-change column classification remains unbuilt.
+  `09-spec-readiness.md` §2.
 - **The ledger has two storage substrates, one per grading.** `smelt-state`'s
   `smelt_state::reconciliation` module implements the `(output-region × column-group)` keying,
   the two storage gradings (additive groups keep delta identities; idempotent groups keep a
@@ -437,34 +733,152 @@ disagree; one per node cannot). Deeper rationale:
 - **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed
   dirt-sets and time-unrolled self-edges are designed (`10-dependency-propagation.md` §6, S12)
   and unbuilt.
-- **Delta detection** is committed as an interface (per-source partition-interval deltas recorded
-  in the state store); the v1 mechanism is append-only landing/interval diff only — CDF offsets
-  and snapshot diffing follow per `mutation_profile` (P10).
+- **Delta detection for `--since-upstream` is explicit, not automatic, for v1.** The runner (or an
+  external poller) supplies each source's landed delta directly on the command line
+  (`--source <address> --landed <start>..<end>`, §CLI); the graph layer reflects exactly the
+  supplied intervals through the edges. No persisted "last propagated through" watermark exists,
+  and no invocation independently diffs a source's current coverage against a prior propagation to
+  discover its own delta — a second `--since-upstream` call has no way to know what changed unless
+  the caller tells it. This sidesteps `smelt_state::landed_deltas` (built for v1 as a byproduct of
+  an ordinary model run — an append-only clocked source's landing is interval-diffed against prior
+  coverage; a `mutable_snapshot` or unclocked source always resolves to the whole-table delta) and
+  `change_feed` offset-based delta detection and snapshot diffing (not yet built), neither of which
+  the graph layer consumes today. An automatic, watermark-diffed `--since-upstream` with no
+  required flags is a possible future extension (§Future Extensions) once a persisted per-source
+  watermark lands in `smelt-state`; the explicit form does not block on it.
 - **Straddle attribution without locality** (a per-key footprint chaining across history) is
   scoped out of the ledger's v1: locality-or-explicit-footprint only (01 §8's own caveat).
-- **`models.md`'s refresh-axis rewrite is pending** (the `batched`/`keyed`/`versioned` strategy
-  names are removed outright per ratified decision 5; shape profiles replace them); until it
-  lands, mode specs still read as strategy peers. A proposed `on_column_add:
-  backfill | leave_null | recompute` policy knob is noted, not yet surface.
-- **User docs describe the trichotomy + grain surface, not yet the plan itself.** The
-  `docs-site/` pages consistently describe `refresh: full | incremental | materialized_view`
-  and `grain: partition | key | key_per_partition`, seeded from the worked example catalogue
-  (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`). What they do
-  not yet cover — because the underlying surface doesn't exist yet — is the maintenance plan
-  itself: the `maintenance:` frontmatter block, `smelt explain`'s cell/clamp/ledger output,
-  `--since-upstream`, `--include-upstreams`, and `smelt bakeoff`.
+- **The refresh-axis cut has landed.** `RefreshStrategy` (`crates/smelt-core/src/config.rs`)
+  accepts only `full` / `incremental` / `materialized_view`; the removed strategy names
+  (`batched`/`keyed`/`cumulative`/`versioned`) are hard errors with a fix-it pointing at
+  `refresh: incremental` + the matching `grain:` (`models.md` §Known Divergences). A proposed
+  `on_column_add: backfill | leave_null | recompute` policy knob is noted, not yet surface.
+- **Windowed-by-default and the derived horizon are contract, partially built.** The stance
+  (§"Windowed maintenance and the horizon") is normative. The per-source reach used to derive
+  the horizon (`model_properties.md`'s `derive_model_bounds`) and the horizon *ceiling*
+  declaration (`horizon_ceiling:`) with its compile-time warning are surfaced; a model-wide
+  derived-horizon proof composing every source's reach into one number remains under
+  construction, as does the model-author lateness-flag pattern's data-quality check. Tracked by
+  `docs/plans/20260704-model-updates.md`.
+- **Key temporal locality, the time-partitioned keyed output, and the scope-map explain surface
+  are specified but unbuilt.** The locality gate and slice-pruned merge live in
+  `keyed_models.md` (§Known Divergences there — refused unconditionally today via
+  `KeyedForbidsTimeseries`); the per-input `smelt explain` scope-map rows are likewise unbuilt.
+  Design derivation: `docs/research/20260705-keyed-time-superset.md`.
+- **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly
+  covered.** The `docs-site/` pages consistently describe
+  `refresh: full | incremental | materialized_view` and `grain: partition | key |
+  key_per_partition`, seeded from the worked example catalogue
+  (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`).
+  `docs-site/docs/reference/cli.md` now documents `--since-upstream` (forward propagation) and
+  `--include-upstreams` (backward resolution) under `smelt run`/`smelt build`, plus
+  `smelt explain`'s cell/clamp/ledger report and `--show-sql`; the `maintenance:` frontmatter
+  block is documented in `docs-site/docs/reference/smelt-yml.md`. What is still not yet
+  covered — because the underlying surface doesn't exist yet — is `smelt bakeoff`.
+- **A group merged across two mutable inputs has no group-merge-provenance policy.** Per-cell
+  admission today checks obligations 4/5 (bounded reach/footprint) the same way regardless of
+  whether a column group's `mutation_sensitivity` set came from ONE input or several — a
+  partition-aligned multi-input merge (e.g. `orders.amount * fx_rates.rate`, both mutable,
+  joined on the output's own partition column) is admitted as a targeted `ColumnScopedMerge`
+  exactly like a single-input mutable dimension enrichment would be. A stricter
+  "partition-local ≠ foldable" policy — forcing region recompute whenever a group's
+  provenance spans more than one mutation-sensitive input, even when the read/write happen to
+  be individually bounded — is undecided and unbuilt; pinned by
+  `crates/smelt-logical/tests/maintenance_coverage_matrix.rs::ex12_multi_input_merge_degenerates_to_recompute`.
+- **The trigger-list builder's `explicitly_mutable` scoping misses `change_feed`-declared
+  sources entirely, not just clocked ones.** `derive_model_maintenance_plan`
+  (`crates/smelt-db/src/queries/maintenance.rs`) only constructs an `UpstreamMutation` trigger
+  for a source that is BOTH unclocked AND declares `mutation_profile: mutable_snapshot`
+  literally — `change_feed` maps to the stricter `MutableSnapshot` posture for *admission*
+  purposes (`source_facts`) but does not satisfy this literal-declaration check, so a
+  `change_feed` source (clocked or not) never gets a mutation cell constructed at all, the
+  same "no cell to even refuse" gap an append-only enrichment source has (the
+  `Trigger::UpstreamMutation` scoping divergence recorded above). Pinned by
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs::ex08_unclocked_change_feed_dimension_scan_unbounded`;
+  when a source's own posture (not just its admission fallback) IS threaded through
+  (`crates/smelt-logical/tests/maintenance_coverage_matrix.rs::ex14_change_feed_sum_recompute_only`,
+  `::ex26_change_feed_latest_writer_recompute_only` construct this directly at the pure-
+  derivation level), only full-input re-derivation is admitted — never an invertible-retraction
+  or order-monotone-overwrite fold — because no live fold machinery consumes a change feed's
+  delta shape yet.
+- **`INTERSECT`/`EXCEPT` are unclassified set operations.** `model_properties.md` §Known
+  Divergences already records that set-op distribution classifies `UNION ALL` only; this spec
+  records the maintenance-plan-level consequence directly: an `INTERSECT`/`EXCEPT` composition
+  falls through to the whole-model mutation-sensitivity collapse (same as any unrecognised
+  shape), so every admitted cell is `DeleteInsert` region recompute regardless of source
+  property — pinned by
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs::ex41_ex42_intersect_no_payload_column_still_delete_insert`.
+  A future set-op distribution proof covering `INTERSECT`/`EXCEPT` would need its own
+  per-arm-cardinality reasoning (unlike `UNION ALL`'s multiset-union, an `INTERSECT`/`EXCEPT`
+  row's presence in the output depends on BOTH arms simultaneously, so no single arm's delta
+  alone determines a row's fate) before any targeted technique could ever be admitted for it.
+
+## Future Extensions
+
+Ideas for widening the plan's admission space beyond what's decided above. Nothing here is
+surface — no `maintenance:` field, diagnostic, or technique described in this section may be
+relied on until it graduates into `§Surface`/`§Semantics` via its own spec diff and plan.
+
+- **Row-local column derivation.** A recurring real-world shape: a column whose value is a pure
+  function of *other columns already present in the same row* — a materialized date truncated
+  from a timestamp, a normalized (lower-cased, hyphen-separated) rendering of a GUID column, an
+  upper/lower-cased string column. When such a column is **added**, this is already the intended
+  shape of the `PureBackfill` verdict (`§"The definition-change trigger"`; classification proof
+  in `model_properties.md` §"Definition-change column classification"): per-column provenance
+  proves the new expression reads only already-stored columns, so the backfill is an in-place
+  `UPDATE` with no upstream read at all — no full-input recompute needed. That path is spec'd and
+  tracked as unbuilt in `§Known Divergences` above; it does not need a new idea, only an
+  implementation of `classify_definition_change`.
+  - **The open extension is the changed-column case, not the added-column case.** The
+    definition-change trigger only fires on a pure addition (the additive-only model-diff,
+    `model_properties.md` §"Additive-only model-diff vs semantic change"). Redefining an
+    *existing* column's expression — e.g. changing how the normalized GUID column is computed —
+    has no described plan-level treatment today; it falls to whatever a general model-definition
+    change does (unspecified here), which in practice means a full recompute even when the new
+    expression is, itself, a pure function of other unchanged stored columns in the same row.
+    A future extension could apply the same per-column-provenance test used for `PureBackfill`
+    to a **changed** column's new expression: if it proves pure-function-of-stored-columns, admit
+    a targeted in-place `UPDATE` over the existing region instead of the region-recompute
+    fallback. This would need its own trigger (distinct from the additive-only definition-change
+    trigger), its own diagnostic naming for when the provenance test fails closed, and a decision
+    on how it composes with the reconciliation ledger (a redefinition invalidates the ledger's
+    provenance identity for that group even though no upstream delta occurred).
+
+- **Automatic, watermark-diffed `--since-upstream`.** Today `--since-upstream` requires the caller
+  to supply each source's landed delta explicitly (`§CLI`, `§Known Divergences`). A future
+  extension persists a per-source "last propagated through" watermark in `smelt-state` and diffs
+  it against the source's current `covered_intervals` on every invocation, so a bare
+  `--since-upstream` with no `--source`/`--landed` flags discovers its own delta. This still does
+  not solve a raw, never-modeled source's freshness (no `covered_intervals` exists for something
+  smelt has never landed) — that remains live backend source-freshness querying, out of scope here
+  (no such capability exists in `smelt-backend*` today; sources declare posture in `sources.md`
+  rather than being polled for it). The explicit-flag form and the automatic form are not
+  exclusive: the automatic form would compute the same `--landed` intervals the explicit form
+  takes directly, so it can layer on top without changing the graph layer or the CLI surface
+  described in `§CLI`.
 
 ## References
 
-- **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit,propagate}.rs` (tracer v0);
+- **Code**: `crates/smelt-logical/src/maintenance/{mod,derive,emit}.rs` (the per-cell derivation);
+  `crates/smelt-logical/src/maintenance/propagate.rs` (the pure graph-layer composition math —
+  `propagate`/`required_inputs`); `crates/smelt-runtime/src/propagation.rs` (the real per-workspace
+  graph assembly, `smelt run --since-upstream` planning, and `smelt build --include-upstreams`
+  planning — `build_forward_graph`, `plan_since_upstream`, `resolve_build_plan`, all consuming the
+  same `Edge` list);
   `crates/smelt-logical/src/analysis/` (the classifiers admission consumes);
   `crates/smelt-runtime/src/{cumulative,maintenance_driver,dimension_horizon_merge,transformer,backfill}.rs`
   (today's technique executors and clamps); `crates/smelt-state/src/intervals.rs` (the degenerate
   ledger); `crates/smelt-backend/src/lib.rs` (technique primitives).
-- **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation}.rs`
-  (pure derivation-side assertions); `crates/smelt-runtime/tests/{tracer_maintenance,tracer_evolution,tracer_propagation}.rs`
-  (the DuckDB equivalence oracles — moved from `smelt-cli` 2026-07-08, since they only depend on
-  `smelt_logical::maintenance::*` + `duckdb`, both already available to `smelt-runtime`);
+- **Tests**: `crates/smelt-logical/tests/{maintenance_tracer,maintenance_tracer_evolution,maintenance_tracer_propagation,maintenance_propagation_adjoint}.rs`
+  (pure derivation-side and graph-composition-math assertions — the regression floor for chains,
+  fan-out, diamonds, granularity mapping, and adjointness — `maintenance_propagation_adjoint.rs`
+  is the dedicated home for the `forward(backward(P)) ⊇ P` law); `crates/smelt-runtime/tests/
+  {tracer_maintenance,tracer_evolution,tracer_propagation,since_upstream_propagation}.rs` (the
+  DuckDB equivalence oracles, and the real-workspace propagation-graph assembly tests);
+  `crates/smelt-cli/tests/since_upstream.rs` (the CLI-wired forward-propagation suite, including
+  the sufficiency-vs-full-refresh equivalence check); `crates/smelt-cli/tests/include_upstreams.rs`
+  (the CLI-wired backward-resolution suite: resolved-slices-suffice-vs-full-refresh equivalence
+  over a two-hop chain, and an unclocked-ancestor-resolves-to-whole-table case);
   `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
   harness — the real-run-pipeline driver, the model-shape catalogue, the multiset-equality oracle,
   and the mutation-aware run-schedule generator/driver — wired as a dev-dependency of `smelt-cli`);
@@ -474,14 +888,34 @@ disagree; one per node cannot). Deeper rationale:
   append/lateness/mutation schedules. The per-cell probe modules under
   `crates/smelt-cli/tests/property_discovery/` that consume the testkit crate remain disposable
   research probes (see `.claude/scripts/property-experimental-gate.sh`); only the shared harness
-  graduated.
+  graduated. `cargo test -p smelt-logical --test maintenance_plan_conformance ::
+  coverage_matrix_is_inhabited` is the standing inventory gate over the research example
+  catalogue's coverage matrix (`docs/research/20260705-refresh-as-maintenance-plan/
+  07-example-catalogue.md` §"Coverage matrix", plus one `INTERSECT`/`EXCEPT` row this gate adds):
+  it encodes the matrix as data and asserts every inhabited `(construct × source-property)` cell
+  is accounted for by exactly one of two explicit, disjoint lists — `CLAIMED` (a grounded,
+  executable test proves the cell's HOLDS-or-refuses verdict; see
+  `crates/smelt-logical/tests/maintenance_coverage_matrix.rs` and
+  `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs` for the cells this phase
+  lifted) or `KNOWN_GAPS` (named, not silently omitted). Adding a matrix cell without a matching
+  `CLAIMED`/`KNOWN_GAPS` entry fails the test, by construction (additive-only). `CLAIMED` currently
+  lifts 9 catalogue ids (EX-02, EX-08, EX-12, EX-14, EX-18, EX-24, EX-26, EX-27, EX-35, plus the
+  added EX-41/EX-42 row); the remainder of the matrix's ~100 inhabited cells are named individually
+  in `KNOWN_GAPS` (most as "plausibly covered by an existing `G-*`/`SC-*` property-discovery probe,
+  not re-verified against this exact catalogue id" — cross-referencing those probes to catalogue
+  ids by name is itself unbuilt; a few, like EX-25's LAG/LEAD footprint reflection and EX-29's
+  as-of-run-contract gating, need production investigation not yet done). Both lists are per-cell,
+  never per-row, so a future change can lift one cell at a time without re-deriving the whole
+  inventory.
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
-  describe the trichotomy + grain surface; the plan itself (the `maintenance:` block, `smelt explain`,
-  the propagation CLI) is not yet user-documented (see Known Divergences).
+  describe the trichotomy + grain surface; `docs-site/docs/reference/cli.md` also documents
+  `--since-upstream`, `--include-upstreams`, and `smelt explain`'s cell/clamp/ledger report with
+  `--show-sql`; `docs-site/docs/reference/smelt-yml.md` documents the `maintenance:` block.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260704-model-updates-fundamentals.md` (the L1+L2 substrate),
   `docs/plans/20260705-property-discovery-loop.md` (the empirical engine).
-- **Related specs**: `model_maintenance.md`, `model_properties.md`, `model_transforms.md`,
+- **Related specs**: `model_properties.md`, `model_transforms.md`,
   `models.md`, `sources.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`,
-  `schema_evolution.md`, `timeseries.md`, `diagnostics.md`, `architecture.md`, `cli.md`.
+  `materialized_view.md`, `multi_backend.md`, `schema_evolution.md`, `timeseries.md`,
+  `diagnostics.md`, `architecture.md`, `cli.md`.

@@ -284,6 +284,135 @@ fn repopulate_sources(db_path: &Path, setup_abs: &Path) {
     setup_sources(db_path, setup_abs);
 }
 
+// ── Cross-midnight session fixture ───────────────────────────────────────────
+
+/// Synthetic `device_id` for the forced cross-midnight session pair — well
+/// outside `datagen.yaml`'s 150,000-row `devices` dataset, so it can never
+/// collide with an organically-generated device.
+const CROSS_MIDNIGHT_DEVICE_ID: i64 = 999_900_001;
+
+/// Insert a synthetic two-event pair into `raw.events` that crosses the
+/// day-1/day-2 midnight boundary (`DAY_WINDOWS[0]` / `DAY_WINDOWS[1]`) with a
+/// 16-minute gap — well under `sessionize`'s 30-minute inactivity threshold —
+/// and the same `platform`, so `smelt.functions.sessionize` merges them into
+/// one session rooted on day 1 (`session_start_date = 2026-03-19`) whose
+/// `session_end` lands on day 2 (`2026-03-20`).
+///
+/// This is the minimal repro of the write-window skew divergence documented
+/// in `docs/plans/20260710-web-analytics-maintenance-demo.md`
+/// §"Deferred during implementation" (the day-46 `event_id=7647` case): a
+/// real cross-midnight pair occurs in the datagen output only about once
+/// every 50 days at `scale_factor=0.01` (rare relative to the 30-minute
+/// inactivity gate), too infrequent to guarantee inside the harness's 7-day
+/// CI window. Both `arrival_time` values equal `event_time` (on-time
+/// delivery) so `silver.events_parsed`'s lateness filter never excludes
+/// either row, and both events are inserted before *any* `smelt run`, so
+/// both pipelines (full-window and day-by-day) see identical source data —
+/// only the run-window shape differs between them.
+fn inject_cross_midnight_session_pair(db_path: &Path) {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let sql = format!(
+        "INSERT INTO raw.events \
+            (event_id, device_id, user_id, seconds_in_day, event_time, arrival_time, \
+             utm_campaign, payload, event_date) \
+         VALUES \
+            (900000001, {dev}, NULL, 85620, \
+                TIMESTAMP '2026-03-19 23:47:00', TIMESTAMP '2026-03-19 23:47:00', NULL, \
+                '{{\"event_name\": \"page_view\", \"platform\": \"web\", \
+                   \"url\": \"https://example.com/home\"}}', \
+                DATE '2026-03-19'), \
+            (900000002, {dev}, NULL, 180, \
+                TIMESTAMP '2026-03-20 00:03:00', TIMESTAMP '2026-03-20 00:03:00', NULL, \
+                '{{\"event_name\": \"page_view\", \"platform\": \"web\", \
+                   \"url\": \"https://example.com/home\"}}', \
+                DATE '2026-03-20');",
+        dev = CROSS_MIDNIGHT_DEVICE_ID,
+    );
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("insert cross-midnight session pair: {e}\nSQL:\n{sql}"));
+}
+
+/// Synthetic `device_id` for the forced **two-boundary** event chain — a
+/// second device, distinct from `CROSS_MIDNIGHT_DEVICE_ID`, so the two
+/// injected shapes never interact.
+const TWO_BOUNDARY_DEVICE_ID: i64 = 999_900_002;
+
+/// Insert a synthetic 60-event chain into `raw.events` that spans **two**
+/// midnights with every pairwise gap under `sessionize`'s 30-minute
+/// inactivity threshold and a constant `platform` — the shape a live
+/// sessionize step treats as one continuous, never-idle activity stream:
+///
+///   - `2026-03-19 23:50` (the chain root, day 1),
+///   - `2026-03-20 00:10` + 25-minute steps through `2026-03-20 23:55`
+///     (58 events, crossing the first midnight),
+///   - `2026-03-21 00:15` (crossing the second midnight).
+///
+/// No inactivity gap ever breaks this chain, so the only thing that can end
+/// the session rooted at `23:50` is the declared one-day cap itself
+/// (`docs/specs/model_transforms.md` §Semantics — the "semantic cap"
+/// paragraph): `sessionize`'s `RANGE BETWEEN INTERVAL '1 day' PRECEDING`
+/// frames stop seeing the root boundary once an event's timestamp passes
+/// `root + 1 day` (= `2026-03-20 23:50`), so each later event falls back to
+/// its own timestamp as a fresh session root. The truncation this chain
+/// realises is therefore the *real* function's, end to end — not a
+/// precomputed stand-in — and the harness's set-equality plus the pinned
+/// per-session assertions in
+/// `web_analytics_session_attribution_matches_full_rebuild` verify it is
+/// identical between the day-by-day replay and the full rebuild.
+///
+/// All `arrival_time`s equal `event_time` (on-time delivery) and all rows
+/// are inserted before *any* `smelt run`, exactly like
+/// `inject_cross_midnight_session_pair` above.
+fn inject_two_boundary_session_chain(db_path: &Path) {
+    let root = chrono::NaiveDateTime::parse_from_str("2026-03-19 23:50:00", "%Y-%m-%d %H:%M:%S")
+        .expect("parse chain root");
+    let day2_base =
+        chrono::NaiveDateTime::parse_from_str("2026-03-20 00:10:00", "%Y-%m-%d %H:%M:%S")
+            .expect("parse day-2 base");
+    let tail = chrono::NaiveDateTime::parse_from_str("2026-03-21 00:15:00", "%Y-%m-%d %H:%M:%S")
+        .expect("parse chain tail");
+
+    let mut timestamps = vec![root];
+    // k = 0..=57: 2026-03-20 00:10 … 2026-03-20 23:55 in 25-minute steps.
+    for k in 0..=57 {
+        timestamps.push(day2_base + chrono::Duration::minutes(25 * k));
+    }
+    timestamps.push(tail);
+
+    let values: Vec<String> = timestamps
+        .iter()
+        .enumerate()
+        .map(|(i, ts)| {
+            use chrono::Timelike;
+            let seconds_in_day = i64::from(ts.time().num_seconds_from_midnight());
+            format!(
+                "(9000000{:02}, {dev}, NULL, {seconds_in_day}, \
+                    TIMESTAMP '{ts}', TIMESTAMP '{ts}', NULL, \
+                    '{{\"event_name\": \"page_view\", \"platform\": \"web\", \
+                       \"url\": \"https://example.com/home\"}}', \
+                    DATE '{date}')",
+                i + 11, // event_id 900000011 … 900000070 (past the pair's 01/02)
+                dev = TWO_BOUNDARY_DEVICE_ID,
+                ts = ts.format("%Y-%m-%d %H:%M:%S"),
+                date = ts.format("%Y-%m-%d"),
+            )
+        })
+        .collect();
+
+    let sql = format!(
+        "INSERT INTO raw.events \
+            (event_id, device_id, user_id, seconds_in_day, event_time, arrival_time, \
+             utm_campaign, payload, event_date) \
+         VALUES {};",
+        values.join(", ")
+    );
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("insert two-boundary session chain: {e}\nSQL:\n{sql}"));
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// We run 7 days (2026-03-19 … 2026-03-26) rather than the full 60-day window
@@ -652,5 +781,669 @@ fn test_runs_under_test_harness() {
         datagen_bin().exists(),
         "smelt-datagen binary not found at {:?}",
         datagen_bin()
+    );
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test 4: silver/events_parsed dedup over the 3-day late window
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `docs/plans/20260710-web-analytics-maintenance-demo.md` Phase 5: the
+// redelivery/lateness datagen shape (Phase 4) means `raw.events` contains
+// byte-identical duplicate rows (same `event_id`, later `arrival_time`) and
+// events whose `arrival_time` trails `event_time` by up to 3 days.
+// `silver/events_parsed` absorbs both: `QUALIFY ROW_NUMBER() OVER (PARTITION
+// BY event_id ORDER BY arrival_time) = 1` drops the redelivered duplicate,
+// and the Form B filter `event_date BETWEEN CAST(arrival_time AS DATE) -
+// INTERVAL '3 days' AND CAST(arrival_time AS DATE)` accepts late arrivals up
+// to that window — a genuine 3-day lookback the planner derives from the
+// filter text (visible via `smelt explain silver.events_parsed --json`).
+
+/// One `(event_id, event_date)` pair from `main.silver_events_parsed`.
+fn query_events_parsed_ids(db_path: &Path) -> Vec<(i64, String)> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare("SELECT event_id, event_date::VARCHAR FROM main.silver_events_parsed")
+        .unwrap_or_else(|e| panic!("prepare events_parsed query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query events_parsed rows: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_or_else(|e| panic!("collect events_parsed rows: {e}"))
+}
+
+/// Every `(event_id, event_date)` in `raw.events` whose lateness
+/// (`arrival_time - event_time`) is within the accepted 3-day window — the
+/// set `silver.events_parsed`'s acceptance filter must retain (at least the
+/// earliest-arriving copy of each `event_id`).
+fn query_acceptable_event_ids(db_path: &Path) -> std::collections::BTreeSet<(i64, String)> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT DISTINCT event_id, event_date::VARCHAR \
+             FROM raw.events \
+             WHERE CAST(arrival_time AS TIMESTAMP) \
+                 <= CAST(event_time AS TIMESTAMP) + INTERVAL '3 days'",
+        )
+        .unwrap_or_else(|e| panic!("prepare acceptable-events query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, i64>(0)?, row.get::<_, String>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query acceptable events: {e}"))
+    .collect::<Result<_, _>>()
+    .unwrap_or_else(|e| panic!("collect acceptable events: {e}"))
+}
+
+/// Day-by-day incremental build of `silver.events_parsed` equals one
+/// full-window rebuild: zero duplicate `event_id`s in the result, and every
+/// event within the accepted 3-day late window is present in its own
+/// `event_date` partition — in both pipelines.
+#[test]
+fn web_analytics_dedup_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "dedup-pipeline-A",
+    );
+    let rows_a = query_events_parsed_ids(&db_path);
+    let acceptable = query_acceptable_event_ids(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("dedup-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let rows_b = query_events_parsed_ids(&db_path);
+
+    assert!(
+        !rows_a.is_empty(),
+        "Pipeline A produced no events_parsed rows"
+    );
+    assert!(
+        !rows_b.is_empty(),
+        "Pipeline B produced no events_parsed rows"
+    );
+
+    // ── Zero duplicate event_ids in either pipeline's result ──────────────
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        let mut counts: std::collections::HashMap<i64, usize> = std::collections::HashMap::new();
+        for (event_id, _) in rows {
+            *counts.entry(*event_id).or_insert(0) += 1;
+        }
+        let dups: Vec<_> = counts.iter().filter(|(_, &c)| c > 1).collect();
+        assert!(
+            dups.is_empty(),
+            "pipeline {label} has duplicate event_ids in silver.events_parsed: {dups:?}"
+        );
+    }
+
+    // ── Day-by-day equals full rebuild exactly (set of (event_id, event_date)) ──
+    let set_a: std::collections::BTreeSet<_> = rows_a.iter().cloned().collect();
+    let set_b: std::collections::BTreeSet<_> = rows_b.iter().cloned().collect();
+    let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
+    let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
+    assert!(
+        only_in_a.is_empty() && only_in_b.is_empty(),
+        "silver.events_parsed differs between full rebuild and day-by-day replay.\n\
+         only in A (first 10): {only_in_a:?}\nonly in B (first 10): {only_in_b:?}"
+    );
+
+    // ── Every accepted-lateness event is present in its own event_date
+    //    partition, in both pipelines (within the [START_DATE,
+    //    END_DATE_EXCLUSIVE) window the harness runs) ───────────────────────
+    let window_acceptable: Vec<_> = acceptable
+        .iter()
+        .filter(|(_, d)| d.as_str() >= START_DATE && d.as_str() < END_DATE_EXCLUSIVE)
+        .collect();
+    assert!(
+        !window_acceptable.is_empty(),
+        "no acceptable-lateness events found in the run window — check datagen output"
+    );
+    for (event_id, event_date) in &window_acceptable {
+        assert!(
+            set_a.contains(&(*event_id, event_date.clone())),
+            "event_id={event_id} (event_date={event_date}, within the 3-day late window) \
+             missing from pipeline A's silver.events_parsed"
+        );
+        assert!(
+            set_b.contains(&(*event_id, event_date.clone())),
+            "event_id={event_id} (event_date={event_date}, within the 3-day late window) \
+             missing from pipeline B's silver.events_parsed"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: session campaign attribution matches full rebuild + respects the cap
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// One row from `silver.sessions`, projected for attribution + cap checks.
+#[derive(Debug, Clone)]
+struct SessionRow {
+    session_id: String,
+    device_id: i64,
+    session_start: String,
+    session_end: String,
+    event_count: i64,
+    utm_campaign: Option<String>,
+}
+
+fn query_session_rows(db_path: &Path) -> Vec<SessionRow> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                session_id, \
+                device_id, \
+                CAST(session_start AS VARCHAR), \
+                CAST(session_end AS VARCHAR), \
+                event_count, \
+                utm_campaign \
+             FROM main.silver_sessions \
+             ORDER BY session_id",
+        )
+        .unwrap_or_else(|e| panic!("prepare sessions query: {e}"));
+    stmt.query_map([], |row| {
+        Ok(SessionRow {
+            session_id: row.get::<_, String>(0)?,
+            device_id: row.get::<_, i64>(1)?,
+            session_start: row.get::<_, String>(2)?,
+            session_end: row.get::<_, String>(3)?,
+            event_count: row.get::<_, i64>(4)?,
+            utm_campaign: row.get::<_, Option<String>>(5)?,
+        })
+    })
+    .unwrap_or_else(|e| panic!("query session rows: {e}"))
+    .collect::<Result<Vec<_>, _>>()
+    .unwrap_or_else(|e| panic!("collect session rows: {e}"))
+}
+
+/// For every session row, the earliest non-NULL `utm_campaign` among the
+/// events that actually belong to that session (`event_ts` within
+/// `[session_start, session_end]`, the model's own, independently-tested
+/// session boundaries — see `tests/session_boundary_invariants.test.sql`)
+/// and within the first 5 minutes of session start. This is a golden
+/// attribution query computed independently of the model's own `ARG_MAX`
+/// aggregation, via a correlated subquery straight against `events_parsed`;
+/// it does not re-derive session *membership* (that has its own dedicated
+/// invariant test), only the attribution rule given membership.
+fn query_expected_attribution(db_path: &Path) -> std::collections::HashMap<String, Option<String>> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT \
+                s.session_id, \
+                ( \
+                    SELECT e.utm_campaign \
+                    FROM main.silver_events_parsed e \
+                    WHERE e.device_id = s.device_id \
+                      AND e.event_ts >= CAST(s.session_start AS TIMESTAMP) \
+                      AND e.event_ts <= CAST(s.session_end AS TIMESTAMP) \
+                      AND e.event_ts <= CAST(s.session_start AS TIMESTAMP) + INTERVAL '5 minutes' \
+                      AND e.utm_campaign IS NOT NULL \
+                    ORDER BY e.event_ts ASC \
+                    LIMIT 1 \
+                ) AS expected_campaign \
+             FROM main.silver_sessions s",
+        )
+        .unwrap_or_else(|e| panic!("prepare expected-attribution query: {e}"));
+    stmt.query_map([], |row| {
+        Ok((row.get::<_, String>(0)?, row.get::<_, Option<String>>(1)?))
+    })
+    .unwrap_or_else(|e| panic!("query expected attribution: {e}"))
+    .collect::<Result<_, _>>()
+    .unwrap_or_else(|e| panic!("collect expected attribution: {e}"))
+}
+
+/// Day-by-day incremental build of `silver.sessions` equals one full-window
+/// rebuild on `(session_id, session_start, session_end, event_count,
+/// utm_campaign)`, campaign attribution comes only from events within the
+/// first 5 minutes of the session (verified against an independently-computed
+/// golden query over `events_parsed`), and no session exceeds the explicit
+/// max-session-length cap.
+///
+/// Includes a forced cross-midnight event pair
+/// (`inject_cross_midnight_session_pair`) spanning `DAY_WINDOWS[0]` /
+/// `DAY_WINDOWS[1]` — the shape that exposes a write-window skew divergence:
+/// `session_id`/`utm_campaign` alone are invariant under that bug (session
+/// identity is the root timestamp; attribution is the first 5 minutes), but
+/// `session_end`/`event_count` diverge when the neighbour partition a
+/// cross-midnight session reaches is never rewritten
+/// (`docs/plans/20260710-web-analytics-maintenance-demo.md`
+/// §"Deferred during implementation").
+#[test]
+fn web_analytics_session_attribution_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+    inject_cross_midnight_session_pair(&db_path);
+    inject_two_boundary_session_chain(&db_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "session-pipeline-A",
+    );
+    let rows_a = query_session_rows(&db_path);
+    let expected_a = query_expected_attribution(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+    inject_cross_midnight_session_pair(&db_path);
+    inject_two_boundary_session_chain(&db_path);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("session-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let rows_b = query_session_rows(&db_path);
+    let expected_b = query_expected_attribution(&db_path);
+
+    assert!(!rows_a.is_empty(), "Pipeline A produced no session rows");
+    assert!(!rows_b.is_empty(), "Pipeline B produced no session rows");
+
+    // ── Attribution correctness (independent golden query) ────────────────
+    for (label, rows, expected) in [
+        ("A (full rebuild)", &rows_a, &expected_a),
+        ("B (day-by-day)", &rows_b, &expected_b),
+    ] {
+        let mut mismatches = Vec::new();
+        for row in rows {
+            let want = expected.get(&row.session_id).cloned().flatten();
+            if row.utm_campaign != want {
+                mismatches.push(format!(
+                    "  session_id={} actual={:?} expected(first-5-min earliest)={:?}",
+                    row.session_id, row.utm_campaign, want
+                ));
+            }
+        }
+        assert!(
+            mismatches.is_empty(),
+            "pipeline {label}: utm_campaign attribution mismatch \
+             (expected: earliest non-NULL campaign among events within the \
+             session's first 5 minutes):\n{}",
+            mismatches.join("\n")
+        );
+    }
+
+    // ── Cap: no session exceeds the explicit max-session-length cap (1 day) ──
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        for row in rows {
+            let start =
+                chrono::NaiveDateTime::parse_from_str(&row.session_start, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(
+                            &row.session_start,
+                            "%Y-%m-%d %H:%M:%S",
+                        )
+                    })
+                    .unwrap_or_else(|e| panic!("parse session_start {:?}: {e}", row.session_start));
+            let end =
+                chrono::NaiveDateTime::parse_from_str(&row.session_end, "%Y-%m-%d %H:%M:%S%.f")
+                    .or_else(|_| {
+                        chrono::NaiveDateTime::parse_from_str(&row.session_end, "%Y-%m-%d %H:%M:%S")
+                    })
+                    .unwrap_or_else(|e| panic!("parse session_end {:?}: {e}", row.session_end));
+            let duration = end - start;
+            assert!(
+                duration <= chrono::Duration::days(1),
+                "pipeline {label}: session_id={} exceeds the max-session-length cap: \
+                 session_start={} session_end={} duration={duration}",
+                row.session_id,
+                row.session_start,
+                row.session_end,
+            );
+        }
+    }
+
+    // ── Day-by-day equals full rebuild exactly on (session_id, session_start,
+    //    session_end, event_count, utm_campaign) ────────────────────────────
+    //
+    // Widened beyond (session_id, utm_campaign): both are invariant under the
+    // write-window skew divergence this harness must catch (session identity
+    // is the root timestamp; attribution is fixed by the first 5 minutes),
+    // so a bug that leaves a cross-midnight session's neighbour partition
+    // stale (wrong `session_end`/`event_count`) would pass silently under the
+    // narrower assertion.
+    let set_a: std::collections::BTreeSet<_> = rows_a
+        .iter()
+        .map(|r| {
+            (
+                r.session_id.clone(),
+                r.session_start.clone(),
+                r.session_end.clone(),
+                r.event_count,
+                r.utm_campaign.clone(),
+            )
+        })
+        .collect();
+    let set_b: std::collections::BTreeSet<_> = rows_b
+        .iter()
+        .map(|r| {
+            (
+                r.session_id.clone(),
+                r.session_start.clone(),
+                r.session_end.clone(),
+                r.event_count,
+                r.utm_campaign.clone(),
+            )
+        })
+        .collect();
+    let only_in_a: Vec<_> = set_a.difference(&set_b).take(10).collect();
+    let only_in_b: Vec<_> = set_b.difference(&set_a).take(10).collect();
+    assert!(
+        only_in_a.is_empty() && only_in_b.is_empty(),
+        "silver.sessions (session_id, session_start, session_end, event_count, \
+         utm_campaign) differs between full rebuild and day-by-day replay.\n\
+         only in A (first 10): {only_in_a:?}\nonly in B (first 10): {only_in_b:?}"
+    );
+
+    // ── Two-boundary truncation, pinned against the REAL sessionize ───────
+    //
+    // The injected 60-event chain (`inject_two_boundary_session_chain`)
+    // never breaks on inactivity or platform, so its only session boundary
+    // is the root at 2026-03-19 23:50. `sessionize`'s `RANGE BETWEEN
+    // INTERVAL '1 day' PRECEDING` frame keeps that boundary visible only to
+    // events with `event_ts <= root + 1 day` (**timestamp** granularity):
+    // the root plus the 25-minute grid through 2026-03-20 23:30 — 58
+    // events. The two later events (2026-03-20 23:55, 2026-03-21 00:15)
+    // fall back to their own timestamps, and since that fallback strikes no
+    // new boundary later events could chain to, each is its own singleton
+    // session. The model's Form B relation restates the same cap in *date*
+    // space (`event_date BETWEEN session_start_date ± 1 day`) — the
+    // declared relation the output window derives from — and removes no
+    // rows the sessionize frame kept (note 2026-03-20 23:55 passes the
+    // date-space filter but is cut by the timestamp-space frame).
+    //
+    // These pins are asserted per pipeline (not just via the set-equality
+    // above) so the real function's truncation behaviour is documented
+    // here, and any divergence from the mirrored fixture expectation in
+    // `cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound`
+    // surfaces as an explicit failure.
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        let mut chain: Vec<&SessionRow> = rows
+            .iter()
+            .filter(|r| r.device_id == TWO_BOUNDARY_DEVICE_ID)
+            .collect();
+        chain.sort_by(|a, b| a.session_start.cmp(&b.session_start));
+
+        let observed: Vec<(&str, &str, i64, Option<&str>)> = chain
+            .iter()
+            .map(|r| {
+                (
+                    r.session_start.as_str(),
+                    r.session_end.as_str(),
+                    r.event_count,
+                    r.utm_campaign.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![
+                ("2026-03-19 23:50:00", "2026-03-20 23:30:00", 58, None),
+                ("2026-03-20 23:55:00", "2026-03-20 23:55:00", 1, None),
+                ("2026-03-21 00:15:00", "2026-03-21 00:15:00", 1, None),
+            ],
+            "pipeline {label}: the real sessionize must truncate the \
+             two-boundary chain at the declared 1-day cap — a 58-event \
+             session ending at the last in-cap event (2026-03-20 23:30, not \
+             the chain's last day-2 event at 23:55) plus two singleton \
+             sessions rooted by the post-cap events; got {observed:?}"
+        );
+
+        // Non-overlap: the device's sessions never overlap in time.
+        for pair in chain.windows(2) {
+            assert!(
+                pair[1].session_start > pair[0].session_end,
+                "pipeline {label}: sessions must not overlap — session \
+                 starting {} begins at or before the previous session's end {}",
+                pair[1].session_start,
+                pair[0].session_end,
+            );
+        }
+
+        // Event conservation: every injected event counted exactly once.
+        let total: i64 = chain.iter().map(|r| r.event_count).sum();
+        assert_eq!(
+            total, 60,
+            "pipeline {label}: the chain device's sessions must account for \
+             all 60 injected events exactly once (58 + 1 + 1)"
+        );
+    }
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Test: silver/events_enriched — event-grain narrow update at model-upstream
+// creation cells
+// ─────────────────────────────────────────────────────────────────────────────
+//
+// `docs/plans/20260710-web-analytics-maintenance-demo.md` Phase 7:
+// `silver/events_enriched` joins `silver.events_parsed` and `silver.sessions`
+// (two maintained-model upstreams) back onto the event grain, `grain:
+// partition` on `event_date`. Its creation cells are clamped by each
+// upstream's own derived reach (`docs/specs/maintenance_plan.md` §"Upstream
+// model edges") — see `crates/smelt-cli/tests/explain_model.rs
+// ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
+// static evidence. These tests exercise the *dynamic* consequence on a real
+// fixture: incremental equals full rebuild, and a run touching one arrival
+// day only ever changes `event_date` partitions within the derived window.
+
+/// One row from `main.silver_events_enriched`, keyed for equivalence checks.
+type EventEnrichedRow = (i64, Option<String>, Option<String>); // (event_id, session_id, session_utm_campaign)
+
+/// Every `silver.events_enriched` row grouped by its `event_date` partition.
+fn query_events_enriched_by_partition(
+    db_path: &Path,
+) -> std::collections::BTreeMap<String, std::collections::BTreeSet<EventEnrichedRow>> {
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    let mut stmt = conn
+        .prepare(
+            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign \
+             FROM main.silver_events_enriched",
+        )
+        .unwrap_or_else(|e| panic!("prepare events_enriched query: {e}"));
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, Option<String>>(2)?,
+                row.get::<_, Option<String>>(3)?,
+            ))
+        })
+        .unwrap_or_else(|e| panic!("query events_enriched rows: {e}"))
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap_or_else(|e| panic!("collect events_enriched rows: {e}"));
+
+    let mut by_partition: std::collections::BTreeMap<
+        String,
+        std::collections::BTreeSet<EventEnrichedRow>,
+    > = std::collections::BTreeMap::new();
+    for (event_date, event_id, session_id, session_utm_campaign) in rows {
+        by_partition.entry(event_date).or_default().insert((
+            event_id,
+            session_id,
+            session_utm_campaign,
+        ));
+    }
+    by_partition
+}
+
+/// Day-by-day incremental build of `silver.events_enriched` equals a
+/// full-window rebuild exactly, per partition — the per-partition
+/// equivalence contract (`docs/specs/incremental_models.md`) applied to a
+/// model whose creation trigger reads two model upstreams rather than a
+/// single source.
+#[test]
+fn web_analytics_events_enriched_matches_full_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "enriched-pipeline-A",
+    );
+    let by_partition_a = query_events_enriched_by_partition(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("enriched-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let by_partition_b = query_events_enriched_by_partition(&db_path);
+
+    assert!(
+        !by_partition_a.is_empty(),
+        "Pipeline A produced no silver.events_enriched rows"
+    );
+    assert_eq!(
+        by_partition_a.keys().collect::<Vec<_>>(),
+        by_partition_b.keys().collect::<Vec<_>>(),
+        "silver.events_enriched partition sets (event_date) differ between \
+         full rebuild and day-by-day replay"
+    );
+
+    let mut mismatches = Vec::new();
+    for (partition, rows_a) in &by_partition_a {
+        let rows_b = by_partition_b.get(partition);
+        if rows_b != Some(rows_a) {
+            mismatches.push(format!(
+                "  partition {partition}: A has {} rows, B has {:?} rows",
+                rows_a.len(),
+                rows_b.map(|r| r.len())
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "silver.events_enriched differs between full rebuild and day-by-day \
+         replay on at least one partition:\n{}",
+        mismatches.join("\n")
+    );
+}
+
+/// Snapshot `silver.events_enriched`'s partitions after a day-by-day replay
+/// through day 6, then run one additional arrival day (day 7) and assert the
+/// change is exactly narrow: `event_date`'s output partition column is not
+/// write-rebased by either upstream edge (`silver.events_parsed`'s own
+/// creation-cell clamp is `Bounded(0,0)` — a direct 1:1 read — and
+/// `silver.sessions`'s ±1-day session-cap clamp only widens the *read*, not
+/// the write footprint; see `crates/smelt-cli/tests/explain_model.rs
+/// ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
+/// static clamp evidence), so a single-day run touches exactly its own
+/// `event_date` partition and no other. Verified empirically against the
+/// real fixture: running the day-7 window changes only the 2026-03-25
+/// partition; every one of the six previously-written partitions
+/// (2026-03-19 .. 2026-03-24) is byte-identical before and after. Asserted
+/// on observed partition contents (row sets), never on implementation logs.
+#[test]
+fn web_analytics_events_enriched_narrow_update() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+    repopulate_sources(&db_path, &setup_abs);
+
+    // Replay the first 6 of the 7 configured days (2026-03-19 .. 2026-03-25).
+    let (initial_windows, remaining_windows) = DAY_WINDOWS.split_at(DAY_WINDOWS.len() - 1);
+    for (ws, we) in initial_windows {
+        smelt_run(&workspace, ws, we, &format!("narrow-before [{ws}..{we})"));
+    }
+    let before = query_events_enriched_by_partition(&db_path);
+    assert!(
+        !before.is_empty(),
+        "no silver.events_enriched rows after the initial 6-day replay"
+    );
+    assert_eq!(
+        before.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "2026-03-19",
+            "2026-03-20",
+            "2026-03-21",
+            "2026-03-22",
+            "2026-03-23",
+            "2026-03-24",
+        ],
+        "unexpected partition set after the initial 6-day replay"
+    );
+
+    // Run the one additional arrival day (day 7: 2026-03-25 .. 2026-03-26).
+    for (ws, we) in remaining_windows {
+        smelt_run(&workspace, ws, we, &format!("narrow-after [{ws}..{we})"));
+    }
+    let after = query_events_enriched_by_partition(&db_path);
+
+    // Exactly one new partition appears (2026-03-25), and every
+    // previously-written partition is byte-identical.
+    assert_eq!(
+        after.keys().cloned().collect::<Vec<_>>(),
+        vec![
+            "2026-03-19",
+            "2026-03-20",
+            "2026-03-21",
+            "2026-03-22",
+            "2026-03-23",
+            "2026-03-24",
+            "2026-03-25",
+        ],
+        "expected exactly one new partition (2026-03-25) after the additional \
+         arrival day"
+    );
+
+    let mut unexpected_changes = Vec::new();
+    for partition in before.keys() {
+        if before.get(partition) != after.get(partition) {
+            unexpected_changes.push(partition.clone());
+        }
+    }
+    assert!(
+        unexpected_changes.is_empty(),
+        "narrow update touched previously-written partition(s) it should not \
+         have (a run touching only 2026-03-25 must not rewrite earlier \
+         partitions): {unexpected_changes:?}"
     );
 }

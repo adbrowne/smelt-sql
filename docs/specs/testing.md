@@ -1,13 +1,13 @@
 ---
 feature: testing
 status: experimental
-last_reviewed: 2026-06-26
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
 # Testing
 
-> **What this is.** A normative spec for the smelt testing framework — the `smelt.test` declaration kind, mock data injection via `PASSING`, CTE isolation via the `#` operator, assertion semantics, and property-based test behavior.
+> **What this is.** A normative spec for the smelt testing framework. It covers two declaration kinds: `smelt.test` — mocked, in-memory **unit tests** of model logic (mock data injection via `PASSING`, CTE isolation via the `#` operator, `EXPECT` assertion semantics, property-based behavior); and `smelt.check` — **data-quality checks** that assert against real built data (a failing-rows query where zero rows means pass), with `severity` and build-time blocking. A test validates that a model's SQL is correct before it materializes; a check validates that the data a model produced is sound after it materializes.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -114,13 +114,63 @@ Strings that match the `YYYY-MM-DD` pattern are automatically cast to `DATE`; st
 
 `smelt test --select <expr>` matches `<expr>` as a **plain substring** against test names. The full `tag:` / `path:` / `+upstream` / `downstream+` selector grammar in `model_selection.md` does **not** apply to `smelt test`; it applies to `smelt run`, `smelt build`, and `smelt explain`. Substring match is asymmetric with the rest of the CLI and is tracked as a divergence in `model_selection.md` Known Divergences (and in this spec's Known Divergences below); aligning the two is open work.
 
+### Data checks — the `smelt.check` declaration
+
+A `smelt.check` is a **data-quality assertion against real built data**. Where a `smelt.test` validates a model's logic in-memory against mock inputs, a check validates that the rows a model actually produced are sound — the same "failing-rows" model used by dbt data tests and SQLMesh audits.
+
+```sql
+smelt.check daily_revenue_non_negative AS (
+    SELECT order_date, total_revenue
+    FROM smelt.daily_revenue
+    WHERE total_revenue < 0
+)
+```
+
+Grammar:
+
+```
+[<frontmatter block>]
+smelt.check <name> AS ( <select> ) [;]
+```
+
+- **`<name>`** — the check's identity. Its full `smelt.<path>` address is formed exactly as a model's or test's (declaring directory joined with `<name>`). A check is addressable for tooling and selectors but is **never** valid in a `TableExpr` position; it produces no database object.
+- **`<select>`** — a **failing-rows query**: it returns the rows that violate the invariant. The query references the model(s) under check via `smelt.<path>`, which resolve to the **real materialized relations** in the configured target. The check's model dependencies are derived from those references.
+- A `smelt.check` has **no `PASSING` and no `EXPECT`** — those are `smelt.test`-only surface (a check reads real data, it does not mock or enumerate expected rows). A `smelt.check` carrying either clause is a `CheckHasTestClause` error.
+
+**Pass condition.** A check **passes iff its query returns zero rows.** Any returned row is a violation. There is no `1e-6`/decimal tolerance machinery (that is comparison surface, which checks do not have) — the only question is whether the failing-rows query is empty.
+
+#### Check frontmatter knobs
+
+| Key | Type | Required | Default | Description |
+|-----|------|----------|---------|-------------|
+| `severity` | `error` \| `warn` | no | `error` | `error`: a violation fails the check (nonzero exit; blocks downstream during `smelt build`). `warn`: a violation is reported but does not fail the run, set a nonzero exit, or block downstream. |
+
+There are no `check_order`, `cases`, `PASSING`, or `EXPECT` knobs — those belong to `smelt.test`. (`error_if`/`warn_if` count thresholds and persisting violating rows to a warehouse table are **not** part of this surface; see Known Divergences.)
+
+#### `#` is not valid in a check
+
+A check queries built tables, not a model's internal CTEs, so the test-local `#` operator is **not** available in a `smelt.check` body: a `smelt.<model>#<cte>` reference inside a check is `CteRefOutsideTest`, exactly as in a model body. Internal CTEs remain a private implementation detail; a check asserts on the model's published output.
+
+#### Running checks — `smelt check` and build integration
+
+Checks have two entry points, both executing against the **configured target** (whichever backend holds the built data — checks are not pinned to DuckDB the way `smelt.test` is):
+
+- **`smelt check [--select <substr>]`** — runs checks against data that is **already built**. `--select` matches a plain substring against check names (the same asymmetric substring rule as `smelt test`; see Selector behaviour). A check whose referenced model has not been built yet fails loudly with `CheckTargetNotBuilt` rather than silently passing on an empty/absent relation.
+- **`smelt build`** — after a model materializes, the checks that reference it run against the freshly written data. An `error`-severity violation **skips every model downstream of the checked model** (the bad data does not propagate), mirroring dbt's `build` skip-cascade and SQLMesh's blocking audits. A `warn`-severity violation never skips. Checks whose dependencies are all built but which guard no further downstream simply report.
+
+**Reporting.** For each check, `smelt check`/`smelt build` reports `PASS`, `FAIL` (error severity, ≥1 violation), or `WARN` (warn severity, ≥1 violation), the violation **row count**, and a **capped inline sample** of the first N violating rows for debugging. Violating rows are **not** persisted to the warehouse (no audit schema/table); the sample is shown in the run output only. `smelt check` exits nonzero iff any `error`-severity check has violations; `warn`-only violations exit zero.
+
 ### Diagnostic codes (owned by this spec)
 
 | Code | Severity | Trigger |
 |---|---|---|
 | `UnknownTestInput` | Error | A `PASSING` clause names a `<dep>` that is not a compiled dependency of the assertion query (catches a typo that would otherwise be silently replaced with an empty CTE → a false-green test). Anchored at the offending name. |
 | `UnknownTestCte` | Error | A `smelt.<model>#<cte>` reference names a `<cte>` that does not exist in the referenced model's `WITH` clause. Anchored at the `#<cte>` suffix. |
-| `CteRefOutsideTest` | Error | A `smelt.<model>#<cte>` reference appears outside a `smelt.test` body. Anchored at the `#` operator. |
+| `CteRefOutsideTest` | Error | A `smelt.<model>#<cte>` reference appears outside a `smelt.test` body (including inside a `smelt.check` body). Anchored at the `#` operator. |
+| `AmbiguousTestModel` | Error | A single-segment `smelt.<leaf>` reference in a `smelt.test` body resolves to two or more models sharing that leaf name. Lists the candidate addresses and advises referencing the model by its full dotted address. Anchored at the reference. |
+| `NonStandaloneTestModel` | Error | While inlining a whole-query test, an upstream model body cannot be compiled standalone (it relies on per-model config vars, incremental/watermark constructs, or similar) and was not mocked via `PASSING`. Advises mocking that dependency's boundary with a `PASSING` clause. Anchored at the offending reference. |
+| `CheckHasTestClause` | Error | A `smelt.check` declaration carries a `PASSING` or `EXPECT` clause, which are valid only on `smelt.test`. Anchored at the offending clause. |
+| `CheckTargetNotBuilt` | Error | A `smelt.check` references a model whose relation does not exist in the configured target (it has not been built). Anchored at the reference. |
 
 ## Semantics
 
@@ -170,6 +220,20 @@ Each iteration uses a different random seed derived from the test's global seed.
 
 `smelt test` always runs against in-memory DuckDB, regardless of the project's configured targets. Tests on Spark-only projects are not validated against Spark semantics. This is a known design gap.
 
+### Check execution model
+
+A `smelt.check` runs against the project's **configured target** — the same connection `smelt run`/`smelt build` writes to — because its assertion is about real materialized data. It is therefore multi-backend by construction: a check on a Spark-built model runs on Spark, a check on a DuckDB-built model runs on DuckDB. This is the deliberate inverse of `smelt.test`, which is always in-memory DuckDB and never touches the target. The lifecycle per check:
+
+1. Resolve the failing-rows `<select>`. Its `smelt.<path>` references compile to the **built relations** in the target (no inlining, no mocking — a check reads the materialized output the way any downstream model would).
+2. If a referenced model's relation is absent from the target, fail with `CheckTargetNotBuilt` (loud, never a silent pass).
+3. Execute the query against the target.
+4. **Zero rows → PASS.** One or more rows → a violation: `FAIL` when `severity: error`, `WARN` when `severity: warn`.
+5. Report the outcome, the violation row count, and a capped sample of violating rows.
+
+**Build integration.** During `smelt build`, a model's checks run immediately after that model materializes, against the just-written data. An `error`-severity violation marks every model **downstream of the checked model** as skipped for the remainder of the build, so invalid data does not propagate; the build exits nonzero. A `warn`-severity violation is reported and the build continues. `smelt run` materializes without running checks; checks are a `build`/`check` concern. (The dependency edge that defines "downstream of the checked model" is derived from the `smelt.<path>` references in the check body — a check guards the models it reads.)
+
+**Standalone `smelt check`.** Run independently of a build, `smelt check` executes the same per-check lifecycle against whatever is currently materialized in the target, with no skip-cascade (there is no in-flight build to gate) — it is a pure validation pass that exits nonzero iff an `error`-severity check has violations.
+
 ## Design
 
 **Test is a declaration kind, not a materialization.** A `smelt.test` declaration is signalled by a `smelt.<noun>` keyword, exactly like `smelt.define` and `smelt.extern` — kind lives on the kind axis (`architecture.md`), not smuggled in through a `materialization:` frontmatter flag. A test produces no output and nothing in the DAG depends on it; it is not a persistence strategy, so it has no business being a `materialization` value. *Modelling a test as a `materialization` value* (a `materialization: test` flag on a bare SELECT) was rejected because it makes a test the only kind signalled by a frontmatter flag rather than by file format or a `smelt.<noun>` keyword the way every other kind is — an asymmetry the keyword form removes. The parser, type checker, and LSP still handle the assertion query with the same machinery they use for any model SELECT; only the kind signal and the input/expectation surface live in the grammar.
@@ -182,6 +246,16 @@ Each iteration uses a different random seed derived from the test's global seed.
 
 **Set comparison by default.** `check_order: false` is the safe default. Most models do not produce ordered output, and ordering in SQL is non-deterministic unless an `ORDER BY` is present. Requiring `check_order: true` explicitly for ordered output avoids brittle tests that depend on DuckDB's internal sort order.
 
+**Check is a kind, not a test mode.** A data-quality assertion gets its own `smelt.check` keyword-signalled kind rather than a flag on `smelt.test` or a `materialization:`/`test:` frontmatter value. Folding it into `smelt.test` was rejected because the two have genuinely different execution models — a test mocks inputs and runs in-memory DuckDB against an `EXPECT` set; a check mocks nothing and runs against real built data in the configured target. One keyword carrying both behaviours, switched by the presence or absence of `PASSING`/`EXPECT`, would overload a single declaration with two execution engines and two failure semantics. A `materialization:`/`test:` frontmatter flag on a bare SELECT was rejected for the same reason `materialization: test` was retired from the kind axis: kind belongs on the kind axis (a `smelt.<noun>` keyword), not smuggled through a storage flag. Distinct kinds keep each declaration's surface minimal — a test has `PASSING`/`EXPECT`/`#`; a check has a failing-rows query and `severity` — and let the resolver, type checker, and LSP classify by keyword.
+
+**Failing-rows, not expected-rows.** A check is a query whose *returned rows are the violations* (zero rows = pass), the convention shared by dbt data tests and SQLMesh audits. This was chosen over an `EXPECT`-style enumerated-output assertion because a data-quality invariant is naturally phrased as "no row should look like this" over an open dataset, where enumerating every acceptable row is impossible. It also keeps the check body a plain SELECT the type checker and planner read with no special machinery.
+
+**Real-data execution against the configured target.** A check runs where the data lives, not on an in-memory engine, because its entire purpose is to assert on what was actually materialized. This makes checks multi-backend for free and is the deliberate inverse of `smelt.test`'s always-DuckDB rule (a test asserts on *logic*, which is engine-independent; a check asserts on *data*, which is not).
+
+**Both a standalone verb and build-blocking.** Checks are reachable two ways: a standalone `smelt check` (run assertions on demand against current data) and automatic execution during `smelt build` where an `error`-severity violation skips downstream models. The standalone verb alone was rejected as the *only* mechanism because both dbt (`build` skip-cascade) and SQLMesh (blocking audits) make data-quality failures stop bad data from propagating — a check that cannot block the pipeline is advisory at best. Build-blocking alone was rejected because operators routinely want to re-run assertions without rebuilding. Severity (`error`/`warn`) is the dial between the two postures, mirroring dbt's `severity` and SQLMesh's blocking/non-blocking flag.
+
+**No thresholds or stored failures in the surface (yet).** `severity` is the only knob. Count-comparison thresholds (`error_if`/`warn_if`) and persisting violating rows to a warehouse audit table — both present in dbt — are deliberately out of the initial surface: the failing-rows query can already encode a threshold (`HAVING count(*) > 10`), and a capped inline sample covers the common debugging need without the schema-management surface that a persisted audit table introduces. These remain open (see Known Divergences) rather than rejected.
+
 ## Constraints & Invariants
 
 1. **Tests run in-memory on DuckDB.** No connection to the project's configured target is made during `smelt test`.
@@ -190,6 +264,10 @@ Each iteration uses a different random seed derived from the test's global seed.
 4. **`PASSING` names are bare dependency address paths.** For both full-query and CTE-level tests, each name is the bare address path of a dependency the assertion query reaches — the `smelt.<path>` minus the leading `smelt.` (e.g. `orders` or `silver.orders`). A CTE-level test still mocks the model's external dependencies, not its internal CTEs. A name that matches no compiled dependency is reported via `UnknownTestInput`.
 5. **`#` is test-local.** A `smelt.<model>#<cte>` reference is legal only inside a `smelt.test` body; elsewhere it is `CteRefOutsideTest`. A `#<cte>` naming a non-existent CTE is `UnknownTestCte`.
 6. **Column comparison uses only `EXPECT` columns.** Extra actual columns are never treated as failure.
+7. **Checks run against the configured target.** A `smelt.check` executes against real built data in the project's configured backend, never against in-memory mocks. It has no `PASSING`/`EXPECT`/`#` surface.
+8. **A check passes iff it returns zero rows.** Returned rows are violations. `severity: error` (default) makes a violation fail the run and block downstream during `build`; `severity: warn` reports without failing or blocking.
+9. **Checks produce no database object.** Like `smelt.test`, a `smelt.check` is never materialized by `smelt run`/`build`, is excluded from execution runs, and is not valid in a `TableExpr` position.
+10. **A check on unbuilt data fails loudly.** A check referencing a model whose relation is absent from the target reports `CheckTargetNotBuilt`, never a silent pass on missing data.
 
 ## Known Divergences / Open Questions
 
@@ -200,14 +278,23 @@ Each iteration uses a different random seed derived from the test's global seed.
 - **`cases: 0` behavior.** Setting `cases: 0` when row literals have omitted columns may result in no iterations. Whether this is PASS or an error is undefined.
 - **Spark test gap.** Tests always run on DuckDB. Spark-specific function behavior (MERGE semantics, Parquet type handling) cannot be tested with `smelt test`.
 - **Project-wide CTE addressing.** `#` is test-local. Whether a model's CTEs should be addressable project-wide (so any model could read another's intermediate CTE — interesting for smelt's cross-model optimization story) is open, and would need its own spec covering the encapsulation and address-collision trade-offs.
+- **Check thresholds.** A `smelt.check` fails on **any** violating row. Count-comparison thresholds (dbt's `error_if`/`warn_if`, e.g. warn above 10 violations and error above 1000) are not part of the surface; a threshold can be encoded in the failing-rows query itself (`... HAVING count(*) > 10`). Whether to add first-class threshold keys is open.
+- **Stored check failures.** Violating rows are reported as a capped inline sample only; they are not persisted to a warehouse audit table (dbt's `store_failures_as`). Whether to add opt-in persistence for post-hoc inspection is open.
+- **Generic / reusable checks.** A `smelt.check` is a one-off failing-rows query. There is no parameterized, reusable check template (dbt generic tests, SQLMesh built-in audits like `not_null(columns := ...)`). smelt's `smelt.define` fragment functions are a plausible substrate for reusable check bodies; whether and how to expose generic checks is open.
+- **Check severity is the only build-gating dial.** `error` blocks downstream during `build`; `warn` does not. There is no per-environment override (block in CI, warn in dev) and no equivalent of SQLMesh's plan-vs-run distinction for checks. Open.
+- **`smelt check` selector is substring-only.** `smelt check --select` matches a plain substring against check names; the full `tag:`/`path:`/`+upstream` selector grammar does not apply (unlike `smelt test --select`, which does use the full selector syntax — see `cli.md`). A selection matching no check exits `0` with a "no checks matched" notice rather than hard-erroring. Aligning this with `smelt run`/`build` is the same open work tracked in `model_selection.md` Known Divergences.
+- **`CheckTargetNotBuilt` pre-check skip-list is narrower than the dependency-graph exclusion list.** The existence pre-check skips only `sources`/`functions` references before probing the target, whereas graph construction also excludes `seeds`, `config`, and the `models.*` meta-accessors — so a check body that directly references `smelt.seeds.*`, `smelt.config.var(...)`, or `smelt.models.*` can surface a spurious `CheckTargetNotBuilt`. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
+- **One `smelt.check` per file.** The check runner processes only the first check declaration in a file (the `smelt.test` runner loops over all declarations in a file). Whether multi-check files should be supported is open. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
+- **A check referencing multiple models runs before all of them are built.** During `smelt build`, a check is registered under every model it references and runs as soon as the first of them materializes; if another referenced model is later in the build order, the check can surface a spurious `CheckTargetNotBuilt`/skip. Single-model checks (all current examples) are unaffected. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
+- **`NonStandaloneTestModel` detection covers only `smelt.config.var`.** The pre-inline detector recognizes the one in-body non-standalone construct that exists today (incremental/watermark declarations live in frontmatter, which is stripped before inlining, so they leave no in-body marker). Any other standalone-compile failure of the composed test query still fails loud, but as a generic `TestCompilationError` anchored at the test body's start rather than an attributed `NonStandaloneTestModel`; `TestCompilationError` and the cycle guard `TestInliningDepthExceeded` are not in the `diagnostics.md` catalogue. Tracked in `docs/plans/20260628-data-checks.md` §"Deferred during implementation".
 
 ## References
 
 - **Code**:
-  - `crates/smelt-parser/src/` — `smelt.test` declaration grammar, `PASSING`/`EXPECT` clauses, the `#` CTE-reference operator
-  - `crates/smelt-core/src/metadata.rs` — `TestConfig` (`check_order`, `cases`), `ColumnTest`
-  - `crates/smelt-core/src/resolver.rs` — `EntityKind::Test`
-  - `crates/smelt-cli/src/commands/` — `smelt test` command implementation
+  - `crates/smelt-parser/src/` — `smelt.test` and `smelt.check` declaration grammar, `PASSING`/`EXPECT` clauses, the `#` CTE-reference operator
+  - `crates/smelt-core/src/metadata.rs` — `TestConfig` (`check_order`, `cases`), `ColumnTest`, `CheckConfig` (`severity`)
+  - `crates/smelt-core/src/resolver.rs` — `EntityKind::Test`, `EntityKind::Check`
+  - `crates/smelt-cli/src/commands/` — `smelt test` and `smelt check` command implementations
 - **User docs**:
   - `docs-site/docs/guide/testing.md`
 - **Related specs**:

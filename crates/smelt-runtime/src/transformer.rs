@@ -272,6 +272,18 @@ fn is_smelt_path_char(b: u8) -> bool {
 /// A model with more than one bounded source, or any nonzero margin, keeps
 /// both layers: the outer clamp remains load-bearing whenever a genuine
 /// lookback makes the scan window wider than the output window.
+///
+/// **This check alone is not sufficient for a model with a derived,
+/// skewing `partition_column`** (`docs/specs/model_transforms.md` §Semantics
+/// "The output window is derived, never assumed"): a skewed model's scan
+/// margin and its output window are two genuinely different ranges even
+/// when there is exactly one zero-margin source, because the *output*
+/// window itself is wider than the *run* window the source-level filter is
+/// built from. Callers must additionally require the model's own derived
+/// skew (`smelt_logical::analysis::walk::model_partition_skew`) to be
+/// `Skew::ZERO` before skipping the outer clamp — see
+/// `crate::execute::derive_batch_filtered_sql`, the single call site that
+/// composes this check with the skew gate.
 pub fn is_transparent_single_source(
     source_bounds: &std::collections::HashMap<String, SourceBound>,
 ) -> bool {

@@ -1,21 +1,35 @@
 # smelt explain
 
-Inspect the logical and physical execution plan for a project.
+Inspect the logical and physical execution plan for a project, or the derived maintenance plan for a single incremental model.
 
 ```bash
-smelt explain [--json] [--project-dir <path>]
+smelt explain [MODEL_NAME] [--json] [--select <selector>] [--project-dir <path>] [--show-sql] [--period <start>..<end>]
 ```
 
 ## Options
 
 | Flag | Description |
 |---|---|
-| `--json` | Output as JSON instead of human-readable text. |
+| `MODEL_NAME` | Optional. Name of a single model to print the maintenance-plan report for instead of the whole-project graph. |
+| `--json` | Output as JSON instead of human-readable text. Ignored when `MODEL_NAME` is given, except in combination with `--show-sql`. |
+| `--select` | Select models to include (repeatable). Ignored when `MODEL_NAME` is given. |
 | `--project-dir` | Path to the smelt project root. Defaults to the current directory. |
+| `--show-sql` | With `MODEL_NAME`, also print the maintenance statements each cell executes. Never connects to a backend. |
+| `--period` | With `--show-sql`, real literal date bounds (`<start>..<end>`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
 
 ## Human-readable output
 
-Without `--json`, smelt prints a summary of the logical graph (models, dependencies, materialization, incremental config) followed by the physical graph (planner optimisations, execution order, per-model strategy).
+Without `--json` or a `MODEL_NAME`, smelt prints a summary of the logical graph (models, dependencies, materialization, incremental config) followed by the physical graph (planner optimisations, execution order, per-model strategy).
+
+## Per-model maintenance plan
+
+`smelt explain <model>` prints that model's derived **maintenance plan** instead of the whole-project graph: every cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the derived per-source scan clamps, each source's partition-locality verdict, any admission refusals, and the model's inbound propagation edges. This only applies to `refresh: incremental` models with a `grain:` declared — other models print a one-line notice instead.
+
+Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell executes — the output of the same pure emitters a run executes. Each cell's SELECT body is compiled through the real discovered project's ephemeral resolver and upstream column types, the same way a run compiles it, so the printed SQL matches what a run would compile (referenced ephemeral models are CTE-inlined, and ref-column aggregates cast to their real type). A transactional group (e.g. a paired region `DELETE`+`INSERT`) is bracketed by `BEGIN`/`COMMIT` lines. `--show-sql` never connects to a backend. Combine with `--period <start>..<end>` for the real literal window bounds, or omit it to see the symbolic `{{window_start}}`/`{{window_end}}` placeholders instead. Combined with `--json`, the report is emitted as JSON with a `statements` array per cell.
+
+One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
+
+See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report.
 
 ## JSON output schema
 
@@ -37,7 +51,7 @@ Each entry in `models` has:
 |---|---|---|
 | `dependencies` | `string[]` | Upstream model names. |
 | `materialization` | `string` | Resolved storage materialization (`"view"`, `"table"`, `"ephemeral"`, `"materialized_view"`). |
-| `refresh` | `string` | Present only for cumulative models: `"cumulative"`. Omitted for full-refresh models. |
+| `refresh` | `string` | Resolved refresh strategy: `"incremental"` or `"materialized_view"`. Omitted when `"full"`. |
 | `incremental` | object | Present only when the model is incremental. See below. |
 | `tags` | `string[]` | Model tags from frontmatter or `smelt.yml`. Omitted when empty. |
 | `owner` | `string` | Model owner from frontmatter `owner:` key. Omitted when absent. |
@@ -45,7 +59,7 @@ Each entry in `models` has:
 
 ### `incremental` object
 
-Present on a model when `incremental: enabled: true` is set and a `timeseries:` block is declared.
+Present on a model when `refresh: incremental` and `grain:` are set and a `timeseries:` block is declared.
 
 | Field | Type | Description |
 |---|---|---|

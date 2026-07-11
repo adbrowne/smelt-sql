@@ -11,6 +11,7 @@ mod backbuild_cumulative_e2e;
 mod build_summary_visibility;
 mod cohort_count_acceptance;
 mod combined_generators_e2e;
+mod cross_midnight_rebase;
 mod cumulative_classifier_gate;
 mod diagnostic_gate;
 mod dry_run_visibility;

@@ -73,6 +73,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         columns: std::collections::HashMap::new(),
         backend_hints: std::collections::HashMap::new(),
         test: None,
+        check: None,
         schema_evolution: None,
         format: None,
         reuse: None,

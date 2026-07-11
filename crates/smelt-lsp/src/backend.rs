@@ -442,6 +442,7 @@ impl Backend {
                 }
                 DbCode::StateModeWidening => "state-mode-widening",
                 DbCode::CteRefOutsideTest => "cte-ref-outside-test",
+                DbCode::CheckHasTestClause => "check-has-test-clause",
                 DbCode::UnknownTestInput => "unknown-test-input",
                 DbCode::UnknownTestCte => "unknown-test-cte",
                 // Pipe SQL (Data-World |> pipe query) diagnostic codes.
@@ -452,6 +453,7 @@ impl Backend {
                 DbCode::GrainRequiresIncremental => "grain-requires-incremental",
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
+                DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
             };
             NumberOrString::String(code_str.to_string())
         });

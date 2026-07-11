@@ -57,6 +57,7 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 - Sub-day propagation grain; keyed-grain dirt-sets; time-unrolled self-edges in the graph (designed, refusing fail-loud — `maintenance_plan.md` §Known Divergences; revisit after this plan).
 - Straddle attribution without locality (ledger v1 is locality-or-explicit-footprint by spec).
 - CDF/snapshot-diff delta detection (v1 is append-only interval diff per P10; `change_feed` admission arms land but their delta *detection* trails).
+- Automatic, watermark-diffed `--since-upstream` (a persisted per-source "last propagated through" watermark in `smelt-state`, diffed each invocation) — `--since-upstream` in this plan takes the delta explicitly via `--source`/`--landed` (Known Divergence → `maintenance_plan.md` §Future Extensions "Automatic, watermark-diffed `--since-upstream`").
 - Backend-derived source facts (Known Divergence → `multi_backend.md`).
 - The `on_column_add:` policy knob (noted-not-surface in `models.md`).
 - Re-cut shape-profile compositions from the superseded L4 sub-plans (versioned SCD-2 executor, native-IVM delegation) — re-scaffolded from evidence after this plan lands the plan machinery.
@@ -78,10 +79,10 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 | MP11  | done     | `7f13b3b0` | 2026-07-10 |
 | MP12  | done     | `6f97578f` | 2026-07-10 |
 | MP13  | done (bakeoff CLI deferred — see docs/ROADMAP.md §10) | `d8948bf5` | 2026-07-10 |
-| MP14  | pending  |        |      |
-| MP15  | pending  |        |      |
-| MP16  | pending  |        |      |
-| MP17  | pending  |        |      |
+| MP14  | done     | `00544764` | 2026-07-10 |
+| MP15  | done     | `4413d46a` | 2026-07-10 |
+| MP16  | done     | `9710a9e2` | 2026-07-10 |
+| MP17  | done (partial — 9 cells CLAIMED, remainder in KNOWN_GAPS, see "Deferred during implementation") | `43785da4` | 2026-07-10 |
 
 ---
 
@@ -452,18 +453,22 @@ The spec set now describes the derived maintenance plan (`maintenance_plan.md`),
 
 ### Phase MP15: Forward propagation — `smelt run --since-upstream`
 
-**Goal.** The graph layer's forward direction live (`maintenance_plan.md` §"The graph layer"): topological dirt reflection through per-edge clamps with outward grain ceiling, per-edge dirt keying the trigger cell, per-model dirt for consumers; `smelt run --since-upstream` prints the dirty set then runs exactly the propagated per-edge regions. Cyclic/self-referential/keyed-grain nodes refuse (`MaintenanceGraphUnsupportedNode`).
+**Goal.** The graph layer's forward direction live (`maintenance_plan.md` §"The graph layer"): topological dirt reflection through per-edge clamps with outward grain ceiling, per-edge dirt keying the trigger cell, per-model dirt for consumers. Delta *source* is explicit: `smelt run --since-upstream --source <address> --landed <start>..<end>` (repeatable) takes the caller-declared per-source deltas directly — no automatic recorded-state diffing (`maintenance_plan.md` §CLI, §Known Divergences "Delta detection for `--since-upstream` is explicit, not automatic, for v1"; the automatic watermark-diffed form is §Future Extensions, out of scope here). Prints the dirty set then runs exactly the propagated per-edge regions. Cyclic/self-referential/keyed-grain nodes refuse (`MaintenanceGraphUnsupportedNode`).
 
 **Pre-conditions.** MP11, MP14.
 
 **TDD tests to write first.**
 - Promote `crates/smelt-logical/tests/maintenance_tracer_propagation.rs` scenarios (S1–S12 minus refused ones) from tracer-fed to production-path.
-- `crates/smelt-cli/tests/since_upstream.rs::runs_exactly_the_propagated_regions` — two sources landing in one tick drive different cells over different regions of one model (P4); partitions outside the dirty set never scheduled (assert via reporter).
+- `crates/smelt-cli/tests/since_upstream.rs::runs_exactly_the_propagated_regions` — two `--source`/`--landed` deltas passed in one invocation drive different cells over different regions of one model (P4); partitions outside the dirty set never scheduled (assert via reporter).
 - `crates/smelt-cli/tests/since_upstream.rs::sufficiency_equals_full_refresh` — testkit equivalence after a propagated run.
 - `crates/smelt-cli/tests/since_upstream.rs::self_referential_node_refuses_fail_loud`
+- `crates/smelt-cli/tests/since_upstream.rs::source_without_landed_flag_propagates_nothing` — a source with no matching `--landed` interval contributes no dirt (no implicit whole-table or recorded-state fallback).
+- `crates/smelt-cli/tests/since_upstream.rs::malformed_landed_range_errors` — `--landed` without a matching `--source`, or a malformed interval, is a named CLI error, not a panic.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/maintenance/propagate.rs` (production promotion), `crates/smelt-runtime`, `crates/smelt-cli/src/commands/run*.rs`
+
+No `smelt-state` schema change: the per-source deltas come from the `--source`/`--landed` flags, not from a persisted watermark (that's the deferred automatic form).
 
 **Docs touched.** *Timeless.*
 - `docs/specs/cli.md`, docs-site (the scheduling story), `maintenance_plan.md` Known Divergences narrowed.
@@ -542,6 +547,58 @@ the refusal diagnostic and are annotated with the catalogue id so later work fli
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
+**2026-07-10 — MP17 (coverage-matrix conformance sweep): partial delivery, scoped down.** The
+research matrix (`07-example-catalogue.md` §"Coverage matrix") has ~100 inhabited
+`(construct × source-property)` cells across 21 rows (plus the `INTERSECT`/`EXCEPT` row this
+phase added); fully re-verifying every cell against a grounded, executable test in one pass was
+not achievable at this session's scope. What landed:
+- The standing inventory gate (`crates/smelt-logical/tests/maintenance_plan_conformance.rs::coverage_matrix_is_inhabited`)
+  encodes the full matrix as data and enforces additive-only coverage: every inhabited cell must
+  appear in exactly one of two explicit lists, `CLAIMED` or `KNOWN_GAPS` — never silently
+  omitted. `cargo test -p smelt-logical --test maintenance_plan_conformance` is green.
+- 9 catalogue ids got a new, grounded, pure-derivation test this pass: EX-08 (unclocked
+  change-feed dimension refuses `ScanUnbounded`), EX-12 (multi-input merge — pins the
+  shared-column-group-technique divergence), EX-14 (change-feed SUM refuses the fold, recompute
+  only), EX-18 (GROUP BY coarser — the declared-granularity widen check HOLDS), EX-26
+  (change-feed MAX_BY-style latest-writer — recompute only), EX-27 (ROW_NUMBER dedup — refuses,
+  no fold specification exists), EX-35 (correlated first-value/`ARG_MAX` — refuses, holistic
+  combiner), plus the added EX-41/EX-42 row (`INTERSECT`/`EXCEPT` — pins the set-op
+  classification collapse). EX-02 and EX-24 were already covered by this file's pre-existing
+  two cases. New test files:
+  `crates/smelt-logical/tests/maintenance_coverage_matrix.rs` (EX-12, EX-14, EX-18, EX-26, EX-27,
+  EX-35) and `crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs` (EX-08,
+  EX-41/EX-42).
+- Everything else — the remainder of the matrix's inhabited cells — is named individually in
+  `KNOWN_GAPS` inside `coverage_matrix_is_inhabited`, each with a one-line reason. Most are
+  tagged "plausibly covered by an existing `G-*`/`SC-*` property-discovery probe, not
+  re-verified against this exact catalogue id" — the `docs/research/20260705-property-discovery-loop.md`
+  catalogue (`G-01`…`G-12`, `SC-1`…`SC-7`) and the `07-example-catalogue.md` `EX-nn` catalogue
+  are two independently-numbered systems with no cross-reference table between them; building
+  that cross-reference (or re-deriving each probe's exact EX-id coverage from its SQL shape) is
+  itself unbuilt and would need its own pass. A few gaps are genuine production investigation,
+  not just attribution: EX-25 (does `source_bounds` derive an `after` margin for `LAG`/`LEAD`
+  offsets at all?), EX-06/EX-11/EX-19/EX-28/EX-29/EX-31/EX-32/EX-33/EX-34 (graph-layer,
+  versioned-interval, and engine-delegation probes outside this pass's pure-derivation scope).
+  Follow-up: lift `KNOWN_GAPS` entries into `CLAIMED` one at a time in a future session — the
+  meta-test's per-cell (not per-row) accounting means this can happen incrementally without
+  re-deriving the whole inventory.
+
+**2026-07-10 — MP17 review remediation.** A reviewer found `ex18_group_by_coarser_write_window_rounds_up`
+only asserted the write-window-widen precondition (`check_declared_granularity`), not the
+equivalence leg its 3 `CLAIMED` entries claimed ("HOLDS"). Added
+`maintenance_plan_conformance.rs::described_technique_matches_execution_ex18_group_by_coarser_write_window`,
+which derives the plan, emits `DeleteInsert` over the week-rounded region, and asserts
+multiset-equivalence against a full refresh over a real DuckDB (plus a negative check that a
+day-scoped, non-rounded region does NOT reproduce the refresh — the hazard the rounding-up
+guarantee rules out). The 3 `CLAIMED` entries now point at this test instead. Also fixed: the
+`KNOWN_GAPS` entry for EX-29 had copy-pasted EX-28's reason (`versioned:` parser gap); corrected
+to EX-29's actual catalogue verdict (structural REFUSED — the interval row set depends on
+observation cadence, gated on OQ2 — independent of the parser gap). Renamed
+`coverage_matrix_gaps.rs::ex41_ex42_intersect_except_refuse_today` to
+`ex41_ex42_intersect_no_payload_column_still_delete_insert` (it asserts `DeleteInsert`/no
+refusals, not a refusal — the actual refusal is proved by the companion
+`..._collapses_whole_model` test).
+
 ## Blocked phases
 
 Append-only log.
@@ -553,6 +610,19 @@ Append-only log.
   Options: (A) scope this iteration of MP13 down to landing the ladder only (already done) and split `smelt bakeoff` into its own follow-up phase once a human has resolved the three questions above; (B) resolve all three inline as part of MP13 (would need reviewer sign-off on the new `smelt-runtime` scratch-schema API and the frontmatter round-trip strategy before proceeding, per "Fail-loud discipline"/API-surface conventions). Recommendation: A — `choice.rs` is self-contained, tested, and unblocks nothing else waiting on it being merged into `mod.rs`; `bakeoff` is a genuinely separate CLI feature with its own runtime-API and file-mutation design surface worth a dedicated review pass rather than folding into this phase's red-green loop.
 
 **2026-07-10 — resolved (human decision): deferred, option A.** The ladder half is the acceptance target this plan actually needs (nothing downstream of MP13 depends on the `bakeoff` CLI); the CLI is re-scoped out of this plan entirely rather than left as a blocked row, so the loop isn't gated on it. Tracked as its own future backlog item in [`docs/ROADMAP.md`](../ROADMAP.md) §10 (`⏸️ smelt bakeoff CLI (deferred)`), which restates the three open design questions above. MP13's Progress-tracking row is marked `done` accordingly; MP14 is next.
+
+**2026-07-10 — MP15 (forward propagation, `smelt run --since-upstream`):** blocked before any code was written. The plan text and `docs/specs/maintenance_plan.md` §CLI say `--since-upstream` computes per-source deltas "from the recorded state," but no mechanism today produces an independent, per-invocation "what's new since I last propagated" delta:
+  1. `LandedDeltaStore` (MP11, `crates/smelt-state/src/landed_deltas.rs`) is populated only as a byproduct of an ordinary model run — `crates/smelt-runtime/src/execute.rs` records the model's *own run window* as the landing, and the `LandedDelta` return value (the true new-vs-prior-coverage delta) is computed and discarded. There's no independent check against the actual source/backend for genuinely new data.
+  2. There is no persisted "last propagated through" watermark anywhere in `smelt-state`; `SourceLanding` exposes only cumulative `covered_intervals`, not a per-invocation delta, so a second `--since-upstream` call has no way to know what's new since the prior call.
+  3. The existing `--auto` flag (`crates/smelt-cli/src/commands/run_setup.rs`, `compute_auto_time_range`) is a different mechanism entirely — one uniform (start,end) window across the whole run from the per-model output-interval store (MP9), not a per-source per-edge propagated dirty set — and does not solve this.
+  Options: (A) explicit CLI-supplied deltas (`--since-upstream --source <addr> --landed <start>..<end>`, repeatable); no new persisted state; an external poller is responsible for telling smelt what changed; matches the phase's stated Critical Files exactly (no `smelt-state` schema change) and the spec's own "a cron tick is only the poller" framing. (B) a new persisted per-source watermark in `smelt-state`, diffed against `covered_intervals` automatically each invocation — closer to a fully automatic `--since-upstream` with no flags, but requires touching `smelt-state` (outside this phase's Critical Files, needs scope sign-off) and still doesn't solve how a raw, never-modeled source's freshness would be discovered. (C) live backend source-freshness queries — explicitly out of scope; `maintenance_plan.md` Known Divergences already defers "backend-derived source facts" to `multi_backend.md`, and no such capability exists in `smelt-backend*` today. Recommendation: A — smallest, matches Critical Files, still exercises the real propagation math (graph assembly, per-edge regions, refusal paths, `execute_project` looped once per `(model, region)`); B can layer on top later without changing `propagate.rs`'s or the CLI's shape.
+  Tree restored clean (an implementer subagent left two stray, unrelated edits to `docs/specs/maintenance_plan.md` and `docs/specs/SPEC_TEMPLATE.md` — a "Future Extensions" section — while exploring; both were reverted with `git checkout --` before this entry was recorded, since they were out of this phase's scope and not requested).
+
+**2026-07-10 — resolved (human decision): option A.** `--since-upstream` takes the per-source delta explicitly (`--source <address> --landed <start>..<end>`, repeatable); no `smelt-state` schema change, no independent recorded-state diffing. Landed in `docs/specs/maintenance_plan.md` §CLI, §Known Divergences ("Delta detection for `--since-upstream` is explicit, not automatic, for v1"), and §Future Extensions (the deferred automatic watermark-diffed form, option B, layers on top later without changing `propagate.rs` or the CLI shape); mirrored in `docs/specs/cli.md`'s maintenance-CLI-surface divergence entry. Option C (live backend source-freshness queries) stays out of scope, noted in the same Future Extensions entry. MP15's Goal and TDD tests above are updated to the explicit-flag form. MP15's Progress-tracking row is `pending` again.
+
+**2026-07-10 — MP16 (backward resolution, `smelt build --period --include-upstreams`):** was blocked without any code written. MP16's own Pre-conditions line names MP15 directly ("MP15 (shared edge objects)") and its Critical Files list `crates/smelt-logical/src/maintenance/propagate.rs` — the same module MP15 was to promote from tracer-fed to production. MP16's adjointness test (`forward(backward(P)) ⊇ P`) is meaningless without a production `forward` to test against; MP15 was still blocked on the unresolved `--since-upstream` delta-source design decision recorded above (2026-07-10). Building the backward direction first, against no shared production edge object, would mean inventing a second one-off edge representation now and reconciling it with whatever MP15 eventually lands — directly contradicting this phase's own review checklist ("One edge object, two directions (no second clamp implementation)"). No new option was needed here; it was a pass-through block on MP15's decision.
+
+**2026-07-10 — resolved (pass-through): MP15 decided, MP16's own mechanism was never in question.** `smelt build --period --include-upstreams` was already explicit in the spec before this decision — the runner supplies the target period directly (`docs/specs/maintenance_plan.md` §CLI); backward resolution never needed to *discover* what changed upstream, only to resolve required ancestor slices for a caller-given period. MP16's block was solely the shared-edge-object pre-condition on MP15, which is now unblocked by the option-A decision above. MP16's Progress-tracking row is `pending` again, its Pre-conditions line ("MP15 (shared edge objects)") unchanged and now satisfiable once MP15 lands.
 
 ## Verification
 

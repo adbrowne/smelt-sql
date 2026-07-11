@@ -253,8 +253,102 @@ pub fn validate_config(config: &DatagenConfig) -> Result<(), String> {
                 )?;
             }
         }
+
+        // Validate every `timestamp_offset` column's `base:` reference: it
+        // must name a column that appears strictly earlier in `columns:` and
+        // whose generator produces a timestamp (per
+        // docs/specs/datagen.md §"Generator types" `timestamp_offset`).
+        for (idx, col) in dataset.columns.iter().enumerate() {
+            if let GeneratorSpec::TimestampOffset { base, .. } = &col.generator {
+                // `base` may instead name this dataset's partition column —
+                // the partition-anchored form. The partition value is
+                // available to every row regardless of column declaration
+                // order, so it needs no earlier/later position check.
+                let is_partition_col = dataset
+                    .partition
+                    .as_ref()
+                    .is_some_and(|p| &p.column == base);
+                if is_partition_col {
+                    continue;
+                }
+                match dataset.columns.iter().position(|c| &c.name == base) {
+                    None => {
+                        return Err(format!(
+                            "dataset '{}' column '{}': timestamp_offset `base: {base}` \
+                             does not name any column in this dataset",
+                            dataset.name, col.name
+                        ));
+                    }
+                    Some(base_idx) if base_idx >= idx => {
+                        return Err(format!(
+                            "dataset '{}' column '{}': timestamp_offset `base: {base}` must \
+                             name an earlier column in the same dataset (column '{base}' is \
+                             declared at or after '{}')",
+                            dataset.name, col.name, col.name
+                        ));
+                    }
+                    Some(base_idx) => {
+                        let base_spec = &dataset.columns[base_idx].generator;
+                        if !is_timestamp_producing(base_spec) {
+                            return Err(format!(
+                                "dataset '{}' column '{}': timestamp_offset `base: {base}` \
+                                 must name a timestamp-producing column (`timestamp` or \
+                                 `timestamp_offset`), but '{base}' is a different generator type",
+                                dataset.name, col.name
+                            ));
+                        }
+                    }
+                }
+            }
+        }
+
+        // Validate the `redelivery:` block, if present: `fraction` must be in
+        // (0.0, 1.0], and `arrival_column` must name a timestamp-producing
+        // column of the dataset (per docs/specs/datagen.md §"Redelivery
+        // (duplicate emission)").
+        if let Some(redelivery) = &dataset.redelivery {
+            if !(redelivery.fraction > 0.0 && redelivery.fraction <= 1.0) {
+                return Err(format!(
+                    "dataset '{}': redelivery `fraction:` must be in (0.0, 1.0], got {}",
+                    dataset.name, redelivery.fraction
+                ));
+            }
+            match dataset
+                .columns
+                .iter()
+                .find(|c| c.name == redelivery.arrival_column)
+            {
+                None => {
+                    return Err(format!(
+                        "dataset '{}': redelivery `arrival_column: {}` does not name any \
+                         column in this dataset",
+                        dataset.name, redelivery.arrival_column
+                    ));
+                }
+                Some(col) if !is_timestamp_producing(&col.generator) => {
+                    return Err(format!(
+                        "dataset '{}': redelivery `arrival_column: {}` must name a \
+                         timestamp-producing column (`timestamp` or `timestamp_offset`)",
+                        dataset.name, redelivery.arrival_column
+                    ));
+                }
+                Some(_) => {}
+            }
+        }
     }
     Ok(())
+}
+
+/// Whether `spec` produces a timestamp-shaped `Utf8` value suitable to be
+/// referenced by `timestamp_offset`'s `base:` or `redelivery`'s
+/// `arrival_column:`. Recurses through `Optional` so an optional timestamp
+/// column is still recognised as timestamp-producing.
+fn is_timestamp_producing(spec: &GeneratorSpec) -> bool {
+    match spec {
+        GeneratorSpec::Timestamp { .. } | GeneratorSpec::TimestampOffset { .. } => true,
+        GeneratorSpec::Optional { inner, .. } => is_timestamp_producing(inner),
+        _ => false,
+    }
 }
 
 /// Recursively walks `spec` and validates any `LinkedChoice` references against
@@ -324,6 +418,11 @@ pub struct DatasetConfig {
     /// `linked_choice` generators to draw correlated values.
     #[serde(default)]
     pub linked_pools: Option<Vec<LinkedPoolConfig>>,
+    /// Re-emit a deterministic fraction of generated rows to model
+    /// at-least-once delivery. See `docs/specs/datagen.md` §"Redelivery
+    /// (duplicate emission)".
+    #[serde(default)]
+    pub redelivery: Option<RedeliveryConfig>,
     pub columns: Vec<ColumnConfig>,
 }
 
@@ -406,6 +505,19 @@ pub enum GeneratorSpec {
         start: String,
         end: String,
     },
+    /// Emit `base + offset_seconds` as an ISO 8601 string. `base` names
+    /// either an earlier column in the same dataset whose generator produces
+    /// a timestamp, or this dataset's partition column (the partition
+    /// day at midnight — the anchored form used to keep an occurrence clock
+    /// aligned with its own partition). `offset_seconds` is any generator
+    /// that produces a numeric value (an int/float `GenericValue`, or a
+    /// string that parses as one — e.g. `weighted_choice` over
+    /// numeric-looking keys) evaluated per row and added as seconds. See
+    /// `docs/specs/datagen.md` §"Generator types" (`timestamp_offset`).
+    TimestampOffset {
+        base: String,
+        offset_seconds: Box<GeneratorSpec>,
+    },
     StringPattern {
         template: String,
     },
@@ -434,6 +546,23 @@ pub enum GeneratorSpec {
         pool: String,
         field: String,
     },
+}
+
+/// A `redelivery:` block under [`DatasetConfig`]: re-emits a deterministic
+/// fraction of generated rows to model at-least-once delivery. See
+/// `docs/specs/datagen.md` §"Redelivery (duplicate emission)".
+#[derive(Debug, Clone, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct RedeliveryConfig {
+    /// Share of rows re-emitted (once each). Must be in `(0.0, 1.0]`.
+    pub fraction: f64,
+    /// The ingestion-clock column shifted on the duplicate. Must name a
+    /// timestamp-producing column (`timestamp` or `timestamp_offset`) of the
+    /// dataset.
+    pub arrival_column: String,
+    /// Numeric generator; added (in seconds) to the original arrival value
+    /// to produce the duplicate's shifted arrival timestamp.
+    pub delay_seconds: GeneratorSpec,
 }
 
 /// Reject `json_object` specs with an empty `fields:` map.
@@ -488,6 +617,7 @@ impl GeneratorSpec {
             GeneratorSpec::ForeignKey { .. } => DataType::Int32,
             GeneratorSpec::Date { .. } => DataType::Utf8,
             GeneratorSpec::Timestamp { .. } => DataType::Utf8,
+            GeneratorSpec::TimestampOffset { .. } => DataType::Utf8,
             GeneratorSpec::StringPattern { .. } => DataType::Utf8,
             GeneratorSpec::JsonObject { .. } => DataType::Utf8,
             // Placeholder — schema construction in generic_parquet.rs overrides this

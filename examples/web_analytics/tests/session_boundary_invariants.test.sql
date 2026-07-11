@@ -16,17 +16,17 @@ smelt.test test_session_boundary_invariants AS (
 )
 PASSING silver.events_parsed AS (
     -- device 1: gap boundary (35 minutes) → 2 sessions
-    {device_id: 1, event_ts: '2026-04-01 10:00:00', event_date: '2026-04-01', platform: 'web'},
-    {device_id: 1, event_ts: '2026-04-01 10:35:00', event_date: '2026-04-01', platform: 'web'},
+    {device_id: 1, event_ts: '2026-04-01 10:00:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
+    {device_id: 1, event_ts: '2026-04-01 10:35:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
     -- device 2: platform boundary (5 min, platform change web→ios) → 2 sessions
-    {device_id: 2, event_ts: '2026-04-01 11:00:00', event_date: '2026-04-01', platform: 'web'},
-    {device_id: 2, event_ts: '2026-04-01 11:05:00', event_date: '2026-04-01', platform: 'ios'},
+    {device_id: 2, event_ts: '2026-04-01 11:00:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
+    {device_id: 2, event_ts: '2026-04-01 11:05:00', event_date: '2026-04-01', platform: 'ios', utm_campaign: NULL},
     -- device 3: no boundary (5 min, same platform) → 1 session of 2 events
-    {device_id: 3, event_ts: '2026-04-01 12:00:00', event_date: '2026-04-01', platform: 'web'},
-    {device_id: 3, event_ts: '2026-04-01 12:05:00', event_date: '2026-04-01', platform: 'web'},
+    {device_id: 3, event_ts: '2026-04-01 12:00:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
+    {device_id: 3, event_ts: '2026-04-01 12:05:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
     -- device 4: cross-midnight continuation (20 min, same platform) → 1 session
-    {device_id: 4, event_ts: '2026-04-01 23:50:00', event_date: '2026-04-01', platform: 'web'},
-    {device_id: 4, event_ts: '2026-04-02 00:10:00', event_date: '2026-04-02', platform: 'web'}
+    {device_id: 4, event_ts: '2026-04-01 23:50:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
+    {device_id: 4, event_ts: '2026-04-02 00:10:00', event_date: '2026-04-02', platform: 'web', utm_campaign: NULL}
 )
 EXPECT (
     -- device 1: two sessions from the gap rule; each has 1 event

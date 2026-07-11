@@ -14,6 +14,9 @@ pub enum RefKind {
     /// `.sql` file containing `smelt.test` declarations. Cannot be used in
     /// `TableExpr` positions per the spec.
     Test,
+    /// `.sql` file containing `smelt.check` declarations. Cannot be used in
+    /// `TableExpr` positions; produces no DB object.
+    Check,
 }
 
 /// Schema representation for sqt models

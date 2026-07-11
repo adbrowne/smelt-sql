@@ -20,6 +20,9 @@ use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::maintenance::emit::{
+    emit_create_table_as, MaintenanceStatement, StatementGroup,
+};
 use smelt_logical::maintenance::{
     MaintenancePlan, PartitionLocal, PlanCell, ScanClamp, SourceFacts, Technique, Trigger,
 };
@@ -171,10 +174,24 @@ pub async fn run_windowed_keyed_maintenance(
 
         let table_exists = backend.table_exists(schema, table).await.unwrap_or(false);
 
-        let action_sql = if !table_exists {
-            format!("CREATE TABLE {}.{} AS {}", schema, table, delta_sql)
+        // The first-run `CREATE TABLE … AS` and the merge both come from
+        // the single-owner emitters in `smelt-logical::maintenance::emit`
+        // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+        // owner)") — this driver builds no maintenance-statement text of
+        // its own.
+        let create_group = if !table_exists {
+            let qualified_table = format!("{}.{}", schema, table);
+            Some(emit_create_table_as(
+                &qualified_table,
+                &delta_sql,
+                smelt_backend::maintenance_dialect(backend.dialect()),
+            ))
         } else {
-            rule.merge_sql(schema, table, &delta_sql)
+            None
+        };
+        let action_sql = match &create_group {
+            Some(group) => group.statements[0].sql.clone(),
+            None => rule.merge_sql(schema, table, &delta_sql),
         };
 
         match grade {
@@ -240,28 +257,31 @@ pub async fn run_windowed_keyed_maintenance(
                 }
             }
             Grade::Idempotent => {
-                if !table_exists {
-                    backend
-                        .create_table_as(schema, table, &delta_sql)
-                        .await
-                        .map_err(|e| {
-                            anyhow::anyhow!(
-                                "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
-                                model_name,
-                                delta_sql,
-                                e
-                            )
-                        })?;
-                } else {
-                    backend.execute_sql(&action_sql).await.map_err(|e| {
-                        anyhow::anyhow!(
-                            "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
-                            model_name,
-                            action_sql,
-                            e
-                        )
-                    })?;
-                }
+                // Both the first-run CREATE and the merge route through
+                // `Backend::execute_statement_group` — the single point
+                // every emitted maintenance statement flows through
+                // (`docs/specs/maintenance_plan.md` §"Statement emission
+                // (single owner)"). The `Additive` branch above is the
+                // documented exception: its action statement is interleaved
+                // with the reconciliation ledger's own DDL/DML via
+                // `fold_ledger_delta`, unchanged by this phase.
+                let group = match &create_group {
+                    Some(group) => group.clone(),
+                    None => StatementGroup {
+                        statements: vec![MaintenanceStatement {
+                            sql: action_sql.clone(),
+                        }],
+                        transactional: false,
+                    },
+                };
+                backend.execute_statement_group(&group).await.map_err(|e| {
+                    anyhow::anyhow!(
+                        "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
+                        model_name,
+                        action_sql,
+                        e
+                    )
+                })?;
             }
         }
 
@@ -500,12 +520,16 @@ pub async fn execute_column_scoped_merge_full(
 ///
 /// `dimension_batch_sql` must project the **full target row** — every
 /// column, not just the re-derived group's — carrying columns outside the
-/// group through unchanged from the existing target state. DuckDB's
-/// `merge_into` issues `UPDATE SET *`, which requires the source and
-/// target column sets to agree exactly (a column-count mismatch is a hard
-/// backend error, not a silent by-name subset); passing every other
-/// column through unchanged is what keeps the *values* column-scoped even
-/// though the physical `SET *` touches every column's assignment.
+/// group through unchanged from the existing target state. `Backend::
+/// merge_into`'s default implementation issues the `MERGE`
+/// `smelt_logical::maintenance::emit::emit_column_scoped_merge` emits
+/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"),
+/// `UPDATE SET *`, which requires the source and target column sets to
+/// agree exactly (a column-count mismatch is a hard backend error, not a
+/// silent by-name subset) — see that emitter's doc comment for the full
+/// contract; passing every other column through unchanged is what keeps
+/// the *values* column-scoped even though the physical `SET *` touches
+/// every column's assignment.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_column_scoped_merge(
     backend: &dyn Backend,
@@ -786,6 +810,15 @@ mod tests {
                 .lock()
                 .unwrap()
                 .push(format!("execute_sql: {}", sql));
+            // The `CREATE TABLE … AS` text now arrives here (via the
+            // default `execute_statement_group` fallback, since this
+            // driver no longer calls `Backend::create_table_as` for this
+            // family) rather than through the dedicated `create_table_as`
+            // method — flip the same flag a real backend's live
+            // `table_exists` query would reflect after running it.
+            if sql.starts_with("CREATE TABLE") {
+                *self.table_exists.lock().unwrap() = true;
+            }
             Ok(vec![])
         }
         async fn create_table_as(
@@ -973,7 +1006,14 @@ mod tests {
 
         let calls = backend.calls.lock().unwrap();
         assert_eq!(calls.len(), 3);
-        assert!(calls[0].starts_with("create_table_as:"));
+        // The first-run CREATE now comes from `emit_create_table_as`,
+        // executed via `execute_statement_group` (its default sequential
+        // fallback routes through `execute_sql`, since `RecordingBackend`
+        // does not override `execute_statement_group`) — no more
+        // `Backend::create_table_as` call for this family
+        // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+        // owner)").
+        assert!(calls[0].starts_with("execute_sql: CREATE TABLE main.t AS"));
         assert!(calls[0].contains("2024-01-01"));
         assert!(calls[1].starts_with("execute_sql: MERGE INTO main.t"));
         assert!(calls[1].contains("2024-01-02"));

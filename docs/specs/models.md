@@ -117,7 +117,7 @@ The refresh axis is the **freshness-owner trichotomy**:
 | `refresh:` | Who keeps it current | Contract |
 |----------|----------------------|----------|
 | `full` *(default)* | smelt, by recomputing everything each run | trivial (recompute) |
-| `incremental` | smelt, by running the derived **maintenance plan** each run | processed-input equivalence (`model_maintenance.md`), discharged per cell (`maintenance_plan.md`) |
+| `incremental` | smelt, by running the derived **maintenance plan** each run | processed-input equivalence, discharged per cell (`maintenance_plan.md`) |
 | `materialized_view` | the **engine**, continuously, via native incremental-view maintenance | end-state; engine-owned (`materialized_view.md`) |
 
 An `incremental` model additionally declares its **output shape and grain** — what a stored row *is* and how it is addressed. The grain is declared-and-checked, never derived (Design §"Declared grain, derived strategy"):
@@ -276,7 +276,7 @@ The YAML frontmatter parser uses `serde`'s `deny_unknown_fields` mode. Any key n
 - **Derived** — read off the model's SQL, its sources, and the DAG, never declared per model: the maintenance plan itself (cells, techniques, scan clamps, partition-locality), the algebraic rung, lookback/horizon, ordering, input-delta discovery, cross-model dirty-set propagation, and monotonicity where statically decidable.
 - **Implied by the refresh value** — the freshness owner, and nothing else.
 
-The selector/assertion split is the crux: only `refresh` + `grain` pick anything; every other declaration merely constrains. The machinery *validates* declarations against derivations and refuses on contradiction; it never chooses (`model_maintenance.md` §"Validator, not chooser"; per-cell choice among proven-interchangeable techniques is the one sanctioned freedom, `maintenance_plan.md`).
+The selector/assertion split is the crux: only `refresh` + `grain` pick anything; every other declaration merely constrains. The machinery *validates* declarations against derivations and refuses on contradiction; it never chooses (`maintenance_plan.md` §"Validator, not chooser"; per-cell choice among proven-interchangeable techniques is the one sanctioned freedom, `maintenance_plan.md`).
 
 The litmus rule keeps this boundary honest against every future "can these combine?" — this is its single home; other specs reference it:
 
@@ -308,8 +308,8 @@ Modelling any of the derived rows as a declared selector was rejected for one sh
 
 ## Known Divergences / Open Questions
 
-- **The refresh trichotomy and `grain:` are parsed and enforced; the rest of the declared-grain surface is not yet built.** `RefreshStrategy` is the `full`/`incremental`/`materialized_view` trichotomy; `batched`/`keyed`/`cumulative`/`versioned` as `refresh:` values are hard errors with a fix-it naming the `refresh: incremental` + `grain:` replacement; `grain: partition | key | key_per_partition` is a parsed frontmatter key, required with `refresh: incremental` and rejected otherwise. Still missing: top-level `unique_key:`, `versioning:`, `maintenance:`, top-level `safety_overrides:`, `backfill:`, and `columns.<c>.contract` do not yet exist as frontmatter keys; the `batched:` sub-block this spec removes is still the live surface for `unique_key`/`safety_overrides` (`batched_models.md`); `grain: key_per_partition` parses but has no dedicated validation or execution path yet. The `smelt migrate` assist for the hard cut does not exist. Grain validation against the derived plan requires the plan itself (`maintenance_plan.md` §Known Divergences). Migration ordering: `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8.
-- **The shape-profile demotion of the mode specs is pending.** `batched_models.md`, `keyed_models.md`, and `versioned_models.md` still read as strategy peers of this spec's refresh axis; each needs its rewrite to a grain shape profile (composition table + local machinery only, admission matrices re-derived as per-cell obligations). Until then, cross-references from those specs to a `refresh: batched`/`keyed` surface describe the pre-cut world.
+- **The refresh trichotomy and `grain:` are parsed and enforced; the rest of the declared-grain surface is not yet built.** `RefreshStrategy` is the `full`/`incremental`/`materialized_view` trichotomy; `batched`/`keyed`/`cumulative`/`versioned` as `refresh:` values are hard errors with a fix-it naming the `refresh: incremental` + `grain:` replacement; `grain: partition | key | key_per_partition` is a parsed frontmatter key, required with `refresh: incremental` and rejected otherwise. `maintenance:` and `columns.<c>.contract` are parsed frontmatter keys (`crates/smelt-core/src/metadata.rs`). Still missing: top-level `unique_key:`, `versioning:`, top-level `safety_overrides:`, and a top-level `backfill:` block do not yet exist as frontmatter keys; the `batched:` sub-block this spec removes is still the live surface for `unique_key`/`safety_overrides` (`batched_models.md`); `grain: key_per_partition` parses but has no dedicated validation or execution path yet. The `smelt migrate` assist for the hard cut does not exist. Grain validation against the derived plan requires the plan itself (`maintenance_plan.md` §Known Divergences). Migration ordering: `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8.
+- **The shape-profile demotion of the mode specs has landed.** `batched_models.md`, `keyed_models.md`, and `versioned_models.md` are grain shape profiles (composition table + local machinery only); the maintenance contract they compose is owned by `maintenance_plan.md`.
 - **`nondeterministic_columns` → `columns.<c>.contract` migration.** The per-column contract supersedes the list form; the grammar ownership of `columns.<c>.contract` vs future column `tests:` is deliberately deferred until the shared `columns:` grammar is specced (`09-spec-readiness.md` decision 8). A proposed `on_column_add: backfill | leave_null | recompute` knob (a species of `backfill:`) is noted, not yet surface.
 - **`name:` in single-model frontmatter is ignored but accepted.** This is technically inconsistent (the field is silently dropped). A future cleanup could either remove support for it or make it an alias for renaming the model (which would conflict with file-stem identity).
 - **Named parameter syntax in `smelt.<path>(...)`.** Parsed, not executed. Tracked in user docs as a note; no implementation timeline.
@@ -337,7 +337,7 @@ Modelling any of the derived rows as a declared selector was rejected for one sh
 - **Related specs**:
   - `architecture.md` — `smelt.<path>` addressing scheme and identity-from-structure principle
   - `maintenance_plan.md` — the derived per-cell maintenance plan, the `maintenance:` block, and the cross-model propagation graph
-  - `model_maintenance.md` — the processed-input equivalence invariant, the algebraic ladder, and the composition contract
+  - `maintenance_plan.md` — the processed-input equivalence invariant, the algebraic ladder, and the composition contract
   - `model_properties.md` — the derived proofs a model's SQL can carry and the model-scoped declarations
   - `model_transforms.md` — the physical transforms a property licenses
   - `timeseries.md` — `timeseries:` frontmatter block

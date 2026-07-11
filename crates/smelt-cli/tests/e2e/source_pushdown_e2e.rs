@@ -204,6 +204,8 @@ async fn incremental_run_pushes_source_filter() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let outcome = execute_project(
@@ -322,6 +324,8 @@ async fn source_pushdown_preserves_correctness() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let outcome = execute_project(
@@ -448,6 +452,8 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
     let incremental_outcome = execute_project(
         "cte-pushdown-test".to_string(),
@@ -496,6 +502,8 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         allow_column_removal: false,
         allow_full_refresh: true,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
     let full_outcome = execute_project(
         "cte-pushdown-full-refresh-test".to_string(),
@@ -650,6 +658,8 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
     let incremental_outcome = execute_project(
         "union-pushdown-test".to_string(),
@@ -704,6 +714,8 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         allow_column_removal: false,
         allow_full_refresh: true,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
     let full_outcome = execute_project(
         "union-pushdown-full-refresh-test".to_string(),

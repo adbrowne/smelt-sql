@@ -7416,3 +7416,211 @@ fn ignore_nulls_in_window_parses() {
         respect.errors
     );
 }
+
+// ===== Phase 1 (data-checks): smelt.check declaration grammar =====
+
+use crate::ast::SmeltCheck;
+use crate::syntax_kind::SyntaxKind::SMELT_CHECK;
+
+#[test]
+fn parse_smelt_check_basic() {
+    // A smelt.check declaration with a SELECT body must parse into a
+    // SmeltCheck node with name + body select; lossless round-trip is verified.
+    let input = r#"smelt.check daily_revenue_non_negative AS (
+    SELECT order_date, total_revenue
+    FROM smelt.daily_revenue
+    WHERE total_revenue < 0
+)"#;
+
+    let (parse_result, file) = parse_file_text(input);
+    assert!(
+        parse_result.errors.is_empty(),
+        "parse_smelt_check_basic: unexpected errors: {:?}",
+        parse_result.errors
+    );
+
+    // There must be exactly one SMELT_CHECK node.
+    let checks: Vec<SmeltCheck> = file.checks().collect();
+    assert_eq!(checks.len(), 1, "expected exactly one smelt.check");
+    let check = &checks[0];
+
+    // Name
+    assert_eq!(
+        check.name().as_deref(),
+        Some("daily_revenue_non_negative"),
+        "check name should be 'daily_revenue_non_negative'"
+    );
+
+    // Body SELECT exists
+    assert!(
+        check.body_select().is_some(),
+        "smelt.check body should contain a SELECT statement"
+    );
+
+    // No stray PASSING or EXPECT clauses
+    assert_eq!(
+        check.passing_clauses().count(),
+        0,
+        "well-formed check should have no PASSING clauses"
+    );
+    assert!(
+        check.expect_clause().is_none(),
+        "well-formed check should have no EXPECT clause"
+    );
+
+    // Lossless round-trip: the CST text must reproduce the exact source bytes.
+    let cst_text = parse_result.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce the exact source"
+    );
+    // Re-parsing the CST text must produce no errors.
+    let parse2 = parse(&cst_text);
+    assert_eq!(
+        parse2.errors.len(),
+        0,
+        "round-trip re-parse failed: errors={:?}",
+        parse2.errors
+    );
+}
+
+#[test]
+fn smelt_check_no_clauses() {
+    // A check body with no PASSING/EXPECT parses cleanly.
+    // AstFile::checks() yields exactly one SmeltCheck; tests() yields none.
+    let input = r#"smelt.check orphan_orders AS (
+    SELECT id FROM smelt.orders WHERE customer_id IS NULL
+)"#;
+
+    let (parse_result, file) = parse_file_text(input);
+    assert!(
+        parse_result.errors.is_empty(),
+        "smelt_check_no_clauses: unexpected errors: {:?}",
+        parse_result.errors
+    );
+
+    let checks: Vec<SmeltCheck> = file.checks().collect();
+    assert_eq!(
+        checks.len(),
+        1,
+        "checks() should yield exactly one SmeltCheck"
+    );
+
+    let tests: Vec<crate::ast::SmeltTest> = file.tests().collect();
+    assert_eq!(
+        tests.len(),
+        0,
+        "tests() should yield none when only a check is present"
+    );
+
+    let check = &checks[0];
+    assert_eq!(check.name().as_deref(), Some("orphan_orders"));
+    assert!(
+        check.body_select().is_some(),
+        "check must have a body SELECT"
+    );
+
+    // Confirm SMELT_CHECK node kind is present in CST.
+    let has_smelt_check_node = parse_result
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == SMELT_CHECK);
+    assert!(has_smelt_check_node, "CST must contain a SMELT_CHECK node");
+}
+
+#[test]
+fn smelt_check_with_stray_test_clause_is_recoverable() {
+    // A stray PASSING clause after a smelt.check body must be captured on the
+    // node (not dropped or panicking) so Phase 2 can diagnose it.
+    let input = r#"smelt.check x AS (
+    SELECT id FROM smelt.t WHERE id < 0
+)
+PASSING dep AS ({id: 1})"#;
+
+    // Parser must not panic and must produce a result (even with errors).
+    let (parse_result, file) = parse_file_text(input);
+
+    // Exactly one SmeltCheck must be present.
+    let checks: Vec<SmeltCheck> = file.checks().collect();
+    assert_eq!(
+        checks.len(),
+        1,
+        "smelt_check_with_stray_test_clause_is_recoverable: expected one SmeltCheck, got {}",
+        checks.len()
+    );
+
+    let check = &checks[0];
+    assert_eq!(check.name().as_deref(), Some("x"));
+
+    // The stray PASSING clause must be reachable on the node (not silently dropped).
+    let stray_passing: Vec<_> = check.passing_clauses().collect();
+    assert_eq!(
+        stray_passing.len(),
+        1,
+        "stray PASSING clause must be captured on the SmeltCheck node for Phase 2 diagnosis"
+    );
+
+    // The CST must be a lossless representation of the input.
+    let cst_text = parse_result.syntax().text().to_string();
+    assert_eq!(
+        cst_text, input,
+        "round-trip: CST text must reproduce the exact source even with stray clause"
+    );
+}
+
+#[test]
+fn check_keyword_contextual() {
+    // `check` outside a `smelt.check` (column alias, CTE name) must remain an
+    // ordinary identifier — it must not trigger smelt.check parsing.
+    let alias_sql = "SELECT 1 AS check FROM t";
+    let (parse_alias, _) = parse_file_text(alias_sql);
+    // Must parse as a model body (SELECT), not a smelt.check.
+    assert!(
+        parse_alias.errors.is_empty(),
+        "check as column alias should parse without errors: {:?}",
+        parse_alias.errors
+    );
+    // No SMELT_CHECK node should be present.
+    let has_check_node = parse_alias
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == SMELT_CHECK);
+    assert!(
+        !has_check_node,
+        "check as column alias must NOT produce a SMELT_CHECK node"
+    );
+
+    // CTE named `check` — `check` is the CTE identifier, not smelt.check.
+    let cte_sql = "WITH check AS (SELECT 1) SELECT * FROM check";
+    let (parse_cte, _) = parse_file_text(cte_sql);
+    assert!(
+        parse_cte.errors.is_empty(),
+        "check as CTE name should parse without errors: {:?}",
+        parse_cte.errors
+    );
+    let has_check_cte = parse_cte
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == SMELT_CHECK);
+    assert!(
+        !has_check_cte,
+        "check as CTE name must NOT produce a SMELT_CHECK node"
+    );
+
+    // smelt_check (single IDENT, no DOT) is ordinary — not a trigger.
+    let no_dot_sql = "SELECT smelt_check FROM t";
+    let (parse_no_dot, _) = parse_file_text(no_dot_sql);
+    assert!(
+        parse_no_dot.errors.is_empty(),
+        "smelt_check as plain identifier should parse without errors: {:?}",
+        parse_no_dot.errors
+    );
+    let has_check_no_dot = parse_no_dot
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == SMELT_CHECK);
+    assert!(
+        !has_check_no_dot,
+        "smelt_check (single IDENT) must NOT produce a SMELT_CHECK node"
+    );
+}

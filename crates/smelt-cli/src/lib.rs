@@ -91,11 +91,11 @@ pub fn build_dependency_graph(
         discover_emitted_model_files(&db, project_dir, &config.paths);
 
     // Hand-authored models: exclude generator files so they don't collide with
-    // their emitted children in the graph, and exclude test models.
+    // their emitted children in the graph, and exclude assertion files (tests and checks).
     let mut models: Vec<ModelFile> = sql_models
         .into_iter()
         .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
-        .filter(|m| !m.is_test())
+        .filter(|m| !m.is_assertion())
         .collect();
     models.extend(emitted_model_files);
 
@@ -135,11 +135,11 @@ pub fn build_dependency_graph_with_origins(
         discover_emitted_model_files(&db, project_dir, &config.paths);
 
     // Hand-authored models: exclude generator files so they don't collide with
-    // their emitted children in the graph, and exclude test models.
+    // their emitted children in the graph, and exclude assertion files (tests and checks).
     let mut models: Vec<ModelFile> = sql_models
         .into_iter()
         .filter(|m| !m.name.ends_with(".gen") && !m.path.to_string_lossy().contains(".gen."))
-        .filter(|m| !m.is_test())
+        .filter(|m| !m.is_assertion())
         .collect();
     models.extend(emitted_model_files);
 

@@ -44,6 +44,8 @@ fn missing_pool_sample_returns_err() {
         fk_counts: &fk,
         pools: &pools,
         pool_samples: &pool_samples,
+        row_so_far: &[],
+        partition_col: None,
     };
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     let result = apply_spec(&mut rng, &spec, &ctx);
@@ -74,6 +76,8 @@ fn missing_pool_ref_returns_err() {
         fk_counts: &fk,
         pools: &pools,
         pool_samples: &pool_samples,
+        row_so_far: &[],
+        partition_col: None,
     };
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     let result = apply_spec(&mut rng, &spec, &ctx);
@@ -105,6 +109,8 @@ fn missing_field_in_pool_returns_err() {
         fk_counts: &fk,
         pools: &pools,
         pool_samples: &pool_samples,
+        row_so_far: &[],
+        partition_col: None,
     };
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     let result = apply_spec(&mut rng, &spec, &ctx);

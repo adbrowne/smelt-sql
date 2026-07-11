@@ -1,9 +1,16 @@
-//! Cross-model dirty-partition propagation — v0 tracer bullet.
+//! Cross-model dirty-partition propagation — the graph layer
+//! (`maintenance_plan.md` §"The graph layer").
 //!
 //! Runs start from *what changed upstream*, not from a cron tick: given the
 //! partition intervals that landed on each source, this module computes
 //! which partitions of every downstream model must run, by composing each
-//! edge's derived scan clamp through the graph.
+//! edge's derived scan clamp through the graph. `smelt-runtime::propagation`
+//! assembles the real per-workspace [`Edge`] list from every model's derived
+//! `MaintenancePlan` scan clamps and drives `smelt run --since-upstream`
+//! through [`propagate`]; this module stays pure data + pure functions
+//! (Salsa-purity compatible by construction) and is exercised directly by
+//! its own test suite for the composition math (chains, fan-out, diamonds,
+//! granularity mapping, adjointness).
 //!
 //! The per-edge rule is the scan/footprint reflection
 //! (`01-framework.md` §5) lifted to whole partitions: an edge whose
@@ -13,7 +20,7 @@
 //! model's merged dirt across its inbound edges is then the delta its own
 //! consumers see, recursively (topological order).
 //!
-//! v0 boundaries:
+//! Known boundaries (`maintenance_plan.md` §Known Divergences):
 //! - **Day-ordinal intervals, Day/Month grains**: intervals are whole days
 //!   (clamp seconds ceiled *outward* — a 36h lookback dirties 2 whole
 //!   partitions; widening is safe, narrowing never is), anchored to the
@@ -428,11 +435,15 @@ pub fn required_inputs(
 
     // Build order: the required models (nodes with an inbound edge) in
     // forward topological order — ancestors of the target precede it, so
-    // the target is last.
+    // the target is last. The target itself is ALWAYS included even when it
+    // has no inbound edge (e.g. a `refresh: full` model, or any target with
+    // no upstream edges registered in the graph) — "no upstream deps" only
+    // means an empty required-slices set for its ancestors, never an empty
+    // build for the target the caller actually asked for.
     let has_inbound: BTreeSet<&str> = edges.iter().map(|e| e.downstream.as_str()).collect();
     let build_order: Vec<String> = order
         .iter()
-        .filter(|n| required.contains_key(**n) && has_inbound.contains(**n))
+        .filter(|n| required.contains_key(**n) && (has_inbound.contains(**n) || **n == target))
         .map(|n| n.to_string())
         .collect();
 

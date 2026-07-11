@@ -518,18 +518,61 @@ pub fn find_plain_model_refs_in_body(body_sql: &str) -> Vec<(Vec<String>, (usize
     refs
 }
 
+/// Typed error returned when whole-query test inlining detects a structural
+/// problem with a `smelt.<path>` ref in the test body.
+///
+/// Carries a diagnostic **code** (for terminal rendering as `error[CODE]:`),
+/// a human-readable message, the path address of the offending ref (for
+/// display), and the ref's byte range within `body_select` (for file-level
+/// anchoring by the caller).
+#[derive(Debug)]
+pub struct TestInliningError {
+    /// Diagnostic code, e.g. `"AmbiguousTestModel"` or `"NonStandaloneTestModel"`.
+    pub code: &'static str,
+    /// Human-readable description of the problem.
+    pub message: String,
+    /// Dotted address of the offending ref (e.g. `"users"`, `"a.users"`).
+    pub ref_path: String,
+    /// Byte range of the offending ref within `body_select` (start, end).
+    pub body_ref_range: (usize, usize),
+}
+
+impl std::fmt::Display for TestInliningError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}: {}", self.code, self.message)
+    }
+}
+
+impl std::error::Error for TestInliningError {}
+
+/// Detect whether a model body contains a non-standalone construct — a
+/// per-model element that cannot be compiled in an isolated context without a
+/// real build. Currently detects:
+///   * `smelt.config.var(…)` — compile-time config variable that requires the
+///     workspace `vars:` map to be resolved. Without a build context the call
+///     is left verbatim and the backend rejects it.
+///
+/// Used by `inline_unmocked_model_refs` to fail loud with `NonStandaloneTestModel`
+/// instead of letting a raw backend error surface.
+fn contains_non_standalone_construct(body: &str) -> bool {
+    // Match the qualified call marker, not a bare `config.var` substring, so a
+    // mention inside a string literal or comment doesn't misclassify the model.
+    body.contains("smelt.config.var")
+}
+
 /// Resolve a `smelt.<path>` ref's address segments to the body of the project
 /// model it names, if any. A fully-qualified ref matches a canonical address in
 /// `canonical_bodies`. A single-segment ref (`smelt.users`) matches by leaf name
 /// via `leaf_to_canonicals`; if that leaf is the name of two or more distinct
-/// models, the reference is **ambiguous** and resolution fails loud rather than
-/// silently picking one. A ref that names no project model returns `Ok(None)`
+/// models, the reference is **ambiguous** — returns `Err(candidates)` carrying
+/// the list of matching canonical addresses so the caller can emit
+/// `AmbiguousTestModel`. A ref that names no project model returns `Ok(None)`
 /// (it is a source/seed/extern, left for the mock pass).
 fn resolve_model_body<'a>(
     segments: &[String],
     canonical_bodies: &'a BTreeMap<String, String>,
     leaf_to_canonicals: &BTreeMap<String, Vec<String>>,
-) -> Result<Option<&'a String>, String> {
+) -> Result<Option<&'a String>, Vec<String>> {
     let dot_key = segments.join(".");
     if let Some(body) = canonical_bodies.get(&dot_key) {
         return Ok(Some(body));
@@ -539,12 +582,7 @@ fn resolve_model_body<'a>(
             match canonicals.as_slice() {
                 [only] => return Ok(canonical_bodies.get(only)),
                 many => {
-                    return Err(format!(
-                        "AmbiguousTestModel: 'smelt.{}' matches multiple models ({}); \
-                         reference it by its full address",
-                        dot_key,
-                        many.join(", ")
-                    ));
+                    return Err(many.to_vec());
                 }
             }
         }
@@ -558,17 +596,25 @@ fn resolve_model_body<'a>(
 /// a ref that resolves to a project model (see [`resolve_model_body`]) is
 /// replaced by its parenthesised body, whose own refs are inlined in turn. A ref
 /// that names no project model (a source/seed/extern) is left for the mock pass.
+///
+/// Returns `Err(TestInliningError)` when an ambiguous single-segment ref or a
+/// non-standalone upstream is encountered; the error carries the diagnostic
+/// code, message, and the offending ref's byte range within `sql` for anchoring.
 fn inline_unmocked_model_refs(
     sql: &str,
     inputs: &BTreeMap<String, Vec<BTreeMap<String, serde_yaml::Value>>>,
     canonical_bodies: &BTreeMap<String, String>,
     leaf_to_canonicals: &BTreeMap<String, Vec<String>>,
     depth: usize,
-) -> Result<String, String> {
+) -> Result<String, TestInliningError> {
     if depth > 32 {
-        return Err(
-            "smelt.test model inlining exceeded depth 32 — possible dependency cycle".to_string(),
-        );
+        return Err(TestInliningError {
+            code: "TestInliningDepthExceeded",
+            message: "smelt.test model inlining exceeded depth 32 — possible dependency cycle"
+                .to_string(),
+            ref_path: String::new(),
+            body_ref_range: (0, 0),
+        });
     }
     let refs = find_plain_model_refs_in_body(sql);
     let mut replacements: Vec<(usize, usize, String)> = Vec::new();
@@ -578,17 +624,59 @@ fn inline_unmocked_model_refs(
         if inputs.contains_key(&dot_key) {
             continue;
         }
-        if let Some(body) = resolve_model_body(&segments, canonical_bodies, leaf_to_canonicals)? {
-            let inner = inline_unmocked_model_refs(
-                body,
-                inputs,
-                canonical_bodies,
-                leaf_to_canonicals,
-                depth + 1,
-            )?;
-            replacements.push((start, end, format!("(\n{}\n)", inner)));
+        match resolve_model_body(&segments, canonical_bodies, leaf_to_canonicals) {
+            Err(candidates) => {
+                // Ambiguous single-segment ref: multiple models share this leaf name.
+                return Err(TestInliningError {
+                    code: "AmbiguousTestModel",
+                    message: format!(
+                        "'smelt.{}' matches multiple models ({}); \
+                         reference it by its full dotted address",
+                        dot_key,
+                        candidates.join(", ")
+                    ),
+                    ref_path: dot_key,
+                    body_ref_range: (start, end),
+                });
+            }
+            Ok(None) => {
+                // Not a project model (source/seed/extern) → leave for the mock pass.
+            }
+            Ok(Some(body)) => {
+                // Before inlining, detect non-standalone constructs in the upstream body.
+                if contains_non_standalone_construct(body) {
+                    return Err(TestInliningError {
+                        code: "NonStandaloneTestModel",
+                        message: format!(
+                            "'smelt.{}' uses smelt.config.var (per-model config vars \
+                             that require a build context) and cannot compile standalone. \
+                             Mock this dependency at its boundary with: \
+                             PASSING {} AS (...)",
+                            dot_key, dot_key
+                        ),
+                        ref_path: dot_key,
+                        body_ref_range: (start, end),
+                    });
+                }
+                let inner = inline_unmocked_model_refs(
+                    body,
+                    inputs,
+                    canonical_bodies,
+                    leaf_to_canonicals,
+                    depth + 1,
+                )
+                .map_err(|mut e| {
+                    // A transitive error carries a range relative to the
+                    // upstream body it was found in. Re-anchor it to this
+                    // ref at every unwind level so the final range is always
+                    // relative to the original `body_select` (the test file).
+                    e.message = format!("{} (reached via 'smelt.{}')", e.message, dot_key);
+                    e.body_ref_range = (start, end);
+                    e
+                })?;
+                replacements.push((start, end, format!("(\n{}\n)", inner)));
+            }
         }
-        // else: not a project model (source/seed/extern) → leave for the mock pass.
     }
     // Apply right-to-left so earlier byte offsets stay valid.
     replacements.sort_by_key(|r| std::cmp::Reverse(r.0));
@@ -623,10 +711,17 @@ pub fn compile_whole_query_test(
     canonical_bodies: &BTreeMap<String, String>,
     leaf_to_canonicals: &BTreeMap<String, Vec<String>>,
     fn_bodies: Option<&FnBodyMap>,
-) -> Result<String, String> {
+) -> Result<String, TestInliningError> {
     let inlined =
         inline_unmocked_model_refs(body_select, inputs, canonical_bodies, leaf_to_canonicals, 0)?;
-    compile_whole_model_test_inner(&inlined, inputs, None, fn_bodies)
+    compile_whole_model_test_inner(&inlined, inputs, None, fn_bodies).map_err(|msg| {
+        TestInliningError {
+            code: "TestCompilationError",
+            message: msg,
+            ref_path: String::new(),
+            body_ref_range: (0, 0),
+        }
+    })
 }
 
 /// Compile a test that targets a specific CTE within a model.
@@ -1646,9 +1741,10 @@ GROUP BY u.user_id
         let err =
             compile_whole_query_test(body_select, &inputs, &canonical_bodies, &no_leaves, None)
                 .unwrap_err();
+        let err_str = err.to_string();
         assert!(
-            err.contains("UnknownTestInput") && err.contains("silver.not_a_dep"),
-            "expected UnknownTestInput for a non-dependency; got: {err}"
+            err_str.contains("UnknownTestInput") && err_str.contains("silver.not_a_dep"),
+            "expected UnknownTestInput for a non-dependency; got: {err_str}"
         );
     }
 
@@ -1680,9 +1776,72 @@ GROUP BY u.user_id
             None,
         )
         .unwrap_err();
+        assert_eq!(err.code, "AmbiguousTestModel");
+        let err_str = err.to_string();
         assert!(
-            err.contains("AmbiguousTestModel") && err.contains("smelt.users"),
-            "ambiguous single-segment ref must fail loud; got: {err}"
+            err_str.contains("AmbiguousTestModel") && err_str.contains("smelt.users"),
+            "ambiguous single-segment ref must fail loud; got: {err_str}"
+        );
+    }
+
+    #[test]
+    fn test_transitive_inlining_error_anchors_at_test_body_ref() {
+        // The test body refs marts.top; marts.top refs staging.base, which is
+        // non-standalone (config.var). The error surfaces at depth 1, but the
+        // range it carries must be relative to the ORIGINAL body_select — i.e.
+        // the `smelt.marts.top` ref the user wrote — not to marts.top's body.
+        let body_select = "SELECT id FROM smelt.marts.top";
+        let mut canonical_bodies = BTreeMap::new();
+        // NB: the upstream ref sits at a DIFFERENT byte offset in marts.top's
+        // body than the test-body ref does in `body_select`, so this test
+        // discriminates a correctly re-anchored range from a leaked child range.
+        canonical_bodies.insert(
+            "marts.top".to_string(),
+            "SELECT id, extra_col FROM smelt.staging.base".to_string(),
+        );
+        canonical_bodies.insert(
+            "staging.base".to_string(),
+            "SELECT smelt.config.var('tenant') AS id".to_string(),
+        );
+        let no_leaves: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let inputs = BTreeMap::new();
+        let err =
+            compile_whole_query_test(body_select, &inputs, &canonical_bodies, &no_leaves, None)
+                .unwrap_err();
+        assert_eq!(err.code, "NonStandaloneTestModel");
+        // The offending upstream is named in the message…
+        assert!(
+            err.message.contains("staging.base"),
+            "message must name the non-standalone upstream; got: {}",
+            err.message
+        );
+        // …but the anchor is the ref in the test body.
+        let expected_start = body_select.find("smelt.marts.top").unwrap();
+        assert_eq!(
+            err.body_ref_range.0, expected_start,
+            "range must anchor at the test-body ref, not inside the upstream body; got {:?}",
+            err.body_ref_range
+        );
+    }
+
+    #[test]
+    fn test_non_standalone_marker_requires_smelt_prefix() {
+        // A bare `config.var` mention (e.g. in a comment or string literal)
+        // must not misclassify the model as non-standalone.
+        let body_select = "SELECT note FROM smelt.marts.notes";
+        let mut canonical_bodies = BTreeMap::new();
+        canonical_bodies.insert(
+            "marts.notes".to_string(),
+            "SELECT 'see config.var docs' AS note".to_string(),
+        );
+        let no_leaves: BTreeMap<String, Vec<String>> = BTreeMap::new();
+        let inputs = BTreeMap::new();
+        let compiled =
+            compile_whole_query_test(body_select, &inputs, &canonical_bodies, &no_leaves, None)
+                .unwrap();
+        assert!(
+            compiled.contains("'see config.var docs'"),
+            "a bare config.var mention must inline normally; got:\n{compiled}"
         );
     }
 }

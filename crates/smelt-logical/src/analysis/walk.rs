@@ -1218,6 +1218,63 @@ pub fn batched_admission_violations(
     Some(walk(&tree, &BatchedAdmission { partition_col }))
 }
 
+// ===== The partition-skew fold: the model's own output-window skew =====
+
+use crate::analysis::source_bounds::{derive_partition_skew, Skew};
+
+/// The partition-skew transfer function: the model's own partition-column
+/// skew bound (`docs/specs/model_transforms.md` §Semantics "The output
+/// window is derived, never assumed") folded over the walk. Per SELECT
+/// scope, the leaf classifier [`derive_partition_skew`] is invoked over the
+/// scope's own region text ([`own_region_text`] — every token except the
+/// subtrees that are walk nodes of their own); verdicts compose by
+/// [`Skew::union`] (max before, max after), since a Form B relation in any
+/// scope can push rows into a neighbouring partition.
+pub struct SkewTransfer<'a> {
+    pub partition_column: &'a str,
+}
+
+impl Transfer for SkewTransfer<'_> {
+    type Verdict = Skew;
+
+    fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) -> Skew {
+        Skew::ZERO
+    }
+
+    fn operator(&self, op: &OpNode<'_>, children: &[Skew], _cx: &NodeCx) -> Skew {
+        let acc = children
+            .iter()
+            .fold(Skew::ZERO, |acc, child| acc.union(*child));
+        match op {
+            OpNode::Select(sn) => {
+                let own = own_region_text(&sn.select);
+                acc.union(derive_partition_skew(&own, self.partition_column))
+            }
+            OpNode::SetOp(_) => acc,
+            // An `Unsupported` node carries no readable text; whole-tree
+            // coverage is restored by [`model_partition_skew`]'s whole-text
+            // fallback (it never walks a tree containing one).
+            OpNode::Unsupported { .. } => acc,
+        }
+    }
+}
+
+/// Convenience entry: the model's own partition-column skew bound, composed
+/// per walk-enumerated scope by [`SkewTransfer`]. Falls back to the
+/// whole-text [`derive_partition_skew`] when the tree normalization cannot
+/// model the SQL (no SELECT statement at all, or an `Unsupported` subtree)
+/// — under-deriving skew would silently narrow the derived output window,
+/// so exact whole-tree coverage wins over fail-closed rejection here (the
+/// [`QueryNode::has_unsupported`] consumer pattern).
+pub fn model_partition_skew(sql: &str, partition_column: &str) -> Skew {
+    match QueryTree::from_sql(sql) {
+        Some(tree) if !tree.root.has_unsupported() => {
+            walk(&tree, &SkewTransfer { partition_column })
+        }
+        _ => derive_partition_skew(sql, partition_column),
+    }
+}
+
 // ===== The model property vector: grain, FDs, discriminants, determinism =====
 
 use crate::analysis::discriminants::{combiner_discriminants, Discriminants};
@@ -2021,6 +2078,58 @@ mod tests {
         assert!(
             !e.unsupported.is_empty(),
             "table function in FROM must yield an Unsupported entry"
+        );
+    }
+
+    /// The walk-composed skew fold: a sessions-shaped model (the Form B
+    /// relation lives in the outer scope, below a CTE) composes to a
+    /// symmetric 1-day skew; an identity model composes to zero; and a
+    /// relation buried inside a CTE body still surfaces at the root (the
+    /// union fold across walk nodes).
+    #[test]
+    fn skew_fold_composes_across_scopes() {
+        use super::super::source_bounds::{Seconds, Skew};
+
+        let sessions_shaped = "WITH sessionized AS (\
+             SELECT user_id, event_date, session_start_date FROM smelt.silver.events\
+         ) \
+         SELECT * FROM sessionized \
+         WHERE event_date BETWEEN session_start_date - INTERVAL '1 day' \
+             AND session_start_date + INTERVAL '1 day'";
+        let skew = model_partition_skew(sessions_shaped, "session_start_date");
+        assert_eq!(
+            skew,
+            Skew {
+                before: Seconds::days(1),
+                after: Seconds::days(1),
+            },
+            "sessions-shaped model must compose a symmetric 1-day skew"
+        );
+
+        let identity = "SELECT event_date, COUNT(*) AS n \
+             FROM smelt.silver.events GROUP BY event_date";
+        assert_eq!(
+            model_partition_skew(identity, "event_date"),
+            Skew::ZERO,
+            "identity model must compose zero skew"
+        );
+
+        // The Form B relation inside a CTE body (its own walk node) must
+        // reach the root verdict via the union fold.
+        let nested = "WITH capped AS (\
+             SELECT * FROM smelt.silver.events \
+             WHERE event_date BETWEEN session_start_date - INTERVAL '2 days' \
+                 AND session_start_date + INTERVAL '1 day'\
+         ) \
+         SELECT * FROM capped";
+        let skew = model_partition_skew(nested, "session_start_date");
+        assert_eq!(
+            skew,
+            Skew {
+                before: Seconds::days(2),
+                after: Seconds::days(1),
+            },
+            "a CTE-scope Form B relation must surface in the root verdict"
         );
     }
 

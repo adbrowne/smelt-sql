@@ -994,6 +994,204 @@ fn extract_form_b_bounds(upper_sql: &str, partition_col_upper: &str) -> Vec<(Sec
     bounds
 }
 
+/// The model's own derived-partition-column skew bound (`docs/specs/
+/// model_transforms.md` §Semantics "The output window is derived, never
+/// assumed"): how far a Form B relation anchored on the model's own
+/// `partition_column` lets new data skew into a neighbouring partition.
+///
+/// `before`/`after` mirror the relation `driving_date BETWEEN
+/// partition_column − before AND partition_column + after`: a session model
+/// partitioned by `session_start_date` under a 1-day cap derives
+/// `Skew { before: 1d, after: 1d }`. Identity models (no such relation, or
+/// the partition column *is* the driving/event-time column) derive
+/// `Skew::ZERO`. This is only the bound itself — inverting it into a
+/// `[start − after, end + before)` output window is the runtime's job
+/// (`docs/specs/model_transforms.md` §Semantics), not derived here.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Default)]
+pub struct Skew {
+    #[serde(serialize_with = "serialize_seconds")]
+    pub before: Seconds,
+    #[serde(serialize_with = "serialize_seconds")]
+    pub after: Seconds,
+}
+
+impl Skew {
+    pub const ZERO: Skew = Skew {
+        before: Seconds::ZERO,
+        after: Seconds::ZERO,
+    };
+
+    /// Union of two skew bounds: max before, max after. The composition
+    /// operator of the walk's skew fold — any scope's Form B relation can
+    /// push rows into a neighbouring partition, so the model-level bound is
+    /// the widest seen anywhere.
+    pub fn union(self, other: Skew) -> Skew {
+        Skew {
+            before: self.before.max(other.before),
+            after: self.after.max(other.after),
+        }
+    }
+}
+
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): pure derivation of the partition-column skew bound (see [`Skew`])
+/// from one scope's own region text. `partition_column` is the model's own
+/// declared `timeseries.partition_column` (not a source's).
+///
+/// Invoked by the shared bottom-up walk — [`crate::analysis::walk::SkewTransfer`]
+/// calls this per SELECT scope over the scope's own region text and composes
+/// the verdicts by [`Skew::union`]. It is also invoked whole-text by
+/// [`crate::analysis::walk::model_partition_skew`] as the coverage fallback
+/// for SQL shapes the tree normalization cannot model (under-deriving skew
+/// would silently narrow the output window). Takes the union (max before,
+/// max after) over every matching relation in the given text; text with no
+/// Form B relation anchored on the partition column derives `Skew::ZERO`.
+pub fn derive_partition_skew(sql: &str, partition_column: &str) -> Skew {
+    let upper_sql = sql.to_uppercase();
+    let partition_col_upper = partition_column.to_uppercase();
+    extract_partition_skew_bounds(&upper_sql, &partition_col_upper)
+        .into_iter()
+        .fold(Skew::ZERO, |acc, (before, after)| {
+            acc.union(Skew { before, after })
+        })
+}
+
+/// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
+/// rule"): the raw-text scan behind [`derive_partition_skew`], which the
+/// shared walk invokes per scope via [`crate::analysis::walk::SkewTransfer`]
+/// (the skew-derivation counterpart of how [`derive_bound_for_source`]
+/// invokes [`extract_form_b_bounds`] for the per-source case).
+///
+/// The mirror image of [`extract_form_b_bounds`]: that classifier scopes a
+/// Form B relation by its **LHS** column (the source being read); this one
+/// scopes by the relation's **anchor** — the expression on the right of
+/// `BETWEEN`/`>=`/`<`, e.g. `session_start_date` in `event_date BETWEEN
+/// session_start_date - INTERVAL '1 day' AND session_start_date + INTERVAL
+/// '1 day'`. A relation whose LHS happens to be `partition_col_upper` (the
+/// existing per-source Form B pattern, where the model's own column is the
+/// thing being *filtered*, not the anchor doing the filtering) does not
+/// match here — only an occurrence where `partition_col_upper` is the
+/// anchor expression contributes to the model's own skew.
+///
+/// Patterns recognised (same interval-literal grammar as
+/// [`extract_form_b_bounds`]):
+/// - `driving BETWEEN partition_col - INTERVAL '...' AND partition_col + INTERVAL '...'`
+/// - `driving >= partition_col - INTERVAL '...'` / `driving < partition_col + INTERVAL '...'`
+fn extract_partition_skew_bounds(
+    upper_sql: &str,
+    partition_col_upper: &str,
+) -> Vec<(Seconds, Seconds)> {
+    let mut bounds = Vec::new();
+
+    // BETWEEN form.
+    let keyword = "BETWEEN ";
+    let mut search_from = 0;
+    while let Some(rel) = upper_sql[search_from..].find(keyword) {
+        let abs = search_from + rel;
+        let after_between = &upper_sql[abs + keyword.len()..];
+
+        if let Some(and_pos) = find_and_at_depth0(after_between) {
+            let lower_expr = &after_between[..and_pos];
+            let upper_expr = expression_prefix(&after_between[and_pos + 4..]);
+
+            let lower_is_anchor = leading_identifier(lower_expr)
+                .map(|id| anchor_is_partition_col(id, partition_col_upper))
+                .unwrap_or(false);
+            let upper_is_anchor = leading_identifier(upper_expr)
+                .map(|id| anchor_is_partition_col(id, partition_col_upper))
+                .unwrap_or(false);
+
+            if lower_is_anchor || upper_is_anchor {
+                let before = if lower_is_anchor && lower_expr.contains("INTERVAL") {
+                    extract_interval_from_subtraction(lower_expr).unwrap_or(Seconds::ZERO)
+                } else {
+                    Seconds::ZERO
+                };
+                let after_secs = if upper_is_anchor && upper_expr.contains("INTERVAL") {
+                    extract_interval_from_addition(upper_expr).unwrap_or(Seconds::ZERO)
+                } else {
+                    Seconds::ZERO
+                };
+                if before > Seconds::ZERO || after_secs > Seconds::ZERO {
+                    bounds.push((before, after_secs));
+                }
+            }
+        }
+
+        search_from = abs + 1;
+    }
+
+    // `>=`/`<` form: `driving >= partition_col - INTERVAL '...'` and
+    // `driving < partition_col + INTERVAL '...'` (or `<=`).
+    let mut before = Seconds::ZERO;
+    let mut after_secs = Seconds::ZERO;
+    let mut found = false;
+
+    let mut search_from = 0;
+    while let Some(rel) = upper_sql[search_from..].find(">= ") {
+        let abs = search_from + rel;
+        let after_op = expression_prefix(&upper_sql[abs + ">= ".len()..]);
+        if after_op.contains("- INTERVAL")
+            && leading_identifier(after_op)
+                .map(|id| anchor_is_partition_col(id, partition_col_upper))
+                .unwrap_or(false)
+        {
+            if let Some(s) = extract_interval_from_subtraction(after_op) {
+                before = before.max(s);
+                found = true;
+            }
+        }
+        search_from = abs + 1;
+    }
+
+    for lt_kw in &["< ", "<= "] {
+        let mut search_from2 = 0;
+        while let Some(rel) = upper_sql[search_from2..].find(lt_kw) {
+            let abs = search_from2 + rel;
+            let after_op = expression_prefix(&upper_sql[abs + lt_kw.len()..]);
+            if after_op.contains("+ INTERVAL")
+                && leading_identifier(after_op)
+                    .map(|id| anchor_is_partition_col(id, partition_col_upper))
+                    .unwrap_or(false)
+            {
+                if let Some(s) = extract_interval_from_addition(after_op) {
+                    after_secs = after_secs.max(s);
+                    found = true;
+                }
+            }
+            search_from2 = abs + 1;
+        }
+    }
+
+    if found {
+        bounds.push((before, after_secs));
+    }
+
+    bounds
+}
+
+/// Sub-helper of [`extract_partition_skew_bounds`]: the leading identifier
+/// (bare or table-qualified, e.g. `SESSION_START_DATE` or
+/// `M.SESSION_START_DATE`) at the start of a trimmed expression string, or
+/// `None` if the expression does not begin with one.
+fn leading_identifier(text: &str) -> Option<&str> {
+    let trimmed = text.trim_start();
+    let end = trimmed
+        .find(|c: char| !(c.is_ascii_alphanumeric() || c == '_' || c == '.'))
+        .unwrap_or(trimmed.len());
+    if end == 0 {
+        None
+    } else {
+        Some(&trimmed[..end])
+    }
+}
+
+/// Sub-helper of [`extract_partition_skew_bounds`]: true if `ident` (bare or
+/// table-qualified) names `partition_col_upper`.
+fn anchor_is_partition_col(ident: &str, partition_col_upper: &str) -> bool {
+    ident == partition_col_upper || ident.ends_with(&format!(".{partition_col_upper}"))
+}
+
 /// Leaf classifier (`docs/specs/architecture.md` §"Property composition walk
 /// rule"): sub-helper of [`extract_form_b_bounds`] / the `extract_gte_lt_*`
 /// pair, scoped to the text immediately preceding one comparison operator.
@@ -1715,6 +1913,51 @@ mod tests {
             }
             other => panic!("Expected Bounded, got {:?}", other),
         }
+    }
+
+    // ---- Partition-column skew tests (`docs/specs/model_transforms.md`
+    // §Semantics "The output window is derived, never assumed") ----
+
+    /// Sessions-shaped SQL: `WHERE event_date BETWEEN session_start_date -
+    /// INTERVAL '1 day' AND session_start_date + INTERVAL '1 day'` with
+    /// `partition_column = session_start_date` derives a symmetric 1-day
+    /// skew bound — the model's own partition column is the relation's
+    /// anchor, not its LHS.
+    #[test]
+    fn partition_skew_form_b_symmetric() {
+        let sql = "SELECT * FROM sessionized \
+                   WHERE event_date BETWEEN session_start_date - INTERVAL '1 day' \
+                       AND session_start_date + INTERVAL '1 day'";
+        let skew = derive_partition_skew(sql, "session_start_date");
+        assert_eq!(skew.before, Seconds::days(1), "before must be 1 day");
+        assert_eq!(skew.after, Seconds::days(1), "after must be 1 day");
+    }
+
+    /// A model whose partition column tracks its own event-time column (no
+    /// Form B relation anchored on it) derives a zero skew — the identity
+    /// case.
+    #[test]
+    fn partition_skew_identity_zero() {
+        let sql = "SELECT event_date, COUNT(*) AS n FROM events GROUP BY event_date";
+        let skew = derive_partition_skew(sql, "event_date");
+        assert_eq!(skew, Skew::ZERO, "identity model must derive zero skew");
+    }
+
+    /// A Form B filter anchored on an *upstream source's* partition column
+    /// (the existing per-source bound pattern, `test_explicit_between_filter`)
+    /// does not contribute to the model's own skew: `partition_date` is the
+    /// anchor here, so deriving skew for `event_date` (the LHS/source
+    /// column, not the anchor) must be zero.
+    #[test]
+    fn partition_skew_ignores_source_form_b() {
+        let sql = "SELECT * FROM sessions s \
+                   WHERE s.event_date BETWEEN m.partition_date - INTERVAL '1 day' AND m.partition_date";
+        let skew = derive_partition_skew(sql, "event_date");
+        assert_eq!(
+            skew,
+            Skew::ZERO,
+            "a source's own LHS column must not be read as its own skew anchor"
+        );
     }
 
     /// A source without `timeseries:` produces no bound entry.

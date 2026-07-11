@@ -24,6 +24,7 @@ All run state lives under a single project-local `.smelt/` root (gitignored in e
   runs/<run_id>.json        # one run manifest per execution
   intervals.json            # cumulative interval coverage across runs
   reconciliation.json       # reconciliation ledger, per plan-managed model (see maintenance_plan.md)
+  landed_deltas.json        # per-source landed-delta intervals, keyed by source address
   schemas/<model>.json      # deployed schema snapshot per model (see schema_evolution.md)
 ```
 
@@ -86,7 +87,7 @@ The run-state intervals this spec owns and the maintenance plan's **reconciliati
 ## Constraints & Invariants
 
 - **Stateless requires no `.smelt/`.** Enabling no state posture must leave a project's on-disk footprint and behaviour exactly as today.
-- **Fixed layout.** State is confined to `.smelt/runs/`, `.smelt/intervals.json`, `.smelt/reconciliation.json`, and `.smelt/schemas/`. New artifact kinds extend this layout under `.smelt/`, never outside it.
+- **Fixed layout.** State is confined to `.smelt/runs/`, `.smelt/intervals.json`, `.smelt/reconciliation.json`, `.smelt/landed_deltas.json`, and `.smelt/schemas/`. New artifact kinds extend this layout under `.smelt/`, never outside it.
 - **Forward-compatible manifests.** Stored JSON must remain readable by later smelt versions; new fields are optional/defaulted.
 - **No stored-hash dependence for reuse.** Reuse correctness must not depend on a previously stored fingerprint value; it is always recomputed.
 
@@ -101,7 +102,7 @@ The run-state intervals this spec owns and the maintenance plan's **reconciliati
 
 ## References
 
-- **Code**: `crates/smelt-state/src/lib.rs` (`RunManifest`, `ModelRunRecord`, `TimeRangeRecord`, `generate_run_id`), `src/file_store.rs` (`.smelt/` reader/writer), `src/intervals.rs` (`IntervalStore`), `src/reconciliation.rs` (`ReconciliationLedger`, `ReconciliationStore`), `src/schema_tracking.rs` (`DeployedSchema`), `src/history.rs` (history queries)
+- **Code**: `crates/smelt-state/src/lib.rs` (`RunManifest`, `ModelRunRecord`, `TimeRangeRecord`, `generate_run_id`), `src/file_store.rs` (`.smelt/` reader/writer), `src/intervals.rs` (`IntervalStore`), `src/reconciliation.rs` (`ReconciliationLedger`, `ReconciliationStore`), `src/landed_deltas.rs` (`LandedDeltaStore`, `SourceLanding`, per-source landed-delta recording), `src/schema_tracking.rs` (`DeployedSchema`), `src/history.rs` (history queries)
 - **Tests**: `crates/smelt-state/tests/`
 - **User docs**: none yet (CLI surfaces `smelt status` / `smelt history` over this state — see `cli.md`)
 - **Plans (history)**: none yet — predecessor research is `docs/research/20260601-virtual-environments.md`

@@ -5,7 +5,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect, StatementGroup,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -615,95 +617,64 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
-    async fn delete_and_insert_transactional(
-        &self,
-        schema: &str,
-        name: &str,
-        partition: &PartitionRange,
-        sql: &str,
-    ) -> Result<(), BackendError> {
-        let table_name = format!("{}.{}", schema, name);
-
-        let delete_sql = format!(
-            "DELETE FROM {} WHERE {} >= '{}' AND {} < '{}'",
-            table_name,
-            partition.column,
-            partition.start.replace('\'', "''"),
-            partition.column,
-            partition.end.replace('\'', "''"),
-        );
-        let insert_sql = format!("INSERT INTO {} {}", table_name, sql);
-
+    /// Real transactional override: executes the emitted [`StatementGroup`]
+    /// (`smelt_logical::maintenance::emit`) inside one `duckdb::Transaction`
+    /// when `group.transactional` — e.g. a paired region `DELETE`+`INSERT`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"). `Transaction` rolls back on `Drop` unless explicitly
+    /// committed (`duckdb::transaction::DropBehavior::Rollback` is the
+    /// default), so a later statement's failure — the `?` returns before
+    /// `commit()` is reached — rolls back every earlier statement in the
+    /// group for free. This crate no longer builds any maintenance-statement
+    /// text of its own; every string in `statements` came from the emitter.
+    async fn execute_statement_group(&self, group: &StatementGroup) -> Result<(), BackendError> {
+        let label = group
+            .statements
+            .first()
+            .map(|s| s.sql.clone())
+            .unwrap_or_default();
+        let statements: Vec<String> = group.statements.iter().map(|s| s.sql.clone()).collect();
+        let transactional = group.transactional && statements.len() > 1;
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
             // invariant: see table_exists_sync for rationale; same mutex.
             let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
-            // `Transaction` rolls back on `Drop` unless explicitly committed
-            // (`duckdb::transaction::DropBehavior::Rollback` is the default),
-            // so an INSERT failure below — the `?` returns before `commit()`
-            // is reached — rolls back the paired DELETE for free.
-            let tx = conn
-                .transaction()
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            tx.execute(&delete_sql, [])
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            tx.execute(&insert_sql, [])
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            tx.commit()
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            if transactional {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| BackendError::execution_failed(label.clone(), e.to_string()))?;
+                for sql in &statements {
+                    tx.execute(sql, []).map_err(|e| {
+                        BackendError::execution_failed(label.clone(), e.to_string())
+                    })?;
+                }
+                tx.commit()
+                    .map_err(|e| BackendError::execution_failed(label.clone(), e.to_string()))?;
+            } else {
+                for sql in &statements {
+                    conn.execute(sql, []).map_err(|e| {
+                        BackendError::execution_failed(label.clone(), e.to_string())
+                    })?;
+                }
+            }
             Ok(())
         })
         .await
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
-    /// `merge_into` (below) issues `MERGE ... WHEN MATCHED THEN UPDATE SET
-    /// *`, which requires `source_sql`'s projection to carry every target
-    /// column (DuckDB errors on a column-count mismatch, it does not
-    /// silently subset by name) — so a column-scoped `MERGE` caller
-    /// (`crate::maintenance_driver::execute_column_scoped_merge` in
-    /// `smelt-runtime`) must project the FULL target row, carrying every
-    /// column outside the re-derived group through unchanged from the
-    /// existing target state. `SET *` then only changes the group's
-    /// columns' actual values, satisfying `Technique::ColumnScopedMerge`'s
-    /// contract without a second, column-list-aware MERGE primitive.
+    /// DuckDB executes the emitted column-scoped `MERGE`'s `UPDATE SET *`
+    /// form; the full-row source-projection contract that shape relies on is
+    /// documented on `smelt_logical::maintenance::emit::
+    /// emit_column_scoped_merge`, the single author of that statement text.
+    /// `merge_into` itself is not overridden here — the `Backend` trait's
+    /// default implementation (build the `StatementGroup` via that emitter,
+    /// then `execute_statement_group`) is exactly this backend's shape: a
+    /// single non-transactional statement over the same connection every
+    /// other statement group runs through.
     fn supports_column_scoped_merge(&self) -> bool {
         true
-    }
-
-    async fn merge_into(
-        &self,
-        schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
-    ) -> Result<(), BackendError> {
-        let table_name = format!("{}.{}", schema, table);
-
-        let on_clause = unique_key
-            .iter()
-            .map(|k| format!("target.{} = source.{}", k, k))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-
-        let merge_sql = format!(
-            "MERGE INTO {} AS target USING ({}) AS source ON {} \
-             WHEN MATCHED THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *",
-            table_name, source_sql, on_clause
-        );
-
-        let connection = Arc::clone(&self.connection);
-
-        tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
-            conn.execute(&merge_sql, [])
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
-            Ok(())
-        })
-        .await
-        .map_err(|e| BackendError::Other(e.into()))?
     }
 
     async fn insert_overwrite(

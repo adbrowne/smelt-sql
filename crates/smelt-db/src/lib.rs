@@ -860,6 +860,9 @@ fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
         if ast.tests().next().is_some() {
             return RefKind::Test;
         }
+        if ast.checks().next().is_some() {
+            return RefKind::Check;
+        }
     }
     // 2. Default: Model.
     RefKind::Model
@@ -1063,6 +1066,20 @@ fn cte_ref_outside_test_diagnostics(
     diags
 }
 
+/// Lowercase display of a `Granularity` for diagnostic messages (matches the
+/// wire/frontmatter spelling, e.g. `granularity: day`).
+fn granularity_lower(g: smelt_core::Granularity) -> &'static str {
+    use smelt_core::Granularity as G;
+    match g {
+        G::Hour => "hour",
+        G::Day => "day",
+        G::Week => "week",
+        G::Month => "month",
+        G::Quarter => "quarter",
+        G::Year => "year",
+    }
+}
+
 /// Map a planner-rule diagnostic code onto smelt-db's diagnostic-code
 /// catalogue. The 1:1 mapping is the seam the Diagnostic-parity rule relies on
 /// (`architecture.md` §"Planner scope").
@@ -1191,6 +1208,58 @@ fn ref_source_info(
         .iter()
         .find(|s| s.address_segments == segments)
         .cloned()
+}
+
+/// Resolve `ref_str` to an upstream **maintained-model edge**
+/// (`maintenance_plan.md` §"Upstream model edges") when it addresses another
+/// maintained (non-`full`, non-view) model in this project — `None` when the
+/// ref doesn't resolve, resolves to a source/seed/function, or resolves to a
+/// `full`-mode or view model (which delivers no incremental delta and so
+/// contributes neither a creation cell nor a refusal). Sibling of
+/// [`ref_source_info`]; reused by [`maintenance_plan_report`] to assemble the
+/// [`smelt_logical::maintenance::derive::ModelEdge`]s the plan derivation
+/// reads. `clock_col` is the upstream's own validated
+/// `timeseries.partition_column`, or `None` when it declares none — the
+/// derivation records that as a `MaintenanceReachNotDerivable` refusal.
+fn ref_model_edge(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    ref_str: &str,
+) -> Option<smelt_logical::maintenance::derive::ModelEdge> {
+    let stripped = ref_str.strip_prefix("smelt.")?;
+    let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+    let leaf = segments.last()?.clone();
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    if resolved.kind != RefKind::Model {
+        return None;
+    }
+    let file = resolved.source_file?;
+    let text = file.text(db);
+    // Extract the addressed model's own `refresh:`/`timeseries:`.
+    let meta = match extract_file_metadata(text) {
+        Ok(FileMetadata::Single { metadata, .. }) => *metadata,
+        Ok(FileMetadata::Multi { models }) => {
+            models
+                .into_iter()
+                .find(|s| s.metadata.name.as_deref() == Some(leaf.as_str()))?
+                .metadata
+        }
+        // Generator-emitted upstreams: their maintenance metadata lives on the
+        // emitted model, not the generator file's frontmatter. Not exercised
+        // by any current maintained-upstream fixture; resolving it is deferred.
+        _ => return None,
+    };
+    // Only a maintained (`refresh: incremental`) upstream delivers an
+    // incremental delta to receive; a `full`-mode or view upstream is
+    // excluded (no creation cell, no refusal).
+    if meta.refresh != Some(smelt_core::config::RefreshStrategy::Incremental) {
+        return None;
+    }
+    let clock_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    Some(smelt_logical::maintenance::derive::ModelEdge {
+        name: stripped.to_string(),
+        clock_col,
+    })
 }
 
 /// Thin Salsa wrapper around
@@ -1322,6 +1391,14 @@ pub fn maintenance_plan_report(
         })
         .collect();
 
+    // Upstream maintained-model edges (`maintenance_plan.md` §"Upstream model
+    // edges"): the model refs that resolve to another maintained model in
+    // this project, each carrying that upstream's own validated clock.
+    let model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = refs
+        .iter()
+        .filter_map(|r| ref_model_edge(db, workspace, r))
+        .collect();
+
     let project_scan_bounds = project
         .and_then(|p| {
             smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
@@ -1358,12 +1435,13 @@ pub fn maintenance_plan_report(
         .map(|(name, _)| name.clone())
         .collect();
 
-    crate::queries::maintenance::derive_model_maintenance_plan(
+    crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
         &metadata,
         &sources,
         &explicitly_mutable,
+        &model_edges,
     )
 }
 
@@ -1579,21 +1657,32 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Skips smelt.define / smelt.extern function files — their frontmatter is
     // handled (with the correct DeclarationKind) by
     // frontmatter_parse_diagnostics_for_file. Only pure SQL model files reach
-    // this block. Calls parse_frontmatter(text, Model) to surface unknown-key
+    // this block. Calls parse_frontmatter(text, Model/Check) to surface unknown-key
     // errors and inapplicable-key warnings. Also tries to deserialize
     // ModelMetadata from the validated map to catch nested sub-field failures
     // (e.g. a bad timeseries.granularity value) that would previously be swallowed.
-    let is_function_file = {
+    let (is_function_file, is_check_file) = {
         let p = parse_file(db, file);
-        AstFile::cast(p.syntax())
+        let ast_opt = AstFile::cast(p.syntax());
+        let is_fn = ast_opt
+            .as_ref()
             .map(|ast| ast.defines().next().is_some() || ast.externs().next().is_some())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let is_chk = ast_opt
+            .as_ref()
+            .map(|ast| ast.checks().next().is_some())
+            .unwrap_or(false);
+        (is_fn, is_chk)
     };
     if !is_function_file {
         if let Some(yaml_text) = smelt_core::frontmatter_yaml_text(text) {
             use smelt_core::{FrontmatterSeverity, ModelMetadata};
-            let (validated_map, fm_diags) =
-                smelt_core::parse_frontmatter(&yaml_text, smelt_core::DeclarationKind::Model);
+            let decl_kind = if is_check_file {
+                smelt_core::DeclarationKind::Check
+            } else {
+                smelt_core::DeclarationKind::Model
+            };
+            let (validated_map, fm_diags) = smelt_core::parse_frontmatter(&yaml_text, decl_kind);
 
             // Emit catalogue diagnostics (unknown key → Error, inapplicable → Warning).
             for fm_diag in &fm_diags {
@@ -1877,6 +1966,21 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             })
             .accumulate(db);
         }
+        if let Some(mismatch) = &plan_diags.granularity_mismatch {
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message: format!(
+                    "declared timeseries.granularity ({}) is contradicted by the model's own \
+                     partition-column grouping, which derives to {}",
+                    granularity_lower(mismatch.declared),
+                    granularity_lower(mismatch.actual),
+                ),
+                range: rowan::TextRange::empty(body_start),
+                code: Some(DiagnosticCode::MaintenanceGranularityMismatch),
+                data: None,
+            })
+            .accumulate(db);
+        }
     }
 
     // Parse errors
@@ -2154,7 +2258,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // `CteRefOutsideTest` for any that carry a `#` suffix but are not
     // inside a SMELT_TEST ancestor.  This is a pure structural check that
     // runs unconditionally (no early-return) so model files, function files,
-    // and test files all surface it correctly.
+    // check files, and test files all surface it correctly.
     {
         let parse = parse_file(db, file);
         let syntax = parse.syntax();
@@ -2163,20 +2267,58 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // `smelt.check` structural validation: PASSING and EXPECT clauses are
+    // test-only surface. A check body is a failing-rows query against real
+    // built data; it has no mock tables and no expected output rows. Emit
+    // `CheckHasTestClause` anchored at the offending clause keyword range.
+    {
+        let parse = parse_file(db, file);
+        if let Some(ast) = AstFile::cast(parse.syntax()) {
+            for check in ast.checks() {
+                for passing in check.passing_clauses() {
+                    let range = passing.syntax().text_range();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "PASSING clauses are not valid on smelt.check — \
+                                  only smelt.test declarations accept mock table data"
+                            .to_string(),
+                        range,
+                        code: Some(DiagnosticCode::CheckHasTestClause),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+                if let Some(expect) = check.expect_clause() {
+                    let range = expect.syntax().text_range();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "EXPECT clause is not valid on smelt.check — \
+                                  only smelt.test declarations assert against expected output rows"
+                            .to_string(),
+                        range,
+                        code: Some(DiagnosticCode::CheckHasTestClause),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+        }
+    }
+
     // Check if model is valid
     if parse_model(db, file).is_none() {
         let path_str = path.to_str().unwrap_or("");
         let is_virtual_submodel = path_str.contains("::");
         if !is_virtual_submodel && path_str.contains("models/") {
-            // Files that contain only `smelt.test` declarations are valid — they
-            // have no SELECT body but they are not broken models.  Suppress the
-            // "does not contain a valid SQL query" warning for such files.
+            // Files that contain only `smelt.test` or `smelt.check` declarations are
+            // valid — they have no SELECT body but they are not broken models.
+            // Suppress the "does not contain a valid SQL query" warning for such files.
             let parse = parse_file(db, file);
-            let has_smelt_tests = AstFile::cast(parse.syntax())
-                .map(|ast| ast.tests().next().is_some())
+            let has_smelt_tests_or_checks = AstFile::cast(parse.syntax())
+                .map(|ast| ast.tests().next().is_some() || ast.checks().next().is_some())
                 .unwrap_or(false);
 
-            if !has_smelt_tests {
+            if !has_smelt_tests_or_checks {
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: "File does not contain a valid SQL query".to_string(),
@@ -2205,6 +2347,20 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         message: format!(
                             "Cannot reference test '{leaf}' in a FROM position — \
                              smelt.tests.* paths are not valid as TableExpr values"
+                        ),
+                        range: path_ref_loc.range,
+                        code: Some(DiagnosticCode::KindMismatch),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+                if resolved.kind == RefKind::Check && path_ref_loc.in_table_expr_position {
+                    let leaf = path_ref_loc.path.last().cloned().unwrap_or_default();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Cannot reference check '{leaf}' in a FROM position — \
+                             smelt.check files produce no DB object and cannot be used as TableExpr values"
                         ),
                         range: path_ref_loc.range,
                         code: Some(DiagnosticCode::KindMismatch),

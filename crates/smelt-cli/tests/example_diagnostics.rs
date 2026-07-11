@@ -1245,6 +1245,102 @@ fn broken_workspace_maintenance_scan_unbounded() {
     );
 }
 
+/// MP14 TDD: `examples/broken/models/maintenance_granularity_mismatch.sql` —
+/// a `grain: partition` model declaring `granularity: hour` while its own
+/// `order_date` projection only truncates to `day` — a narrowing declaration
+/// (finer than what the grouping actually derives), refused with
+/// `MaintenanceGranularityMismatch` and no other maintenance diagnostic
+/// firing anywhere else in the shared `examples/broken/` workspace.
+///
+/// Spec: `docs/specs/maintenance_plan.md` §Design "Grain is declared" /
+/// "Widen-never-narrow".
+#[test]
+fn broken_workspace_maintenance_granularity_mismatch() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticCode, Workspace};
+
+    const GRANULARITY_CODES: &[DiagnosticCode] = &[DiagnosticCode::MaintenanceGranularityMismatch];
+    let expected_file = "models/maintenance_granularity_mismatch.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/broken");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel.replace('\\', "/").ends_with(expected_file);
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !d
+                .code
+                .as_ref()
+                .is_some_and(|c| GRANULARITY_CODES.contains(c))
+            {
+                continue;
+            }
+            if is_target {
+                target.push(d.clone());
+            } else {
+                other.push((rel.clone(), d.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "expected zero MaintenanceGranularityMismatch diagnostics from files other than \
+         '{expected_file}', got {}:\n  {}",
+        other.len(),
+        other
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target.len(),
+        1,
+        "expected exactly 1 MaintenanceGranularityMismatch from '{expected_file}', got {}:\n  {}",
+        target.len(),
+        target
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        target[0].code,
+        Some(DiagnosticCode::MaintenanceGranularityMismatch)
+    );
+}
+
 // ===== Phase D (meta-language) TDD tests =====
 //
 // Layout mirrors Phase C: one clean workspace + one broken workspace per diagnostic code.
@@ -3942,4 +4038,19 @@ fn incremental_broken_union_event_time() {
         "examples/incremental_broken_union_event_time",
         "models/union_mart.sql",
     );
+}
+
+// ===== smelt.check Phase 2 TDD tests =====
+
+/// Phase 2 TDD: `examples/data_checks/` — a workspace containing a `smelt.check`
+/// and a regular model loads with zero diagnostics. The check is excluded from
+/// materialization (not in the explain catalog) and produces no warnings.
+#[test]
+fn check_excluded_from_run_and_explain() {
+    // The data_checks fixture contains:
+    //   models/revenue.sql         — a regular model
+    //   checks/no_negative_amounts.sql — a smelt.check declaration
+    // The check must load without diagnostics (it is not materialized, not in
+    // the explain/catalog, and must not cause the workspace to emit warnings).
+    check_workspace_no_diagnostics("examples/data_checks");
 }

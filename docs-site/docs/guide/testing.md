@@ -11,9 +11,10 @@ data for their dependencies via `PASSING` clauses, and states the expected outpu
 standalone SQL query with mock data substituted for dependencies, executes it against an
 in-memory DuckDB instance, and compares the actual output to the expected rows.
 
-Tests are discovered the same way as models — by scanning the directories listed in `paths:`
-in your `smelt.yml`. They can live in a dedicated `tests/` directory or co-located in
-model files.
+Tests are discovered the same way as models — by the project-wide scan of every
+non-excluded directory (`paths:` in `smelt.yml` affects how addresses are derived,
+not what gets scanned). They can live in a dedicated `tests/` directory or co-located
+in model files.
 
 ## smelt.test declarations
 
@@ -221,6 +222,135 @@ reference it via `smelt.<name>`.
       - tests
     ```
 
+## smelt.check declarations
+
+`smelt.check` is a **data-quality assertion** that runs against your built pipeline data —
+not mocked data. Where a `smelt.test` supplies mock inputs and expected output rows, a
+check queries the tables that your pipeline has actually materialised and flags rows that
+violate a condition. If the query returns any rows, the check fails.
+
+```sql
+smelt.check no_negative_amounts AS (
+    SELECT order_id, amount
+    FROM smelt.revenue
+    WHERE amount < 0
+)
+```
+
+The grammar is:
+
+```
+smelt.check <name> AS ( <select> )
+```
+
+- **`<name>`** — identifier for the check, used in CLI output and selector expressions.
+- **`<select>`** — a query that returns **failing rows**. The check passes when the result
+  set is empty and fails when it contains at least one row.
+
+### Difference from smelt.test
+
+| | `smelt.test` | `smelt.check` |
+|---|---|---|
+| Input data | Mock rows supplied via `PASSING` clauses | Real tables built by the pipeline |
+| Assertion | `EXPECT` clause lists expected rows | Any returned row is a failure |
+| When it runs | `smelt test` (before or without a full build) | `smelt check`, against already-built data |
+| `PASSING` / `EXPECT` | Valid | Error — not permitted on a check |
+
+### Severity
+
+By default a failing check is an `error`. Set `severity: warn` in frontmatter to emit a
+warning instead (the command exits 0 but reports the check as a warning):
+
+```sql
+---
+severity: warn
+---
+smelt.check no_negative_amounts AS (
+    SELECT order_id, amount
+    FROM smelt.revenue
+    WHERE amount < 0
+)
+```
+
+| Key | Values | Default | Description |
+|-----|--------|---------|-------------|
+| `severity` | `error`, `warn` | `error` | Exit code and display treatment when the check fails. |
+
+### File placement
+
+Place check files in a directory listed in `paths:` in `smelt.yml`. A dedicated
+`checks/` directory is conventional:
+
+```yaml
+# smelt.yml
+paths:
+  - models
+  - checks
+```
+
+Any `.sql` file that contains a `smelt.check` declaration is classified as a **check
+file**. Check files never materialise a DB object — they are not part of the execution
+graph and are not built by `smelt run`, `smelt explain`, or `smelt build`. They are
+*evaluated* in two places: on demand via `smelt check`, and automatically during
+`smelt build` after the models they reference materialise (see below).
+
+### Running checks
+
+Run checks with `smelt check`. Each check's `smelt.<path>` references are compiled to the
+real materialized relations in the configured target, and the failing-rows query is executed
+against the data your pipeline has already built:
+
+```bash
+# Run all checks against the dev target
+smelt check
+
+# Run only checks whose name contains "revenue"
+smelt check --select revenue
+
+# Run against a different target
+smelt check --target prod
+```
+
+Each check is reported as `PASS` (zero rows), `FAIL` (an `error`-severity violation), or
+`WARN` (a `warn`-severity violation). A violation shows the violating row count and a capped
+sample of the offending rows; the rows are shown inline only and are not written to the
+warehouse.
+
+```
+smelt check
+
+  PASS  daily_revenue_non_negative
+  FAIL  amount_must_exceed_500 — 3 violating row(s)
+    {"order_id": "7", "amount": "120.00"}
+
+  1 passed, 1 failed, 0 warned, 2 total
+```
+
+`smelt check` exits `0` when every `error`-severity check passes and `1` when any
+`error`-severity check has violations; `warn`-severity violations never change the exit code.
+A check that references a model which has not been built in the target fails loudly with
+`CheckTargetNotBuilt` rather than silently passing on a missing relation, so build the
+pipeline (`smelt build`) before running checks against it.
+
+### Checks during `smelt build`
+
+`smelt build` runs each check automatically, **immediately after the model it references
+materialises**, against the freshly written data. This makes checks a guardrail on the
+pipeline rather than a separate after-the-fact step:
+
+- An **`error`-severity** violation **skips every model downstream of the checked model**
+  for the rest of the build, so bad data never propagates, and the build exits `1`.
+- A **`warn`-severity** violation is reported and the build **continues** — downstream models
+  still build and the build exits `0`.
+
+Skipped models are listed in the build summary. Because the dependency edge is derived from
+the check's `smelt.<path>` references, a check guards exactly the models it reads (and
+everything downstream of them).
+
+`smelt run` does **not** run checks — it only materialises models. Checks are a
+`smelt build` / `smelt check` concern, so use `smelt build` (or a `smelt run` followed by
+`smelt check`) when you want the data validated.
+
 ## Comparison behavior
 
 ### Set vs ordered comparison
@@ -255,12 +385,13 @@ Floating-point values are compared with an epsilon of 1e-6. For example, an actu
 
 ### Type coercion
 
-YAML values are automatically converted to SQL types:
+Literal values are automatically converted to SQL types:
 
-| YAML value | SQL type | Example |
-|------------|----------|---------|
+| Literal value | SQL type | Example |
+|---------------|----------|---------|
 | Integer | INTEGER | `42` |
 | Float | DOUBLE | `3.14` |
+| Decimal-shaped string (has `.`, no exponent) | DECIMAL | `'300.00'` |
 | String | VARCHAR | `hello` or `'hello'` |
 | Boolean | BOOLEAN | `true`, `false` |
 | Null | NULL | `null` |

@@ -45,6 +45,12 @@ pub enum TestError {
         inner: Box<TestError>,
         generated_values: BTreeMap<String, Vec<BTreeMap<String, String>>>,
     },
+    /// Anchored diagnostic from whole-query test inlining.
+    ///
+    /// Carries a diagnostic code (e.g. `"AmbiguousTestModel"`) and a
+    /// human-readable message that may include a `file:line:col` prefix for
+    /// terminal anchoring.
+    InliningDiagnostic { code: &'static str, message: String },
 }
 
 impl fmt::Display for TestError {
@@ -52,6 +58,7 @@ impl fmt::Display for TestError {
         match self {
             TestError::ExecutionError(msg) => write!(f, "SQL execution failed: {}", msg),
             TestError::CompilationError(msg) => write!(f, "Compilation failed: {}", msg),
+            TestError::InliningDiagnostic { code: _, message } => write!(f, "{}", message),
             TestError::RowCountMismatch { expected, actual } => {
                 write!(f, "Expected {} row(s), got {} row(s)", expected, actual)
             }
@@ -318,11 +325,7 @@ pub fn compare_rows(
     }
 
     // Filter actual rows to only include columns from expected
-    let expected_columns: Vec<String> = if let Some(first) = expected.first() {
-        first.keys().cloned().collect()
-    } else {
-        return None;
-    };
+    let expected_columns: Vec<String> = expected.first()?.keys().cloned().collect();
 
     let filtered_actual: Vec<BTreeMap<String, String>> = actual
         .iter()
