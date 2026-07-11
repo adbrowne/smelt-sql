@@ -68,8 +68,8 @@ A 2026-07-11 review found that the parser silently absorbs all top-level tokens 
 | 1     | done     | 1e09f6c0 | 2026-07-11 |
 | 2     | done     | 3da7e023 | 2026-07-11 |
 | 3     | done     | 2d8a80ce | 2026-07-11 |
-| 4     | done     |        | 2026-07-11 |
-| 5     | pending  |        |      |
+| 4     | done     | df0cb16b | 2026-07-11 |
+| 5     | done     |        | 2026-07-11 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 | 8     | pending  |        |      |

@@ -848,7 +848,19 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
-        SqlFunction::Median => first_arg_type_or(func, ctx, DataType::Double, true),
+        SqlFunction::Median => {
+            // MEDIAN interpolates: integer-family inputs widen to Double (DuckDB
+            // and Spark both return DOUBLE for integer medians); Decimal/Double/
+            // temporal inputs keep their own type.
+            // Regression: median_integer_infers_double.
+            first_arg_type_or(func, ctx, DataType::Double, true).map(|tc| match tc.data_type {
+                DataType::SmallInt | DataType::Integer | DataType::BigInt => TypedColumn {
+                    data_type: DataType::Double,
+                    nullable: tc.nullable,
+                },
+                _ => tc,
+            })
+        }
 
         SqlFunction::Mode => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 

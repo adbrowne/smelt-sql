@@ -756,7 +756,91 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::BigInt,
         },
-        // TO_CHAR omitted — not available in DuckDB
+        // ---- Extended coverage: temporal/statistical/JSON/string functions ----
+        // MEDIAN(integer) interpolates to Double in DuckDB/Spark; Decimal/Double
+        // preserve their type (smelt fix: median_integer_infers_double).
+        FuncDesc {
+            name: "MEDIAN",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        // ARRAY_AGG(col) → Array(col_type); DuckDB returns T[] (Arrow List).
+        FuncDesc {
+            name: "ARRAY_AGG",
+            input: FuncInput::AnyAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::unknown_dynamic(), // arg-dependent
+        },
+        // AGE(temporal) → Interval.
+        FuncDesc {
+            name: "AGE",
+            input: FuncInput::Temporal,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Interval,
+        },
+        // JSON_EXTRACT(json_text, path) → JSON (Arrow Varchar); smelt models JSON
+        // as Text (Text/Varchar compatible).
+        FuncDesc {
+            name: "JSON_EXTRACT",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral("$.a")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
+        // IFNULL(a, b) ≡ COALESCE(a, b) → argument type.
+        FuncDesc {
+            name: "IFNULL",
+            input: FuncInput::Numeric,
+            extra_args: &[ExtraArg::IntLiteral("0")],
+            prepend_literal: None,
+            output_type: DataType::unknown_dynamic(), // arg-dependent
+        },
+        // TRANSLATE(s, from, to) → Varchar (smelt Text; compatible).
+        FuncDesc {
+            name: "TRANSLATE",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral("a"), ExtraArg::StringLiteral("b")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
+        // Two-argument statistical aggregates → Double (DuckDB and smelt agree).
+        FuncDesc {
+            name: "CORR",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[ExtraArg::SameAsFirst],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "COVAR_POP",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[ExtraArg::SameAsFirst],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "COVAR_SAMP",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[ExtraArg::SameAsFirst],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        // MODE(col) → the column's type (DuckDB and smelt agree).
+        FuncDesc {
+            name: "MODE",
+            input: FuncInput::AnyAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::unknown_dynamic(), // arg-dependent
+        },
+        // NOTE: INITCAP and TO_CHAR are not DuckDB scalar functions, and the
+        // SQL-standard `POSITION(x IN y)` / `PERCENTILE_CONT(f) WITHIN GROUP`
+        // forms are deferred parser grammar. They are intentionally not
+        // generated here — the differential-parsing gaps track them instead.
     ]
 }
 
@@ -799,9 +883,20 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             },
             _ => DataType::Double,
         },
-        "MIN" | "MAX" | "COALESCE" | "NULLIF" | "GREATEST" | "LEAST" | "ANY_VALUE" => {
+        "MIN" | "MAX" | "COALESCE" | "NULLIF" | "IFNULL" | "GREATEST" | "LEAST" | "ANY_VALUE" => {
             arg_type.clone()
         }
+        // MEDIAN interpolates integer inputs to Double; other numerics keep type.
+        "MEDIAN" => match arg_type {
+            DataType::SmallInt | DataType::Integer | DataType::BigInt => DataType::Double,
+            other => other.clone(),
+        },
+        "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP" | "COVAR_SAMP" => {
+            DataType::Double
+        }
+        "ARRAY_AGG" => DataType::Array(Box::new(arg_type.clone())),
+        "AGE" => DataType::Interval,
+        "MODE" => arg_type.clone(),
         "COUNT" | "APPROX_COUNT_DISTINCT" => DataType::BigInt,
         "SUM" => DataType::Decimal {
             precision: 38,
@@ -825,8 +920,8 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         "MOD" => arg_type.clone(),
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
-        | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "SUBSTRING" | "SUBSTR" | "LEFT" | "RIGHT"
-        | "SPLIT_PART" | "STRING_AGG" => DataType::Text,
+        | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "TRANSLATE" | "TO_CHAR" | "SUBSTRING"
+        | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" | "STRING_AGG" => DataType::Text,
         // JSON functions
         "TO_JSON"
         | "JSON_OBJECT"
@@ -847,18 +942,32 @@ pub fn base_type_strategy() -> impl Strategy<Value = BaseType> {
 }
 
 /// Strategy that generates a pool of 1-5 typed columns.
+///
+/// With a 25% "tz-mixing" weight the pool is augmented with both a naive
+/// `Timestamp` and a `Timestamp WITH TIME ZONE` column, so the generators can
+/// reach mixed naive/tz-aware timestamp expressions (comparisons here; the
+/// tz-mixed *arithmetic* diagnostic path in the inference) that a uniform draw
+/// would produce only rarely.
 pub fn column_pool_strategy() -> impl Strategy<Value = Vec<TypedSource>> {
-    prop::collection::vec(base_type_strategy(), 1..=5).prop_map(|types| {
-        types
-            .into_iter()
-            .enumerate()
-            .map(|(i, bt)| TypedSource {
-                name: format!("{}_{}", bt.col_prefix(), i),
-                data_type: bt.to_smelt_type(),
-                cast_sql: bt.cast_sql().to_string(),
-            })
-            .collect()
-    })
+    (
+        prop::collection::vec(base_type_strategy(), 1..=5),
+        proptest::bool::weighted(0.25),
+    )
+        .prop_map(|(mut types, tz_mix)| {
+            if tz_mix {
+                types.push(BaseType::Timestamp);
+                types.push(BaseType::TimestampTz);
+            }
+            types
+                .into_iter()
+                .enumerate()
+                .map(|(i, bt)| TypedSource {
+                    name: format!("{}_{}", bt.col_prefix(), i),
+                    data_type: bt.to_smelt_type(),
+                    cast_sql: bt.cast_sql().to_string(),
+                })
+                .collect()
+        })
 }
 
 /// Strategy that picks an expression kind.
@@ -919,6 +1028,16 @@ pub fn generate_expr(
                     ("INTEGER", DataType::Integer),
                     ("BIGINT", DataType::BigInt),
                     ("VARCHAR", DataType::Varchar { max_length: None }),
+                    (
+                        "DECIMAL(12,3)",
+                        DataType::Decimal {
+                            precision: 12,
+                            scale: 3,
+                        },
+                    ),
+                    // smelt normalises FLOAT → Double (registered divergence
+                    // `cast_float_as_double`); DuckDB reports FLOAT.
+                    ("FLOAT", DataType::Double),
                 ]
             } else if col.data_type.is_string() {
                 &[("VARCHAR", DataType::Varchar { max_length: None })]
@@ -956,7 +1075,27 @@ pub fn generate_expr(
 
         ExprKind::Function => {
             let funcs = core_functions();
-            let func = &funcs[func_idx % funcs.len()];
+            // Spread the selection across the whole list: `func_idx` ranges only
+            // 0..100 while the list is longer, so a bare modulo leaves the tail
+            // (where the extended functions live) reachable by a single index.
+            // Mixing in `expr_idx` with a coprime multiplier gives every entry a
+            // fair share.
+            let sel = func_idx
+                .wrapping_mul(7)
+                .wrapping_add(expr_idx.wrapping_mul(3));
+            let func = &funcs[sel % funcs.len()];
+
+            // JSON_EXTRACT needs a *valid JSON* first argument: the oracle
+            // executes the query, and feeding it an arbitrary string column
+            // (e.g. 'hello') raises a runtime "Malformed JSON" error. Use a JSON
+            // literal so the path is exercised on well-formed input.
+            if func.name == "JSON_EXTRACT" {
+                return Some(TypedExpr {
+                    sql: r#"JSON_EXTRACT('{"a":1}', '$.a')"#.to_string(),
+                    alias,
+                    expected_smelt_type: DataType::Text,
+                });
+            }
 
             // Handle zero-arg functions
             if matches!(func.input, FuncInput::NoArg) {
@@ -996,59 +1135,7 @@ pub fn generate_expr(
             })
         }
 
-        ExprKind::BinaryOp => {
-            // Exclude Decimal operands: Decimal / T is rejected as non-portable
-            // (spec §15 "Division rejection"), and the other operators have their
-            // own Decimal coverage. Excluding Decimal here keeps "/" generation safe.
-            let num_cols: Vec<&TypedSource> = columns
-                .iter()
-                .filter(|c| {
-                    c.data_type.is_numeric() && !matches!(c.data_type, DataType::Decimal { .. })
-                })
-                .collect();
-
-            // Rotate through arithmetic operators. "/" is included: smelt now returns
-            // Double for non-Decimal division (DuckDB/Spark-aligned).
-            let ops = ["+", "-", "*", "%", "/"];
-            let op = ops[expr_idx % ops.len()];
-
-            if num_cols.len() >= 2 && func_idx.is_multiple_of(3) {
-                // Mixed-type binary op: pick two different numeric columns
-                let col_a = num_cols[expr_idx % num_cols.len()];
-                let col_b = num_cols[(expr_idx + 1) % num_cols.len()];
-                let expected = if op == "/" {
-                    DataType::Double
-                } else {
-                    promote_numeric_type(&col_a.data_type, &col_b.data_type)
-                };
-                Some(TypedExpr {
-                    sql: format!("{} {} {}", col_a.name, op, col_b.name),
-                    alias,
-                    expected_smelt_type: expected,
-                })
-            } else if let Some(num_col) = num_cols.first() {
-                // Same-type arithmetic
-                let expected = if op == "/" {
-                    DataType::Double
-                } else {
-                    num_col.data_type.clone()
-                };
-                Some(TypedExpr {
-                    sql: format!("{} {} {}", num_col.name, op, num_col.name),
-                    alias,
-                    expected_smelt_type: expected,
-                })
-            } else {
-                columns
-                    .iter()
-                    .find(|c| c.data_type.is_string())
-                    .map(|str_col| TypedExpr {
-                        sql: format!("{} || {}", str_col.name, str_col.name),
-                        alias,
-                        expected_smelt_type: DataType::Text,
-                    })
-            }
-        }
+        ExprKind::BinaryOp => generate_binary_op_expr(columns, expr_idx, func_idx, alias),
 
         ExprKind::CaseExpr => {
             let col = &columns[expr_idx % columns.len()];
@@ -1111,10 +1198,39 @@ pub fn generate_expr(
         }
 
         ExprKind::Comparison => {
-            // Find two columns of the same type for comparison
-            let col = &columns[expr_idx % columns.len()];
             let ops = ["=", "<>", "<", ">", "<=", ">="];
             let op = ops[func_idx % ops.len()];
+            // Mixed naive/tz-aware timestamp comparison: DuckDB and smelt both
+            // yield Boolean (comparison aligns the tz axis; only tz-mixed
+            // *arithmetic* is an error, spec §16). Exercising this keeps the
+            // tz-mixing path covered without tripping the arithmetic diagnostic.
+            let naive_ts = columns.iter().find(|c| {
+                matches!(
+                    c.data_type,
+                    DataType::Timestamp {
+                        with_timezone: false
+                    }
+                )
+            });
+            let tz_ts = columns.iter().find(|c| {
+                matches!(
+                    c.data_type,
+                    DataType::Timestamp {
+                        with_timezone: true
+                    }
+                )
+            });
+            if let (Some(a), Some(b)) = (naive_ts, tz_ts) {
+                if func_idx.is_multiple_of(2) {
+                    return Some(TypedExpr {
+                        sql: format!("{} {op} {}", a.name, b.name),
+                        alias,
+                        expected_smelt_type: DataType::Boolean,
+                    });
+                }
+            }
+            // Find two columns of the same type for comparison
+            let col = &columns[expr_idx % columns.len()];
             Some(TypedExpr {
                 sql: format!("{} {op} {}", col.name, col.name),
                 alias,
@@ -1165,12 +1281,18 @@ pub fn generate_expr(
             let temporal_col = columns
                 .iter()
                 .find(|c| matches!(c.data_type, DataType::Date | DataType::Timestamp { .. }))?;
-            let parts = ["YEAR", "MONTH", "DAY"];
+            // EPOCH returns fractional seconds → Double; calendar fields → BigInt.
+            let parts = ["YEAR", "MONTH", "DAY", "EPOCH"];
             let part = parts[func_idx % parts.len()];
+            let expected = if part == "EPOCH" {
+                DataType::Double
+            } else {
+                DataType::BigInt
+            };
             Some(TypedExpr {
                 sql: format!("EXTRACT({part} FROM {})", temporal_col.name),
                 alias,
-                expected_smelt_type: DataType::BigInt,
+                expected_smelt_type: expected,
             })
         }
 
@@ -1237,6 +1359,220 @@ pub fn generate_expr(
                     },
                 })
             }
+        }
+    }
+}
+
+/// Generate a binary-operation expression, covering numeric, string,
+/// decimal-arithmetic, and temporal-arithmetic paths.
+///
+/// The expected-type computation mirrors the SPEC formulas (types.md §15
+/// decimal growth and §16 temporal/tz-transparent arithmetic); it does not
+/// import production inference. Each satisfiable operand pairing contributes a
+/// candidate; one is selected deterministically by `(expr_idx, func_idx)` so
+/// the corpus reaches every path over enough cases.
+fn generate_binary_op_expr(
+    columns: &[TypedSource],
+    expr_idx: usize,
+    func_idx: usize,
+    alias: String,
+) -> Option<TypedExpr> {
+    let by = |pred: &dyn Fn(&DataType) -> bool| -> Vec<&TypedSource> {
+        columns.iter().filter(|c| pred(&c.data_type)).collect()
+    };
+
+    let interval_cols = by(&|d| matches!(d, DataType::Interval));
+    let date_cols = by(&|d| matches!(d, DataType::Date));
+    let ts_cols = by(&|d| {
+        matches!(
+            d,
+            DataType::Timestamp {
+                with_timezone: false
+            }
+        )
+    });
+    let tstz_cols = by(&|d| {
+        matches!(
+            d,
+            DataType::Timestamp {
+                with_timezone: true
+            }
+        )
+    });
+    let time_cols = by(&|d| matches!(d, DataType::Time));
+    let dec_cols = by(&|d| matches!(d, DataType::Decimal { .. }));
+    // Non-decimal numeric operands keep "/" generation portable (Decimal / T is
+    // rejected by spec §15, covered separately via the decimal candidates).
+    let num_cols = by(&|d| d.is_numeric() && !matches!(d, DataType::Decimal { .. }));
+    let str_cols = by(&|d| d.is_string());
+
+    // (sql, expected_smelt_type) candidates.
+    let mut candidates: Vec<(String, DataType)> = Vec::new();
+
+    // ---- Temporal arithmetic (spec §16: tz-transparent) ----
+    if let (Some(iv), Some(d)) = (interval_cols.first(), date_cols.first()) {
+        // DATE ± INTERVAL → Timestamp (DuckDB/Spark agree).
+        candidates.push((
+            format!("{} + {}", d.name, iv.name),
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+        ));
+        candidates.push((
+            format!("{} - {}", d.name, iv.name),
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+        ));
+    }
+    if let (Some(iv), Some(t)) = (interval_cols.first(), ts_cols.first()) {
+        candidates.push((
+            format!("{} + {}", t.name, iv.name),
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+        ));
+        candidates.push((
+            format!("{} - {}", t.name, iv.name),
+            DataType::Timestamp {
+                with_timezone: false,
+            },
+        ));
+    }
+    if let (Some(iv), Some(t)) = (interval_cols.first(), tstz_cols.first()) {
+        candidates.push((
+            format!("{} + {}", t.name, iv.name),
+            DataType::Timestamp {
+                with_timezone: true,
+            },
+        ));
+        candidates.push((
+            format!("{} - {}", t.name, iv.name),
+            DataType::Timestamp {
+                with_timezone: true,
+            },
+        ));
+    }
+    if let (Some(iv), Some(t)) = (interval_cols.first(), time_cols.first()) {
+        candidates.push((format!("{} + {}", t.name, iv.name), DataType::Time));
+    }
+    if let Some(iv) = interval_cols.first() {
+        // INTERVAL ± INTERVAL → Interval.
+        candidates.push((format!("{} + {}", iv.name, iv.name), DataType::Interval));
+        candidates.push((format!("{} - {}", iv.name, iv.name), DataType::Interval));
+    }
+    // Temporal differences → Interval (smelt, Spark-aligned).
+    //
+    // NOTE: `DATE - DATE` is intentionally NOT generated. smelt infers Interval
+    // (docs/type_semantics.md), but DuckDB returns BIGINT (a day count) that it
+    // cannot cast back to INTERVAL — so the cast-wrap conformance oracle rejects
+    // it. It is a registered divergence (`date_minus_date`); the Interval-typed
+    // temporal-difference path is covered here by TIMESTAMP/TIMESTAMPTZ
+    // subtraction, which DuckDB also types as INTERVAL.
+    if let Some(t) = ts_cols.first() {
+        candidates.push((format!("{} - {}", t.name, t.name), DataType::Interval));
+    }
+    if let Some(t) = tstz_cols.first() {
+        candidates.push((format!("{} - {}", t.name, t.name), DataType::Interval));
+    }
+    // NOTE: `TIME - TIME` is intentionally omitted — DuckDB has no `-(TIME, TIME)`
+    // overload, so it is not in the portable surface (`TIME - INTERVAL` is).
+
+    // ---- Decimal arithmetic (spec §15 growth formulas) ----
+    if let Some(a) = dec_cols.first() {
+        let b = dec_cols.get(1).copied().unwrap_or(a);
+        let (pa, sa) = decimal_ps(&a.data_type);
+        let (pb, sb) = decimal_ps(&b.data_type);
+        candidates.push((
+            format!("{} + {}", a.name, b.name),
+            decimal_add_type(pa, sa, pb, sb),
+        ));
+        candidates.push((
+            format!("{} * {}", a.name, b.name),
+            decimal_mul_type(pa, sa, pb, sb),
+        ));
+        // Decimal / Decimal is rejected by smelt (spec §15) → Unknown; still
+        // generated so the property test exercises the rejection path.
+        candidates.push((
+            format!("{} / {}", a.name, b.name),
+            DataType::unknown_dynamic(),
+        ));
+    }
+
+    // ---- Numeric arithmetic (non-decimal) ----
+    let num_ops = ["+", "-", "*", "%", "/"];
+    if num_cols.len() >= 2 {
+        let a = num_cols[expr_idx % num_cols.len()];
+        let b = num_cols[(expr_idx + 1) % num_cols.len()];
+        for op in num_ops {
+            let expected = if op == "/" {
+                DataType::Double
+            } else {
+                promote_numeric_type(&a.data_type, &b.data_type)
+            };
+            candidates.push((format!("{} {} {}", a.name, op, b.name), expected));
+        }
+    } else if let Some(n) = num_cols.first() {
+        for op in num_ops {
+            let expected = if op == "/" {
+                DataType::Double
+            } else {
+                n.data_type.clone()
+            };
+            candidates.push((format!("{} {} {}", n.name, op, n.name), expected));
+        }
+    }
+
+    // ---- String concatenation ----
+    if let Some(s) = str_cols.first() {
+        candidates.push((format!("{} || {}", s.name, s.name), DataType::Text));
+    }
+
+    if candidates.is_empty() {
+        return None;
+    }
+    let (sql, expected_smelt_type) =
+        candidates[(expr_idx.wrapping_mul(7).wrapping_add(func_idx)) % candidates.len()].clone();
+    Some(TypedExpr {
+        sql,
+        alias,
+        expected_smelt_type,
+    })
+}
+
+/// Extract (precision, scale) from a Decimal type; falls back to (10, 2).
+fn decimal_ps(dt: &DataType) -> (u8, u8) {
+    match dt {
+        DataType::Decimal { precision, scale } => (*precision, *scale),
+        _ => (10, 2),
+    }
+}
+
+/// Spec §15 additive growth: p' = max(p1-s1, p2-s2) + max(s1,s2) + 1, s' = max(s1,s2).
+/// Overflow (p' > 38) collapses to Unknown, mirroring the inference contract.
+fn decimal_add_type(p1: u8, s1: u8, p2: u8, s2: u8) -> DataType {
+    let s_prime = s1.max(s2) as u32;
+    let p_prime = (p1.saturating_sub(s1)).max(p2.saturating_sub(s2)) as u32 + s_prime + 1;
+    if p_prime > 38 {
+        DataType::unknown_dynamic()
+    } else {
+        DataType::Decimal {
+            precision: p_prime as u8,
+            scale: s_prime as u8,
+        }
+    }
+}
+
+/// Spec §15 multiplicative growth: p' = p1 + p2 + 1, s' = s1 + s2.
+fn decimal_mul_type(p1: u8, s1: u8, p2: u8, s2: u8) -> DataType {
+    let p_prime = p1 as u32 + p2 as u32 + 1;
+    let s_prime = s1 as u32 + s2 as u32;
+    if p_prime > 38 {
+        DataType::unknown_dynamic()
+    } else {
+        DataType::Decimal {
+            precision: p_prime as u8,
+            scale: s_prime as u8,
         }
     }
 }

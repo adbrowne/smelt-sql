@@ -134,6 +134,16 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::ByDesign,
         },
         TypeDivergence {
+            id: "date_minus_date",
+            description: "DATE - DATE — smelt infers Interval (Spark-aligned, the portable \
+                temporal difference); DuckDB returns BIGINT (a plain day count). Spark also \
+                returns an interval, matching smelt.",
+            smelt_type: DataType::Interval,
+            duckdb_type: Some(DataType::BigInt),
+            spark_type: None, // Spark returns Interval, matches smelt
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
             id: "round_integer",
             description: "ROUND(INTEGER) — smelt's ROUND signature is Double→Double only; \
                 integer inputs are upcast to Double before rounding, so smelt infers Double \

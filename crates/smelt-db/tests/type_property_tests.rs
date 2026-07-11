@@ -698,3 +698,214 @@ proptest! {
         }
     }
 }
+
+// ---- Generator reachability smoke tests ----
+//
+// These are statistical guards (not proofs): over a deterministic sample of
+// generated scenarios the corpus must contain at least one occurrence of each
+// of the "hard" inference paths the generators are meant to reach. If a future
+// edit silently stops emitting temporal/decimal arithmetic, decimal casts,
+// EXTRACT(EPOCH), mixed-tz comparisons, or the extended function list, one of
+// these assertions fails — catching generator regressions the property test
+// itself would silently paper over (an un-generated path can never diverge).
+mod reachability {
+    use super::generators::{assemble_cte_query, generate_expr, test_scenario_strategy, TypedExpr};
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    /// Deterministically sample `n` generated CTE queries from the top-level
+    /// scenario strategy (the same one `prop_type_inference` drives).
+    fn sample_generated_sql(n: usize) -> Vec<String> {
+        let mut runner = TestRunner::deterministic();
+        let strat = test_scenario_strategy();
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let tree = strat
+                .new_tree(&mut runner)
+                .expect("strategy generated a value");
+            let (columns, shape, expr_kinds, func_indices) = tree.current();
+            let mut exprs: Vec<TypedExpr> = Vec::new();
+            for (i, kind) in expr_kinds.iter().enumerate() {
+                let func_idx = func_indices.get(i).copied().unwrap_or(0);
+                if let Some(expr) = generate_expr(&columns, *kind, i, func_idx) {
+                    exprs.push(expr);
+                }
+            }
+            if exprs.is_empty() {
+                continue;
+            }
+            out.push(assemble_cte_query(&columns, &exprs, &shape));
+        }
+        out
+    }
+
+    const N: usize = 500;
+
+    /// A binary operation between two columns whose names start with the given
+    /// prefixes joined by one of `ops`, in either operand order.
+    fn has_binop(corpus: &[String], left_prefix: &str, ops: &[&str], right_prefix: &str) -> bool {
+        corpus.iter().any(|sql| {
+            for token_l in tokens_starting_with(sql, left_prefix) {
+                for op in ops {
+                    let needle_lr = format!("{token_l} {op} ");
+                    if let Some(pos) = sql.find(&needle_lr) {
+                        let rest = &sql[pos + needle_lr.len()..];
+                        if starts_with_prefix_token(rest, right_prefix) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        })
+    }
+
+    /// All whitespace/paren-delimited tokens in `sql` that begin with `prefix`.
+    fn tokens_starting_with(sql: &str, prefix: &str) -> Vec<String> {
+        sql.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| t.starts_with(prefix) && !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    }
+
+    fn starts_with_prefix_token(rest: &str, prefix: &str) -> bool {
+        let tok: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        tok.starts_with(prefix) && !tok.is_empty()
+    }
+
+    #[test]
+    fn reaches_interval_plus_timestamp() {
+        let corpus = sample_generated_sql(N);
+        // interval ± (naive or tz-aware) timestamp, either order.
+        let hit = has_binop(&corpus, "ts_col", &["+", "-"], "interval_col")
+            || has_binop(&corpus, "interval_col", &["+", "-"], "ts_col")
+            || has_binop(&corpus, "tstz_col", &["+", "-"], "interval_col")
+            || has_binop(&corpus, "interval_col", &["+", "-"], "tstz_col");
+        assert!(
+            hit,
+            "generators never produced interval±timestamp over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_temporal_difference() {
+        // Temporal subtraction → Interval. `DATE - DATE` is deliberately not
+        // generated (DuckDB returns an un-castable BIGINT — registered
+        // `date_minus_date` divergence); the Interval-typed difference path is
+        // covered by TIMESTAMP/TIMESTAMPTZ subtraction, which DuckDB also types
+        // as INTERVAL and the cast-wrap conformance oracle accepts.
+        let corpus = sample_generated_sql(N);
+        let hit = has_binop(&corpus, "ts_col", &["-"], "ts_col")
+            || has_binop(&corpus, "tstz_col", &["-"], "tstz_col");
+        assert!(
+            hit,
+            "generators never produced a temporal difference over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_decimal_arithmetic() {
+        let corpus = sample_generated_sql(N);
+        assert!(
+            has_binop(&corpus, "dec_col", &["+"], "dec_col"),
+            "generators never produced decimal + decimal over {N} cases"
+        );
+        assert!(
+            has_binop(&corpus, "dec_col", &["*"], "dec_col"),
+            "generators never produced decimal * decimal over {N} cases"
+        );
+        assert!(
+            has_binop(&corpus, "dec_col", &["/"], "dec_col"),
+            "generators never produced decimal / decimal over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_decimal_cast() {
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|s| s.contains("DECIMAL(12,3)")),
+            "generators never produced CAST(... AS DECIMAL(12,3)) over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_extract_epoch() {
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|s| s.contains("EXTRACT(EPOCH")),
+            "generators never produced EXTRACT(EPOCH ...) over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_mixed_tz_comparison() {
+        let corpus = sample_generated_sql(N);
+        let cmp = &["=", "<>", "<", ">", "<=", ">="];
+        let hit = has_binop(&corpus, "ts_col", cmp, "tstz_col")
+            || has_binop(&corpus, "tstz_col", cmp, "ts_col");
+        assert!(
+            hit,
+            "generators never produced a mixed-tz comparison over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_extended_functions() {
+        // The function list is far longer than the 0..100 `func_idx` range, so a
+        // uniform strategy sample is too sparse to reliably surface any specific
+        // 10 functions. This guard instead sweeps the generator's own Function
+        // path over a pool holding one column of every base type — a stronger
+        // check that each extended function is *reachable* (guards against
+        // silently dropping one from `core_functions`).
+        use super::generators::{BaseType, ExprKind, TypedSource};
+        let pool: Vec<TypedSource> = BaseType::all()
+            .iter()
+            .enumerate()
+            .map(|(i, bt)| TypedSource {
+                name: format!("{}_{}", bt.col_prefix(), i),
+                data_type: bt.to_smelt_type(),
+                cast_sql: bt.cast_sql().to_string(),
+            })
+            .collect();
+
+        let n_funcs = super::generators::core_functions().len();
+        let mut corpus: Vec<String> = Vec::new();
+        for expr_idx in 0..n_funcs {
+            for func_idx in 0..(n_funcs * 3) {
+                if let Some(e) = generate_expr(&pool, ExprKind::Function, expr_idx, func_idx) {
+                    corpus.push(e.sql);
+                }
+            }
+        }
+
+        // The extended, DuckDB-executable functions added to the generator.
+        // (INITCAP/TO_CHAR aren't DuckDB scalars, and POSITION(x IN y) /
+        // PERCENTILE_CONT WITHIN GROUP are deferred parser grammar, so those are
+        // not generated — see the note in `core_functions`.)
+        let new_functions = [
+            "MEDIAN",
+            "ARRAY_AGG",
+            "AGE",
+            "JSON_EXTRACT",
+            "IFNULL",
+            "TRANSLATE",
+            "CORR",
+            "COVAR_POP",
+            "COVAR_SAMP",
+            "MODE",
+        ];
+        let missing: Vec<&str> = new_functions
+            .iter()
+            .copied()
+            .filter(|f| !corpus.iter().any(|s| s.contains(&format!("{f}("))))
+            .collect();
+        assert!(
+            missing.is_empty(),
+            "extended functions not reachable from the generator: {missing:?}"
+        );
+    }
+}
