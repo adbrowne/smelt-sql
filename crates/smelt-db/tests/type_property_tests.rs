@@ -20,8 +20,11 @@ use prop_helpers::generators::{
     self, assemble_cte_query, generate_expr, join_scenario_strategy, multi_model_scenario_strategy,
     test_scenario_strategy, three_model_scenario_strategy, wrap_in_outer_cte, TypedExpr,
 };
+use prop_helpers::known_unknowns::{find_known_unknown, known_unknowns, KnownUnknown};
 use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
+
+use std::collections::HashMap;
 
 use smelt_db::type_inference::{infer_select_column_types, TypeContext};
 use smelt_parser::ast::File;
@@ -73,13 +76,25 @@ fn run_smelt_inference(sql: &str, columns: &[generators::TypedSource]) -> Vec<(S
         .collect()
 }
 
+/// Build an alias → generating-SQL lookup so an inferred `Unknown` column can be
+/// matched against the known-unknowns registry by its generating expression.
+fn expr_sql_by_alias(exprs: &[TypedExpr]) -> HashMap<String, String> {
+    exprs
+        .iter()
+        .map(|e| (e.alias.clone(), e.sql.clone()))
+        .collect()
+}
+
 /// Compare smelt inference against one oracle backend, returning an error message on mismatch.
+#[allow(clippy::too_many_arguments)]
 fn check_types_against_oracle(
     oracle: &dyn TypeOracle,
     backend: &str,
     sql: &str,
     columns: &[generators::TypedSource],
+    exprs: &[TypedExpr],
     divergences: &[TypeDivergence],
+    unknowns: &[KnownUnknown],
 ) -> Result<(), String> {
     let actual_types = match oracle.query_types(sql) {
         Ok(types) => types,
@@ -87,6 +102,7 @@ fn check_types_against_oracle(
     };
 
     let inferred_types = run_smelt_inference(sql, columns);
+    let by_alias = expr_sql_by_alias(exprs);
 
     for (i, actual) in actual_types.iter().enumerate() {
         let inferred = if i < inferred_types.len() {
@@ -98,8 +114,23 @@ fn check_types_against_oracle(
         let smelt_type = &inferred.1;
         let actual_type = &actual.1;
 
-        if *smelt_type == DataType::unknown_dynamic() {
-            continue;
+        if smelt_type.is_unknown() {
+            // A column smelt cannot type is a coverage hole, not a free pass:
+            // it is only tolerated when its generating expression matches a
+            // registered known-unknown shape.
+            let expr_sql = by_alias.get(&inferred.0).map(String::as_str).unwrap_or(sql);
+            if find_known_unknown(expr_sql, unknowns).is_some() {
+                continue;
+            }
+            return Err(format!(
+                "Unregistered Unknown inference for column {} ({}) against {backend}:\n  \
+                 smelt inferred: {smelt_type:?}\n  \
+                 {backend} actual:  {actual_type:?}\n  \
+                 generating expr: {expr_sql}\n  \
+                 SQL: {sql}\n  \
+                 (add a prop_helpers/known_unknowns.rs entry or fix inference)",
+                i, actual.0
+            ));
         }
 
         match compare_types(smelt_type, actual_type) {
@@ -133,6 +164,7 @@ proptest! {
     ) {
         let duckdb = DuckDbOracle::new();
         let divergences = known_divergences();
+        let unknowns = known_unknowns();
 
         // Generate expressions from the column pool
         let mut exprs: Vec<TypedExpr> = Vec::new();
@@ -149,13 +181,17 @@ proptest! {
         let sql = assemble_cte_query(&columns, &exprs, &shape);
 
         // Always check DuckDB
-        if let Err(msg) = check_types_against_oracle(&duckdb, "duckdb", &sql, &columns, &divergences) {
+        if let Err(msg) =
+            check_types_against_oracle(&duckdb, "duckdb", &sql, &columns, &exprs, &divergences, &unknowns)
+        {
             prop_assert!(false, "{}", msg);
         }
 
         // Check Spark if available (shared session, one JVM for all cases)
         if let Some(spark) = SPARK.as_ref() {
-            if let Err(msg) = check_types_against_oracle(spark, "spark", &sql, &columns, &divergences) {
+            if let Err(msg) =
+                check_types_against_oracle(spark, "spark", &sql, &columns, &exprs, &divergences, &unknowns)
+            {
                 prop_assert!(false, "{}", msg);
             }
         }
@@ -181,7 +217,16 @@ fn smoke_cast_integer() {
 
     if let Some(spark) = SPARK.as_ref() {
         let divergences = known_divergences();
-        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+        check_types_against_oracle(
+            spark,
+            "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
     }
 }
 
@@ -208,7 +253,16 @@ fn smoke_upper_function() {
 
     if let Some(spark) = SPARK.as_ref() {
         let divergences = known_divergences();
-        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+        check_types_against_oracle(
+            spark,
+            "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
     }
 }
 
@@ -230,7 +284,16 @@ fn smoke_count_aggregate() {
 
     if let Some(spark) = SPARK.as_ref() {
         let divergences = known_divergences();
-        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+        check_types_against_oracle(
+            spark,
+            "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
     }
 }
 
@@ -264,7 +327,16 @@ fn smoke_binary_add() {
 
     if let Some(spark) = SPARK.as_ref() {
         let divergences = known_divergences();
-        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+        check_types_against_oracle(
+            spark,
+            "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
     }
 }
 
@@ -295,7 +367,16 @@ fn smoke_binary_division() {
 
     if let Some(spark) = SPARK.as_ref() {
         let divergences = known_divergences();
-        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+        check_types_against_oracle(
+            spark,
+            "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
     }
 }
 
@@ -335,7 +416,16 @@ fn smoke_case_expression() {
 
     if let Some(spark) = SPARK.as_ref() {
         let divergences = known_divergences();
-        check_types_against_oracle(spark, "spark", sql, &columns, &divergences).unwrap();
+        check_types_against_oracle(
+            spark,
+            "spark",
+            sql,
+            &columns,
+            &[],
+            &divergences,
+            &known_unknowns(),
+        )
+        .unwrap();
     }
 }
 
@@ -470,6 +560,8 @@ proptest! {
     fn prop_multi_model_type_inference(scenario in multi_model_scenario_strategy()) {
         let duckdb = DuckDbOracle::new();
         let divergences = known_divergences();
+        let unknowns = known_unknowns();
+        let unknown_scope_sql = scenario.duckdb_sql.clone();
 
         // Get DuckDB actual types
         let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
@@ -492,8 +584,15 @@ proptest! {
             let smelt_type = &inferred.1;
             let actual_type = &actual.1;
 
-            if *smelt_type == DataType::unknown_dynamic() {
-                continue;
+            if smelt_type.is_unknown() {
+                if find_known_unknown(&unknown_scope_sql, &unknowns).is_some() {
+                    continue;
+                }
+                prop_assert!(
+                    false,
+                    "Unregistered Unknown inference for column {} ({}): {}",
+                    i, actual.0, unknown_scope_sql
+                );
             }
 
             match compare_types(smelt_type, actual_type) {
@@ -578,6 +677,8 @@ proptest! {
     fn prop_three_model_type_inference(scenario in three_model_scenario_strategy()) {
         let duckdb = DuckDbOracle::new();
         let divergences = known_divergences();
+        let unknowns = known_unknowns();
+        let unknown_scope_sql = scenario.duckdb_sql.clone();
 
         let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
             Ok(types) => types,
@@ -601,8 +702,15 @@ proptest! {
             let smelt_type = &inferred.1;
             let actual_type = &actual.1;
 
-            if *smelt_type == DataType::unknown_dynamic() {
-                continue;
+            if smelt_type.is_unknown() {
+                if find_known_unknown(&unknown_scope_sql, &unknowns).is_some() {
+                    continue;
+                }
+                prop_assert!(
+                    false,
+                    "Unregistered Unknown inference for column {} ({}): {}",
+                    i, actual.0, unknown_scope_sql
+                );
             }
 
             match compare_types(smelt_type, actual_type) {
@@ -652,6 +760,8 @@ proptest! {
     fn prop_join_type_inference(scenario in join_scenario_strategy()) {
         let duckdb = DuckDbOracle::new();
         let divergences = known_divergences();
+        let unknowns = known_unknowns();
+        let unknown_scope_sql = scenario.duckdb_sql.clone();
 
         let actual_types = match duckdb.query_types(&scenario.duckdb_sql) {
             Ok(types) => types,
@@ -675,8 +785,15 @@ proptest! {
             let smelt_type = &inferred.1;
             let actual_type = &actual.1;
 
-            if *smelt_type == DataType::unknown_dynamic() {
-                continue;
+            if smelt_type.is_unknown() {
+                if find_known_unknown(&unknown_scope_sql, &unknowns).is_some() {
+                    continue;
+                }
+                prop_assert!(
+                    false,
+                    "Unregistered Unknown inference for column {} ({}): {}",
+                    i, actual.0, unknown_scope_sql
+                );
             }
 
             match compare_types(smelt_type, actual_type) {
@@ -907,5 +1024,101 @@ mod reachability {
             missing.is_empty(),
             "extended functions not reachable from the generator: {missing:?}"
         );
+    }
+}
+
+// ---- Known-unknowns staleness report ----
+//
+// Staleness pressure for `prop_helpers/known_unknowns.rs`: over a deterministic
+// sample of generated queries, warn (never fail) about any registered entry that
+// never matched a column smelt actually inferred as `Unknown`. A registered hole
+// that has since been closed should have its entry deleted; this surfaces the
+// candidates. Warn-level (eprintln) by design — closing a hole must not turn the
+// suite red until someone prunes the registry.
+#[test]
+fn known_unknowns_staleness_report() {
+    use prop_helpers::generators::{
+        assemble_cte_query, generate_expr, test_scenario_strategy, TypedExpr,
+    };
+    use prop_helpers::known_unknowns::{find_known_unknown, known_unknowns};
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    let entries = known_unknowns();
+    let mut fired: std::collections::BTreeSet<&'static str> = std::collections::BTreeSet::new();
+
+    let mut runner = TestRunner::deterministic();
+    let strat = test_scenario_strategy();
+    const N: usize = 500;
+    for _ in 0..N {
+        let tree = strat.new_tree(&mut runner).expect("strategy value");
+        let (columns, shape, expr_kinds, func_indices) = tree.current();
+        let mut exprs: Vec<TypedExpr> = Vec::new();
+        for (i, kind) in expr_kinds.iter().enumerate() {
+            let func_idx = func_indices.get(i).copied().unwrap_or(0);
+            if let Some(e) = generate_expr(&columns, *kind, i, func_idx) {
+                exprs.push(e);
+            }
+        }
+        if exprs.is_empty() {
+            continue;
+        }
+        let sql = assemble_cte_query(&columns, &exprs, &shape);
+        let inferred = run_smelt_inference(&sql, &columns);
+        let by_alias = expr_sql_by_alias(&exprs);
+        for (alias, dt) in &inferred {
+            if dt.is_unknown() {
+                let expr_sql = by_alias.get(alias).map(String::as_str).unwrap_or(&sql);
+                if let Some(e) = find_known_unknown(expr_sql, &entries) {
+                    fired.insert(e.id);
+                }
+            }
+        }
+    }
+
+    // Cross-model passes: some holes (e.g. decimal-multiply overflow from a
+    // chained `*` on an already-widened decimal, p'=43>38) only arise through
+    // smelt.ref() lineage, never in a single CTE, and only in the deeper chains.
+    // Sample both two- and three-model scenarios so those entries can fire,
+    // scoped to the full lineage SQL like the cross-model property tests.
+    const MM: usize = 1000;
+    let mm_strat = multi_model_scenario_strategy();
+    for _ in 0..MM {
+        let tree = mm_strat.new_tree(&mut runner).expect("strategy value");
+        let scenario = tree.current();
+        let (db, _up, downstream_path) =
+            setup_two_model_db(&scenario.upstream_sql, &scenario.downstream_sql);
+        let inferred = run_smelt_multi_model_inference(&db, &downstream_path);
+        if inferred.iter().any(|(_, dt)| dt.is_unknown()) {
+            if let Some(e) = find_known_unknown(&scenario.duckdb_sql, &entries) {
+                fired.insert(e.id);
+            }
+        }
+    }
+    let tm_strat = three_model_scenario_strategy();
+    for _ in 0..MM {
+        let tree = tm_strat.new_tree(&mut runner).expect("strategy value");
+        let scenario = tree.current();
+        let (db, c_path) = setup_three_model_db(
+            &scenario.model_a_sql,
+            &scenario.model_b_sql,
+            &scenario.model_c_sql,
+        );
+        let inferred = run_smelt_multi_model_inference(&db, &c_path);
+        if inferred.iter().any(|(_, dt)| dt.is_unknown()) {
+            if let Some(e) = find_known_unknown(&scenario.duckdb_sql, &entries) {
+                fired.insert(e.id);
+            }
+        }
+    }
+
+    for e in &entries {
+        if !fired.contains(e.id) {
+            eprintln!(
+                "warning: known-unknown entry '{}' never fired over {N} generated cases \
+                 — the inference hole may be closed; consider deleting the entry ({})",
+                e.id, e.description
+            );
+        }
     }
 }

@@ -36,6 +36,22 @@ pub struct TypeDivergence {
 /// All known divergences.  Add new entries here when proptest surfaces expected mismatches.
 pub fn known_divergences() -> Vec<TypeDivergence> {
     vec![
+        // Names the single blanket compatibility rule in `type_comparison.rs`.
+        // smelt models Text/Varchar(n)/Char(n) as one logical string type, so a
+        // length/name difference from the backend is a designed leniency, not an
+        // inference bug. `compare_types` returns Compatible for the string family
+        // and cites this entry; it never reaches `find_divergence`, but the entry
+        // exists so the leniency is named and greppable per the strictness rule.
+        TypeDivergence {
+            id: "text_varchar_compat",
+            description: "Text/Varchar/Char — smelt has one logical string type; backends \
+                distinguish VARCHAR(n)/CHAR(n)/TEXT. Authorises the string-family \
+                Compatible verdict in type_comparison.rs.",
+            smelt_type: DataType::Text,
+            duckdb_type: Some(DataType::Varchar { max_length: None }),
+            spark_type: Some(DataType::Varchar { max_length: None }),
+            status: DivergenceStatus::ByDesign,
+        },
         TypeDivergence {
             id: "sum_integer",
             description: "SUM(INTEGER/BIGINT) — smelt infers BigInt, DuckDB returns Decimal(38,0) (HUGEINT via Arrow)",
@@ -143,6 +159,53 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None, // Spark returns Interval, matches smelt
             status: DivergenceStatus::BackendSpecific,
         },
+        // Decimal arithmetic model: smelt applies the portable, Spark-aligned
+        // decimal growth formulas (spec §15) — multiplication p'=p1+p2+1,
+        // s'=s1+s2; addition/subtraction/modulo p'=max(p1-s1,p2-s2)+max(s1,s2)+1;
+        // ROUND keeps the input scale. DuckDB uses its native, physically-clamped
+        // decimal arithmetic — multiplication clamps the result precision to the
+        // storage-type boundary (BIGINT-backed DECIMAL, max 18 digits), ROUP(x)
+        // reduces scale to 0, IFNULL widens precision to hold an integer literal,
+        // and these differences propagate through nested arithmetic. On *raw*
+        // (un-cast) SQL the two decimal models therefore disagree on precision
+        // and/or scale across an open-ended family of expressions, so this is a
+        // single named class divergence rather than one entry per (p,s) pair.
+        //
+        // Both operands are wildcards (`Decimal { precision: 0, scale: 0 }`): the
+        // entry matches any Decimal-vs-Decimal pair. This is admissible — and not
+        // a return to the removed blanket `is_decimal_compat` rule — because the
+        // *exact* decimal correctness of smelt's inference is verified separately
+        // and strictly by `tests/proptests/type_conformance_tests.rs`, which
+        // cast-wraps smelt's inferred types and asserts DuckDB reproduces them
+        // with zero divergence. A smelt-vs-DuckDB decimal difference on raw SQL is
+        // expected; a cast-wrapped difference is a bug the conformance test fails
+        // on. Verified DuckDB behaviours: `CAST(99.99 AS DECIMAL(10,2)) *
+        // CAST(99.99 AS DECIMAL(10,2))` → DECIMAL(18,4) (smelt DECIMAL(21,4));
+        // `ROUND(CAST(99.99 AS DECIMAL(10,2)))` → DECIMAL(10,0) (smelt (10,2));
+        // `IFNULL(CAST(99.99 AS DECIMAL(10,2)), 0)` → DECIMAL(12,2) (smelt (10,2)).
+        TypeDivergence {
+            id: "decimal_arithmetic_model",
+            description: "smelt uses Spark-aligned decimal growth (spec §15); DuckDB uses \
+                physically-clamped native decimal arithmetic. On raw SQL the two disagree on \
+                Decimal precision/scale across multiplication, ROUND, IFNULL, and nested \
+                arithmetic. Exact decimal correctness is verified by the cast-wrap conformance \
+                oracle (type_conformance_tests.rs); this entry tolerates the raw-SQL \
+                Decimal-vs-Decimal difference only.",
+            // Wildcard: matches any smelt Decimal.
+            smelt_type: DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            },
+            // Wildcard: matches any DuckDB Decimal.
+            duckdb_type: Some(DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            }),
+            // Spark uses the same Spark-aligned formulas as smelt, so no divergence
+            // there; a Spark Decimal difference should still surface.
+            spark_type: None,
+            status: DivergenceStatus::BackendSpecific,
+        },
         TypeDivergence {
             id: "round_integer",
             description: "ROUND(INTEGER) — smelt's ROUND signature is Double→Double only; \
@@ -167,7 +230,7 @@ pub fn find_divergence<'a>(
     divergences: &'a [TypeDivergence],
 ) -> Option<&'a TypeDivergence> {
     divergences.iter().find(|d| {
-        d.smelt_type == *smelt && {
+        types_match(&d.smelt_type, smelt) && {
             let expected = match backend {
                 "duckdb" => d.duckdb_type.as_ref(),
                 "spark" => d.spark_type.as_ref(),
@@ -235,6 +298,56 @@ mod tests {
                 scale: 0,
             },
             "spark",
+            &divs,
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn decimal_arithmetic_model_matches_any_decimal_pair_duckdb() {
+        let divs = known_divergences();
+        // Multiplication precision growth.
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 21,
+                scale: 4,
+            },
+            &DataType::Decimal {
+                precision: 18,
+                scale: 4,
+            },
+            "duckdb",
+            &divs,
+        );
+        assert_eq!(found.unwrap().id, "decimal_arithmetic_model");
+        // ROUND scale reduction (different scale) is also covered.
+        let found2 = find_divergence(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            &DataType::Decimal {
+                precision: 10,
+                scale: 0,
+            },
+            "duckdb",
+            &divs,
+        );
+        assert_eq!(found2.unwrap().id, "decimal_arithmetic_model");
+    }
+
+    #[test]
+    fn decimal_wildcard_does_not_match_non_decimal_smelt() {
+        let divs = known_divergences();
+        // smelt Double vs DuckDB Decimal must NOT be absorbed by the decimal
+        // wildcard (smelt side is not a Decimal).
+        let found = find_divergence(
+            &DataType::Double,
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            "duckdb",
             &divs,
         );
         assert!(found.is_none());
