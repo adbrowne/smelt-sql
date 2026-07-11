@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1782981939563,
+  "lastUpdate": 1783768841097,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -20961,6 +20961,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.542868,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "bf881006156e0d3142bbd3c34e47eeefe834b532",
+          "message": "fix(db): cache smelt.yml parse for maintenance/state queries, fix O(N) CI bench regression\n\nmaintenance_plan, maintenance_plan_report, and the state.mode widening\ncheck each re-parsed smelt.yml's full YAML text on every per-file Salsa\nquery instead of going through a cached tracked query. On the 2000-model\nbench workspace (all refresh: incremental) this reran serde_yaml parsing\nonce per model, driving initial_load_ms/full_diagnostics_ms from ~700ms\nto ~15s and tripping the CI regression gate. Added project_maintenance_config\nand project_state_mode tracked queries (mirroring project_paths) so the\nconfig is parsed once per revision and reused.\n\nLocally: initial_load_ms 6190ms -> 391ms, full_diagnostics_ms 6116ms -> 332ms\non the 2000-model bench workspace.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-11T21:15:34+10:00",
+          "tree_id": "bd4be8f75cc8983d59ebb3ccd88bb1196d3b0cf3",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bf881006156e0d3142bbd3c34e47eeefe834b532"
+        },
+        "date": 1783768839478,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 58.581634,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 56.465337,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.831877,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.6003970000000001,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.378955,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 917.061291,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.160779,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.617739,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.410574,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.6760769999999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 759.4893959999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.15475,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.88107,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.596212,
             "unit": "ms"
           }
         ]
