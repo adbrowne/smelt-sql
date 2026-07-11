@@ -7,12 +7,11 @@
 //! Fixture: a sessions-shaped model whose `partition_column`
 //! (`session_start_date`) is a derived column that can skew away from the
 //! driving `event_date` column, declared by the Form B filter `event_date
-//! BETWEEN session_start_date - INTERVAL '1 day' AND session_start_date +
-//! INTERVAL '1 day'` (the same shape as `examples/web_analytics`
-//! `silver/sessions.sql`, minus the sessionization machinery itself — the
-//! source rows here carry a precomputed `session_start_ts` directly, so the
-//! fixture isolates the output-window derivation from the sessionize
-//! algorithm).
+//! BETWEEN session_start_date AND session_start_date + INTERVAL '1 day'`
+//! (the same shape as `examples/web_analytics` `silver/sessions.sql`, minus
+//! the sessionization machinery itself — the source rows here carry a
+//! precomputed `session_start_ts` directly, so the fixture isolates the
+//! output-window derivation from the sessionize algorithm).
 //!
 //! Two events for the same device straddle midnight with a gap under the
 //! sessionization's own cap (`session_start_ts` is the same for both, as a
@@ -30,7 +29,7 @@
 use std::path::Path;
 use std::sync::Arc;
 
-use chrono::NaiveDate;
+use chrono::{Duration, NaiveDate, NaiveDateTime, NaiveTime};
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Config, TimeseriesConfig};
@@ -119,7 +118,7 @@ SELECT
     COUNT(*) AS event_count
 FROM sessionized
 WHERE event_date
-    BETWEEN session_start_date - INTERVAL '1 day'
+    BETWEEN session_start_date
         AND session_start_date + INTERVAL '1 day'
 GROUP BY device_id, session_start_ts, session_start_date
 "#;
@@ -382,23 +381,24 @@ fn fetch_all_sessions(db_path: &Path) -> anyhow::Result<Vec<(String, i64, String
 /// `2024-01-02 23:55`, then `2024-01-03 00:15`. Returns
 /// `(event_ts, event_date, session_start_ts)` rows with `session_start_ts`
 /// assigned exactly as `examples/web_analytics/functions/sessionize.sql`
-/// computes it (this fixture's stand-in mirror; the *real* function is
-/// pinned to the same shape end-to-end by
+/// computes it under the **clock-anchored cut**
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"silver.sessions — clock-anchored cut"; this fixture's stand-in mirror —
+/// the *real* function is pinned to the same shape end-to-end by
 /// `per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild`):
 ///
-/// - The chain never breaks on inactivity or platform, so its only session
-///   boundary (`_boundary_ts`) is the root, `2024-01-01 23:50`.
-/// - An event roots to that boundary iff the boundary is inside its
-///   `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW` frame —
-///   i.e. iff `event_ts <= root + 1 day` (**timestamp** granularity). That
-///   covers the root plus the 25-minute grid through `2024-01-02 23:30`
-///   (58 events).
-/// - An event past `root + 1 day` (`2024-01-02 23:55` and
-///   `2024-01-03 00:15`) sees no boundary in frame, and
-///   `COALESCE(MAX(_boundary_ts) OVER …, ts_col)` falls back to its **own**
-///   timestamp. The fallback does not strike a new `_boundary_ts` later
-///   events could chain to, so each post-cap event is its own singleton
-///   session — they do *not* merge into a second multi-event session.
+/// - The chain never breaks on inactivity or platform, so its only natural
+///   boundary is the root, `2024-01-01 23:50`.
+/// - The root's time-of-day (`23:50`) is `>= 00:30`, so its deadline is
+///   `end_of_day(date(root) + 1 day)` = the midnight starting
+///   `2024-01-03` — the *second* midnight. Every event strictly before that
+///   deadline roots to `2024-01-01 23:50`: the root itself plus the full
+///   25-minute grid through `2024-01-02 23:55` (58 events).
+/// - The first event at or past the deadline (`2024-01-03 00:15`) is a
+///   **forced root**: nothing marks it as a boundary for later events to
+///   chain to, so it (and any further post-deadline event) roots its own
+///   singleton session — it does not merge into the prior session, nor into
+///   a second multi-event one.
 fn two_boundary_chain() -> Vec<(String, String, String)> {
     let root = chrono::NaiveDateTime::parse_from_str("2024-01-01 23:50:00", "%Y-%m-%d %H:%M:%S")
         .expect("parse chain root");
@@ -415,11 +415,15 @@ fn two_boundary_chain() -> Vec<(String, String, String)> {
     }
     timestamps.push(tail);
 
-    let cap = root + chrono::Duration::days(1);
+    // The root's time-of-day is >= 00:30, so its deadline reaches to the
+    // *second* midnight: end_of_day(date(root) + 1 day).
+    let deadline = (root.date() + chrono::Duration::days(2))
+        .and_hms_opt(0, 0, 0)
+        .expect("midnight");
     timestamps
         .into_iter()
         .map(|ts| {
-            let assigned_root = if ts <= cap { root } else { ts };
+            let assigned_root = if ts < deadline { root } else { ts };
             (
                 ts.format("%Y-%m-%d %H:%M:%S").to_string(),
                 ts.format("%Y-%m-%d").to_string(),
@@ -433,32 +437,28 @@ fn two_boundary_chain() -> Vec<(String, String, String)> {
 /// (`docs/specs/model_transforms.md` §Semantics "The output window is
 /// derived, never assumed" — the "semantic cap" paragraph): a continuous
 /// 60-event chain, every gap under 30 minutes, running `2024-01-01 23:50` →
-/// `2024-01-03 00:15` — longer than the declared 1-day cap. Only the cap
-/// can end the session rooted at `23:50`; see `two_boundary_chain` for the
-/// event grid and the mirrored sessionize root assignment.
+/// `2024-01-03 00:15` — longer than the root's deadline. Only the
+/// clock-anchored cut can end the session rooted at `23:50`; see
+/// `two_boundary_chain` for the event grid and the mirrored sessionize root
+/// assignment.
 ///
-/// Note the cap's two granularities: the *operative* row-membership cut is
-/// sessionize's frame reach in **timestamp** space (`event_ts <= root + 1
-/// day`, so the `2024-01-02 23:55` event is out despite its `event_date`
-/// being within ±1 day of the root's date), while the model's Form B
-/// relation restates the same 1-day cap in **date** space over
-/// `(event_date, session_start_date)` — the declared relation the planner
-/// derives the output window from. The date-space filter is implied by the
-/// timestamp-space one (it removes no rows the sessionize cap kept), which
-/// is exactly why declaring it is sound.
+/// The root's time-of-day (`23:50`) is `>= 00:30`, so its deadline reaches
+/// to the *second* midnight (the start of `2024-01-03`) — the model's Form B
+/// relation (`event_date BETWEEN session_start_date AND session_start_date +
+/// INTERVAL '1 day'`) declares exactly that one-day-forward reach in date
+/// space, the declared relation the planner derives the output window from.
 ///
 /// Claims pinned here:
 /// - (a) truncation at the declared bound: the day-1 session carries
-///   exactly the 58 in-cap events (`session_end = 2024-01-02 23:30`), never
-///   the post-cap ones — in a day-by-day replay and a from-scratch full
-///   build alike;
-/// - (b) excess-event behaviour: each post-cap event roots its own
-///   **singleton** session (`2024-01-02 23:55`, `2024-01-03 00:15`) — they
-///   are neither absorbed, nor dropped, nor merged together;
+///   exactly the 59 in-deadline events (root plus the full day-2 grid;
+///   `session_end = 2024-01-02 23:55`), never the post-deadline one — in a
+///   day-by-day replay and a from-scratch full build alike;
+/// - (b) excess-event behaviour: the first post-deadline event
+///   (`2024-01-03 00:15`) roots its own **singleton** session — it is
+///   neither absorbed into the day-1 session, nor dropped;
 /// - (c) day-by-day ≡ full build on the full per-session tuple;
 /// - (d) invariants: the device's sessions never overlap in time, and
-///   event counts conserve (58 + 1 + 1 = 60 — no event lost or
-///   double-counted).
+///   event counts conserve (59 + 1 = 60 — no event lost or double-counted).
 #[tokio::test]
 async fn two_boundary_session_truncated_at_declared_bound() {
     let chain = two_boundary_chain();
@@ -531,17 +531,17 @@ async fn two_boundary_session_truncated_at_declared_bound() {
 
     assert_eq!(
         fetch_session(&db_path, "2024-01-01").expect("fetch day-1 partition after day 2"),
-        Some((58, "2024-01-02 23:30:00".to_string())),
+        Some((59, "2024-01-02 23:55:00".to_string())),
         "(a) day 2's derived output window [2024-01-01, 2024-01-04) must \
-         rewrite the day-1 session with exactly the 58 in-cap events — \
-         truncated at root + 1 day, so session_end is the last in-cap event \
-         (2024-01-02 23:30), not the chain's last day-2 event (23:55)"
+         rewrite the day-1 session with all 59 in-deadline events — the \
+         root plus the full day-2 grid — so session_end is the chain's \
+         last day-2 event (2024-01-02 23:55)"
     );
     assert_eq!(
         fetch_session(&db_path, "2024-01-02").expect("fetch day-2 partition after day 2"),
-        Some((1, "2024-01-02 23:55:00".to_string())),
-        "(b) the first post-cap event (2024-01-02 23:55) must root its own \
-         singleton session in the 2024-01-02 partition"
+        None,
+        "no session should root in the 2024-01-02 partition yet — every \
+         day-2 event is still within the day-1 root's deadline"
     );
 
     seed_events_batch(&db_path, &day3_rows).expect("seed day-3 event");
@@ -564,14 +564,8 @@ async fn two_boundary_session_truncated_at_declared_bound() {
         vec![
             (
                 "2024-01-01".to_string(),
-                58,
+                59,
                 "2024-01-01 23:50:00".to_string(),
-                "2024-01-02 23:30:00".to_string(),
-            ),
-            (
-                "2024-01-02".to_string(),
-                1,
-                "2024-01-02 23:55:00".to_string(),
                 "2024-01-02 23:55:00".to_string(),
             ),
             (
@@ -581,11 +575,9 @@ async fn two_boundary_session_truncated_at_declared_bound() {
                 "2024-01-03 00:15:00".to_string(),
             ),
         ],
-        "(a)+(b) final day-by-day state: the truncated 58-event day-1 \
-         session plus two singleton post-cap sessions — the post-cap events \
-         must not merge into one session (falling out of the frame strikes \
-         no new boundary), and the day-1 session must survive day 3's run \
-         unchanged"
+        "(a)+(b) final day-by-day state: the 59-event day-1 session (root \
+         plus the full day-2 grid) plus one singleton post-deadline session \
+         — the day-1 session must survive day 3's run unchanged"
     );
 
     // (d) invariants: non-overlap + event conservation.
@@ -603,7 +595,7 @@ async fn two_boundary_session_truncated_at_declared_bound() {
     assert_eq!(
         total, 60,
         "(d) event conservation: the device's sessions must account for \
-         every injected event exactly once (58 + 1 + 1 = 60)"
+         every injected event exactly once (59 + 1 = 60)"
     );
 
     // ── From-scratch full-window build over the same 60 events ──
@@ -641,6 +633,217 @@ async fn two_boundary_session_truncated_at_declared_bound() {
         "(c) the from-scratch full-window build must equal the day-by-day \
          replay row-for-row — truncation at the declared bound is a property \
          of the model's own SQL, identical in every build shape"
+    );
+}
+
+// ── Never-idle device: the clock-anchored cut eliminates confetti ──────────
+
+/// The clock-anchored rule's deadline for a candidate root
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"silver.sessions — clock-anchored cut"): `end_of_day(date(root))` if the
+/// root's time-of-day is before 00:30, else `end_of_day(date(root) + 1
+/// day)`.
+fn deadline_for(root: NaiveDateTime) -> NaiveDateTime {
+    let midnight = NaiveTime::from_hms_opt(0, 0, 0).expect("midnight");
+    let cutoff = NaiveTime::from_hms_opt(0, 30, 0).expect("00:30");
+    let days_ahead = if root.time() < cutoff { 1 } else { 2 };
+    NaiveDateTime::new(root.date() + Duration::days(days_ahead), midnight)
+}
+
+/// Mirrors `examples/web_analytics/functions/sessionize.sql`'s clock-anchored
+/// root assignment for a single-partition, single-platform, continuous
+/// chain: natural boundaries are gap-only (no platform change here), the
+/// candidate is the most recent natural boundary within a trailing 2-day
+/// window, and an event past its candidate's deadline is a forced root
+/// (assigned to the first event of its own calendar day).
+fn assign_session_roots(events: &[NaiveDateTime]) -> Vec<NaiveDateTime> {
+    let mut natural_boundaries: Vec<NaiveDateTime> = Vec::new();
+    for (i, &ts) in events.iter().enumerate() {
+        let is_boundary = match events.get(i.wrapping_sub(1)) {
+            Some(&prev) if i > 0 => ts - prev > Duration::minutes(30),
+            _ => true,
+        };
+        if is_boundary {
+            natural_boundaries.push(ts);
+        }
+    }
+
+    events
+        .iter()
+        .map(|&ts| {
+            let candidate = natural_boundaries
+                .iter()
+                .filter(|&&nts| nts <= ts && ts - nts <= Duration::days(2))
+                .max()
+                .copied();
+            match candidate {
+                Some(c) if ts < deadline_for(c) => c,
+                _ => events
+                    .iter()
+                    .filter(|&&e| e.date() == ts.date())
+                    .min()
+                    .copied()
+                    .expect("own day has at least this event"),
+            }
+        })
+        .collect()
+}
+
+/// A never-idle device (one event every 29 minutes, gap always under the
+/// 30-minute inactivity threshold, so the chain never strikes a natural
+/// boundary after its root) rooted at `2024-01-01 14:00`, running for 9
+/// elapsed days. Under the old frame-cap + `COALESCE` fallback design this
+/// degenerated into single-event confetti after the first capped session
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md` §Problem);
+/// under the clock-anchored cut it settles into a deterministic cadence: one
+/// ~34-hour session (the root's own 2-day reach, since `14:00 >= 00:30`),
+/// then exactly one session per subsequent calendar day, phase-locked to
+/// each day's first event.
+#[tokio::test]
+async fn never_idle_device_yields_one_session_per_day() {
+    let root = NaiveDate::from_ymd_opt(2024, 1, 1)
+        .expect("date")
+        .and_hms_opt(14, 0, 0)
+        .expect("time");
+    let end = root + Duration::days(9);
+
+    let mut timestamps = Vec::new();
+    let mut t = root;
+    while t < end {
+        timestamps.push(t);
+        t += Duration::minutes(29);
+    }
+    assert_eq!(timestamps.len(), 447, "fixture: expected 447 events");
+
+    let roots = assign_session_roots(&timestamps);
+    let chain: Vec<(String, String, String)> = timestamps
+        .iter()
+        .zip(&roots)
+        .map(|(ts, root)| {
+            (
+                ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                ts.format("%Y-%m-%d").to_string(),
+                root.format("%Y-%m-%d %H:%M:%S").to_string(),
+            )
+        })
+        .collect();
+
+    // Group rows by calendar day, in order, for day-by-day replay.
+    type ChainRow = (String, String, String);
+    let mut days: Vec<(String, Vec<ChainRow>)> = Vec::new();
+    for row in &chain {
+        match days.last_mut() {
+            Some((d, rows)) if *d == row.1 => rows.push(row.clone()),
+            _ => days.push((row.1.clone(), vec![row.clone()])),
+        }
+    }
+    assert_eq!(
+        days.len(),
+        10,
+        "fixture: expected events across 10 calendar days"
+    );
+
+    // ── Day-by-day replay ──
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+    stage_project(&project_dir, &db_path);
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let mut first = true;
+    for (day, rows) in &days {
+        if first {
+            let (ts, date, root) = &rows[0];
+            seed_event(&db_path, 1, ts, date, root, true).expect("seed first event");
+            if rows.len() > 1 {
+                seed_events_batch(&db_path, &rows[1..]).expect("seed remaining first-day events");
+            }
+            first = false;
+        } else {
+            seed_events_batch(&db_path, rows).expect("seed day's events");
+        }
+
+        let start = day.clone();
+        let end_date =
+            NaiveDate::parse_from_str(day, "%Y-%m-%d").expect("parse day") + Duration::days(1);
+        let outcome = run_single_day_window(
+            &project_dir,
+            &db_path,
+            &config,
+            &graph,
+            &db,
+            &start,
+            &end_date.format("%Y-%m-%d").to_string(),
+        )
+        .await
+        .unwrap_or_else(|e| panic!("run for {day} must succeed: {e}"));
+        assert!(!outcome.models.is_empty(), "{day}: expected a model run");
+    }
+
+    let day_by_day = fetch_all_sessions(&db_path).expect("fetch all sessions (day-by-day)");
+    assert_eq!(
+        day_by_day.len(),
+        9,
+        "expected 9 sessions (one ~34h root session, then one per \
+         subsequent day), got {day_by_day:?}"
+    );
+    assert!(
+        day_by_day.iter().all(|(_, n, _, _)| *n > 1),
+        "no session may degenerate to a single-event confetti session, got \
+         {day_by_day:?}"
+    );
+    let total: i64 = day_by_day.iter().map(|(_, n, _, _)| n).sum();
+    assert_eq!(
+        total, 447,
+        "every event must be accounted for exactly once across sessions"
+    );
+    for pair in day_by_day.windows(2) {
+        let (_, _, _, prev_end) = &pair[0];
+        let (_, _, next_start, _) = &pair[1];
+        assert!(
+            next_start > prev_end,
+            "sessions must not overlap: session starting {next_start} \
+             begins at or before the previous session's end {prev_end}"
+        );
+    }
+
+    // ── From-scratch full-window build over the same 447 events ──
+    let tmp2 = tempfile::TempDir::new().expect("tempdir");
+    let project_dir2 = tmp2.path().to_path_buf();
+    let db_path2 = project_dir2.join("dev.duckdb");
+    stage_project(&project_dir2, &db_path2);
+
+    let (ts, date, root) = &chain[0];
+    seed_event(&db_path2, 1, ts, date, root, true).expect("full build: seed first event");
+    seed_events_batch(&db_path2, &chain[1..]).expect("full build: seed remaining events");
+
+    let config2 = Arc::new(Config::load(&project_dir2).expect("load config"));
+    let (db2, graph2) = build_db_and_graph(&project_dir2, &config2);
+
+    let outcome = run_single_day_window(
+        &project_dir2,
+        &db_path2,
+        &config2,
+        &graph2,
+        &db2,
+        "2024-01-01",
+        "2024-01-11",
+    )
+    .await
+    .expect("full-window run must succeed");
+    assert!(
+        !outcome.models.is_empty(),
+        "full-window build: expected a model run"
+    );
+
+    let full = fetch_all_sessions(&db_path2).expect("fetch all sessions (full build)");
+    assert_eq!(
+        full, day_by_day,
+        "the from-scratch full-window build must equal the day-by-day \
+         replay row-for-row — window-independence holds under a never-idle \
+         input"
     );
 }
 
