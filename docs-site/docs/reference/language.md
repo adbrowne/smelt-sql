@@ -10,13 +10,16 @@ Standard SQL SELECT with all common clauses:
 SELECT [DISTINCT] columns
 FROM table_references
 [WHERE condition]
-[GROUP BY expressions]
+[GROUP BY expressions | GROUP BY ALL]
 [HAVING condition]
 [QUALIFY condition]
-[ORDER BY expressions]
+[ORDER BY expressions | ORDER BY ALL [ASC | DESC] [NULLS FIRST | NULLS LAST]]
 [LIMIT n]
 [OFFSET n]
 ```
+
+`ORDER BY ALL` orders by every select-list item, left to right; an optional
+direction and NULLS placement apply to the whole ordering (`ORDER BY ALL DESC`).
 
 A model file contains at most one query body. Any content after it — a second `SELECT`, stray tokens, or the tail of an unsupported construct — is an error, surfaced as a `trailing-top-level-content` diagnostic; it is never silently ignored.
 
@@ -143,8 +146,13 @@ CROSS JOIN f
 SUM(amount) OVER (PARTITION BY user_id ORDER BY date ROWS BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW)
 ROW_NUMBER() OVER (PARTITION BY group_col ORDER BY sort_col)
 LAG(value, 1) OVER (ORDER BY date)
+LAST_VALUE(value IGNORE NULLS) OVER (ORDER BY date)
 PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER BY val)
 ```
+
+An `IGNORE NULLS` or `RESPECT NULLS` modifier may follow a function's arguments
+inside the parentheses (`LAST_VALUE(value IGNORE NULLS)`). `IGNORE NULLS` skips
+NULL inputs when picking a value; `RESPECT NULLS` (the default) keeps them.
 
 ## Common Table Expressions
 
@@ -186,10 +194,16 @@ SELECT ... EXCEPT SELECT ...
 ## GROUP BY extensions
 
 ```sql
+GROUP BY ALL
 GROUP BY CUBE(a, b)
 GROUP BY ROLLUP(a, b)
 GROUP BY GROUPING SETS ((a, b), (a), ())
 ```
+
+`GROUP BY ALL` groups by every select-list item that is not an aggregate, so
+the grouping keys never drift out of sync with the projection as it evolves.
+With no non-aggregate items it degenerates to a single-group (whole-table)
+aggregation, exactly as writing out the grouping keys by hand would.
 
 ### Labelling rollup rows
 
@@ -269,6 +283,11 @@ CAST(x AS INTEGER)
 x::INTEGER          -- PostgreSQL-style
 TRY_CAST(x AS DATE) -- Returns NULL on failure
 ```
+
+`CAST`/`::` pass NULL through from the input but never introduce it, so the
+result is non-nullable when the input is. `TRY_CAST` instead returns NULL on any
+failed conversion, so its result type is the target type but is **always
+nullable**, regardless of the input.
 
 ### Numeric literal forms
 

@@ -70,9 +70,10 @@ A 2026-07-11 review found that the parser silently absorbs all top-level tokens 
 | 3     | done     | 2d8a80ce | 2026-07-11 |
 | 4     | done     | df0cb16b | 2026-07-11 |
 | 5     | done     | bb843c12 | 2026-07-11 |
-| 6     | done     |        | 2026-07-11 |
-| 7     | pending  |        |      |
+| 6     | done     | 78b3a39d | 2026-07-11 |
+| 7     | done     |        | 2026-07-11 |
 | 8     | pending  |        |      |
+| 9     | pending  |        |      |
 
 ---
 
@@ -344,6 +345,37 @@ Update printer round-trip for all four forms.
 - [ ] New invariant landed in architecture.md + CLAUDE.md gate list, timeless wording
 
 **Commit.** `refactor(types): consolidate function name/signature/type into BuiltinRegistry — consistency gate + migration ratchet`
+
+---
+
+### Phase 9: GROUP BY ALL expansion in smelt-logical analysis
+
+**Goal.** `GROUP BY ALL` is analyzed with its real grouping keys (the non-aggregate select items, per DuckDB semantics) — or conservatively rejected — everywhere smelt-logical consumes grouping information. Today the grammar parses it but analysis does not expand it: the AST path (`resolve_scope_group_by`) returns an empty key set, so the composition walk cannot distinguish `GROUP BY ALL` from no grouping (conservative but lossy), and the text-scan path (`extract_group_by_from_text`) returns a phantom `["ALL"]` key that feeds cumulative/incremental rules a wrong `unique_key` and spurious `KeyedUnknownCombiner`s — a silent mis-analysis, newly reachable now that the form parses.
+
+**Pre-conditions.** Phase 7 (the form must parse). Independent of Phase 8.
+
+**TDD tests to write first.**
+- `crates/smelt-logical/` (walk/analysis tests): a model with `SELECT k, SUM(v) FROM t GROUP BY ALL` yields the same `ScopeKind::GroupBy` scope / grain verdict as the explicit `GROUP BY k` twin — red against today's empty expansion.
+- Cumulative/incremental rule test: the `GROUP BY ALL` twin of an incremental-eligible `GROUP BY k` model derives the same `unique_key` (`["k"]`, not `["ALL"]`), and no spurious `KeyedUnknownCombiner` is emitted — red against the phantom-key behavior.
+- Aggregates-only guard: `SELECT SUM(v) FROM t GROUP BY ALL` (no non-aggregate items) degenerates to single-group semantics without a phantom key.
+- Real fixture: the Phase 7 `examples/timeseries/models/user_activity.sql` (already `GROUP BY ALL`) keeps identical analysis verdicts to its pre-adoption form (characterize via existing walk_coverage/example tests).
+
+**Implementation shape.** Expand `ALL` where grouping keys are consumed: in `resolve_scope_group_by` (AST path), compute the non-aggregate select items of the same scope (mirroring DuckDB's expansion) and return them as the key set; in `extract_group_by_from_text`, either reuse the same expansion or — if the text-scan leaf cannot see the select list — return a conservative rejection (no phantom `["ALL"]`, and the consuming rules must treat "unknown grouping" as not-eligible, fail-loud per the discipline). Honor the property-composition-walk rule: expansion logic lives with the walk/leaf classifiers, not as a new ad hoc scan.
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-logical/src/analysis/mod.rs` (`resolve_scope_group_by`, `extract_group_by_from_text`), `analysis/walk.rs` if scope construction needs it
+- `crates/smelt-logical/src/rules/cumulative.rs` (and sibling incremental rule) — only if the conservative-reject branch lands there
+- `crates/smelt-logical/tests/` — TDD tests above
+- `docs/specs/model_properties.md` — only if the specified grouping semantics need a GROUP BY ALL sentence (spec-first, timeless)
+
+**Review checklist** (material findings only):
+- [ ] Explicit-twin equivalence tests exist and were red first
+- [ ] No phantom `["ALL"]` key survives anywhere (grep)
+- [ ] Walk rule honored: expansion in the walk/leaf classifier, not a new raw-SQL scan
+- [ ] Conservative paths fail loud (not-eligible + reason), never silently wrong
+- [ ] examples/ fixture verdicts unchanged vs explicit form
+
+**Commit.** `fix(logical): expand GROUP BY ALL to real grouping keys in analysis — no phantom ALL key`
 
 ---
 

@@ -31,6 +31,7 @@ pub enum SyntaxKind {
     ELSE_KW,
     END_KW,
     CAST_KW,
+    TRY_CAST_KW,
     BETWEEN_KW,
     IN_KW,
     EXISTS_KW,
@@ -194,28 +195,29 @@ pub enum SyntaxKind {
     // Phase 15: Aggregate function nodes
     FILTER_CLAUSE, // FILTER (WHERE condition)
     // Multi-dialect superset nodes
-    QUALIFY_CLAUSE,      // QUALIFY expression
-    LAMBDA_EXPR,         // x -> expr or (x, y) -> expr
-    LAMBDA_PARAM_LIST,   // Parameter list in lambda
-    PIVOT_CLAUSE,        // PIVOT (agg FOR col IN (...))
-    UNPIVOT_CLAUSE,      // UNPIVOT (val FOR name IN (...))
-    PIVOT_IN_LIST,       // IN list for PIVOT/UNPIVOT
-    ARRAY_SUBSCRIPT,     // expr[expr]
-    ARRAY_SLICE,         // expr[expr:expr]
-    ARRAY_LITERAL,       // ARRAY[1, 2, 3]
-    VALUES_CLAUSE,       // VALUES (1, 2), (3, 4)
-    VALUES_ROW,          // Single row in VALUES: (1, 2)
-    ALIAS_COLUMN_LIST,   // Column list after table alias: AS t(c1, c2, …) or CTE name(c1, c2, …)
-    STRUCT_LITERAL,      // STRUCT(a, b, c)
-    ROW_CONSTRUCTOR,     // ROW(1, 2, 3)
-    EXTRACT_EXPR,        // EXTRACT(field FROM expr)
-    COLLATE_EXPR,        // expr COLLATE collation_name
-    ANY_EXPR,            // ANY(expr) / ALL(expr) / SOME(expr)
-    WITHIN_GROUP_CLAUSE, // WITHIN GROUP (ORDER BY ...)
-    FRAME_EXCLUDE,       // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
-    FETCH_CLAUSE,        // FETCH FIRST N ROWS ONLY
-    WINDOW_CLAUSE,       // WINDOW w AS (...), w2 AS (...) — named window definitions
-    NAMED_WINDOW,        // Single named window definition: w AS (...)
+    QUALIFY_CLAUSE,        // QUALIFY expression
+    LAMBDA_EXPR,           // x -> expr or (x, y) -> expr
+    LAMBDA_PARAM_LIST,     // Parameter list in lambda
+    PIVOT_CLAUSE,          // PIVOT (agg FOR col IN (...))
+    UNPIVOT_CLAUSE,        // UNPIVOT (val FOR name IN (...))
+    PIVOT_IN_LIST,         // IN list for PIVOT/UNPIVOT
+    ARRAY_SUBSCRIPT,       // expr[expr]
+    ARRAY_SLICE,           // expr[expr:expr]
+    ARRAY_LITERAL,         // ARRAY[1, 2, 3]
+    VALUES_CLAUSE,         // VALUES (1, 2), (3, 4)
+    VALUES_ROW,            // Single row in VALUES: (1, 2)
+    ALIAS_COLUMN_LIST,     // Column list after table alias: AS t(c1, c2, …) or CTE name(c1, c2, …)
+    STRUCT_LITERAL,        // STRUCT(a, b, c)
+    ROW_CONSTRUCTOR,       // ROW(1, 2, 3)
+    EXTRACT_EXPR,          // EXTRACT(field FROM expr)
+    COLLATE_EXPR,          // expr COLLATE collation_name
+    ANY_EXPR,              // ANY(expr) / ALL(expr) / SOME(expr)
+    WITHIN_GROUP_CLAUSE,   // WITHIN GROUP (ORDER BY ...)
+    NULL_TREATMENT_CLAUSE, // IGNORE NULLS / RESPECT NULLS inside a function-call arg list
+    FRAME_EXCLUDE,         // EXCLUDE CURRENT ROW / GROUP / TIES / NO OTHERS
+    FETCH_CLAUSE,          // FETCH FIRST N ROWS ONLY
+    WINDOW_CLAUSE,         // WINDOW w AS (...), w2 AS (...) — named window definitions
+    NAMED_WINDOW,          // Single named window definition: w AS (...)
 
     // smelt.define top-level declaration
     SMELT_DEFINE,  // smelt.define name(params) [-> TypeRef] AS (body)
@@ -417,6 +419,7 @@ impl SyntaxKind {
                 | ELSE_KW
                 | END_KW
                 | CAST_KW
+                | TRY_CAST_KW
                 | BETWEEN_KW
                 | IN_KW
                 | EXISTS_KW

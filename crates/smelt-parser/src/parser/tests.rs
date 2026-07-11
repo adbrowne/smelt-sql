@@ -7318,3 +7318,101 @@ fn clean_file_has_no_trailing_error() {
         parse.errors
     );
 }
+
+// ===== Phase 7: High-value grammar gaps =====
+// TRY_CAST, GROUP BY ALL, ORDER BY ALL, IGNORE/RESPECT NULLS.
+
+#[test]
+fn try_cast_parses() {
+    let input = "SELECT TRY_CAST(a AS INTEGER) FROM t";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+
+    let cast_node = parsed
+        .syntax()
+        .descendants()
+        .find_map(CastExpr::cast)
+        .expect("TRY_CAST should produce a cast-shaped node");
+    assert!(cast_node.is_try_cast(), "should be marked as TRY_CAST");
+    assert!(!cast_node.is_double_colon_cast());
+    assert!(cast_node.expression().is_some(), "should have expression");
+    let type_spec = cast_node.type_spec().expect("should have type spec");
+    assert_eq!(type_spec.type_name().as_deref(), Some("INTEGER"));
+
+    // Plain CAST must NOT be flagged as a TRY_CAST.
+    let plain = parse("SELECT CAST(a AS INTEGER) FROM t");
+    let plain_cast = plain
+        .syntax()
+        .descendants()
+        .find_map(CastExpr::cast)
+        .expect("should have a CastExpr");
+    assert!(!plain_cast.is_try_cast());
+}
+
+#[test]
+fn group_by_all_parses() {
+    let input = "SELECT a, count(*) AS n FROM t GROUP BY ALL";
+    let (_, select) = parse_select(input);
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    assert!(group_by.is_all(), "GROUP BY ALL should be flagged as ALL");
+    // No expression items for the bare ALL form.
+    assert_eq!(group_by.expressions().count(), 0);
+}
+
+#[test]
+fn order_by_all_parses() {
+    let (_, select) = parse_select("SELECT a FROM t ORDER BY ALL");
+    let order_by = select.order_by_clause().expect("should have ORDER BY");
+    assert!(order_by.is_all(), "ORDER BY ALL should be flagged as ALL");
+
+    // ORDER BY ALL DESC round-trips through the printer unchanged.
+    let (_, select_desc) = parse_select("SELECT a FROM t ORDER BY ALL DESC");
+    let order_by_desc = select_desc.order_by_clause().expect("should have ORDER BY");
+    assert!(order_by_desc.is_all());
+    assert!(
+        select_desc
+            .to_string()
+            .to_uppercase()
+            .contains("ORDER BY ALL DESC"),
+        "printed: {}",
+        select_desc
+    );
+}
+
+#[test]
+fn ignore_nulls_in_window_parses() {
+    let input = "SELECT last_value(a IGNORE NULLS) OVER (ORDER BY a) AS x FROM t";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+
+    let call = parsed
+        .syntax()
+        .descendants()
+        .find_map(FunctionCall::cast)
+        .expect("should have a FunctionCall");
+    assert!(
+        call.syntax()
+            .text()
+            .to_string()
+            .to_uppercase()
+            .contains("IGNORE NULLS"),
+        "call should retain IGNORE NULLS: {}",
+        call.syntax().text()
+    );
+
+    // RESPECT NULLS is the complementary form.
+    let respect = parse("SELECT first_value(a RESPECT NULLS) OVER (ORDER BY a) AS x FROM t");
+    assert!(
+        respect.errors.is_empty(),
+        "RESPECT NULLS parse errors: {:?}",
+        respect.errors
+    );
+}

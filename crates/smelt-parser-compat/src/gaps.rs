@@ -91,42 +91,10 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // statement currently falls in this category — Phase 1/2 fail-loud parsing
     // converted the former silent mis-parses (`GLOB`, dollar-quoted, `MAP {…}`)
     // into loud parse failures, so they register as `duckdb_fails_to_parse`.
-    KnownGap {
-        id: "duckdb_try_cast",
-        description: "TRY_CAST(expr AS type) is not parsed (DuckDB error-tolerant cast)",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bTRY_CAST\s*\("],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "duckdb_group_by_all",
-        description: "GROUP BY ALL is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bGROUP\s+BY\s+ALL\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "duckdb_order_by_all",
-        description: "ORDER BY ALL is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bORDER\s+BY\s+ALL\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "duckdb_ignore_respect_nulls",
-        description: "IGNORE NULLS / RESPECT NULLS inside window function args is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\b(IGNORE|RESPECT)\s+NULLS\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // TRY_CAST, GROUP BY ALL, ORDER BY ALL, and IGNORE/RESPECT NULLS were
+    // formerly registered here; smelt now parses, prints, and (for TRY_CAST)
+    // infers them, so their entries were removed and the ratchet baseline
+    // shrank accordingly.
     KnownGap {
         id: "duckdb_trim_modifier",
         description: "SQL-standard trim(BOTH|LEADING|TRAILING … FROM …) form is not parsed",

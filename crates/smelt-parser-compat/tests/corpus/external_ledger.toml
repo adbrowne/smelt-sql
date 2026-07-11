@@ -55,21 +55,9 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "derived_table_column_alias_list"
 note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
-["a2a35111e374fa5a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
-["1d031b0c610aff61"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
 ["430fadb76ce45e99"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
-
-["23d16822bcf40adc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["d16194276459eb33"]
 category = "smelt_fails_unclassified"
@@ -219,10 +207,6 @@ note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs
 category = "natural_join_chain"
 note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
 
-["5251198afbf9d8bd"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
 ["366a6098c46dbf5d"]
 category = "named_arg_walrus_or_bare_eq"
 note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
@@ -234,10 +218,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 ["bfd77a838c18b1ee"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["c0c9b1ff8b7d8f2f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["b12be8f116c89c25"]
 category = "named_arg_walrus_or_bare_eq"
@@ -283,10 +263,6 @@ note = "Function call with a DuckDB `name := value` or bare `name = value` argum
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["6dff1d985a5e9432"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
 ["abc0037ef1a7ff76"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found HASH"
@@ -331,10 +307,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "set_operation_nesting"
 note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
 
-["4fcfc6748413b7ad"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
 ["31e689f81aaddaf6"]
 category = "file_glob_or_path_literal_from"
 note = "A glob/path string literal used directly as a FROM target is not parsed"
@@ -342,10 +314,6 @@ note = "A glob/path string literal used directly as a FROM target is not parsed"
 ["309df939f0e0e423"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found PARTITION_KW"
-
-["fabbc15ec29c1748"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["403890fe1405f8ed"]
 category = "file_glob_or_path_literal_from"
@@ -410,10 +378,6 @@ note = "unclassified parser gap; first smelt parser error: Expected type name"
 ["d97613440546afab"]
 category = "derived_table_column_alias_list"
 note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
-["d53de3a8ee8c4408"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["f4780243e43996c6"]
 category = "smelt_fails_unclassified"
@@ -595,10 +559,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "at_time_zone_or_time_tz_type"
 note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
-["9d0fa3b3c25e2af2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
 ["4fb7bac86850ba1d"]
 category = "derived_table_column_alias_list"
 note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
@@ -626,10 +586,6 @@ note = "unclassified parser gap; first smelt parser error: Expected table refere
 ["f16d828fc730974f"]
 category = "natural_join_chain"
 note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
-
-["0e187a17b572a0e5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["32b190f08513f4c0"]
 category = "smelt_fails_unclassified"
@@ -663,10 +619,6 @@ note = "Function call with a DuckDB `name := value` or bare `name = value` argum
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found PLUS"
 
-["368d89aea7f439d7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
 ["da676b8ed997d2e7"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
@@ -694,10 +646,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["34c0d550b05d75c8"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
-
-["55cea6f109f6aa75"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["ed076a4bed786a82"]
 category = "with_ordinality"
@@ -730,10 +678,6 @@ note = "Trailing comma inside a VALUES row is not parsed"
 ["59b6e8884651ae90"]
 category = "grouping_sets"
 note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
-
-["c141c1db22e4a958"]
-category = "pivot_unpivot"
-note = "PIVOT/UNPIVOT clauses are not parsed (tracked gaps.rs::pivot_unpivot)"
 
 ["d93932f2d774acbc"]
 category = "pivot_unpivot"
@@ -802,10 +746,6 @@ note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not
 ["dca844a46bc203da"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected SELECT in subquery"
-
-["8f1ac0c68f25351b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
 
 ["ea88b2757d9c71e2"]
 category = "smelt_fails_unclassified"
@@ -891,10 +831,6 @@ note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not par
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
 
-["f54a33907fde134d"]
-category = "dollar_quoted_or_backslash_literal"
-note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
-
 ["bedcd41917f4c6be"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
@@ -903,17 +839,9 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
 
-["3bd207b2e25c682c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
 ["0ee0644cb314ecf7"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["f4f7ec1c7d4b3743"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
 
 ["adbd9123def3a1ae"]
 category = "smelt_fails_unclassified"
@@ -955,10 +883,6 @@ note = "unclassified parser gap; first smelt parser error: Expected table refere
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
 
-["0ceb5c677007ef08"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
 ["40b096cd22036c6a"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
@@ -999,10 +923,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RBRACKET, fo
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
-["7a35234d10d8de7c"]
-category = "map_type_or_literal"
-note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
-
 ["f204f83e26a1db9b"]
 category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
@@ -1026,26 +946,6 @@ note = "Function call with a DuckDB `name := value` or bare `name = value` argum
 ["b51c675b6c3c339b"]
 category = "named_arg_walrus_or_bare_eq"
 note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
-["443eae9af7ec5ab2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
-["8f9689bcac066f22"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
-["37c1e193a0128f4a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
-["83c604461bbbc129"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
-["2f9e165c3f1a0bfd"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
 
 ["31cbbfb11333cb31"]
 category = "smelt_fails_unclassified"
@@ -1091,10 +991,6 @@ note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison e
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["3dbec66fb359caef"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
-
 ["7a689f12e5ce1105"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected `]` to close list literal"
@@ -1102,10 +998,6 @@ note = "unclassified parser gap; first smelt parser error: Expected `]` to close
 ["6419ed0b514e1675"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
-["3af9377a12a72d3b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found AS_KW"
 
 ["a3fbcd23e56eea5e"]
 category = "power_operator_or_cast_target_literal"
@@ -1120,10 +1012,6 @@ category = "set_operation_nesting"
 note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
 
 ["10473e2a67b8dceb"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
-
-["057772c9ee270f10"]
 category = "set_operation_nesting"
 note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
 

@@ -39,20 +39,27 @@ pub fn infer_cast_type(cast_expr: &CastExpr, ctx: &TypeContext) -> Option<TypedC
         other => other,
     };
 
-    // Propagate nullability from the input expression. CAST does not introduce
-    // NULL — it only passes through NULL from the input. When the input type is
-    // unknown (None), we default to NOT NULL rather than conservatively assuming
-    // nullable, because unknown inputs are typically NOT NULL in practice (e.g.
-    // columns from external sources / seeds) and the conservative default caused
-    // false-positive D-52 diagnostics on common patterns like
-    //   SELECT CAST(ts AS DATE) AS partition_date FROM smelt.sources.raw.events
-    // Genuine nullable inputs (e.g. CASE without ELSE, outer-join columns) still
-    // propagate nullable=true correctly through this path.
-    let nullable = cast_expr
-        .expression()
-        .and_then(|e| infer_expression_type(&e, ctx))
-        .map(|t| t.nullable)
-        .unwrap_or(false);
+    // TRY_CAST (DuckDB error-tolerant cast) returns NULL on a failed conversion,
+    // so its result is ALWAYS nullable regardless of the input's nullability.
+    // A plain CAST only passes NULL through from the input.
+    let nullable = if cast_expr.is_try_cast() {
+        true
+    } else {
+        // Propagate nullability from the input expression. CAST does not introduce
+        // NULL — it only passes through NULL from the input. When the input type is
+        // unknown (None), we default to NOT NULL rather than conservatively assuming
+        // nullable, because unknown inputs are typically NOT NULL in practice (e.g.
+        // columns from external sources / seeds) and the conservative default caused
+        // false-positive D-52 diagnostics on common patterns like
+        //   SELECT CAST(ts AS DATE) AS partition_date FROM smelt.sources.raw.events
+        // Genuine nullable inputs (e.g. CASE without ELSE, outer-join columns) still
+        // propagate nullable=true correctly through this path.
+        cast_expr
+            .expression()
+            .and_then(|e| infer_expression_type(&e, ctx))
+            .map(|t| t.nullable)
+            .unwrap_or(false)
+    };
 
     Some(TypedColumn {
         data_type,

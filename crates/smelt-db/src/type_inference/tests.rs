@@ -6399,3 +6399,24 @@ fn inner_join_preserves_nullability() {
         right_id.1.nullable
     );
 }
+
+#[test]
+fn try_cast_infers_nullable_target() {
+    // TRY_CAST yields the target type but is ALWAYS nullable — it returns NULL
+    // on a failed conversion — even when the input expression is non-nullable.
+    let types = infer_sql("SELECT TRY_CAST('x' AS INTEGER)");
+    assert_eq!(types[0].data_type, DataType::Integer);
+    assert!(
+        types[0].nullable,
+        "TRY_CAST result must be nullable even over a non-nullable input"
+    );
+
+    // Plain CAST over the same non-nullable literal stays non-nullable — this
+    // guards that the TRY flag, not the input, drives the difference.
+    let plain = infer_sql("SELECT CAST('x' AS INTEGER)");
+    assert_eq!(plain[0].data_type, DataType::Integer);
+    assert!(
+        !plain[0].nullable,
+        "plain CAST over a non-nullable input should stay non-nullable"
+    );
+}
