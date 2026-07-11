@@ -94,6 +94,10 @@ The maintenance-plan programme's cost-model override ladder (`crates/smelt-logic
 
 ## Recently Completed
 
+### ~~Derived Output Window for Partition-Grain Runs~~ ✅ (July 11, 2026)
+
+Six-phase plan ([plan](plans/20260711-derived-output-window.md)) closing the silent under-write for models whose `partition_column` is derived and skews from the driving date column (Form B relation). The output window is now **derived** from the run window — identity in the common case, skew-inverted `[start − after, end + before)` otherwise — and DELETE range, output clamp, and per-batch scan all key off it; the transparent fast path is restricted to zero-skew models. Skew derivation is a pure walk-composed leaf classifier in `smelt-logical` (`model_partition_skew`). Also fixed `smelt explain --show-sql` clamp injection for function-at-FROM models (wrap-then-compile, matching the live run), strengthened the `per_partition_equivalence` harness (full session 5-tuple + injected cross-midnight and two-boundary chains through the real `sessionize`), and added freshness-gated tutorial sections covering the cross-midnight prior-day rewrite and the two-boundary truncation semantics (the declared relation is a semantic cap). The 60-day `verify_incremental_equivalence.py` replay passes with zero local-column divergence. Deferred items tracked in the plan: name-only skew-anchor matching (over-wide, correctness-safe), `apply_type_casts` inert under the output clamp, and an optional bot-motivated session-continuation rule.
+
 ### ~~Spec-Remediation W8/misc-spec — Provenance-Tag Preservation + Record Overlay Shallow Replace (D-54, D-55)~~ ✅ (June 22, 2026)
 
 Two-phase remediation plan ([plan](plans/20260620-w8-misc-spec.md)) closing out D-54 (nested expansion leaves prior `Tagged` nodes intact — verified by a new regression test in `smelt-planner`) and D-55 (record overlay is shallow replace, not deep recursive merge — `merge_values` in `loader.rs` simplified; nested-record discriminator test locks the new behaviour).

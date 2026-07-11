@@ -70,7 +70,7 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 | 3     | done     | 98813033 | 2026-07-11 |
 | 4     | done     | 23d5c35b | 2026-07-11 |
 | 5     | done     | dd686a5c | 2026-07-11 |
-| 6     | done     |        | 2026-07-11 |
+| 6     | done     | ac446446 | 2026-07-11 |
 
 ---
 
