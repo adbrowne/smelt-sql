@@ -228,6 +228,8 @@ async fn run_single_day_window(
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     execute_project(

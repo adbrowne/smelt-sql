@@ -41,8 +41,8 @@ pub(super) fn discover_models_for_run(
     )
     .with_context(|| "Failed to run combined discovery loop")?;
 
-    // Filter test models (CLI-level concern; combined loop doesn't know about them).
-    models.retain(|m| !m.is_test());
+    // Filter assertion files — tests and checks (CLI-level concern; combined loop doesn't know about them).
+    models.retain(|m| !m.is_assertion());
 
     if !models.is_empty() {
         info!("Discovery complete: {} model(s)", models.len());

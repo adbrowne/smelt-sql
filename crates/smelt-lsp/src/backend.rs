@@ -441,6 +441,7 @@ impl Backend {
                 }
                 DbCode::StateModeWidening => "state-mode-widening",
                 DbCode::CteRefOutsideTest => "cte-ref-outside-test",
+                DbCode::CheckHasTestClause => "check-has-test-clause",
                 DbCode::UnknownTestInput => "unknown-test-input",
                 DbCode::UnknownTestCte => "unknown-test-cte",
                 // Pipe SQL (Data-World |> pipe query) diagnostic codes.

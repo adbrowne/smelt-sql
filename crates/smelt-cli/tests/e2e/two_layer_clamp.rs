@@ -229,6 +229,8 @@ async fn batched_write_clamp_does_not_widen_to_scan_margin() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let outcome = execute_project(

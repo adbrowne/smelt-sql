@@ -51,6 +51,8 @@ enum Commands {
     Diff(DiffArgs),
     /// Run unit tests for models
     Test(TestArgs),
+    /// Run data-quality checks against the configured target
+    Check(CheckArgs),
     /// Generate documentation
     Docs {
         #[command(subcommand)]
@@ -500,6 +502,29 @@ struct TestArgs {
     json: bool,
 }
 
+#[derive(Parser)]
+struct CheckArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Select specific checks to run by name substring (repeatable)
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+
+    /// Target environment from smelt.yml
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// DuckDB database file path (overrides smelt.yml)
+    #[arg(long)]
+    database: Option<PathBuf>,
+
+    /// Show compiled SQL for each check
+    #[arg(long, short)]
+    verbose: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     let cli = Cli::parse();
@@ -523,6 +548,7 @@ async fn main() -> Result<()> {
         Commands::Explain(args) => commands::explain::explain(args, scope).await,
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
+        Commands::Check(args) => commands::check::run_checks(args).await,
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,
             DocsCommands::List => commands::docs::list(),

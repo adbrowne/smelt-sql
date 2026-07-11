@@ -170,7 +170,11 @@ Owned by `docs/specs/testing.md`.
 |------|----------|---------|
 | `UnknownTestInput` | Error | A `PASSING <dep>` clause in a `smelt.test` declaration names no compiled dependency of the assertion query (catches a typo that would otherwise be silently replaced with an empty CTE → a false-green test). Anchored at the offending name. |
 | `UnknownTestCte` | Error | A `smelt.<model>#<cte>` reference names a CTE absent from the referenced model's `WITH` clause. Anchored at the `#<cte>` suffix. |
-| `CteRefOutsideTest` | Error | A `smelt.<model>#<cte>` CTE reference appears outside a `smelt.test` body. Anchored at the `#` operator. |
+| `CteRefOutsideTest` | Error | A `smelt.<model>#<cte>` CTE reference appears outside a `smelt.test` body (including inside a `smelt.check` body). Anchored at the `#` operator. |
+| `AmbiguousTestModel` | Error | A single-segment `smelt.<leaf>` reference in a `smelt.test` body resolves to two or more models sharing that leaf name. Lists candidates; advises full dotted address. Anchored at the reference. |
+| `NonStandaloneTestModel` | Error | While inlining a whole-query `smelt.test`, an upstream model body cannot compile standalone (per-model config vars, incremental/watermark constructs) and was not mocked via `PASSING`. Advises mocking that dependency via `PASSING`. Anchored at the offending reference. |
+| `CheckHasTestClause` | Error | A `smelt.check` declaration carries a `PASSING` or `EXPECT` clause (valid only on `smelt.test`). Anchored at the offending clause. |
+| `CheckTargetNotBuilt` | Error | A `smelt.check` references a model whose relation does not exist in the configured target (not yet built). Anchored at the reference. |
 
 ---
 

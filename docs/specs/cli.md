@@ -1,7 +1,7 @@
 ---
 feature: cli
 status: experimental
-last_reviewed: 2026-07-10
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
@@ -24,6 +24,7 @@ owners: [andrew]
 | `smelt backbuild` | Rebuild a model and its upstreams over a time range |
 | `smelt seed` | Load CSV seeds into the target database |
 | `smelt test` | Run unit tests against in-memory DuckDB |
+| `smelt check` | Run data-quality checks against built data in the configured target |
 | `smelt diff` | Report pending schema changes (offline) |
 | `smelt table <model>` | Show inferred column schema for a model (offline) |
 | `smelt type [model]` | Show model function signature (offline) |
@@ -93,6 +94,8 @@ Three input shapes are accepted:
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
 
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.
+
+**`smelt check` specifics:** exits `0` if every `error`-severity check passes (zero violating rows); exits `1` if any `error`-severity check has violations. `warn`-severity checks never affect the exit code — a check with `severity: warn` and violations reports `WARN` and the command still exits `0`. A check whose referenced model is not built in the target fails with `CheckTargetNotBuilt` (exit `1`), never a silent pass.
 
 ### `smelt build` flags
 
@@ -236,13 +239,14 @@ A single `smelt build` performs these steps, in order:
 
 1. **Load** `smelt.yml` from `--project-dir`. Fail if absent.
 2. **Validate** that the requested `--target` exists in the config.
-3. **Discover** all project files by walking every non-excluded subdirectory under the project root (discovery is project-wide; `paths:` only strips address prefixes — there are no per-kind dedicated scan paths, per `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The resolver classifies each file by format and content: `.sql` files become models, `smelt.define`s, or tests; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone) become seed sidecars or sources respectively.
+3. **Discover** all project files by walking every non-excluded subdirectory under the project root (discovery is project-wide; `paths:` only strips address prefixes — there are no per-kind dedicated scan paths, per `architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The resolver classifies each file by format and content: `.sql` files become models, `smelt.define`s, tests, or checks; `.csv` files become seeds; per-entity `.yml` files (a `users.yml` next to a `users.csv`, or alone) become seed sidecars or sources respectively.
 4. **Seed** — run the seed lifecycle per `seeds.md` for each non-ephemeral CSV seed (in deterministic sorted order): smelt parses and type-infers the CSV itself and ingests it via `Backend::load_table(...)` — not a backend-specific `read_csv_auto` recipe. Ephemeral seeds are skipped (they inline as CTEs at compile time); sources are never loaded. Schemas are auto-created if absent.
 5. **Plan** — build the logical dependency graph; apply planner rules; produce the physical execution graph. Models execute in topological order.
 6. **Run** — for each model in topological order, materialize according to its effective materialization:
    - `table` / `materialized_view`: `CREATE OR REPLACE TABLE` (atomic replacement)
    - `view`: `CREATE OR REPLACE VIEW`
    - `ephemeral`: inlined as CTE — no DDL emitted
+7. **Check** — after a model materializes, run every `smelt.check` that references it against the just-written data (per `testing.md` §"Check execution model"). An `error`-severity violation marks every model **downstream of the checked model** as skipped for the remainder of the build (bad data does not propagate) and makes the build exit `1`; a `warn`-severity violation is reported and the build continues. Checks run within the same `build` invocation only — `smelt run` does not run checks.
 
 `smelt build` is idempotent. Re-running with the same inputs and the same time range produces the same final database state.
 
@@ -344,6 +348,12 @@ The cwd-derived scope is informational at command start and does not change mid-
 
 `smelt test --select` uses the **full selector syntax** (`model_selection.md` §"Selector syntax") — the same `model_name` / `tag:` / `generator_file:` methods and `+` graph operators every other command accepts, resolved through the §"Argument resolution algorithm". It is **not** a substring match on test names. A test model matches a `model_name` selector by its canonical `smelt.<path>` (test models are addressable, per `architecture.md`), and matches `tag:` by its effective tag set. This makes test selection consistent with `smelt run`/`smelt build` selection.
 
+### `smelt check` — data-quality assertions against built data
+
+`smelt check` executes each `smelt.check` declaration's failing-rows query against the project's **configured target** (not in-memory DuckDB — a check asserts on the real materialized data; see `testing.md` §"Check execution model"). A check passes iff its query returns **zero rows**; returned rows are violations. The command reports `PASS`/`FAIL`/`WARN` per check with the violation row count and a capped inline sample of violating rows, and exits per §"Exit codes" (`error`-severity violations → `1`; `warn`-only → `0`). A check that references an unbuilt model fails with `CheckTargetNotBuilt` rather than passing silently.
+
+`smelt check --select` is a **substring match on the check name** (repeatable; a check runs if any `--select` value is a substring of its name). It does not use the full selector syntax — no `tag:`/`generator_file:` methods, no `+` graph operators — and a selection that matches no check prints `No checks matched the selection.` and exits `0` rather than hard-erroring. Unlike the build-integrated check pass (`smelt build` step 7), standalone `smelt check` runs against whatever is currently materialized and applies no downstream skip-cascade — it is a pure validation pass.
+
 ### `smelt docs generate` output
 
 With `--format markdown` (default):
@@ -367,6 +377,8 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 **`smelt explain --json` for orchestrators.** The JSON output is the integration contract for Dagster, Airflow, and other orchestrators. It must be stable — field additions are allowed, field removals are not. The physical graph is included to allow orchestrators to understand cross-engine topology.
 
 **`smelt test` always in-memory on DuckDB.** Tests do not execute against the project's production target. This guarantees tests are fast, reproducible, and require no external database. The trade-off is that tests on Spark-only projects may miss Spark-specific behavior.
+
+**`smelt check` runs against the target; `smelt test` does not.** The two assertion commands deliberately split on execution model: a test asserts on model *logic* and runs in-memory on mock data (fast, no connection), a check asserts on materialized *data* and must run against the configured target where that data lives. `smelt check` is a separate verb (rather than only a `smelt build` phase) so operators can re-validate current data without rebuilding; build-time check execution (`smelt build` step 7) additionally blocks downstream propagation on an `error`-severity failure, matching dbt's `build` skip-cascade and SQLMesh's blocking audits. The full design rationale for the `smelt.check` kind lives in `testing.md` §Design.
 
 **`--show-plan` is per-model in v1.** Whole-project planning is a different operation (it produces a graph view, not a single-model plan) and the right output format has not been chosen. Keeping `--show-plan` per-model leaves the design space open while serving the most common need.
 
@@ -397,6 +409,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 11. **Argument resolution uses the same resolver as model SQL.** Every entity argument flows through `resolve_ref_path` after scope expansion; there is no parallel leaf-only resolver in the CLI surface. The dependency graph and run manifest are keyed by canonical paths only.
 12. **Scoped shorthand has no fall-through.** With a scope active, a shorthand argument resolves only as `<scope>.<arg>`; it never silently retries the bare `<arg>`. Reaching an entity outside the scope requires a full path. Adding a new entity (at any level) never changes which entity a previously-passing command resolved to.
 13. **`paths:` is a strip-list, not a scan gate.** Discovery walks every non-excluded subdirectory under the project root; `paths:` only strips address prefixes (`architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The cwd-derived scope is computed by the same strip-prefix rule, and the CLI defines no separate per-kind scan paths.
+14. **`smelt check` runs against the configured target.** Checks assert on real built data; a check passes iff its failing-rows query returns zero rows. `error`-severity violations set exit `1` and block models downstream of the checked model during `smelt build`; `warn`-severity violations do neither. A check on an unbuilt model is `CheckTargetNotBuilt`, never a silent pass.
 
 ## Known Divergences / Open Questions
 
@@ -445,11 +458,15 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `crates/smelt-cli/src/commands/` — per-command implementation
   - `crates/smelt-cli/src/commands/build.rs` — `--show-plan` dispatch
   - `crates/smelt-cli/src/logical_graph.rs` — `LogicalGraph::build()`
+- **Tests**:
+  - `crates/smelt-cli/tests/check_command.rs` — `smelt check` exit codes, severity gating, `--select` substring, unbuilt-target loudness
+  - `crates/smelt-cli/tests/build_checks.rs` — `smelt build` check gate: error-severity skip-cascade, warn transparency
 - **User docs**:
   - `docs-site/docs/reference/cli.md` — full flag reference
   - `docs-site/docs/guide/model-selection.md` — selector syntax
 - **Plans (history)**:
   - `docs/plans/20260502-smelt-loop-findings.md` — TB-1 and TB-4 fixes, TB-3 deferred
+  - `docs/plans/20260628-data-checks.md` — `smelt check` command and the `smelt build` check gate
 - **Related specs**:
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `model_selection.md` — `--select` / `--exclude` semantics
@@ -457,5 +474,5 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `batched_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
   - `functions.md` — `smelt build` plans function expansion as part of the build lifecycle.
   - `schema_evolution.md` — `smelt diff` change classification
-  - `testing.md` — `smelt test` execution
+  - `testing.md` — `smelt test` and `smelt check` execution
   - `smelt_yml.md` — `targets:` and `paths:` keys consumed by the CLI.

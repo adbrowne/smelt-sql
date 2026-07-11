@@ -17,6 +17,7 @@
 //! for the normative invariant.
 
 pub mod backfill;
+pub mod check_runner;
 pub mod combined_loop;
 pub mod compile;
 pub mod cumulative;
@@ -37,6 +38,7 @@ pub mod types;
 pub mod windowing;
 
 pub use backfill::targeted_column_backfill;
+pub use check_runner::{batches_to_rows, run_single_check, CheckOutcome, CheckStatus};
 pub use combined_loop::run_combined_discovery_loop;
 pub use compile::{
     build_source_bound_map, expand_function_calls, resolve_refs_in_sql,

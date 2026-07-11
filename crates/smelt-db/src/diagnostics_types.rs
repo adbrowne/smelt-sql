@@ -790,9 +790,15 @@ pub enum DiagnosticCode {
     /// outside a `smelt.test` body. The `#` operator is test-local: it may
     /// only be used inside a `smelt.test` declaration body to address one
     /// internal CTE of the referenced model. Using it in a model body, a
-    /// `smelt.define` body, or any other position is a hard error.
-    /// Anchored at the `#` operator token.
+    /// `smelt.define` body, a `smelt.check` body, or any other position is
+    /// a hard error. Anchored at the `#` operator token.
     CteRefOutsideTest,
+    /// Emitted (Error) when a `smelt.check` declaration carries a `PASSING`
+    /// or `EXPECT` clause. These clauses are valid only on `smelt.test`
+    /// declarations; a check has no mocks and no expected output — it is a
+    /// failing-rows query against real built data. Anchored at the offending
+    /// clause's opening keyword (`PASSING` or `EXPECT`).
+    CheckHasTestClause,
     /// Emitted (Error) at `smelt test` run time when a `PASSING <dep>` clause
     /// in a `smelt.test` declaration names a dependency that is not a reachable
     /// external `smelt.<path>` dep of the assertion query. Catches typos such

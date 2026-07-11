@@ -31,6 +31,7 @@ use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
 use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
+use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
 use crate::compile::build_source_bound_map;
 use crate::compile::CompilerRegistry;
 use crate::reporter::RunReporter;
@@ -480,6 +481,7 @@ pub async fn execute_project(
             models: HashMap::new(),
             total_rows: 0,
             plan_summary: Some(plan_summary),
+            check_results: vec![],
         };
         drop(graph_lock);
         return Ok(outcome);
@@ -605,6 +607,62 @@ pub async fn execute_project(
         }
     }
 
+    // ── Check infrastructure (build integration) ──────────────────────────
+    // Pre-compute all data needed for check execution before the model loop:
+    // - checks_by_model: model name → check ModelFiles that reference it
+    // - upstream_map: selected model name → transitive upstream set
+    //   (used to find "downstream of X" by inverting: m is downstream of X
+    //   iff upstream_map[m].contains(X))
+    let checks_by_model: HashMap<String, Vec<smelt_core::ModelFile>> = if request.run_checks {
+        let mut map: HashMap<String, Vec<smelt_core::ModelFile>> = HashMap::new();
+        for check_model in &request.checks {
+            // A check references a model when it has a smelt.<path> ref whose
+            // joined segments match a selected model name.
+            for ref_info in &check_model.refs {
+                let segs = ref_info.smelt_ref.to_path();
+                if segs.is_empty() || segs[0] == "sources" || segs[0] == "functions" {
+                    continue;
+                }
+                let model_name = segs.join(".");
+                if selected.contains(&model_name) {
+                    map.entry(model_name.clone())
+                        .or_default()
+                        .push(check_model.clone());
+                }
+            }
+        }
+        map
+    } else {
+        HashMap::new()
+    };
+
+    // Build model → all_upstream map for the selected set (needed for
+    // downstream closure computation). Captured here to avoid holding the
+    // graph lock across awaits in the model loop.
+    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks {
+        // graph_lock was already dropped above; we need to re-lock briefly to
+        // read all_upstream for each selected model.
+        // Actually, graph was dropped before backends were created.
+        // We need to rebuild from the model graph. Since we dropped graph_lock,
+        // we captured needed data already. But we need all_upstream.
+        // Use the already-built model_plans to reconstruct deps from model_file refs.
+        // Actually, model_file.refs captures the smelt refs, not the canonical names.
+        // The cleanest: re-lock the graph briefly just to capture upstream maps.
+        // This is safe because graph is only mutated before the lock is dropped.
+        let graph_lock2 = graph.lock().await;
+        let map: HashMap<String, HashSet<String>> = selected
+            .iter()
+            .map(|name| (name.clone(), graph_lock2.all_upstream(name)))
+            .collect();
+        drop(graph_lock2);
+        map
+    } else {
+        HashMap::new()
+    };
+
+    let mut skip_set: HashSet<String> = HashSet::new();
+    let mut check_results: Vec<CheckOutcome> = Vec::new();
+
     // ── Execute loop ────────────────────────────────────────────────────
     reporter.run_started(
         &run_id,
@@ -628,7 +686,35 @@ pub async fn execute_project(
     for (model_idx, plan) in model_plans.iter().enumerate() {
         if cancel.is_cancelled() {
             reporter.run_cancelled(&run_id);
-            return Ok(build_outcome(&run_id, run_start, None, manifest, 0));
+            return Ok(build_outcome(
+                &run_id,
+                run_start,
+                None,
+                manifest,
+                0,
+                check_results,
+            ));
+        }
+
+        // ── Skip set: skip models downstream of a failed error check ─────
+        if request.run_checks && skip_set.contains(&plan.name) {
+            tracing::info!(
+                "Skipping model '{}' — downstream of a failed error-severity check",
+                plan.name
+            );
+            manifest.models.insert(
+                plan.name.clone(),
+                smelt_state::ModelRunRecord {
+                    strategy: "skipped_failed_check".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                },
+            );
+            reporter.model_completed(&run_id, &plan.name, 0, std::time::Duration::ZERO);
+            continue;
         }
 
         reporter.model_started(&run_id, &plan.name, model_idx, model_plans.len());
@@ -839,6 +925,25 @@ pub async fn execute_project(
                 },
             );
             reporter.model_completed(&run_id, &plan.name, total_rows, model_start.elapsed());
+            // ── Check seam A: cumulative arm ─────────────────────────────────
+            if request.run_checks {
+                let (outcomes, to_skip) = run_model_checks(
+                    &plan.name,
+                    &checks_by_model,
+                    &compilers,
+                    &backends,
+                    &target_assignments,
+                    &ephemeral_resolvers,
+                    config.as_ref(),
+                    &upstream_map,
+                    &selected,
+                    reporter,
+                    &run_id,
+                )
+                .await;
+                check_results.extend(outcomes);
+                skip_set.extend(to_skip);
+            }
             continue;
         }
 
@@ -1097,6 +1202,7 @@ pub async fn execute_project(
                             None,
                             manifest,
                             total_rows_overall,
+                            vec![],
                         ));
                     }
 
@@ -1537,6 +1643,25 @@ pub async fn execute_project(
 
         let model_duration = model_start.elapsed();
         reporter.model_completed(&run_id, &plan.name, total_rows, model_duration);
+        // ── Check seam B: incremental / full-refresh arm ─────────────────────
+        if request.run_checks {
+            let (outcomes, to_skip) = run_model_checks(
+                &plan.name,
+                &checks_by_model,
+                &compilers,
+                &backends,
+                &target_assignments,
+                &ephemeral_resolvers,
+                config.as_ref(),
+                &upstream_map,
+                &selected,
+                reporter,
+                &run_id,
+            )
+            .await;
+            check_results.extend(outcomes);
+            skip_set.extend(to_skip);
+        }
     }
 
     manifest.completed_at = Some(Utc::now());
@@ -1572,6 +1697,7 @@ pub async fn execute_project(
         Some(Utc::now()),
         manifest,
         total_rows_overall,
+        check_results,
     ))
 }
 
@@ -1878,6 +2004,7 @@ fn build_outcome(
     completed_at: Option<chrono::DateTime<Utc>>,
     manifest: RunManifest,
     total_rows: usize,
+    check_results: Vec<CheckOutcome>,
 ) -> RunOutcome {
     RunOutcome {
         run_id: run_id.to_string(),
@@ -1886,7 +2013,130 @@ fn build_outcome(
         models: manifest.models,
         total_rows,
         plan_summary: None,
+        check_results,
     }
+}
+
+/// Execute all checks registered for `model_name` after it materializes.
+///
+/// Returns `(outcomes, models_to_skip)` where:
+/// - `outcomes` is the per-check result list to append to `check_results`
+/// - `models_to_skip` is the downstream closure to add to `skip_set` when an
+///   error-severity check fails (derived from `upstream_map`)
+#[allow(clippy::too_many_arguments)]
+async fn run_model_checks(
+    model_name: &str,
+    checks_by_model: &HashMap<String, Vec<smelt_core::ModelFile>>,
+    compilers: &CompilerRegistry,
+    backends: &HashMap<String, Box<dyn Backend>>,
+    target_assignments: &HashMap<String, String>,
+    ephemeral_resolvers: &HashMap<String, EphemeralResolver>,
+    config: &smelt_core::config::Config,
+    upstream_map: &HashMap<String, HashSet<String>>,
+    selected: &[String],
+    reporter: &dyn RunReporter,
+    run_id: &str,
+) -> (Vec<CheckOutcome>, HashSet<String>) {
+    use smelt_core::metadata::CheckSeverity;
+
+    let Some(check_files) = checks_by_model.get(model_name) else {
+        return (vec![], HashSet::new());
+    };
+
+    let model_target = target_assignments
+        .get(model_name)
+        .map(|s| s.as_str())
+        .unwrap_or(model_name);
+
+    let Some(backend) = backends.get(model_target) else {
+        return (vec![], HashSet::new());
+    };
+
+    let schema = &config.targets[model_target].schema;
+    let compiler = compilers.get(model_target);
+
+    static EMPTY_RESOLVER: std::sync::OnceLock<EphemeralResolver> = std::sync::OnceLock::new();
+    let resolver = ephemeral_resolvers
+        .get(model_target)
+        .unwrap_or_else(|| EMPTY_RESOLVER.get_or_init(EphemeralResolver::empty));
+
+    let ephemeral_names = &resolver.ephemeral_names;
+
+    let mut outcomes: Vec<CheckOutcome> = Vec::new();
+    let mut any_error_check_failed = false;
+
+    for check_model in check_files {
+        let severity: CheckSeverity = check_model
+            .metadata
+            .as_ref()
+            .and_then(|m| m.check.as_ref())
+            .map(|c| c.severity.clone())
+            .unwrap_or_default();
+
+        let outcome = match run_single_check(
+            compiler,
+            backend.as_ref(),
+            schema,
+            check_model,
+            severity,
+            ephemeral_names,
+            resolver,
+        )
+        .await
+        {
+            Ok(o) => o,
+            Err(e) => {
+                tracing::warn!("check '{}' error: {}", check_model.name, e);
+                CheckOutcome {
+                    name: check_model.name.clone(),
+                    severity: CheckSeverity::Error,
+                    status: CheckStatus::Fail,
+                    row_count: 0,
+                    sample: vec![],
+                    message: Some(e.to_string()),
+                    sql: None,
+                }
+            }
+        };
+
+        let status_str = match outcome.status {
+            CheckStatus::Pass => "pass",
+            CheckStatus::Fail => "fail",
+            CheckStatus::Warn => "warn",
+            CheckStatus::TargetNotBuilt => "target_not_built",
+        };
+
+        reporter.check_result(run_id, &outcome.name, status_str, outcome.row_count);
+
+        if matches!(
+            (&outcome.severity, &outcome.status),
+            (
+                CheckSeverity::Error,
+                CheckStatus::Fail | CheckStatus::TargetNotBuilt
+            )
+        ) {
+            any_error_check_failed = true;
+        }
+
+        outcomes.push(outcome);
+    }
+
+    // Compute downstream closure to skip (only for error-severity failures).
+    let models_to_skip: HashSet<String> = if any_error_check_failed {
+        selected
+            .iter()
+            .filter(|m| {
+                upstream_map
+                    .get(*m)
+                    .is_some_and(|ups| ups.contains(model_name))
+            })
+            .cloned()
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    (outcomes, models_to_skip)
 }
 
 /// Build the project-wide `smelt.<path> → timeseries` lookup map used by

@@ -72,6 +72,24 @@ impl ModelFile {
         false
     }
 
+    /// Whether this model file contains `smelt.check` declarations.
+    pub fn is_check(&self) -> bool {
+        let clean = smelt_parser::strip_frontmatter(&self.content);
+        let parse = smelt_parser::parse(&clean);
+        if let Some(file) = AstFile::cast(parse.syntax()) {
+            return file.checks().next().is_some();
+        }
+        false
+    }
+
+    /// Whether this model file is a non-materialised assertion: a `smelt.test`
+    /// or a `smelt.check`. Use this at filtering sites that mean "exclude
+    /// declarations that produce no database object" — so that adding a new
+    /// assertion kind does not require touching every such site individually.
+    pub fn is_assertion(&self) -> bool {
+        self.is_test() || self.is_check()
+    }
+
     /// Get test configuration if this is a test model.
     pub fn test_config(&self) -> Option<&TestConfig> {
         self.metadata.as_ref().and_then(|m| m.test.as_ref())
@@ -223,7 +241,8 @@ impl ModelDiscovery {
                 match classify(file_path, None, &files) {
                     Some(EntityKind::Model)
                     | Some(EntityKind::Function)
-                    | Some(EntityKind::Test) => {
+                    | Some(EntityKind::Test)
+                    | Some(EntityKind::Check) => {
                         // Parse (address_segments filled in below).
                         let mut parsed = match self.parse_model_file(file_path) {
                             Ok(p) => p,

@@ -156,6 +156,8 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes,
+        run_checks: false,
+        checks: vec![],
     };
 
     let run_id = generate_run_id();

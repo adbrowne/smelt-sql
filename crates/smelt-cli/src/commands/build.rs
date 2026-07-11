@@ -3,13 +3,14 @@ use smelt_cli::argument_resolution::{compute_scope, resolve_argument};
 use smelt_cli::{Config, ModelDiscovery};
 use smelt_core::graph::DependencyGraph;
 use smelt_runtime::types::ExecuteRequest;
+use smelt_runtime::{CheckOutcome, CheckStatus};
 use smelt_state::generate_run_id;
 use std::sync::Arc;
 use tokio_util::sync::CancellationToken;
 use tracing::info;
 
 use super::run_setup::*;
-use crate::{BuildArgs, RunArgs, SeedArgs};
+use crate::{BuildArgs, SeedArgs};
 
 pub async fn build(args: BuildArgs, scope: Option<&str>) -> Result<()> {
     if args.show_plan {
@@ -30,32 +31,243 @@ pub async fn build(args: BuildArgs, scope: Option<&str>) -> Result<()> {
         return build_include_upstreams(args, scope).await;
     }
 
-    // Step 2: Run
-    let run_args = RunArgs {
-        project_dir: args.project_dir,
-        database: args.database,
-        target: args.target,
-        show_results: args.show_results,
-        verbose: args.verbose,
-        dry_run: false,
-        event_time_start: args.event_time_start,
-        event_time_end: args.event_time_end,
-        select: args.select,
-        exclude: args.exclude,
-        start: None,
-        end: None,
-        batch_size: None,
+    // Step 2: Run models + checks
+    run_build_with_checks(args, scope).await
+}
+
+async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<()> {
+    use smelt_cli::{
+        argument_resolution::{compute_scope, resolve_selector_args},
+        backend_factory::CliBackendFactory,
+        reporter::CliReporter,
+        Config, ModelDiscovery, SourcesConfig,
+    };
+    use smelt_core::graph::DependencyGraph;
+    use smelt_runtime::types::ExecuteRequest;
+    use smelt_state::generate_run_id;
+    use std::sync::Arc;
+    use tokio_util::sync::CancellationToken;
+    use tracing::info;
+
+    use super::run_setup::*;
+
+    let project_dir = smelt_cli::find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+    info!("Project directory: {}", project_dir.display());
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+    info!("Project: {} (version {})", config.name, config.version);
+    if !config.targets.contains_key(&args.target) {
+        return Err(anyhow!(
+            "Target '{}' not found in smelt.yml. Available targets: {}",
+            args.target,
+            config
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+    let seeds = smelt_core::discover_seed_infos_with_sidecars(&project_dir, &config.paths);
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let (models, function_files) =
+        discover_models_for_run(&discovery, &args.target, &project_dir, &config)?;
+    let ephemeral_seed_ctes = build_ephemeral_seed_ctes(&seeds);
+
+    // Discover check files separately (excluded from the model graph).
+    let all_discovered = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models for check discovery")?;
+    let check_files: Vec<smelt_cli::ModelFile> = all_discovered
+        .into_iter()
+        .filter(|m| m.is_check())
+        .collect();
+    if !check_files.is_empty() {
+        info!("Found {} check(s)", check_files.len());
+    }
+
+    if models.is_empty() {
+        return Err(anyhow!(
+            "No models found in paths: {}",
+            config.paths.join(", ")
+        ));
+    }
+    info!("Found {} models total", models.len());
+    validate_materialization_configs(&models, &config)?;
+
+    let mut graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+    graph.add_seeds(&seeds);
+    graph.warn_unused_ephemerals(&config);
+
+    let mut gen_salsa_db = smelt_cli::init_db(
+        &project_dir,
+        &discovery.discover_models().unwrap_or_default(),
+    );
+    gen_salsa_db.set_active_target(Some(Arc::from(args.target.as_str())));
+    let gen_salsa_ws = smelt_db::Workspace::try_get(&gen_salsa_db)
+        .ok_or_else(|| anyhow!("workspace not initialized"))?;
+    let gen_salsa_project = gen_salsa_db
+        .project_input(&project_dir)
+        .ok_or_else(|| anyhow!("project not initialized"))?;
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let resolved_select = resolve_selector_args(
+        &gen_salsa_db,
+        gen_salsa_ws,
+        gen_salsa_project,
+        active_scope.as_ref(),
+        &args.select,
+    )
+    .map_err(|e| anyhow!("{}", e))?;
+    let resolved_exclude = resolve_selector_args(
+        &gen_salsa_db,
+        gen_salsa_ws,
+        gen_salsa_project,
+        active_scope.as_ref(),
+        &args.exclude,
+    )
+    .map_err(|e| anyhow!("{}", e))?;
+
+    {
+        let gate_names = parse_error_gate_set(&graph, &resolved_select, &config);
+        match gate_names {
+            Some(ref names) => {
+                let scoped: Vec<smelt_cli::ModelFile> = models
+                    .iter()
+                    .filter(|m| names.contains(&m.canonical_path()))
+                    .cloned()
+                    .collect();
+                check_parse_errors(&scoped)?;
+            }
+            None => check_parse_errors(&models)?,
+        }
+    }
+
+    let start_val = args.event_time_start.clone();
+    let end_val = args.event_time_end.clone();
+
+    let salsa_db = build_execute_salsa_db(
+        &discovery,
+        &function_files,
+        &models,
+        &project_dir,
+        &args.target,
+    )?;
+
+    let request = ExecuteRequest {
+        target: args.target.clone(),
+        select: resolved_select,
+        exclude: resolved_exclude,
+        start: start_val,
+        end: end_val,
+        batch_size_days: None,
         per_partition: false,
-        auto: false,
+        full_refresh: false,
+        dry_run: false,
+        enforce_safety: !args.allow_downgrade,
         allow_column_removal: false,
         allow_full_refresh: false,
-        allow_downgrade: args.allow_downgrade,
-        show_plan: false,
-        since_upstream: false,
-        since_upstream_source: Vec::new(),
-        since_upstream_landed: Vec::new(),
+        ephemeral_seed_ctes,
+        run_checks: true,
+        checks: check_files,
     };
-    super::run::run(run_args, scope).await
+
+    let run_id = generate_run_id();
+    let config_arc = Arc::new(config);
+    let graph_arc = Arc::new(tokio::sync::Mutex::new(graph));
+    let db_arc = Arc::new(tokio::sync::Mutex::new(salsa_db));
+    let reporter = CliReporter::new(args.verbose, false, args.show_results);
+    let backend_factory = CliBackendFactory {
+        database_override: args.database,
+    };
+
+    let outcome = smelt_runtime::execute_project(
+        run_id.clone(),
+        request,
+        config_arc,
+        graph_arc,
+        db_arc,
+        &project_dir,
+        &backend_factory,
+        &reporter,
+        CancellationToken::new(),
+    )
+    .await?;
+
+    report_check_results(&outcome.check_results)
+}
+
+fn report_check_results(results: &[CheckOutcome]) -> Result<()> {
+    use smelt_core::metadata::CheckSeverity;
+
+    if results.is_empty() {
+        return Ok(());
+    }
+
+    println!("\nsmelt build — checks\n");
+
+    let mut fail_count = 0usize;
+    let mut warn_count = 0usize;
+    let mut pass_count = 0usize;
+
+    for outcome in results {
+        match outcome.status {
+            CheckStatus::Pass => {
+                println!("  PASS  {}", outcome.name);
+                pass_count += 1;
+            }
+            CheckStatus::Warn => {
+                println!(
+                    "  WARN  {} — {} violating row(s)",
+                    outcome.name, outcome.row_count
+                );
+                for row in outcome.sample.iter().take(5) {
+                    println!("    {:?}", row);
+                }
+                warn_count += 1;
+            }
+            CheckStatus::Fail => {
+                println!(
+                    "  FAIL  {} — {} violating row(s)",
+                    outcome.name, outcome.row_count
+                );
+                for row in outcome.sample.iter().take(5) {
+                    println!("    {:?}", row);
+                }
+                if outcome.severity == CheckSeverity::Error {
+                    fail_count += 1;
+                } else {
+                    warn_count += 1;
+                }
+            }
+            CheckStatus::TargetNotBuilt => {
+                let msg = outcome
+                    .message
+                    .as_deref()
+                    .unwrap_or("target relation not built");
+                println!("  FAIL  {} — {}", outcome.name, msg);
+                fail_count += 1;
+            }
+        }
+    }
+
+    let total = pass_count + fail_count + warn_count;
+    println!(
+        "\n  {} passed, {} failed, {} warned, {} total\n",
+        pass_count, fail_count, warn_count, total
+    );
+
+    if fail_count > 0 {
+        std::process::exit(1);
+    }
+
+    Ok(())
 }
 
 /// `smelt build <model> --period <start>..<end> --include-upstreams` —
@@ -181,6 +393,8 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             allow_column_removal: false,
             allow_full_refresh: false,
             ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
+            run_checks: false,
+            checks: Vec::new(),
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

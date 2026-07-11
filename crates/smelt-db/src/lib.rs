@@ -860,6 +860,9 @@ fn sql_file_kind(db: &dyn salsa::Database, file: SourceFile) -> RefKind {
         if ast.tests().next().is_some() {
             return RefKind::Test;
         }
+        if ast.checks().next().is_some() {
+            return RefKind::Check;
+        }
     }
     // 2. Default: Model.
     RefKind::Model
@@ -1651,21 +1654,32 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // Skips smelt.define / smelt.extern function files — their frontmatter is
     // handled (with the correct DeclarationKind) by
     // frontmatter_parse_diagnostics_for_file. Only pure SQL model files reach
-    // this block. Calls parse_frontmatter(text, Model) to surface unknown-key
+    // this block. Calls parse_frontmatter(text, Model/Check) to surface unknown-key
     // errors and inapplicable-key warnings. Also tries to deserialize
     // ModelMetadata from the validated map to catch nested sub-field failures
     // (e.g. a bad timeseries.granularity value) that would previously be swallowed.
-    let is_function_file = {
+    let (is_function_file, is_check_file) = {
         let p = parse_file(db, file);
-        AstFile::cast(p.syntax())
+        let ast_opt = AstFile::cast(p.syntax());
+        let is_fn = ast_opt
+            .as_ref()
             .map(|ast| ast.defines().next().is_some() || ast.externs().next().is_some())
-            .unwrap_or(false)
+            .unwrap_or(false);
+        let is_chk = ast_opt
+            .as_ref()
+            .map(|ast| ast.checks().next().is_some())
+            .unwrap_or(false);
+        (is_fn, is_chk)
     };
     if !is_function_file {
         if let Some(yaml_text) = smelt_core::frontmatter_yaml_text(text) {
             use smelt_core::{FrontmatterSeverity, ModelMetadata};
-            let (validated_map, fm_diags) =
-                smelt_core::parse_frontmatter(&yaml_text, smelt_core::DeclarationKind::Model);
+            let decl_kind = if is_check_file {
+                smelt_core::DeclarationKind::Check
+            } else {
+                smelt_core::DeclarationKind::Model
+            };
+            let (validated_map, fm_diags) = smelt_core::parse_frontmatter(&yaml_text, decl_kind);
 
             // Emit catalogue diagnostics (unknown key → Error, inapplicable → Warning).
             for fm_diag in &fm_diags {
@@ -2241,7 +2255,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
     // `CteRefOutsideTest` for any that carry a `#` suffix but are not
     // inside a SMELT_TEST ancestor.  This is a pure structural check that
     // runs unconditionally (no early-return) so model files, function files,
-    // and test files all surface it correctly.
+    // check files, and test files all surface it correctly.
     {
         let parse = parse_file(db, file);
         let syntax = parse.syntax();
@@ -2250,20 +2264,58 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         }
     }
 
+    // `smelt.check` structural validation: PASSING and EXPECT clauses are
+    // test-only surface. A check body is a failing-rows query against real
+    // built data; it has no mock tables and no expected output rows. Emit
+    // `CheckHasTestClause` anchored at the offending clause keyword range.
+    {
+        let parse = parse_file(db, file);
+        if let Some(ast) = AstFile::cast(parse.syntax()) {
+            for check in ast.checks() {
+                for passing in check.passing_clauses() {
+                    let range = passing.syntax().text_range();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "PASSING clauses are not valid on smelt.check — \
+                                  only smelt.test declarations accept mock table data"
+                            .to_string(),
+                        range,
+                        code: Some(DiagnosticCode::CheckHasTestClause),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+                if let Some(expect) = check.expect_clause() {
+                    let range = expect.syntax().text_range();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: "EXPECT clause is not valid on smelt.check — \
+                                  only smelt.test declarations assert against expected output rows"
+                            .to_string(),
+                        range,
+                        code: Some(DiagnosticCode::CheckHasTestClause),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+            }
+        }
+    }
+
     // Check if model is valid
     if parse_model(db, file).is_none() {
         let path_str = path.to_str().unwrap_or("");
         let is_virtual_submodel = path_str.contains("::");
         if !is_virtual_submodel && path_str.contains("models/") {
-            // Files that contain only `smelt.test` declarations are valid — they
-            // have no SELECT body but they are not broken models.  Suppress the
-            // "does not contain a valid SQL query" warning for such files.
+            // Files that contain only `smelt.test` or `smelt.check` declarations are
+            // valid — they have no SELECT body but they are not broken models.
+            // Suppress the "does not contain a valid SQL query" warning for such files.
             let parse = parse_file(db, file);
-            let has_smelt_tests = AstFile::cast(parse.syntax())
-                .map(|ast| ast.tests().next().is_some())
+            let has_smelt_tests_or_checks = AstFile::cast(parse.syntax())
+                .map(|ast| ast.tests().next().is_some() || ast.checks().next().is_some())
                 .unwrap_or(false);
 
-            if !has_smelt_tests {
+            if !has_smelt_tests_or_checks {
                 DiagnosticAcc(Diagnostic {
                     severity: DiagnosticSeverity::Warning,
                     message: "File does not contain a valid SQL query".to_string(),
@@ -2292,6 +2344,20 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                         message: format!(
                             "Cannot reference test '{leaf}' in a FROM position — \
                              smelt.tests.* paths are not valid as TableExpr values"
+                        ),
+                        range: path_ref_loc.range,
+                        code: Some(DiagnosticCode::KindMismatch),
+                        data: None,
+                    })
+                    .accumulate(db);
+                }
+                if resolved.kind == RefKind::Check && path_ref_loc.in_table_expr_position {
+                    let leaf = path_ref_loc.path.last().cloned().unwrap_or_default();
+                    DiagnosticAcc(Diagnostic {
+                        severity: DiagnosticSeverity::Error,
+                        message: format!(
+                            "Cannot reference check '{leaf}' in a FROM position — \
+                             smelt.check files produce no DB object and cannot be used as TableExpr values"
                         ),
                         range: path_ref_loc.range,
                         code: Some(DiagnosticCode::KindMismatch),

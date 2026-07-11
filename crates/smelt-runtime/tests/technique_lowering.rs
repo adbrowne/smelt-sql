@@ -801,6 +801,8 @@ mod column_scoped_merge_e2e {
             allow_column_removal: false,
             allow_full_refresh: false,
             ephemeral_seed_ctes: vec![],
+            run_checks: false,
+            checks: vec![],
         }
     }
 

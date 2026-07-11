@@ -223,6 +223,8 @@ async fn self_referential_backfill_converges_to_sequential_running_balance() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let outcome = execute_project(

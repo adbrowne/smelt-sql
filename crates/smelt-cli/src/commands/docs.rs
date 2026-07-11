@@ -144,8 +144,8 @@ pub async fn generate(args: DocsGenerateArgs) -> Result<()> {
         }
     }
 
-    // Filter out test models
-    models.retain(|m| !m.is_test());
+    // Filter out assertion files (tests and checks)
+    models.retain(|m| !m.is_assertion());
 
     let python_files = discovery
         .discover_python_files()

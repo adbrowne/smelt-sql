@@ -1,0 +1,18 @@
+name: data_checks
+version: 1
+
+paths:
+  - models
+  - checks
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+models:
+  revenue:
+    materialization: table
