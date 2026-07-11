@@ -1317,12 +1317,7 @@ pub fn maintenance_plan(
         .collect();
 
     let project_scan_bounds = project
-        .and_then(|p| {
-            smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
-                .ok()
-                .map(|(cfg, _)| cfg.maintenance)
-        })
-        .flatten()
+        .and_then(|p| (*crate::queries::project::project_maintenance_config(db, p)).clone())
         .and_then(|m| m.scan_bounds);
 
     let table = path
@@ -1400,12 +1395,7 @@ pub fn maintenance_plan_report(
         .collect();
 
     let project_scan_bounds = project
-        .and_then(|p| {
-            smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
-                .ok()
-                .map(|(cfg, _)| cfg.maintenance)
-        })
-        .flatten()
+        .and_then(|p| (*crate::queries::project::project_maintenance_config(db, p)).clone())
         .and_then(|m| m.scan_bounds);
 
     let table = path
@@ -1829,11 +1819,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         // state.mode but not widen it.
         if let Some(model_state) = metadata.state.as_ref() {
             let project_mode = project
-                .and_then(|p| {
-                    smelt_core::Config::parse_with_warnings(p.smelt_yml_text(db))
-                        .ok()
-                        .map(|(cfg, _)| cfg.state.mode)
-                })
+                .map(|p| crate::queries::project::project_state_mode(db, p))
                 .unwrap_or_default();
             if !project_mode.can_narrow_to(&model_state.mode) {
                 DiagnosticAcc(Diagnostic {
