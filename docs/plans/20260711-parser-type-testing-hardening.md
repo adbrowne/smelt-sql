@@ -72,8 +72,8 @@ A 2026-07-11 review found that the parser silently absorbs all top-level tokens 
 | 5     | done     | bb843c12 | 2026-07-11 |
 | 6     | done     | 78b3a39d | 2026-07-11 |
 | 7     | done     | 415c653d | 2026-07-11 |
-| 8     | done     |        | 2026-07-11 |
-| 9     | pending  |        |      |
+| 8     | done     | 251ec52f | 2026-07-11 |
+| 9     | done     |        | 2026-07-11 |
 
 ---
 
@@ -382,6 +382,10 @@ Update printer round-trip for all four forms.
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Window-function select items leak into GROUP BY ALL grouping keys** (found by the Phase 9 review, 2026-07-11). `classify_select_items` (`crates/smelt-logical/src/analysis/mod.rs`) routes items to `OtherAggregate` only via `is_aggregate()`, never `is_window()`, so a bare `ROW_NUMBER() OVER (…)` projection under `GROUP BY ALL` becomes a grouping key — DuckDB groups by non-aggregate *and non-window* columns. Pre-existing classifier gap, uniquely triggered by ALL expansion; uncommon combination; all tested/fixture cases correct. Fix: add an `is_window()` guard in `classify_select_items` (route to `OtherAggregate` or a new non-key kind) so every key consumer excludes window items.
+- **Dialect-alias resolution lives outside `BuiltinRegistry`** (Phase 8): `SqlFunction::from_name` still owns aliases (NVL, GET_JSON_OBJECT, …); moving alias resolution into the registry would let recognition go fully registry-side. Recorded in architecture.md Known Divergences.
+- **MP13 WIP expect regression**: smelt-logical expect baseline bumped 1→3 (commit 4c5c8ddd) for two production `.expect("live implies Some")` in `maintenance/choice.rs` merged from worktree-incremental; the MP13 owner should classify/convert and re-tighten.
 
 ## Verification
 
