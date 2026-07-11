@@ -353,12 +353,40 @@ pub enum SyntaxKind {
     HASH,
     CTE_SEGMENT,
 
-    // Phase 1 (data-checks): smelt.check top-level declaration.
+    // Pipe SQL (|>) — Data-World SQL pipe query nodes and operator markers.
+    //
+    // PIPE_QUERY: Root node for a FROM-first pipe query. Children are an optional
+    //   WITH_CLAUSE, a FROM_CLAUSE (the entry), and zero or more PIPE_STAGE nodes.
+    // PIPE_STAGE: One `|> OPERATOR body` stage. Contains a zero-width operator
+    //   marker (PIPE_OP_*) and the body tokens/nodes for that operator.
+    //
+    // The PIPE_OP_* markers follow the EXPR_KIND_* zero-width marker pattern:
+    // they are emitted as empty child nodes so that AST wrappers can dispatch
+    // on SyntaxKind rather than inspecting token text.
+    PIPE_QUERY,
+    PIPE_STAGE,
+    PIPE_OP_WHERE,
+    PIPE_OP_SELECT,
+    PIPE_OP_EXTEND,
+    PIPE_OP_SET,
+    PIPE_OP_DROP,
+    PIPE_OP_RENAME,
+    PIPE_OP_AS,
+    PIPE_OP_AGGREGATE,
+    PIPE_OP_ORDER_BY,
+    PIPE_OP_LIMIT,
+    PIPE_OP_JOIN,
+    PIPE_OP_UNION,
+    PIPE_OP_INTERSECT,
+    PIPE_OP_EXCEPT,
+    PIPE_OP_DISTINCT,
+
+    // Data checks: smelt.check top-level declaration.
     //
     // SMELT_CHECK: wraps the entire `smelt.check <name> AS (<select>)` declaration.
     //   Unlike smelt.test there is no required PASSING/EXPECT — those are errors.
-    //   Any stray PASSING/EXPECT clause is captured as a child node so Phase 2
-    //   can emit CheckHasTestClause diagnostics.
+    //   Any stray PASSING/EXPECT clause is captured as a child node so later
+    //   analysis can emit CheckHasTestClause diagnostics.
     // CHECK_NAME: wraps the check name identifier (mirrors TEST_NAME / DEFINE_NAME).
     SMELT_CHECK,
     CHECK_NAME,

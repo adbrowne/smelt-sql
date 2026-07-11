@@ -86,9 +86,17 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
+### 10. ⏸️ `smelt bakeoff` CLI (deferred)
+
+The maintenance-plan programme's cost-model override ladder (`crates/smelt-logical/src/maintenance/choice.rs` — `ChosenTechnique`, `resolve_cell_choice`, the override ladder, `ChoiceRefusal`) is landed and tested. The `smelt bakeoff <model> [--cells ...] [--pin]` CLI that measures admissible techniques over a representative window and optionally pins a choice into frontmatter is deferred until three design questions are resolved: (1) no runtime plumbing exists to force-execute a single named technique against a scratch schema — `execute_project` only runs whole-model resolution; (2) `--pin` has no frontmatter round-trip precedent — nothing writes YAML frontmatter back into a `.sql` file today, and naively re-serializing `ModelMetadata` risks destroying hand-authored formatting; (3) `smelt-cli`'s `commands` module is private, so a bakeoff CLI test can't drive it in-process the way other CLI tests do. See the full writeup in [`docs/plans/20260707-maintenance-plan-impl.md`](plans/20260707-maintenance-plan-impl.md) §"Blocked phases" (2026-07-10). Scope for the eventual follow-up phase: resolve the three questions above (each needs a design decision, not just an implementation), then implement the CLI against them.
+
 ---
 
 ## Recently Completed
+
+### ~~Derived Output Window for Partition-Grain Runs~~ ✅ (July 11, 2026)
+
+Six-phase plan ([plan](plans/20260711-derived-output-window.md)) closing the silent under-write for models whose `partition_column` is derived and skews from the driving date column (Form B relation). The output window is now **derived** from the run window — identity in the common case, skew-inverted `[start − after, end + before)` otherwise — and DELETE range, output clamp, and per-batch scan all key off it; the transparent fast path is restricted to zero-skew models. Skew derivation is a pure walk-composed leaf classifier in `smelt-logical` (`model_partition_skew`). Also fixed `smelt explain --show-sql` clamp injection for function-at-FROM models (wrap-then-compile, matching the live run), strengthened the `per_partition_equivalence` harness (full session 5-tuple + injected cross-midnight and two-boundary chains through the real `sessionize`), and added freshness-gated tutorial sections covering the cross-midnight prior-day rewrite and the two-boundary truncation semantics (the declared relation is a semantic cap). The 60-day `verify_incremental_equivalence.py` replay passes with zero local-column divergence. Deferred items tracked in the plan: name-only skew-anchor matching (over-wide, correctness-safe), `apply_type_casts` inert under the output clamp, and an optional bot-motivated session-continuation rule.
 
 ### ~~Spec-Remediation W8/misc-spec — Provenance-Tag Preservation + Record Overlay Shallow Replace (D-54, D-55)~~ ✅ (June 22, 2026)
 
@@ -807,6 +815,14 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - `smelt test` silently skips `materialization: test` files with a boolean-`SELECT` body — no "discovered but skipped" diagnostic (`20260509-meta-language-G.md`).
 - `smelt seed` command fate undecided (repurpose as `list`/`describe` vs remove; seed type-inference + caching open) (`20260406-seed-schema.md`).
 
+**Incremental eligibility — monotonicity primitive follow-ons** (`20260702-monotonicity-primitive-tested.md`)
+- **Consumers of the trace, unwired today** — `UNION`-branch partitionability (§2.5/E1), subquery/CTE pushdown conservatism (§4.6/B4/E2), and join driving-fact resolution (§5.4). Each is a separate gated plan; the primitive's output type is designed for all three.
+- **Tree-annotation injection redesign** — replace the *textual* `inject_time_filter` / `inject_source_filters` (`transformer.rs:65`,`:272`) with logical/physical-tree annotation consumed by `smelt-planner`'s `plan_printer.rs`. The trace names a *semantic* `(source, source_column, offset)` target; consumers annotate the tree and the printer emits SQL — no consumer ever computes source-text edits (research §6.7, decision 2026-07-02).
+- **Retain-parsed-AST cleanup sweep** — Phase 0 retains the parsed `Expr` on `analyze_select` items; other analyses still re-scan raw text and should retain what's parsed instead: `analysis/mod.rs` clause string-scanning, `source_bounds.rs` textual `INTERVAL`/`RANGE BETWEEN` recognition, `rules/incremental.rs` `Frontmatter::strip`+re-scan, and the `temporal.rs` re-parse sites.
+
+**smelt-logical / smelt-planner extraction**
+- **Consolidate the duplicated analysis modules.** `smelt-planner/src/` still carries a parallel copy of nearly every `smelt-logical` module — `analysis/{mod,source_bounds,temporal}.rs`, `rules/{incremental,cumulative,rule_diagnostics,cube_split}.rs`, `logical.rs`, `graph.rs`, `types.rs`, `lowering/as_struct.rs` — from the recent (incomplete) extraction into `smelt-logical`. Finish the extraction so each analysis lives once (in `smelt-logical`, consumed by both `smelt-db` and `smelt-planner`), leaving `smelt-planner` only its planner-only pieces (`logical_plan_rules.rs`, `plan_printer.rs`, `python_bridge.rs`). Prerequisite context for where any future type-aware analysis moves.
+
 **Datagen / incremental**
 - Foreign-key resolution inside `JsonObject`/`entity.columns` always resolves to id 1 (`20260517-web-analytics-1-datagen-json-object.md`).
 - Cumulative reprocessing detection has no watermark store — refuses via a heuristic pending a state-tracking spec (`20260523-cumulative-aggregate.md`).
@@ -826,6 +842,9 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - `incremental_models.md` Known Divergences omits the window-function safety check as a third non-expanding classify site (BUG-062).
 - `cumulative_aggregate.md` Known Divergences omits the Month/Quarter/Year grain limitation (BUG-071).
 - `smelt docs` follow-ons: HTML output, `smelt docs serve`, column-lineage visualization, `smelt docs diff` (`20260329-docs-generate.md`).
+
+**CI / Performance**
+- **Cold-Salsa full-diagnostics regression (2000-model benchmark)** — the `Benchmarks` CI workflow's catastrophic-regression gate (`crates/smelt-bench/src/bin/save_results.rs`, 10s ceiling) has failed on `main` for three consecutive pushes starting 2026-07-09: `initial_load_ms`/`full_diagnostics_ms` are ≈14.8s, up from a healthy baseline well under the ceiling. The jump lines up with the large incremental/batched-refresh feature merges around PR #151 (monotonicity trace, composition walk, and related per-model logical analyses added significant cold-load work across all 2000 models). Needs profiling (`crates/smelt-bench/src/bin/profile_initial_load.rs`) to find which new analysis is driving the blow-up before deciding whether to optimize it or raise the ceiling.
 
 ---
 

@@ -1068,8 +1068,9 @@ mod tests {
     }
 
     #[test]
-    fn test_delta_array_of_struct_field_add_merge_schema() {
-        // Delta also doesn't support nested array DDL (supports_nested_array_ddl = false)
+    fn test_delta_array_of_struct_field_add_ddl() {
+        // Delta supports nested array DDL (supports_nested_array_ddl = true, empirically verified W7·P2).
+        // So adding a field inside an array-of-struct generates ALTER TABLE ADD COLUMNS, not MergeSchemaWrite.
         let ops = vec![SchemaOperation::AddStructField {
             column: "items".into(),
             path: vec!["element".into()],
@@ -1086,11 +1087,15 @@ mod tests {
             &delta_caps(),
         );
         match result {
-            MigrationExecution::MergeSchemaWrite { columns_to_add } => {
-                assert_eq!(columns_to_add.len(), 1);
-                assert_eq!(columns_to_add[0].0, "items.element.score");
+            MigrationExecution::Statements(stmts) => {
+                assert_eq!(stmts.len(), 1);
+                assert!(
+                    stmts[0].contains("ADD COLUMNS") && stmts[0].contains("items.element.score"),
+                    "expected ALTER TABLE ADD COLUMNS, got: {}",
+                    stmts[0]
+                );
             }
-            other => panic!("Expected MergeSchemaWrite, got {:?}", other),
+            other => panic!("Expected Statements (DDL), got {:?}", other),
         }
     }
 

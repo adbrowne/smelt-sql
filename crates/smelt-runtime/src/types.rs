@@ -132,7 +132,7 @@ pub struct RunOutcome {
     pub total_rows: usize,
     /// Resolved execution plan, populated when `ExecuteRequest::dry_run` is
     /// `true`. The plan lists each selected model with its resolved strategy
-    /// (full refresh, incremental, cumulative, ephemeral, or skipped). When
+    /// (full refresh, incremental, keyed, ephemeral, or skipped). When
     /// `dry_run` is `false` this is `None`.
     pub plan_summary: Option<PlanSummary>,
 
@@ -178,8 +178,8 @@ pub enum ModelStrategy {
         /// Granularity label (e.g. `"day"`, `"week"`, `"month"`).
         granularity: String,
     },
-    /// Cumulative aggregate merge loop.
-    Cumulative,
+    /// Keyed merge loop.
+    Keyed,
     /// Inlined as a CTE into downstream models — not materialized directly.
     Ephemeral,
     /// Excluded from execution.

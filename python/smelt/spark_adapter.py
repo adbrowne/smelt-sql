@@ -15,7 +15,7 @@ import pyarrow as pa
 class SparkAdapter:
     """Wraps a PySpark SparkSession for SQL execution with Arrow results."""
 
-    def __init__(self, connect_url, catalog=None, schema=None):
+    def __init__(self, connect_url, catalog=None):
         from pyspark.sql import SparkSession
 
         builder = SparkSession.builder
@@ -25,8 +25,14 @@ class SparkAdapter:
 
         if catalog:
             self.spark.catalog.setCurrentCatalog(catalog)
-        if schema:
-            self.spark.catalog.setCurrentDatabase(schema)
+
+    def select_current_schema(self, schema):
+        """Select the current database/schema.
+
+        Called by SparkBackend::new() after ensure_schema() has created the schema,
+        so the schema is guaranteed to exist before setCurrentDatabase is called.
+        """
+        self.spark.catalog.setCurrentDatabase(schema)
 
     def execute_sql(self, sql):
         """Execute SQL and return a pyarrow.Table.
@@ -57,22 +63,29 @@ class SparkAdapter:
         row = self.spark.sql(f"SELECT COUNT(*) AS cnt FROM {full_name}").collect()
         return row[0]["cnt"]
 
-    def load_arrow_table(self, parquet_path, full_table_name):
-        """Load a Parquet file written from Arrow batches into a Spark table.
+    def load_arrow_table(self, ipc_bytes, full_table_name):
+        """Load Arrow IPC stream bytes into a Spark table via createDataFrame.
 
-        Drops any existing table with the same name first, then reads the
-        Parquet file and saves as a managed table.
+        Rows are sent through the Connect client — no host-filesystem path is
+        used, so this works with containerised or remote Spark Connect servers.
 
         Args:
-            parquet_path: Local filesystem path to the Parquet file.
+            ipc_bytes: Arrow IPC stream bytes (bytes object) containing the
+                       table data.
             full_table_name: Fully-qualified table name, e.g. "catalog.schema.table".
         """
+        import io
+
+        # Reconstruct the pyarrow Table from the IPC stream bytes.
+        reader = pa.ipc.open_stream(io.BytesIO(ipc_bytes))
+        table = reader.read_all()
+
         # Drop the existing table if present.
         if self.spark.catalog.tableExists(full_table_name):
             self.spark.sql(f"DROP TABLE IF EXISTS {full_table_name}")
 
-        # Read the Parquet file and persist as a managed Spark table.
-        df = self.spark.read.parquet(parquet_path)
+        # Load via createDataFrame — no host path involved.
+        df = self.spark.createDataFrame(table)
         df.write.saveAsTable(full_table_name)
 
     def close(self):

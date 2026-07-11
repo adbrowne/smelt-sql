@@ -76,6 +76,8 @@ fn generate_fk_values(target_count: usize, n: usize) -> Vec<i32> {
         fk_counts: &fk,
         pools: &pools,
         pool_samples: &pool_samples,
+        row_so_far: &[],
+        partition_col: None,
     };
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     (0..n)
@@ -139,6 +141,8 @@ fn fk_zero_count_fallback_hardened() {
         fk_counts: &fk,
         pools: &pools,
         pool_samples: &pool_samples,
+        row_so_far: &[],
+        partition_col: None,
     };
     let mut rng = ChaCha8Rng::seed_from_u64(42);
     let result = apply_spec(&mut rng, &spec, &ctx);

@@ -4,9 +4,23 @@
 //! or future context (lookahead) each query needs beyond the requested
 //! time range. This is combined with upstream data latency to compute
 //! the effective window for incremental execution.
+//!
+//! Advisory heuristic (`docs/specs/architecture.md` §"Property composition
+//! walk rule", `docs/specs/model_properties.md` §Known Divergences): this
+//! module's `EffectiveWindow` estimate is a deliberately separate,
+//! day-granular, uppercase-substring-scanning walk — not the second-granular
+//! `BoundResult` composition walk in `source_bounds.rs`. It answers a
+//! different question (backfill batch-chunking size) with deliberately
+//! different fail-closure (a bare `LAG`/`LEAD` is a bounded row/period
+//! estimate here, where `source_bounds.rs` refuses the same construct
+//! outright). Its output feeds no admission gate and no pushdown-eligibility
+//! proof; every function in this module is an advisory heuristic and stays
+//! text-scan based by design.
 
 use serde::Serialize;
 use smelt_parser::{parse, File, FrameUnit, SelectStmt};
+
+use crate::analysis::source_bounds;
 
 /// How much temporal context a query needs beyond its requested time range.
 #[derive(Debug, Clone, Default, Serialize)]
@@ -336,26 +350,60 @@ fn extract_bound_number(text: &str) -> Option<u32> {
         .find_map(|word| word.parse::<u32>().ok())
 }
 
-/// Extract days from an interval expression like "INTERVAL '3' DAY" or "INTERVAL '3 days'".
+/// Extract days from an interval expression like "INTERVAL '3' DAY" or
+/// "INTERVAL '3 days'", by routing the recognised unit through the shared
+/// [`source_bounds::parse_interval`] — the single interval-literal parser
+/// used everywhere in this crate (see `docs/specs/model_properties.md`
+/// "Unified bound / reach derivation"). Month/year fold to
+/// `Offset::Symbolic` there, since a month/year has no fixed length in
+/// seconds — but this module's `EffectiveWindow` is an advisory
+/// day-granular estimate consumed to widen the actual filter/DELETE range
+/// for real incremental runs (unlike `source_bounds`'s fail-closed pushdown
+/// proof), so silently falling through to the caller's bare-number fallback
+/// would under-widen the lookback by ~30-90x. Apply the same calendar
+/// approximation this estimate has always used: month → 30 days/period,
+/// year → 365 days/period.
 fn extract_interval_days(text: &str) -> Option<u32> {
-    // Try to find a number in the text
     let n = extract_bound_number(text)?;
-
     let upper = text.to_uppercase();
-    if upper.contains("DAY") {
-        Some(n)
+    let unit = if upper.contains("DAY") {
+        "DAY"
     } else if upper.contains("WEEK") {
-        Some(n * 7)
+        "WEEK"
     } else if upper.contains("MONTH") {
-        Some(n * 30) // Approximate
+        "MONTH"
     } else if upper.contains("YEAR") {
-        Some(n * 365) // Approximate
+        "YEAR"
     } else if upper.contains("HOUR") {
-        // Less than a day — round up to 1
-        Some(if n > 0 { 1 } else { 0 })
+        "HOUR"
     } else {
-        // Default: assume days
-        Some(n)
+        // Default: assume days.
+        "DAY"
+    };
+
+    match source_bounds::parse_interval(&format!("{n} {unit}"))? {
+        source_bounds::Offset::Seconds(s) => {
+            // Round up to whole days — a sub-day duration (e.g. HOUR) still
+            // needs at least 1 day of lookback/lookahead margin.
+            let days = s.0.div_ceil(86400) as u32;
+            Some(if n > 0 { days.max(1) } else { 0 })
+        }
+        source_bounds::Offset::Symbolic(_) => Some(match unit {
+            "MONTH" => n * 30,
+            "YEAR" => n * 365,
+            _ => n,
+        }),
+        // `unit` above is always one of the fixed literal strings
+        // DAY/WEEK/MONTH/YEAR/HOUR, and `parse_interval` only ever folds
+        // those to `Seconds`/`Symbolic` — `Integer` is only ever produced
+        // from a bare, non-INTERVAL integer literal elsewhere
+        // (`monotonicity::classify_binary`), never from this
+        // unit-string-driven call. Unreachable in practice; kept as an
+        // explicit arm (not a wildcard) so a future change to `unit`'s
+        // value set is forced to reconsider this match.
+        source_bounds::Offset::Integer(_) => {
+            unreachable!("parse_interval(\"{n} {unit}\") never yields Offset::Integer")
+        }
     }
 }
 
@@ -438,22 +486,50 @@ fn find_interval_in_text(text: &str) -> Option<u32> {
     max_days
 }
 
-/// Given a combined interval text and the numeric value, determine days.
+/// Given a combined interval text (the quoted value plus any unit text that
+/// followed the closing quote, e.g. `"3 " + "DAY"` for `INTERVAL '3' DAY`)
+/// and the numeric value, determine days — routed through the shared
+/// [`source_bounds::parse_interval`] (see `extract_interval_days`'s doc for
+/// why month/year apply a calendar approximation here rather than folding
+/// through to `Offset::Symbolic`/`None`).
 fn extract_interval_days_from_combined(text: &str, n: u32) -> Option<u32> {
     let upper = text.to_uppercase();
-    if upper.contains("DAY") {
-        Some(n)
+    let unit = if upper.contains("DAY") {
+        "DAY"
     } else if upper.contains("WEEK") {
-        Some(n * 7)
+        "WEEK"
     } else if upper.contains("MONTH") {
-        Some(n * 30)
+        "MONTH"
     } else if upper.contains("YEAR") {
-        Some(n * 365)
+        "YEAR"
     } else if upper.contains("HOUR") {
-        Some(if n > 0 { 1 } else { 0 })
+        "HOUR"
     } else {
-        // Default: assume days
-        Some(n)
+        // Default: assume days.
+        "DAY"
+    };
+
+    match source_bounds::parse_interval(&format!("{n} {unit}"))? {
+        source_bounds::Offset::Seconds(s) => {
+            let days = s.0.div_ceil(86400) as u32;
+            Some(if n > 0 { days.max(1) } else { 0 })
+        }
+        source_bounds::Offset::Symbolic(_) => Some(match unit {
+            "MONTH" => n * 30,
+            "YEAR" => n * 365,
+            _ => n,
+        }),
+        // `unit` above is always one of the fixed literal strings
+        // DAY/WEEK/MONTH/YEAR/HOUR, and `parse_interval` only ever folds
+        // those to `Seconds`/`Symbolic` — `Integer` is only ever produced
+        // from a bare, non-INTERVAL integer literal elsewhere
+        // (`monotonicity::classify_binary`), never from this
+        // unit-string-driven call. Unreachable in practice; kept as an
+        // explicit arm (not a wildcard) so a future change to `unit`'s
+        // value set is forced to reconsider this match.
+        source_bounds::Offset::Integer(_) => {
+            unreachable!("parse_interval(\"{n} {unit}\") never yields Offset::Integer")
+        }
     }
 }
 
@@ -491,8 +567,13 @@ pub fn compute_effective_window(
 
     let is_unbounded = temporal.lookback.is_unbounded() || temporal.lookahead.is_unbounded();
 
+    // Lateness and computation-reach are independently-sourced quantities
+    // (`model_properties.md` §"Unified bound / reach derivation"): a row
+    // arriving `data_latency` late still needs the full AST-derived reach of
+    // history behind it, so the scan widens by their SUM — max would silently
+    // truncate the frame for the latest-arriving rows.
     let lookback_days = if let Some(ast_days) = ast_lookback_days {
-        ast_days.max(data_latency_days)
+        ast_days.saturating_add(data_latency_days)
     } else {
         0 // Unbounded — lookback_days is meaningless
     };
@@ -751,27 +832,48 @@ mod tests {
     }
 
     #[test]
-    fn test_effective_window_ast_wins_over_latency() {
-        // 6-day temporal dependency from window function, 3-day latency
+    fn effective_window_sums_lateness_and_reach() {
+        // A 7-day frame plus 3 days of declared lateness: a row arriving 3
+        // days late still needs the full 7 days of history BEHIND it to fold
+        // correctly, so the scan widens by the SUM of the two independently-
+        // sourced quantities (10), never their max (7) — max silently
+        // truncates the frame for the latest-arriving rows.
+        let dep = TemporalDependency {
+            lookback: TemporalOffset::Periods(7),
+            lookahead: TemporalOffset::Zero,
+            sources: vec![],
+        };
+        let window = compute_effective_window(&dep, 3, 1);
+        assert_eq!(
+            window.lookback_days, 10,
+            "lateness and computation-reach are independent; the scan widens by their sum"
+        );
+    }
+
+    #[test]
+    fn test_effective_window_ast_plus_latency() {
+        // 6-day temporal dependency from window function, 3-day latency:
+        // independent quantities sum (a max here encoded the truncated-frame
+        // bug — catalog cell SC-5).
         let dep = TemporalDependency {
             lookback: TemporalOffset::Periods(6),
             lookahead: TemporalOffset::Zero,
             sources: vec![],
         };
         let window = compute_effective_window(&dep, 3, 1);
-        assert_eq!(window.lookback_days, 6); // AST wins
+        assert_eq!(window.lookback_days, 9);
     }
 
     #[test]
-    fn test_effective_window_latency_wins_over_ast() {
-        // 2-day temporal dependency, 5-day latency
+    fn test_effective_window_latency_plus_ast() {
+        // 2-day temporal dependency, 5-day latency — sums from either side.
         let dep = TemporalDependency {
             lookback: TemporalOffset::Days(2),
             lookahead: TemporalOffset::Zero,
             sources: vec![],
         };
         let window = compute_effective_window(&dep, 5, 1);
-        assert_eq!(window.lookback_days, 5); // Latency wins
+        assert_eq!(window.lookback_days, 7);
     }
 
     #[test]
@@ -798,6 +900,20 @@ mod tests {
         };
         let window = compute_effective_window(&dep, 3, 1);
         assert!(window.is_unbounded);
+    }
+
+    #[test]
+    fn test_range_interval_months_preceding_approximates_30_days_per_month() {
+        let sql = "SELECT user_id, SUM(amount) OVER (PARTITION BY user_id ORDER BY day RANGE BETWEEN INTERVAL '3 months' PRECEDING AND CURRENT ROW) as rolling_3mo FROM events";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(90));
+    }
+
+    #[test]
+    fn test_range_interval_years_preceding_approximates_365_days_per_year() {
+        let sql = "SELECT user_id, SUM(amount) OVER (PARTITION BY user_id ORDER BY day RANGE BETWEEN INTERVAL '2 years' PRECEDING AND CURRENT ROW) as rolling_2yr FROM events";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(730));
     }
 
     #[test]

@@ -1,0 +1,22 @@
+name: functional_dependency_declared
+version: 1
+
+# Fixture for the `functional_dependencies` declaration (DC2 of
+# docs/plans/20260704-model-updates-l3-declarations.md;
+# docs/specs/model_properties.md §"Model-scoped declarations"): the
+# `customer_region` column is a per-key constant under `customer_id` — a
+# world-fact the model's own SQL cannot decide statically (no join or
+# aggregate proves it). The declaration parses and structurally validates
+# clean; no transform consumes it yet (DC2 builds the declaration + its
+# widening/guard only).
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

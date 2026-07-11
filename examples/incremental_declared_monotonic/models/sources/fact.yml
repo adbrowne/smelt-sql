@@ -1,0 +1,9 @@
+description: Fact stream partitioned by an integer day-bucket key.
+columns:
+  - { name: event_ts,     type: TIMESTAMP, nullable: false }
+  - { name: partition_key, type: INTEGER,   nullable: false }
+  - { name: user_id,      type: INTEGER,   nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: partition_key
+  granularity: day

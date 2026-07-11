@@ -4,7 +4,8 @@
 //! progress events to `tracing` / stderr and prints compiled SQL to stdout
 //! when `--verbose` or `--dry-run` is active.
 
-use smelt_runtime::reporter::RunReporter;
+use smelt_logical::maintenance::emit::StatementGroup;
+use smelt_runtime::reporter::{ChunkInfo, RunReporter};
 use smelt_runtime::types::ModelStrategy;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
@@ -78,6 +79,36 @@ impl RunReporter for CliReporter {
         }
     }
 
+    fn maintenance_statements(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        chunk: Option<&ChunkInfo>,
+        group: &StatementGroup,
+    ) {
+        // `--dry-run` prints the maintenance statements this invocation would
+        // execute (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
+        // statements"). A real run does not re-print them — its progress is the
+        // `batch_completed`/`model_completed` summary. A backbuild whose range
+        // was split into chunks introduces each chunk's block with a boundary
+        // line naming its `[start, end)` window and position.
+        if !self.dry_run {
+            return;
+        }
+        if let Some(c) = chunk {
+            if c.total > 1 {
+                println!(
+                    "-- chunk {}/{}: [{}, {})",
+                    c.index + 1,
+                    c.total,
+                    c.start,
+                    c.end
+                );
+            }
+        }
+        print!("{}", crate::explain::render_statement_group_text(group, ""));
+    }
+
     fn model_completed(&self, _run_id: &str, model: &str, row_count: usize, duration: Duration) {
         info!("{} done ({} rows, {:?})", model, row_count, duration);
     }
@@ -112,7 +143,7 @@ pub fn format_strategy(strategy: &ModelStrategy) -> String {
             partition_column,
             granularity,
         } => format!("incremental (by {}, {})", partition_column, granularity),
-        ModelStrategy::Cumulative => "cumulative".to_string(),
+        ModelStrategy::Keyed => "keyed".to_string(),
         ModelStrategy::Ephemeral => "ephemeral".to_string(),
         ModelStrategy::Skipped { .. } => "skipped".to_string(),
     }

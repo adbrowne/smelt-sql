@@ -1,13 +1,13 @@
 ---
 feature: timeseries
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-05
 owners: [andrew]
 ---
 
 # Timeseries
 
-> **What this is.** A normative spec for the `timeseries:` frontmatter block — the declaration of a time dimension on a model's or source's output. Out of scope: incremental execution (see `incremental_models.md`), source YAML grammar beyond the timeseries block (see `sources.md`), full model frontmatter schema (see `models.md`).
+> **What this is.** A normative spec for the `timeseries:` frontmatter block — the declaration of a time dimension on a model's or source's output. Out of scope: incremental execution (see `batched_models.md`), source YAML grammar beyond the timeseries block (see `sources.md`), full model frontmatter schema (see `models.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -36,6 +36,7 @@ FROM smelt.orders_raw
 | `partition_column` | yes | — | Identifier — name of the column the engine prunes on (date or integer) |
 | `granularity` | yes | — | One of: `hour`, `day`, `week`, `month`, `quarter`, `year` |
 | `week_start` | no | `monday` | When `granularity: week`. One of: `monday`, `sunday` |
+| `assert_monotonic` | no | `false` | Boolean — the declared-monotonicity escape hatch: the modeller's assertion that the projected `event_time`/partition expression is monotone non-decreasing even where static analysis cannot decide it (an opaque function call). Widens only the *undecidable* verdict; a construct static analysis positively disproves (a constant/`NULL` seed, a row-nondeterministic function, a periodic/piecewise construct) is still refused (`model_properties.md` §"Event-time monotonicity trace") |
 
 `event_time_column` and `partition_column` may be the same column. They differ when the source-of-truth time is a timestamp and the partition is a derived date.
 
@@ -64,7 +65,7 @@ A source that declares `timeseries:` must declare the named `event_time_column` 
 | Code | Severity | Trigger |
 |---|---|---|
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule (missing required key, unknown key, `granularity` not in the enum, `partition_column` absent from the model's output / source's columns, `event_time_column` has an incompatible type). |
-| `TimeseriesRequiredForIncremental` | Error | A model declares `incremental:` without `timeseries:`. |
+| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` without `timeseries:`. |
 
 ### `smelt.yml` (project-level overrides)
 
@@ -87,6 +88,8 @@ A model or source carrying `timeseries:` declares to the planner: *this output h
 
 A model or source **without** `timeseries:` is non-timeseries — it has no declared time dimension. Downstream rules that need partition information treat it as a lookup (read in full, no pushdown).
 
+**`granularity` is the declared propagation grain, checked rather than derived.** For cross-model dependency propagation, `granularity` is each node's partition-axis grain — `maintenance_plan.md` §"The graph layer" defines a dependency edge as running between two partition axes whose grain is the declared `timeseries.granularity` of each node, never per-edge and never derived from the SQL. The SQL's own grouping (a `GROUP BY`/`date_trunc` at some cadence) is not the source of truth; it is only *checked* against the declaration by the grain-alignment proof (`model_properties.md` §"Grain-alignment check"), which reports `Aligned` or `NotAligned{reason}` and never substitutes a derived value for the declared one.
+
 ### Compatibility with materialization modes
 
 | Materialization | `timeseries:` allowed? |
@@ -97,19 +100,23 @@ A model or source **without** `timeseries:` is non-timeseries — it has no decl
 | `ephemeral` | No — ephemeral models have no persisted output; declaring `timeseries:` is `MalformedTimeseries`. |
 | `test` | No — test models are not persistent outputs; declaring `timeseries:` is `MalformedTimeseries`. |
 
-### Interaction with `incremental:`
+### Interaction with the partition grain (`grain: partition`)
 
-A model that declares `incremental:` (per `incremental_models.md`) must also declare `timeseries:`. The two blocks have independent surfaces — `timeseries:` declares the time dimension, `incremental:` opts the model into incremental execution and carries strategy-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `incremental:` without `timeseries:` is `TimeseriesRequiredForIncremental`.
+A model that declares `refresh: incremental` + `grain: partition` (the shape profile detailed in `batched_models.md`) must also declare `timeseries:`. The two surfaces are independent — `timeseries:` declares the time dimension, the partition-grain surface carries grain-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `grain: partition` without `timeseries:` is `TimeseriesRequiredForBatched`.
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
+### Interaction with the key grain (`grain: key`)
+
+A `grain: key` model (the shape profile detailed in `keyed_models.md`) may declare `timeseries:` to time-partition its keyed output. Admission is gated on **key temporal locality**, owned by `keyed_models.md` §"Key temporal locality" — this spec owns only the block grammar and the structural rules below. A key-grain model without an admitted block has non-timeseries output (a lookup).
+
 ### Validation rules
 
-1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY`). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
+1. **Partition column projection.** For a model, `partition_column` must appear in the model's output `SELECT` list (and, if grouping is present, in the `GROUP BY` — except on a `grain: key` model, where it may instead be an aggregate projection admitted by key temporal locality; `keyed_models.md` §"Key temporal locality"). For a source, `partition_column` must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 2. **Event-time column projection.** For a model, `event_time_column` must appear in the model's output. For a source, it must appear in the declared `columns:` list. Violation produces `MalformedTimeseries`.
 3. **Type constraint on event_time_column.** Must be a date, timestamp, or timestamp-with-timezone type per `types.md`. Violation produces `MalformedTimeseries`.
 4. **Type constraint on partition_column.** Must be a date or integer type. (Date-typed partitions are the common case; integer-typed partitions support custom epoch-encoded forms.) Violation produces `MalformedTimeseries`.
-5. **Granularity closure.** Must be one of the enumerated values. Unknown values produce `MalformedTimeseries`. Custom granularity is reserved for a future plugin surface (see `incremental_models.md` § "Granularity values").
+5. **Granularity closure.** Must be one of the enumerated values. Unknown values produce `MalformedTimeseries`. Custom granularity is reserved for a future plugin surface (see `batched_models.md` § "Granularity values").
 6. **`week_start` requires `granularity: week` and must be `monday` or `sunday`.** Setting `week_start` on any other granularity, or setting it to a weekday other than `monday` or `sunday`, is `MalformedTimeseries`.
 7. **Partition / pruning columns must be NOT NULL.** `partition_column` must be NOT NULL on the model's output (or declared `nullable: false` on the source's columns). When `event_time_column` drives pruning (it differs from `partition_column` and is the column a downstream rule filters on), it must be NOT NULL too. A NULL partition value silently escapes the half-open `>= start AND < end` pruning window — it is never deleted or re-inserted — which is a correctness hole for incremental execution. A nullable partition/pruning column is `MalformedTimeseries`.
 8. **Sub-day granularity requires a timestamp-resolution partition type.** When `granularity` is `hour` (a sub-day unit), `partition_column` must be a timestamp-resolution type (timestamp or timestamp-with-timezone), not a plain `date` — a `DATE` cannot represent hour boundaries, so hour-granularity pruning against a `DATE` partition silently coarsens to whole days. A sub-day granularity paired with a `date` (or otherwise day-resolution) partition type is `MalformedTimeseries`.
@@ -117,7 +124,7 @@ A source declaring `timeseries:` opts in to being a pushdown target for downstre
 ### LSP surface
 
 - **Hover** on a `smelt.<path>` reference whose target carries `timeseries:` shows the declared partition column and granularity alongside the column list.
-- **Diagnostics** for `MalformedTimeseries` and `TimeseriesRequiredForIncremental` follow the standard diagnostic format (`lsp.md`).
+- **Diagnostics** for `MalformedTimeseries` and `TimeseriesRequiredForBatched` follow the standard diagnostic format (`lsp.md`).
 - **Goto-definition** for a `timeseries:` field navigates to the column declaration in the model's output or the source YAML.
 
 ### Granularity arithmetic
@@ -160,15 +167,15 @@ This section captures the load-bearing rationale.
 ## References
 
 - **Code**:
-  - `crates/smelt-core/src/config.rs` — `IncrementalConfig` (today's home of the fields; will be split into `TimeseriesConfig` + a slimmer `IncrementalConfig`)
+  - `crates/smelt-core/src/config.rs` — `BatchedConfig`, `TimeseriesConfig`
   - `crates/smelt-core/src/metadata.rs` — frontmatter parsing (`ModelMetadata`)
   - `crates/smelt-core/src/sources.rs` — `SourceInfo` (will gain a `timeseries:` parser path)
-- **Tests**: schema validation, `MalformedTimeseries` diagnostic coverage, `TimeseriesRequiredForIncremental` coverage (to be added with the migration plan)
+- **Tests**: schema validation, `MalformedTimeseries` diagnostic coverage, `TimeseriesRequiredForBatched` coverage (to be added with the migration plan)
 - **User docs**: to be authored alongside the migration plan; will live at `docs-site/docs/reference/timeseries.md`
 - **Plans (history)**:
   - `docs/research/20260521-incremental-as-planner-rule.md` — research doc that proposed factoring `timeseries:` out of `incremental:`
 - **Related specs**:
-  - `incremental_models.md` — consumes `timeseries:`; carries incremental-rule-specific keys
+  - `batched_models.md` — consumes `timeseries:`; carries batched-rule-specific keys
   - `sources.md` — host for `timeseries:` on external sources
   - `models.md` — host for `timeseries:` on model frontmatter; lists the key in the frontmatter table
   - `types.md` — the date/timestamp/integer type vocabulary used for type constraints

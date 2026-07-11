@@ -1,0 +1,6 @@
+description: Orders, append-only, clocked on order_date.
+mutation_profile: append_only
+columns:
+  - { name: order_id, type: INTEGER, nullable: false }
+  - { name: order_date, type: DATE, nullable: false }
+  - { name: customer_id, type: INTEGER, nullable: false }

@@ -1,0 +1,20 @@
+name: horizon_ceiling_comfortable
+version: 1
+
+# Fixture for the `horizon_ceiling` declaration (docs/plans/20260704-model-updates-l3-declarations.md;
+# docs/specs/maintenance_plan.md §"Windowed maintenance and the horizon"): the
+# downstream model's SQL only reaches a 2-hour lookback (a `RANGE BETWEEN
+# INTERVAL` frame), well inside the declared 30-day `horizon_ceiling`. The
+# derived horizon is comfortably under the ceiling, so smelt emits no
+# warning — the clamp still uses the derived (2-hour) value regardless.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

@@ -16,14 +16,18 @@
 //! See `docs/specs/architecture.md` → "Run pipeline parity rule (CLI ↔ UI)"
 //! for the normative invariant.
 
+pub mod backfill;
 pub mod check_runner;
 pub mod combined_loop;
 pub mod compile;
 pub mod cumulative;
+pub mod dimension_horizon_merge;
 pub mod execute;
 pub mod fn_bodies;
 pub mod gate;
+pub mod maintenance_driver;
 pub mod meta_eval;
+pub mod propagation;
 pub mod python;
 pub mod reporter;
 pub mod safety;
@@ -33,6 +37,7 @@ pub mod transformer;
 pub mod types;
 pub mod windowing;
 
+pub use backfill::targeted_column_backfill;
 pub use check_runner::{batches_to_rows, run_single_check, CheckOutcome, CheckStatus};
 pub use combined_loop::run_combined_discovery_loop;
 pub use compile::{
@@ -43,14 +48,19 @@ pub use compile::{
 pub use cumulative::{
     build_cumulative_merge_sql, classify_cumulative_sql, execute_cumulative_aggregate,
 };
-pub use execute::{build_source_timeseries_map, execute_project, BackendFactory, BackendFuture};
+pub use dimension_horizon_merge::dimension_horizon_merge;
+pub use execute::{
+    build_model_source_bounds, build_source_timeseries_map, derive_batch_filtered_sql,
+    execute_project, BackendFactory, BackendFuture,
+};
 pub use fn_bodies::{build_fn_body_map, build_fn_body_map_from_model_files, FnBodyMap};
 pub use gate::{format_gate_errors, gate_diagnostics, GateDiagnostic};
 pub use python::discover_python_models;
-pub use reporter::{NoOpReporter, RunReporter};
+pub use reporter::{ChunkInfo, NoOpReporter, RunReporter};
 pub use select::{select_executable_models, SelectionPlan, SelectionRequest};
 pub use transformer::{
-    inject_source_filters, inject_time_filter, SourceBound, TimeRange, TransformError,
+    inject_source_filters, inject_time_filter, is_transparent_single_source, SourceBound,
+    TimeRange, TransformError,
 };
 pub use types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
 
@@ -71,7 +81,9 @@ mod tests {
         };
         let result = inject_time_filter(sql, "created_at", &range).unwrap();
         assert!(result.contains("WHERE status = 'active'"));
-        assert!(result.contains("AND (created_at >= '2024-01-15' AND created_at < '2024-01-18')"));
+        assert!(result.contains(
+            "_smelt_output_clamp WHERE created_at >= '2024-01-15' AND created_at < '2024-01-18'"
+        ));
     }
 
     #[test]

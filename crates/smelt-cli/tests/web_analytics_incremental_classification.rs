@@ -107,15 +107,19 @@ fn web_analytics_incremental_models_classify_as_safe() {
     //   events_parsed               → silver.events_parsed
     //   eventstream_with_identity   → gold.eventstream_with_identity
     //   daily_active_users_by_method → marts.daily_active_users_by_method
-    for model in &["silver.events_parsed", "marts.daily_active_users_by_method"] {
-        assert_incremental_and_fully_batch_safe(&output, model);
-    }
+    assert_incremental_and_fully_batch_safe(&output, "marts.daily_active_users_by_method");
 
     // Models that carry an explicit lookback bound classify as bounded_safe
     // (a safe class — the planner widens the source read by the derived bound).
     // Both are safe; the assertion accepts either fully_batch_safe or
     // bounded_safe to guard only against silent downgrades to the refused class.
     //
+    //   silver.events_parsed            — Form B BETWEEN filter accepting
+    //                                     late-arriving events up to 3 days
+    //                                     (`event_date BETWEEN CAST(arrival_time
+    //                                     AS DATE) - INTERVAL '3 days' AND
+    //                                     CAST(arrival_time AS DATE)`), a genuine
+    //                                     derived reach on `bronze.raw_events`.
     //   silver.sessions                 — RANGE INTERVAL frames (Form A) on the
     //                                     LAG/MAX window functions plus a Form B
     //                                     BETWEEN filter widening the write window
@@ -125,6 +129,7 @@ fn web_analytics_incremental_models_classify_as_safe() {
     //                                     a session that started on D-1.
     //   gold.identity_forward_only      — Form B BETWEEN filter on event_date.
     for model in &[
+        "silver.events_parsed",
         "silver.sessions",
         "gold.eventstream_with_identity",
         "gold.identity_forward_only",

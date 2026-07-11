@@ -22,13 +22,14 @@ pub mod test_runner;
 
 pub use backend_registry::BackendRegistry;
 pub use config::{
-    find_project_root, BackendType, Config, IncrementalConfig, Materialization, SourcesConfig,
+    find_project_root, BackendType, BatchedConfig, Config, Materialization, SourcesConfig,
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::CliError;
 pub use explain::{
-    build_explain_output, build_physical_explain, ExplainIncremental, ExplainModel, ExplainOutput,
-    ExplainPhysical, ExplainPhysicalNode, SourceBoundJson,
+    build_explain_output, build_maintenance_plan_report, build_physical_explain,
+    ExplainIncremental, ExplainModel, ExplainOutput, ExplainPhysical, ExplainPhysicalNode,
+    SourceBoundJson,
 };
 pub use metadata::{extract_file_metadata, FileMetadata, MetadataError, ModelMetadata};
 pub use python::discover_python_models;
@@ -41,8 +42,8 @@ pub use smelt_runtime::{
     TimeRange, TransformError, UpstreamSchemas,
 };
 pub use temporal::{
-    compute_incremental_windows, compute_single_window, validate_run_window_alignment,
-    IncrementalBatch, IncrementalWindows, SingleIncrementalWindow,
+    compute_incremental_windows, validate_run_window_against_partition_grid,
+    validate_run_window_alignment, IncrementalBatch, IncrementalWindows,
 };
 pub use test_compiler::{
     compile_whole_model_test_with_fns, extract_ctes, find_cte_ref_in_body,

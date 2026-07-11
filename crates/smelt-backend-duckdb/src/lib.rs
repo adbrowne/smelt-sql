@@ -5,7 +5,9 @@ use arrow::array::RecordBatch;
 use arrow::datatypes::{DataType, SchemaRef, TimeUnit};
 use async_trait::async_trait;
 use duckdb::Connection;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect, StatementGroup,
+};
 use std::collections::BTreeMap;
 use std::path::Path;
 use std::sync::{Arc, Mutex};
@@ -615,38 +617,64 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
-    async fn merge_into(
-        &self,
-        schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
-    ) -> Result<(), BackendError> {
-        let table_name = format!("{}.{}", schema, table);
-
-        let on_clause = unique_key
-            .iter()
-            .map(|k| format!("target.{} = source.{}", k, k))
-            .collect::<Vec<_>>()
-            .join(" AND ");
-
-        let merge_sql = format!(
-            "MERGE INTO {} AS target USING ({}) AS source ON {} \
-             WHEN MATCHED THEN UPDATE SET * \
-             WHEN NOT MATCHED THEN INSERT *",
-            table_name, source_sql, on_clause
-        );
-
+    /// Real transactional override: executes the emitted [`StatementGroup`]
+    /// (`smelt_logical::maintenance::emit`) inside one `duckdb::Transaction`
+    /// when `group.transactional` — e.g. a paired region `DELETE`+`INSERT`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"). `Transaction` rolls back on `Drop` unless explicitly
+    /// committed (`duckdb::transaction::DropBehavior::Rollback` is the
+    /// default), so a later statement's failure — the `?` returns before
+    /// `commit()` is reached — rolls back every earlier statement in the
+    /// group for free. This crate no longer builds any maintenance-statement
+    /// text of its own; every string in `statements` came from the emitter.
+    async fn execute_statement_group(&self, group: &StatementGroup) -> Result<(), BackendError> {
+        let label = group
+            .statements
+            .first()
+            .map(|s| s.sql.clone())
+            .unwrap_or_default();
+        let statements: Vec<String> = group.statements.iter().map(|s| s.sql.clone()).collect();
+        let transactional = group.transactional && statements.len() > 1;
         let connection = Arc::clone(&self.connection);
 
         tokio::task::spawn_blocking(move || {
-            let conn = connection.lock().expect("DuckDB connection mutex poisoned");
-            conn.execute(&merge_sql, [])
-                .map_err(|e| BackendError::execution_failed(table_name.clone(), e.to_string()))?;
+            // invariant: see table_exists_sync for rationale; same mutex.
+            let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
+            if transactional {
+                let tx = conn
+                    .transaction()
+                    .map_err(|e| BackendError::execution_failed(label.clone(), e.to_string()))?;
+                for sql in &statements {
+                    tx.execute(sql, []).map_err(|e| {
+                        BackendError::execution_failed(label.clone(), e.to_string())
+                    })?;
+                }
+                tx.commit()
+                    .map_err(|e| BackendError::execution_failed(label.clone(), e.to_string()))?;
+            } else {
+                for sql in &statements {
+                    conn.execute(sql, []).map_err(|e| {
+                        BackendError::execution_failed(label.clone(), e.to_string())
+                    })?;
+                }
+            }
             Ok(())
         })
         .await
         .map_err(|e| BackendError::Other(e.into()))?
+    }
+
+    /// DuckDB executes the emitted column-scoped `MERGE`'s `UPDATE SET *`
+    /// form; the full-row source-projection contract that shape relies on is
+    /// documented on `smelt_logical::maintenance::emit::
+    /// emit_column_scoped_merge`, the single author of that statement text.
+    /// `merge_into` itself is not overridden here — the `Backend` trait's
+    /// default implementation (build the `StatementGroup` via that emitter,
+    /// then `execute_statement_group`) is exactly this backend's shape: a
+    /// single non-transactional statement over the same connection every
+    /// other statement group runs through.
+    fn supports_column_scoped_merge(&self) -> bool {
+        true
     }
 
     async fn insert_overwrite(
@@ -680,6 +708,72 @@ impl Backend for DuckDbBackend {
         .await
         .map_err(|e| BackendError::Other(e.into()))?
     }
+
+    /// Real transactional override (`docs/specs/maintenance_plan.md`
+    /// §Constraints "Never fold a delta already reflected in the state"):
+    /// `insert_sql` (the ledger's `PRIMARY KEY`-guarded record of this
+    /// delta identity) and `action_sql` (the fold itself) run inside one
+    /// `duckdb::Transaction` — either both commit or neither does, so a
+    /// crash between the two can never leave the ledger claiming a fold
+    /// that never happened, or vice versa. `ensure_sql` (idempotent
+    /// `CREATE TABLE IF NOT EXISTS`) runs first, outside that transaction —
+    /// safe standalone, and keeps DuckDB's DDL-vs-constraint-check
+    /// interaction out of the transaction that actually needs atomicity.
+    /// A repeat delta violates the ledger table's own `PRIMARY KEY`;
+    /// `Transaction`'s default `DropBehavior::Rollback` undoes the failed
+    /// insert attempt for free, so `action_sql` never runs a second time —
+    /// no check-then-act race across the write.
+    async fn fold_ledger_delta(
+        &self,
+        ensure_sql: &str,
+        insert_sql: &str,
+        _exists_sql: &str,
+        action_sql: &str,
+    ) -> Result<(), BackendError> {
+        let ensure_sql = ensure_sql.to_string();
+        let insert_sql = insert_sql.to_string();
+        let action_sql = action_sql.to_string();
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
+
+            conn.execute(&ensure_sql, [])
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+
+            let tx = conn
+                .transaction()
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+
+            if let Err(e) = tx.execute(&insert_sql, []) {
+                let message = e.to_string();
+                if is_constraint_violation(&message) {
+                    // `tx` rolls back on drop (default `DropBehavior::Rollback`):
+                    // the failed insert never lands, and `action_sql` below
+                    // never runs.
+                    return Err(BackendError::already_reflected(message));
+                }
+                return Err(BackendError::execution_failed("ledger", message));
+            }
+
+            tx.execute(&action_sql, [])
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+
+            tx.commit()
+                .map_err(|e| BackendError::execution_failed("ledger", e.to_string()))?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
+}
+
+/// Whether a DuckDB error message reports a constraint violation (`PRIMARY
+/// KEY`/`UNIQUE`) rather than some other execution failure. DuckDB's error
+/// text for this case reliably contains "constraint" (e.g. "Constraint
+/// Error: Duplicate key ... violates primary key constraint").
+fn is_constraint_violation(message: &str) -> bool {
+    message.to_lowercase().contains("constraint")
 }
 
 #[cfg(test)]
@@ -848,6 +942,8 @@ mod tests {
         assert!(caps.supports_merge);
         assert!(caps.supports_create_or_replace_table);
         assert!(!caps.supports_insert_overwrite);
+        assert!(!caps.supports_native_ivm);
+        assert!(!caps.supports_retraction);
     }
 
     #[tokio::test]
@@ -978,33 +1074,283 @@ mod tests {
         assert_eq!(val, 999);
     }
 
+    // ── delete_and_insert_transactional: per-chunk transaction boundary ─────────
+    // (`batched_models.md` §"First-run and backfill": "Each chunk's
+    // DELETE+INSERT is one backend transaction. INSERT failure rolls back
+    // the chunk's DELETE.")
+
+    #[tokio::test]
+    async fn test_delete_and_insert_transactional_commits_on_success() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql(
+                "CREATE TABLE main.daily AS SELECT * FROM (VALUES \
+                 ('2024-01-01', 10), ('2024-01-02', 30)) AS t(dt, val)",
+            )
+            .await
+            .unwrap();
+
+        let partition = smelt_backend::PartitionRange {
+            column: "dt".to_string(),
+            start: "2024-01-01".to_string(),
+            end: "2024-01-02".to_string(),
+        };
+
+        backend
+            .delete_and_insert_transactional(
+                "main",
+                "daily",
+                &partition,
+                "SELECT '2024-01-01' as dt, 999 as val",
+            )
+            .await
+            .unwrap();
+
+        let count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(count, 2, "delete removed 1 row, insert added 1 row back");
+
+        let result = backend
+            .execute_sql("SELECT val FROM main.daily WHERE dt = '2024-01-01'")
+            .await
+            .unwrap();
+        let val: i32 = result[0]
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int32Array>()
+            .unwrap()
+            .value(0);
+        assert_eq!(val, 999, "the replacement row from the INSERT is present");
+    }
+
+    #[tokio::test]
+    async fn test_delete_and_insert_transactional_rolls_back_delete_on_insert_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.daily (dt VARCHAR, val INTEGER)")
+            .await
+            .unwrap();
+        backend
+            .execute_sql(
+                "INSERT INTO main.daily VALUES ('2024-01-01', 10), ('2024-01-01', 20), \
+                 ('2024-01-02', 30)",
+            )
+            .await
+            .unwrap();
+
+        let before_count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(before_count, 3);
+
+        let partition = smelt_backend::PartitionRange {
+            column: "dt".to_string(),
+            start: "2024-01-01".to_string(),
+            end: "2024-01-02".to_string(),
+        };
+
+        // The INSERT SELECT references a column that doesn't exist in
+        // `main.daily`'s schema (dt, val) — this fails at INSERT time, after
+        // the DELETE has already run inside the same transaction.
+        let result = backend
+            .delete_and_insert_transactional(
+                "main",
+                "daily",
+                &partition,
+                "SELECT '2024-01-01' as dt, 999 as val, 'bogus' as nonexistent_column",
+            )
+            .await;
+
+        assert!(
+            result.is_err(),
+            "an INSERT into a mismatched schema should fail"
+        );
+
+        // The DELETE must have been rolled back — the table state must equal
+        // what it was before this (failed) attempt, not "deleted with no
+        // replacement rows".
+        let after_count = backend.get_row_count("main", "daily").await.unwrap();
+        assert_eq!(
+            after_count, before_count,
+            "a failed INSERT must roll back the paired DELETE"
+        );
+
+        let jan1_count: usize = {
+            let rows = backend
+                .execute_sql("SELECT val FROM main.daily WHERE dt = '2024-01-01' ORDER BY val")
+                .await
+                .unwrap();
+            rows.iter().map(|b| b.num_rows()).sum()
+        };
+        assert_eq!(
+            jan1_count, 2,
+            "the two 2024-01-01 rows deleted mid-transaction must be restored"
+        );
+    }
+
+    // ── fold_ledger_delta: warehouse-resident per-delta ledger (MP12) ────
+    // (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    // already reflected in the state" — the DuckDB override must run the
+    // ledger insert and the paired fold action as one transaction.)
+
+    fn ledger_sql(
+        model: &str,
+        delta_id: &str,
+        action_sql: &str,
+    ) -> (String, String, String, String) {
+        let ensure_sql = smelt_state::ddl_duckdb::generate_ledger_table_ddl("main");
+        let insert_sql = smelt_state::ddl_duckdb::generate_ledger_insert_sql(
+            "main",
+            model,
+            "{*}",
+            "smelt.events",
+            delta_id,
+            "2026-01-01",
+            "2026-01-02",
+        );
+        let exists_sql = smelt_state::ddl_duckdb::generate_ledger_exists_sql(
+            "main",
+            model,
+            "{*}",
+            "smelt.events",
+            delta_id,
+        );
+        (ensure_sql, insert_sql, exists_sql, action_sql.to_string())
+    }
+
+    #[tokio::test]
+    async fn test_fold_ledger_delta_commits_ledger_and_action_together() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (n INTEGER)")
+            .await
+            .unwrap();
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-01",
+            "INSERT INTO main.device_stats VALUES (1)",
+        );
+
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("first fold commits");
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(count, 1, "the paired action ran and committed");
+    }
+
+    #[tokio::test]
+    async fn test_fold_ledger_delta_refuses_repeat_and_never_reruns_action() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (n INTEGER)")
+            .await
+            .unwrap();
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-01",
+            "INSERT INTO main.device_stats VALUES (1)",
+        );
+
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("first fold commits");
+
+        // A repeat of the exact same delta identity — the ledger's PRIMARY
+        // KEY refuses inside the transaction, and the paired action must
+        // not run a second time (no check-then-act race across the write).
+        let result = backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await;
+
+        assert!(
+            matches!(result, Err(BackendError::AlreadyReflected { .. })),
+            "repeat delta must surface AlreadyReflected, got: {:?}",
+            result
+        );
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(
+            count, 1,
+            "the paired action must not run a second time once the ledger insert was refused"
+        );
+    }
+
+    #[tokio::test]
+    async fn test_fold_ledger_delta_distinct_deltas_both_apply() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (n INTEGER)")
+            .await
+            .unwrap();
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-01",
+            "INSERT INTO main.device_stats VALUES (1)",
+        );
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("first delta folds");
+
+        let (ensure_sql, insert_sql, exists_sql, action_sql) = ledger_sql(
+            "device_stats",
+            "2026-01-02",
+            "INSERT INTO main.device_stats VALUES (2)",
+        );
+        backend
+            .fold_ledger_delta(&ensure_sql, &insert_sql, &exists_sql, &action_sql)
+            .await
+            .expect("a distinct delta identity is not refused");
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(count, 2, "both distinct deltas' actions ran");
+    }
+
     /// `resolve_strategy` is no longer a dispatching function — it always
     /// returns DeleteInsert. MERGE is the physical primitive of the
     /// `cumulative_aggregate` materialization and is not selected through
     /// the IncrementalStrategy enum.
     #[tokio::test]
     async fn test_resolve_strategy_always_delete_insert() {
-        use smelt_backend::IncrementalConfig;
-        use smelt_backend::IncrementalSafetyOverrides;
+        use smelt_backend::BatchedConfig;
+        use smelt_backend::BatchedSafetyOverrides;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.duckdb");
         let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
 
-        let config_with_key = IncrementalConfig {
-            enabled: true,
+        let config_with_key = BatchedConfig {
             unique_key: vec!["id".to_string()],
-            safety_overrides: IncrementalSafetyOverrides::default(),
+            nondeterministic_columns: vec![],
+            safety_overrides: BatchedSafetyOverrides::default(),
         };
         assert_eq!(
             backend.resolve_strategy(&config_with_key),
             smelt_backend::IncrementalStrategy::DeleteInsert,
         );
 
-        let config_without_key = IncrementalConfig {
-            enabled: true,
+        let config_without_key = BatchedConfig {
             unique_key: vec![],
-            safety_overrides: IncrementalSafetyOverrides::default(),
+            nondeterministic_columns: vec![],
+            safety_overrides: BatchedSafetyOverrides::default(),
         };
         assert_eq!(
             backend.resolve_strategy(&config_without_key),

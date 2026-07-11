@@ -1,6 +1,9 @@
-//! Classifier for the `cumulative_aggregate` materialization.
+//! Classifier for the `refresh: keyed` mode.
 //!
-//! See `docs/specs/cumulative_aggregate.md` for the normative spec.
+//! See `docs/specs/keyed_models.md` for the normative spec. This module is
+//! the mode's built seed: the direct-monoid families (additive fold,
+//! extremal/lattice fold) — the overwrite, once-write, and plain-overwrite
+//! families are not yet classified here.
 //!
 //! The classifier is a pure function that reads an inlined SELECT
 //! (post function expansion) plus a small source-timeseries lookup
@@ -14,13 +17,16 @@
 //!   FROM clause.
 //!
 //! Returns a `CumulativeClassification` on success or a list of
-//! `CumulativeDiagnostic`s on rejection.
+//! `KeyedDiagnostic`s on rejection.
 
 use serde::Serialize;
 use smelt_core::config::TimeseriesConfig;
 use std::collections::HashMap;
 
+use crate::analysis::monotonicity::NONDETERMINISTIC_FUNCTIONS;
+use crate::analysis::source_bounds::{resolve_single_anchor, AnchorAmbiguity};
 use crate::analysis::{analyze_select, SelectItemKind};
+use smelt_types::SqlFunction;
 
 /// A per-partition aggregator paired with its cross-partition combiner.
 ///
@@ -76,104 +82,116 @@ impl CrossPartitionCombiner {
     }
 }
 
-/// Lookup a per-partition aggregator name in the allowlist and return its
-/// cross-partition combiner. `None` means the aggregator is not in the v1
-/// allowlist.
+/// Lookup a per-partition aggregator name and return its cross-partition
+/// combiner. The gate is the shared algebraic-discriminants classifier
+/// (`analysis::discriminants::combiner_discriminants`) — only a monoid
+/// combiner is admitted; `None` means the aggregator is not a monoid (either
+/// holistic, e.g. `AVG`/`STRING_AGG`, or unrecognised).
 pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
-    match agg_name.to_ascii_uppercase().as_str() {
-        "COUNT" => Some(CrossPartitionCombiner::Sum),
-        "SUM" => Some(CrossPartitionCombiner::Sum),
-        "MIN" => Some(CrossPartitionCombiner::Min),
-        "MAX" => Some(CrossPartitionCombiner::Max),
-        "BOOL_AND" => Some(CrossPartitionCombiner::BoolAnd),
-        "BOOL_OR" => Some(CrossPartitionCombiner::BoolOr),
-        "BIT_AND" => Some(CrossPartitionCombiner::BitAnd),
-        "BIT_OR" => Some(CrossPartitionCombiner::BitOr),
-        "BIT_XOR" => Some(CrossPartitionCombiner::BitXor),
+    let function = SqlFunction::from_name(agg_name)?;
+    let discriminants = crate::analysis::discriminants::combiner_discriminants(function, false);
+    if !discriminants.is_monoid {
+        return None;
+    }
+    match function {
+        SqlFunction::Count | SqlFunction::Sum => Some(CrossPartitionCombiner::Sum),
+        SqlFunction::Min => Some(CrossPartitionCombiner::Min),
+        SqlFunction::Max => Some(CrossPartitionCombiner::Max),
+        SqlFunction::BoolAnd => Some(CrossPartitionCombiner::BoolAnd),
+        SqlFunction::BoolOr => Some(CrossPartitionCombiner::BoolOr),
+        SqlFunction::BitAnd => Some(CrossPartitionCombiner::BitAnd),
+        SqlFunction::BitOr => Some(CrossPartitionCombiner::BitOr),
+        SqlFunction::BitXor => Some(CrossPartitionCombiner::BitXor),
         _ => None,
     }
 }
 
-/// A diagnostic code emitted by the cumulative classifier.
+/// A diagnostic code emitted by the keyed classifier.
 ///
-/// Mirrors `cumulative_aggregate.md` §"Diagnostic codes".
+/// Mirrors `keyed_models.md` §"Diagnostic codes" (owned by this spec).
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
-pub enum CumulativeDiagnostic {
-    CumulativeRequiresGroupBy,
-    CumulativeUnknownAggregator {
+pub enum KeyedDiagnostic {
+    KeyedRequiresGroupBy,
+    KeyedUnknownCombiner {
         projection: String,
         offending: String,
     },
-    CumulativeGroupByContainsPartitionColumn {
+    KeyedGroupByContainsPartitionColumn {
         partition_column: String,
     },
-    CumulativeForbidsWindowFunctions,
-    CumulativeForbidsNondeterministic {
+    KeyedForbidsWindowFunctions,
+    KeyedForbidsNondeterministic {
         offending: String,
     },
-    CumulativeNoDrivingSource,
-    CumulativeMultipleDrivingSources {
+    /// Interim not-yet-supported refusal: no clocked driving source was
+    /// found, and the snapshot-reconcile executor is unbuilt
+    /// (`docs/specs/keyed_models.md` §Known Divergences). This is a
+    /// fail-loud "not yet" refusal, not a model error.
+    KeyedSnapshotPostureUnsupported,
+    KeyedMultipleDrivingSources {
         candidates: Vec<String>,
     },
-    SqlNotParseable,
+    KeyedSqlNotParseable,
 }
 
-impl std::fmt::Display for CumulativeDiagnostic {
+impl std::fmt::Display for KeyedDiagnostic {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            CumulativeDiagnostic::CumulativeRequiresGroupBy => write!(
+            KeyedDiagnostic::KeyedRequiresGroupBy => write!(
                 f,
-                "CumulativeRequiresGroupBy: cumulative_aggregate SELECT must have a GROUP BY \
+                "KeyedRequiresGroupBy: refresh: keyed SELECT must have a GROUP BY \
                  clause — the GROUP BY columns are the unique key"
             ),
-            CumulativeDiagnostic::CumulativeUnknownAggregator {
+            KeyedDiagnostic::KeyedUnknownCombiner {
                 projection,
                 offending,
             } => write!(
                 f,
-                "CumulativeUnknownAggregator: projection `{}` uses `{}`, which is not in the \
-                 cumulative aggregator allowlist (COUNT, SUM, MIN, MAX, BOOL_AND, BOOL_OR, \
+                "KeyedUnknownCombiner: projection `{}` uses `{}`, which is not in the \
+                 keyed aggregator allowlist (COUNT, SUM, MIN, MAX, BOOL_AND, BOOL_OR, \
                  BIT_AND, BIT_OR, BIT_XOR). Composite expressions over aggregates are not \
                  allowed — split into separate projections.",
                 projection, offending
             ),
-            CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn { partition_column } => {
+            KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { partition_column } => {
                 write!(
                     f,
-                    "CumulativeGroupByContainsPartitionColumn: the GROUP BY contains the driving \
+                    "KeyedGroupByContainsPartitionColumn: the GROUP BY contains the driving \
                      source's partition_column `{}`, which produces a per-partition output shape, \
-                     not the cumulative one — switch to `materialization: incremental` + \
-                     `timeseries:` instead",
+                     not the keyed one — switch to `refresh: batched` + `timeseries:` instead, or \
+                     declare `timeseries:` on this model to stay keyed",
                     partition_column
                 )
             }
-            CumulativeDiagnostic::CumulativeForbidsWindowFunctions => write!(
+            KeyedDiagnostic::KeyedForbidsWindowFunctions => write!(
                 f,
-                "CumulativeForbidsWindowFunctions: window functions (OVER (...)) are not allowed \
-                 in cumulative_aggregate SELECTs — the cumulative state is the window"
+                "KeyedForbidsWindowFunctions: window functions (OVER (...)) are not allowed \
+                 in refresh: keyed SELECTs — the keyed state is the window"
             ),
-            CumulativeDiagnostic::CumulativeForbidsNondeterministic { offending } => write!(
+            KeyedDiagnostic::KeyedForbidsNondeterministic { offending } => write!(
                 f,
-                "CumulativeForbidsNondeterministic: non-deterministic function `{}` is not \
-                 allowed in cumulative_aggregate SELECTs — cross-partition combine requires \
-                 deterministic per-partition output",
+                "KeyedForbidsNondeterministic: non-deterministic function `{}` is not \
+                 allowed in refresh: keyed SELECTs — cross-window combine requires \
+                 deterministic per-window output",
                 offending
             ),
-            CumulativeDiagnostic::CumulativeNoDrivingSource => write!(
+            KeyedDiagnostic::KeyedSnapshotPostureUnsupported => write!(
                 f,
-                "CumulativeNoDrivingSource: no source in the FROM clause declares a `timeseries:` \
-                 block — declare `timeseries:` on the source, or choose a different materialization"
+                "KeyedSnapshotPostureUnsupported: this model has no clocked driving source \
+                 (no timeseries-tagged source in the FROM clause) — the snapshot-reconcile \
+                 executor for `refresh: keyed` is not yet built (see \
+                 docs/plans/20260705-keyed-collapse.md). Declare `timeseries:` on a driving \
+                 source to use the window-forward run shape instead."
             ),
-            CumulativeDiagnostic::CumulativeMultipleDrivingSources { candidates } => write!(
+            KeyedDiagnostic::KeyedMultipleDrivingSources { candidates } => write!(
                 f,
-                "CumulativeMultipleDrivingSources: multiple timeseries-tagged sources in the \
+                "KeyedMultipleDrivingSources: multiple timeseries-tagged sources in the \
                  FROM clause ({}). v1 supports exactly one driving source.",
                 candidates.join(", ")
             ),
-            CumulativeDiagnostic::SqlNotParseable => write!(
-                f,
-                "SQL body could not be parsed for cumulative classification"
-            ),
+            KeyedDiagnostic::KeyedSqlNotParseable => {
+                write!(f, "SQL body could not be parsed for keyed classification")
+            }
         }
     }
 }
@@ -200,20 +218,8 @@ pub struct DrivingSource {
 
 /// Lookup table for a source's `timeseries:` declaration. The classifier
 /// uses this to identify the driving source and to enforce
-/// `CumulativeGroupByContainsPartitionColumn`.
+/// `KeyedGroupByContainsPartitionColumn`.
 pub type SourceTimeseriesMap = HashMap<String, TimeseriesConfig>;
-
-/// Non-deterministic function names that disqualify a cumulative SELECT.
-const NONDETERMINISTIC_FUNCTIONS: &[&str] = &[
-    "RANDOM",
-    "RAND",
-    "NOW",
-    "CURRENT_TIMESTAMP",
-    "CURRENT_DATE",
-    "UUID",
-    "GEN_RANDOM_UUID",
-    "SETSEED",
-];
 
 /// Classify a `cumulative_aggregate` model.
 ///
@@ -228,19 +234,19 @@ pub fn classify_cumulative(
     sql: &str,
     refs: &[String],
     source_timeseries: &SourceTimeseriesMap,
-) -> Result<CumulativeClassification, Vec<CumulativeDiagnostic>> {
+) -> Result<CumulativeClassification, Vec<KeyedDiagnostic>> {
     let mut diagnostics = Vec::new();
 
     let analysis = match analyze_select(sql) {
         Some(a) => a,
         None => {
-            return Err(vec![CumulativeDiagnostic::SqlNotParseable]);
+            return Err(vec![KeyedDiagnostic::KeyedSqlNotParseable]);
         }
     };
 
     // Rule: GROUP BY required.
     if analysis.group_by_exprs.is_empty() {
-        diagnostics.push(CumulativeDiagnostic::CumulativeRequiresGroupBy);
+        diagnostics.push(KeyedDiagnostic::KeyedRequiresGroupBy);
     }
 
     // Build the unique_key as the SELECT aliases corresponding to GROUP BY
@@ -250,7 +256,9 @@ pub fn classify_cumulative(
     for group_expr in &analysis.group_by_exprs {
         // Find the matching projection by expression text.
         let matched = analysis.items.iter().find_map(|item| match item {
-            SelectItemKind::GroupByKey { text, alias } if text == group_expr => Some(alias.clone()),
+            SelectItemKind::GroupByKey { text, alias, .. } if text == group_expr => {
+                Some(alias.clone())
+            }
             _ => None,
         });
         if let Some(alias) = matched {
@@ -268,7 +276,7 @@ pub fn classify_cumulative(
     let mut aggregator_columns: Vec<AggregatorColumn> = Vec::new();
     for item in &analysis.items {
         match item {
-            SelectItemKind::GroupByKey { text, alias } => {
+            SelectItemKind::GroupByKey { text, alias, .. } => {
                 // A "GroupByKey" item is the analyser's classification for
                 // any non-aggregate expression. If the projection's text
                 // appears in the GROUP BY, it is genuinely a key column.
@@ -277,7 +285,7 @@ pub fn classify_cumulative(
                 // permitted in a cumulative SELECT.
                 let in_group_by = analysis.group_by_exprs.iter().any(|g| g == text);
                 if !in_group_by {
-                    diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                    diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                         projection: alias.clone(),
                         offending: format!("composite expression `{}`", text.trim()),
                     });
@@ -287,16 +295,25 @@ pub fn classify_cumulative(
                 // COUNT(DISTINCT x) is not commutative under merge (the union
                 // of distinct values across partitions cannot be reconstructed
                 // from per-partition counts). Refuse.
-                diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                     projection: alias.clone(),
                     offending: "COUNT(DISTINCT)".to_string(),
                 });
             }
-            SelectItemKind::OtherAggregate { text, alias } => {
-                // Extract the outer function name. The projection text is
-                // something like `COUNT(*)` or `MIN(event_ts)`; we want the
-                // identifier before the first `(`.
-                let agg_name = extract_outer_function_name(text);
+            SelectItemKind::OtherAggregate {
+                text, alias, expr, ..
+            } => {
+                // Extract the outer function name from the already-parsed
+                // expression (no string re-parse) and confirm it against the
+                // typed aggregate classifier — the same
+                // `SqlFunction::is_aggregate` predicate `analysis::mod` used
+                // to classify this item as `OtherAggregate` in the first
+                // place.
+                let agg_name = expr
+                    .as_function_call()
+                    .and_then(|f| f.name())
+                    .map(|n| n.to_ascii_uppercase())
+                    .filter(|n| SqlFunction::from_name(n).is_some_and(|f| f.is_aggregate()));
                 let combiner = agg_name.as_deref().and_then(combiner_for);
                 match (agg_name, combiner) {
                     (Some(agg_upper), Some(combiner)) => {
@@ -311,20 +328,20 @@ pub fn classify_cumulative(
                                 cross_partition_combiner: combiner,
                             });
                         } else {
-                            diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                            diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                                 projection: alias.clone(),
                                 offending: format!("composite expression `{}`", text.trim()),
                             });
                         }
                     }
                     (Some(name), None) => {
-                        diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                             projection: alias.clone(),
                             offending: name,
                         });
                     }
                     (None, _) => {
-                        diagnostics.push(CumulativeDiagnostic::CumulativeUnknownAggregator {
+                        diagnostics.push(KeyedDiagnostic::KeyedUnknownCombiner {
                             projection: alias.clone(),
                             offending: text.clone(),
                         });
@@ -335,40 +352,68 @@ pub fn classify_cumulative(
     }
 
     // Rule: no window functions in the outer body.
+    //
+    // Known walk-invariant violation: this is a raw whole-SQL text scan in an
+    // admission path, not a leaf classifier invoked by the shared
+    // composition walk (`docs/specs/architecture.md` §"Property composition
+    // walk rule"). It predates that walk and is excluded from the
+    // `walk_coverage` structural gate (`crates/smelt-logical/tests/walk_coverage.rs`'s
+    // `KNOWN_NONCOMPLIANT` skip-list) rather than mislabeled with a
+    // classification tag it doesn't actually carry. Migrating this admission
+    // check onto the walk is tracked as deferred work in
+    // `docs/plans/20260707-property-composition-walk.md` (see "Deferred
+    // during implementation") and `docs/specs/model_properties.md` §Known
+    // Divergences ("Heuristic text-scanning layer").
     let upper_sql = sql.to_uppercase();
     if upper_sql.contains("OVER(") || upper_sql.contains("OVER (") {
-        diagnostics.push(CumulativeDiagnostic::CumulativeForbidsWindowFunctions);
+        diagnostics.push(KeyedDiagnostic::KeyedForbidsWindowFunctions);
     }
 
     // Rule: no non-deterministic functions in the outer body.
     for nd in NONDETERMINISTIC_FUNCTIONS {
         let pattern = format!("{}(", nd);
         if upper_sql.contains(&pattern) {
-            diagnostics.push(CumulativeDiagnostic::CumulativeForbidsNondeterministic {
+            diagnostics.push(KeyedDiagnostic::KeyedForbidsNondeterministic {
                 offending: nd.to_string(),
             });
             break;
         }
     }
 
-    // Find the driving source from refs.
-    let candidate_sources: Vec<(String, TimeseriesConfig)> = refs
-        .iter()
-        .filter_map(|r| source_timeseries.get(r).map(|ts| (r.clone(), ts.clone())))
-        .collect();
+    // Find the driving source: the single alias-scoped FROM/JOIN input that
+    // is both a collected ref and registered with a `timeseries:` block —
+    // the shared anchor resolver (`resolve_single_anchor`) also used by
+    // `resolve_join_driving_fact`'s alias-scoped monotonicity trace.
+    let alias_sources: Vec<(String, String)> =
+        smelt_parser::File::cast(smelt_parser::parse(sql).syntax())
+            .and_then(|file| file.select_stmt())
+            .and_then(|select| select.from_clause())
+            .map(|from_clause| {
+                crate::analysis::source_bounds::from_clause_alias_sources(&from_clause)
+            })
+            .unwrap_or_default();
 
-    let driving_source = match candidate_sources.len() {
-        0 => {
-            diagnostics.push(CumulativeDiagnostic::CumulativeNoDrivingSource);
+    let driving_source = match resolve_single_anchor(&alias_sources, |source_name| {
+        let key = format!("smelt.{source_name}");
+        if !refs.iter().any(|r| r == &key) {
+            return None;
+        }
+        source_timeseries.get(&key).map(|ts| DrivingSource {
+            name: key.clone(),
+            timeseries: ts.clone(),
+        })
+    }) {
+        Ok(ds) => Some(ds),
+        Err(AnchorAmbiguity::NoCandidate) => {
+            diagnostics.push(KeyedDiagnostic::KeyedSnapshotPostureUnsupported);
             None
         }
-        1 => Some(DrivingSource {
-            name: candidate_sources[0].0.clone(),
-            timeseries: candidate_sources[0].1.clone(),
-        }),
-        _ => {
-            diagnostics.push(CumulativeDiagnostic::CumulativeMultipleDrivingSources {
-                candidates: candidate_sources.iter().map(|(n, _)| n.clone()).collect(),
+        Err(AnchorAmbiguity::Multiple(candidates)) => {
+            diagnostics.push(KeyedDiagnostic::KeyedMultipleDrivingSources {
+                candidates: candidates
+                    .into_iter()
+                    .map(|n| format!("smelt.{n}"))
+                    .collect(),
             });
             None
         }
@@ -386,11 +431,9 @@ pub fn classify_cumulative(
                 .iter()
                 .any(|e| e.to_ascii_lowercase() == partition_col_lower);
         if contains_partition {
-            diagnostics.push(
-                CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn {
-                    partition_column: partition_col.clone(),
-                },
-            );
+            diagnostics.push(KeyedDiagnostic::KeyedGroupByContainsPartitionColumn {
+                partition_column: partition_col.clone(),
+            });
         }
     }
 
@@ -403,28 +446,6 @@ pub fn classify_cumulative(
         aggregator_columns,
         driving_source: driving_source.expect("driving_source must be set when diagnostics empty"),
     })
-}
-
-/// Extract the outer function name from a projection expression like
-/// `COUNT(*)` or `MIN(event_ts)`. Returns the uppercased identifier before
-/// the first `(`, or `None` if the text doesn't look like a function call.
-fn extract_outer_function_name(text: &str) -> Option<String> {
-    let trimmed = text.trim();
-    let paren_pos = trimmed.find('(')?;
-    let name = trimmed[..paren_pos].trim();
-    if name.is_empty() {
-        return None;
-    }
-    // Reject any non-identifier characters (whitespace, operators).
-    if !name
-        .chars()
-        .all(|c| c.is_alphanumeric() || c == '_' || c == '.')
-    {
-        return None;
-    }
-    // For qualified names like `pg_catalog.sum`, take the last segment.
-    let last_segment = name.rsplit('.').next().unwrap_or(name);
-    Some(last_segment.to_ascii_uppercase())
 }
 
 /// Verify the projection is a direct call to `expected_fn` and nothing else —
@@ -479,6 +500,7 @@ mod tests {
             partition_column: partition_col.to_string(),
             granularity: Granularity::Day,
             week_start: None,
+            assert_monotonic: false,
         }
     }
 
@@ -534,7 +556,7 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// A SELECT with no GROUP BY produces CumulativeRequiresGroupBy.
+    /// A SELECT with no GROUP BY produces KeyedRequiresGroupBy.
     #[test]
     fn test_no_group_by_refused() {
         let sql = "SELECT COUNT(*) AS n FROM smelt.silver.events_parsed";
@@ -542,13 +564,13 @@ GROUP BY device_id, user_id"#;
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeRequiresGroupBy)),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedRequiresGroupBy)),
             "diagnostics: {:?}",
             err
         );
     }
 
-    /// STRING_AGG on a non-key projection produces CumulativeUnknownAggregator.
+    /// STRING_AGG on a non-key projection produces KeyedUnknownCombiner.
     #[test]
     fn test_unknown_aggregator_refused() {
         let sql = r#"SELECT
@@ -561,7 +583,7 @@ GROUP BY device_id"#;
         assert!(
             err.iter().any(|d| matches!(
                 d,
-                CumulativeDiagnostic::CumulativeUnknownAggregator { offending, .. }
+                KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
                     if offending.to_uppercase() == "STRING_AGG"
             )),
             "diagnostics: {:?}",
@@ -582,7 +604,7 @@ GROUP BY device_id"#;
         assert!(
             err.iter().any(|d| matches!(
                 d,
-                CumulativeDiagnostic::CumulativeUnknownAggregator { offending, .. }
+                KeyedDiagnostic::KeyedUnknownCombiner { offending, .. }
                     if offending.contains("composite") || offending.contains("expression")
             )),
             "diagnostics: {:?}",
@@ -602,7 +624,7 @@ GROUP BY device_id"#;
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeUnknownAggregator { .. })),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
             "diagnostics: {:?}",
             err
         );
@@ -623,7 +645,7 @@ GROUP BY device_id, user_id, event_date"#;
         assert!(
             err.iter().any(|d| matches!(
                 d,
-                CumulativeDiagnostic::CumulativeGroupByContainsPartitionColumn { partition_column }
+                KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { partition_column }
                     if partition_column == "event_date"
             )),
             "diagnostics: {:?}",
@@ -631,7 +653,7 @@ GROUP BY device_id, user_id, event_date"#;
         );
     }
 
-    /// An OVER (...) projection produces CumulativeForbidsWindowFunctions.
+    /// An OVER (...) projection produces KeyedForbidsWindowFunctions.
     #[test]
     fn test_window_function_refused() {
         let sql = r#"SELECT
@@ -643,7 +665,7 @@ GROUP BY device_id"#;
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeForbidsWindowFunctions)),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
             "diagnostics: {:?}",
             err
         );
@@ -660,18 +682,16 @@ GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
         let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
         assert!(
-            err.iter().any(|d| matches!(
-                d,
-                CumulativeDiagnostic::CumulativeForbidsNondeterministic { .. }
-            )),
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
             "diagnostics: {:?}",
             err
         );
     }
 
-    /// A SELECT from a source with no timeseries: produces CumulativeNoDrivingSource.
+    /// A SELECT from a source with no timeseries: produces KeyedSnapshotPostureUnsupported.
     #[test]
-    fn test_zero_driving_sources_refused() {
+    fn test_zero_driving_sources_refused_as_snapshot_posture_unsupported() {
         let sql = r#"SELECT
     device_id,
     COUNT(*) AS n
@@ -681,13 +701,13 @@ GROUP BY device_id"#;
         let err = classify_cumulative(sql, &refs, &HashMap::new()).unwrap_err();
         assert!(
             err.iter()
-                .any(|d| matches!(d, CumulativeDiagnostic::CumulativeNoDrivingSource)),
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
             "diagnostics: {:?}",
             err
         );
     }
 
-    /// Two timeseries-tagged sources produces CumulativeMultipleDrivingSources.
+    /// Two timeseries-tagged sources produces KeyedMultipleDrivingSources.
     #[test]
     fn test_multiple_driving_sources_refused() {
         let sql = r#"SELECT
@@ -705,13 +725,36 @@ GROUP BY device_id"#;
         map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
         let err = classify_cumulative(sql, &refs, &map).unwrap_err();
         assert!(
-            err.iter().any(|d| matches!(
-                d,
-                CumulativeDiagnostic::CumulativeMultipleDrivingSources { .. }
-            )),
+            err.iter()
+                .any(|d| matches!(d, KeyedDiagnostic::KeyedMultipleDrivingSources { .. })),
             "diagnostics: {:?}",
             err
         );
+    }
+
+    /// A timeseries-tagged ref that is only reached through a subquery (not
+    /// one of the top-level FROM/JOIN inputs) is not a driving-fact
+    /// candidate — the alias-scoped resolver only considers the joined
+    /// inputs of the outer scope, unlike the former ref-count selection
+    /// (which would have flat-counted both refs and refused as ambiguous).
+    #[test]
+    fn test_driving_source_resolved_via_alias_scope_ignores_non_joined_ref() {
+        let sql = r#"SELECT
+    device_id,
+    COUNT(*) AS n
+FROM smelt.silver.events_a
+WHERE device_id IN (SELECT device_id FROM smelt.silver.events_b)
+GROUP BY device_id"#;
+        let refs = vec![
+            "smelt.silver.events_a".to_string(),
+            "smelt.silver.events_b".to_string(),
+        ];
+        let mut map = HashMap::new();
+        map.insert("smelt.silver.events_a".to_string(), ts("event_date"));
+        map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
+        let classification =
+            classify_cumulative(sql, &refs, &map).expect("must classify: only events_a is joined");
+        assert_eq!(classification.driving_source.name, "smelt.silver.events_a");
     }
 
     /// A SELECT from one timeseries source and one lookup classifies cleanly.

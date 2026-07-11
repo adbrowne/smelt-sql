@@ -24,9 +24,10 @@
 //!    ```
 
 use crate::config::{
-    DataLatency, IncrementalConfig, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
+    BatchedConfig, DataLatency, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
+use serde::de::Error as _;
 use serde::{Deserialize, Serialize};
 use std::collections::{BTreeMap, HashMap};
 use std::ops::Range;
@@ -126,6 +127,28 @@ pub struct ColumnMetadata {
     /// Used in UPDATE statements after ALTER TABLE ADD COLUMN.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub backfill: Option<String>,
+
+    /// The column's equivalence contract (default `exact`). `plausible`
+    /// admits non-determinism in a payload column; barred from every
+    /// skeleton position, with cross-model fail-loud propagation. See
+    /// `docs/specs/models.md` §"`columns:` — column metadata" and
+    /// `docs/specs/maintenance_plan.md` §Surface "The plan (derived,
+    /// reported)" (the guarantee ledger's equivalence-contract axis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub contract: Option<Contract>,
+}
+
+/// A column's declared equivalence contract (`columns.<c>.contract`).
+#[derive(Debug, Clone, Copy, Default, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum Contract {
+    /// Bit-preserving across a technique change at a fixed processed-input
+    /// set (the default).
+    #[default]
+    Exact,
+    /// Admits non-determinism in a payload column. Barred from every
+    /// skeleton position (identity/grouping/dedup/ordering).
+    Plausible,
 }
 
 /// Author override hatches for virtual-environment reuse (D-46).
@@ -168,9 +191,12 @@ pub struct ModelMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeseries: Option<TimeseriesConfig>,
 
-    /// Incremental configuration
+    /// `batched:` block — optional configuration (`unique_key`,
+    /// `safety_overrides`) layered on top of the `refresh: batched` selector.
+    /// Selection itself is `refresh: batched` (`refresh` field below), not the
+    /// presence of this block.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub incremental: Option<IncrementalConfig>,
+    pub batched: Option<BatchedConfig>,
 
     /// Target to execute this model on (overrides smelt.yml and CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -237,22 +263,88 @@ pub struct ModelMetadata {
     /// Refresh axis: how stored output is recomputed across runs.
     ///
     /// `None` / `Some(Full)` — default full rebuild from scratch.
-    /// `Some(Cumulative)` — cumulative-aggregate merge loop.
-    /// Opt-in: `materialization: table` + `refresh: cumulative`.
+    /// `Some(Incremental)` — smelt runs the derived maintenance plan each
+    /// run; requires a sibling `grain:` (see [`ModelMetadata::grain`]).
+    /// Opt-in: `materialization: table` + `refresh: incremental` +
+    /// `grain: key` (the former `refresh: keyed`).
     ///
     /// See `docs/specs/models.md` §"Refresh axis" and
-    /// `docs/specs/cumulative_aggregate.md` §Surface.
+    /// `docs/specs/keyed_models.md` §Surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
+
+    /// Declared grain (`partition` | `key` | `key_per_partition`) — the
+    /// output shape and row identity for a `refresh: incremental` model.
+    /// Required whenever `refresh: incremental` is set; rejected (hard
+    /// error, see [`validate_timeseries`]) otherwise. See
+    /// `docs/specs/models.md` §"Refresh axis".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub grain: Option<crate::config::Grain>,
+
+    /// Model-scoped functional-dependency declarations (`key → determines`).
+    /// See `crate::config::FunctionalDependency` and `model_properties.md`
+    /// §"Model-scoped declarations".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub functional_dependencies: Vec<crate::config::FunctionalDependency>,
+
+    /// Model-scoped bounded-domain / space-budget declaration
+    /// (`column` + required `max_cardinality`). See
+    /// `crate::config::BoundedDomain` and `model_properties.md`
+    /// §"Model-scoped declarations". A model asserts at most one bounded
+    /// domain today (one holistic-aggregate column per model); the field is
+    /// `Option`, not a list — an absent cap is a YAML parse error, never a
+    /// silent default (no `#[serde(default)]` on `BoundedDomain::max_cardinality`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub bounded_domain: Option<crate::config::BoundedDomain>,
+
+    /// Model-scoped horizon-ceiling declaration — the modeller's warning
+    /// ceiling on the maintained window. The horizon is always **derived**
+    /// from the model's own reach (lookback, window frames, join
+    /// contribution); this declaration never relaxes or narrows the derived
+    /// clamp. It only licenses a compile-time warning when the derived
+    /// horizon would exceed the declared ceiling. See
+    /// `docs/specs/maintenance_plan.md` §"Windowed maintenance and the
+    /// horizon". Reuses `crate::config::DataLatency`'s existing fail-loud
+    /// interval parser — no new interval grammar.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub horizon_ceiling: Option<crate::config::DataLatency>,
+
+    /// Per-cell technique preferences/pins and the scan-locality guardrail
+    /// (`defaults.prefer`, `cells[]`, `scan_bounds`). See
+    /// `docs/specs/maintenance_plan.md` §Surface "Frontmatter".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub maintenance: Option<crate::config::MaintenanceConfig>,
 }
 
 impl ModelMetadata {
-    /// Returns `true` when this model uses the cumulative-aggregate merge loop.
+    /// Returns `true` when this model uses the keyed merge loop.
     ///
-    /// The opt-in is `materialization: table` + `refresh: cumulative`.
-    /// Every cumulative detection site must route through this predicate.
-    pub fn is_cumulative(&self) -> bool {
-        self.refresh == Some(RefreshStrategy::Cumulative)
+    /// The opt-in is `materialization: table` + `refresh: incremental` +
+    /// `grain: key` (the former `refresh: keyed`).
+    /// Every keyed detection site must route through this predicate.
+    pub fn is_keyed(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::Incremental)
+            && self.grain == Some(crate::config::Grain::Key)
+    }
+
+    /// Returns `true` when this model uses the partition-grain window-forward
+    /// refresh loop.
+    ///
+    /// The opt-in is `materialization: table` + `refresh: incremental` +
+    /// `grain: partition` (the former `refresh: batched`).
+    /// Every partition-grain detection site must route through this predicate.
+    pub fn is_partition_grain(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::Incremental)
+            && self.grain == Some(crate::config::Grain::Partition)
+    }
+
+    /// Returns `true` when this model delegates freshness to a backend's
+    /// native incremental-view maintenance.
+    ///
+    /// The opt-in is `materialization: table` + `refresh: materialized_view`.
+    /// Every materialized-view detection site must route through this predicate.
+    pub fn is_materialized_view(&self) -> bool {
+        self.refresh == Some(RefreshStrategy::MaterializedView)
     }
 }
 
@@ -343,24 +435,71 @@ pub enum MetadataError {
         span: SourceSpan,
     },
 
-    /// A model declares `incremental:` without a sibling `timeseries:` block.
-    #[error("TimeseriesRequiredForIncremental: model declares `incremental:` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
-    TimeseriesRequiredForIncremental,
+    /// A model declares `refresh: batched` without a sibling `timeseries:` block.
+    #[error("TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
+    TimeseriesRequiredForBatched,
 
     /// The `timeseries:` block violates a structural rule.
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
-    /// A model declares `refresh: cumulative` and a `timeseries:` block.
-    /// Cumulative outputs are not themselves timeseries — the rule reads the
-    /// partition shape from the driving source instead (see
-    /// `docs/specs/cumulative_aggregate.md` §"Output shape").
-    #[error("CumulativeForbidsTimeseries: cumulative models must not declare a `timeseries:` block — the cumulative output has no partition column; the rule reads the partition shape from the driving source")]
-    CumulativeForbidsTimeseries,
+    /// A model declares `refresh: keyed` and a `timeseries:` block without
+    /// key temporal locality being established. Keyed outputs are not
+    /// themselves timeseries by default — the rule reads the partition
+    /// shape from the driving source instead (see
+    /// `docs/specs/keyed_models.md` §"Output shape").
+    #[error("KeyedForbidsTimeseries: keyed models must not declare a `timeseries:` block — the keyed output has no partition column; the rule reads the partition shape from the driving source")]
+    KeyedForbidsTimeseries,
 
-    /// A model declares `refresh: cumulative` and an `incremental:` block.
-    #[error("CumulativeForbidsIncremental: cumulative and incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/cumulative_aggregate.md)")]
-    CumulativeForbidsIncremental,
+    /// A model declares `refresh: incremental` + `grain: key` (or another
+    /// keyed-output mode) and a `batched:` block.
+    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/keyed_models.md)")]
+    KeyedForbidsBatched,
+
+    /// A model declares a `batched:` block without `refresh: incremental` +
+    /// `grain: partition`.
+    #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
+    BatchedRequiresRefreshBatched,
+
+    /// A model declares `refresh: materialized_view` and a `timeseries:` block.
+    /// Like `keyed`, the engine-maintained output is a keyed lookup with
+    /// no partition column (`docs/specs/materialized_view.md` §"Constraints
+    /// & Invariants").
+    #[error("MaterializedViewForbidsTimeseries: refresh: materialized_view models must not declare a `timeseries:` block — the output is a keyed lookup with no partition column")]
+    MaterializedViewForbidsTimeseries,
+
+    /// A model declares `refresh: materialized_view` and a `batched:` block.
+    /// The engine, not smelt, owns freshness for this mode — there is no
+    /// smelt-driven batch loop to configure.
+    #[error("MaterializedViewForbidsBatched: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
+    MaterializedViewForbidsBatched,
+
+    /// A `functional_dependencies:` entry is structurally invalid: an empty
+    /// `key`/`determines`, a `determines` column also listed in `key`
+    /// (self-contradictory), or a `key`/`determines` column absent from the
+    /// model's SQL body.
+    #[error("MalformedFunctionalDependency: {message}")]
+    MalformedFunctionalDependency { message: String },
+
+    /// A `bounded_domain:` declaration is structurally invalid: an absent
+    /// (already caught at YAML-parse time by the required field) or
+    /// non-positive `max_cardinality`, an empty `column`, or a `column`
+    /// absent from the model's SQL body.
+    #[error("MalformedBoundedDomain: {message}")]
+    MalformedBoundedDomain { message: String },
+
+    /// A model declares `refresh: incremental` without a sibling `grain:`
+    /// declaration. `grain:` is required whenever `refresh: incremental` is
+    /// set — it declares the output's row identity/shape
+    /// (`docs/specs/models.md` §"Refresh axis").
+    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`")]
+    GrainRequiredForIncremental,
+
+    /// A model declares `grain:` without `refresh: incremental`. `grain:` is
+    /// only meaningful alongside `refresh: incremental`
+    /// (`docs/specs/models.md` §"Refresh axis").
+    #[error("GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key")]
+    GrainRequiresIncremental,
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -382,54 +521,85 @@ fn frontmatter_has_generates(source: &str) -> bool {
     false
 }
 
-/// Validate `timeseries:` and `incremental:` constraints on parsed metadata.
+/// Validate `refresh:`/`grain:`, `timeseries:`, and `batched:` constraints on
+/// parsed metadata.
 ///
 /// Pure function — operates only on the already-parsed `ModelMetadata` and the
 /// SQL body text (for partition-column projection checks). Emits the first
 /// constraint violation found, or `Ok(())` when all constraints pass.
 ///
-/// Rules checked (per `timeseries.md` §Semantics):
-/// - `incremental:` present without `timeseries:` → `TimeseriesRequiredForIncremental`
+/// Rules checked (per `models.md` §"Constraint violations", `timeseries.md` §Semantics):
+/// - `refresh: incremental` without `grain:` → `GrainRequiredForIncremental`
+/// - `grain:` without `refresh: incremental` → `GrainRequiresIncremental`
+/// - `refresh: incremental` + `grain: partition` without `timeseries:` → `TimeseriesRequiredForBatched`
+/// - `batched:` block without `refresh: incremental` + `grain: partition` → `BatchedRequiresRefreshBatched`
 /// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
-/// - Legacy nested form (`event_time_column` inside `incremental:`) was removed;
+/// - Legacy nested form (`event_time_column` inside `batched:`) was removed;
 ///   its presence in the YAML block now produces a YAML parse error (unknown field)
-///   rather than a custom diagnostic, because `IncrementalConfig` no longer
+///   rather than a custom diagnostic, because `BatchedConfig` no longer
 ///   declares those fields.
 /// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
-    // Rule: cumulative forbids incremental: — enforced here so the diagnostic
+    // Rule: grain: requires refresh: incremental, and vice versa — the two
+    // keys are declared together (`docs/specs/models.md` §"Refresh axis").
+    match (&metadata.refresh, &metadata.grain) {
+        (Some(RefreshStrategy::Incremental), None) => {
+            return Err(MetadataError::GrainRequiredForIncremental);
+        }
+        (refresh, Some(_)) if *refresh != Some(RefreshStrategy::Incremental) => {
+            return Err(MetadataError::GrainRequiresIncremental);
+        }
+        _ => {}
+    }
+
+    // Rule: keyed forbids batched: — enforced here so the diagnostic
     // fires alongside the other materialization-block constraints.
-    // Triggered by `refresh: cumulative`.
-    if metadata.is_cumulative() && metadata.incremental.is_some() {
-        return Err(MetadataError::CumulativeForbidsIncremental);
+    // Triggered by `refresh: incremental` + `grain: key`.
+    if metadata.is_keyed() && metadata.batched.is_some() {
+        return Err(MetadataError::KeyedForbidsBatched);
     }
 
-    // Rule: cumulative forbids timeseries: — the cumulative output
-    // has no partition column.
-    if metadata.is_cumulative() && metadata.timeseries.is_some() {
-        return Err(MetadataError::CumulativeForbidsTimeseries);
+    // Rule: keyed forbids timeseries: — the keyed output has no
+    // partition column by default (key temporal locality establishment
+    // is not yet built; see docs/specs/keyed_models.md §Known Divergences).
+    if metadata.is_keyed() && metadata.timeseries.is_some() {
+        return Err(MetadataError::KeyedForbidsTimeseries);
     }
 
-    // `refresh: cumulative` on a non-stored materialization:
-    // - ephemeral: hard error — there is no persisted output to accumulate into.
+    // Rule: materialized_view forbids batched: — the engine owns freshness
+    // for this mode; there is no smelt-driven batch loop to configure.
+    if metadata.is_materialized_view() && metadata.batched.is_some() {
+        return Err(MetadataError::MaterializedViewForbidsBatched);
+    }
+
+    // Rule: materialized_view forbids timeseries: — like keyed, the
+    // engine-maintained output is a keyed lookup with no partition column.
+    if metadata.is_materialized_view() && metadata.timeseries.is_some() {
+        return Err(MetadataError::MaterializedViewForbidsTimeseries);
+    }
+
+    // `refresh: incremental` + `grain: key` on a non-stored materialization:
+    // - ephemeral: hard error — there is no persisted output to merge into.
     //   Mirrors the existing `ephemeral` + `incremental:` hard-error treatment.
     // - view: advisory warning only — config is ignored; mirrors `view + incremental`.
-    if metadata.refresh == Some(RefreshStrategy::Cumulative) {
+    if metadata.is_keyed() {
         if let Some(mat) = &metadata.materialization {
             match mat {
                 Materialization::Ephemeral => {
                     return Err(MetadataError::MalformedTimeseries {
-                        message: "ephemeral models cannot use refresh: cumulative \
-                                  (ephemeral models have no persisted output to accumulate into)"
+                        message: "ephemeral models cannot use refresh: incremental + \
+                                  grain: key (ephemeral models have no persisted output \
+                                  to merge into)"
                             .to_string(),
                     });
                 }
                 Materialization::View => {
                     tracing::warn!(
-                        "model has `refresh: cumulative` but `materialization: view` — \
-                         the refresh config is ignored for non-table materializations"
+                        "model has `refresh: incremental` + `grain: key` but \
+                         `materialization: view` — the refresh config is ignored for \
+                         non-table materializations"
                     );
                     // Not an error — fall through.
                 }
@@ -438,9 +608,16 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
-    // Rule: incremental: without timeseries: → TimeseriesRequiredForIncremental
-    if metadata.incremental.is_some() && metadata.timeseries.is_none() {
-        return Err(MetadataError::TimeseriesRequiredForIncremental);
+    // Rule: batched: block without refresh: incremental + grain: partition →
+    // BatchedRequiresRefreshBatched
+    if metadata.batched.is_some() && !metadata.is_partition_grain() {
+        return Err(MetadataError::BatchedRequiresRefreshBatched);
+    }
+
+    // Rule: refresh: incremental + grain: partition without timeseries: →
+    // TimeseriesRequiredForBatched
+    if metadata.is_partition_grain() && metadata.timeseries.is_none() {
+        return Err(MetadataError::TimeseriesRequiredForBatched);
     }
 
     let ts = match &metadata.timeseries {
@@ -496,6 +673,159 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
+    // Rule: `batched.nondeterministic_columns` must not name a column that
+    // governs windowing, partition placement, or dedup identity — those
+    // roles must stay deterministic regardless of any opt-in (Constraint 13;
+    // `batched_models.md` §"Non-determinism and the equivalence contract").
+    if let Some(batched) = &metadata.batched {
+        for col in &batched.nondeterministic_columns {
+            if col == &ts.event_time_column {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: format!(
+                        "nondeterministic_columns cannot list '{col}' — it is the \
+                         event_time_column, which governs windowing and must stay \
+                         deterministic"
+                    ),
+                });
+            }
+            if col == &ts.partition_column {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: format!(
+                        "nondeterministic_columns cannot list '{col}' — it is the \
+                         partition_column, which governs partition placement and must \
+                         stay deterministic"
+                    ),
+                });
+            }
+            if batched.unique_key.contains(col) {
+                return Err(MetadataError::MalformedTimeseries {
+                    message: format!(
+                        "nondeterministic_columns cannot list '{col}' — it is a \
+                         unique_key column, which governs dedup identity and must stay \
+                         deterministic"
+                    ),
+                });
+            }
+        }
+    }
+
+    Ok(())
+}
+
+/// Validate `functional_dependencies:` entries on parsed metadata.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata` and the
+/// SQL body text (for the column-presence check, mirroring
+/// [`validate_timeseries`]'s partition-column heuristic). Emits the first
+/// constraint violation found, or `Ok(())` when all entries pass (including
+/// the common case of no `functional_dependencies:` at all).
+///
+/// Rules checked (`model_properties.md` §"Model-scoped declarations",
+/// §Constraints "Declared escape hatches may only widen"):
+/// - `key` must be non-empty and `determines` must be non-empty (a
+///   self-contradictory / empty declaration is a configuration error).
+/// - `determines` must not also appear in `key` (an FD cannot determine
+///   itself — self-contradictory).
+/// - Every `key` column and `determines` must appear in the model's SQL body
+///   (a fast presence heuristic, same limitation as `validate_timeseries`'s
+///   `partition_column` check — a full SELECT-list resolution is the
+///   planner's job).
+pub fn validate_functional_dependencies(
+    metadata: &ModelMetadata,
+    sql_body: &str,
+) -> Result<(), MetadataError> {
+    let upper_body = sql_body.to_uppercase();
+    for fd in &metadata.functional_dependencies {
+        if fd.key.is_empty() {
+            return Err(MetadataError::MalformedFunctionalDependency {
+                message: format!(
+                    "functional dependency determining '{}' has an empty key — a functional \
+                     dependency must name at least one key column",
+                    fd.determines
+                ),
+            });
+        }
+        if fd.determines.trim().is_empty() {
+            return Err(MetadataError::MalformedFunctionalDependency {
+                message: "functional dependency has an empty `determines` column".to_string(),
+            });
+        }
+        if fd.key.iter().any(|k| k == &fd.determines) {
+            return Err(MetadataError::MalformedFunctionalDependency {
+                message: format!(
+                    "functional dependency is self-contradictory: '{}' cannot determine itself \
+                     (it appears in both `key` and `determines`)",
+                    fd.determines
+                ),
+            });
+        }
+        if !sql_body.trim().is_empty() {
+            for col in fd.key.iter().chain(std::iter::once(&fd.determines)) {
+                if !upper_body.contains(&col.to_uppercase()) {
+                    return Err(MetadataError::MalformedFunctionalDependency {
+                        message: format!(
+                            "functional dependency names column '{col}' which does not appear \
+                             in the model's SQL body"
+                        ),
+                    });
+                }
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Validate the `bounded_domain:` declaration on parsed metadata.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata` and
+/// the SQL body text (for the column-presence check, mirroring
+/// [`validate_functional_dependencies`]'s heuristic). Emits the first
+/// constraint violation found, or `Ok(())` when the declaration is absent or
+/// passes every check.
+///
+/// Rules checked (`model_properties.md` §"Model-scoped declarations",
+/// §Constraints "Declared escape hatches may only widen"):
+/// - `max_cardinality` must be strictly positive — a zero-sized budget can
+///   never license anything and is a configuration error, not treated as
+///   "no declaration". (An *absent* cap is already a YAML parse error at the
+///   `BoundedDomain` struct level — the field carries no
+///   `#[serde(default)]` — so it never reaches this validator.)
+/// - `column` must be non-empty.
+/// - `column` must appear in the model's SQL body (a fast presence
+///   heuristic, same limitation as `validate_functional_dependencies`'s
+///   check — full SELECT-list resolution is the planner's job).
+pub fn validate_bounded_domains(
+    metadata: &ModelMetadata,
+    sql_body: &str,
+) -> Result<(), MetadataError> {
+    let Some(bd) = metadata.bounded_domain.as_ref() else {
+        return Ok(());
+    };
+
+    if bd.column.trim().is_empty() {
+        return Err(MetadataError::MalformedBoundedDomain {
+            message: "bounded_domain declaration has an empty `column`".to_string(),
+        });
+    }
+    if bd.max_cardinality == 0 {
+        return Err(MetadataError::MalformedBoundedDomain {
+            message: format!(
+                "bounded_domain declaration for column '{}' has max_cardinality: 0 — a \
+                 zero-sized space budget can never license a holistic aggregate; declare a \
+                 positive cap or remove the declaration",
+                bd.column
+            ),
+        });
+    }
+    if !sql_body.trim().is_empty() && !sql_body.to_uppercase().contains(&bd.column.to_uppercase()) {
+        return Err(MetadataError::MalformedBoundedDomain {
+            message: format!(
+                "bounded_domain declaration names column '{}' which does not appear in the \
+                 model's SQL body",
+                bd.column
+            ),
+        });
+    }
     Ok(())
 }
 
@@ -746,9 +1076,14 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         // Pre-validate strict sub-fields before the resilient fallback path.
         // `reuse` uses deny_unknown_fields and `state` uses strict enum variants;
         // both must fail hard rather than be silently stripped (fail-loud discipline).
-        // `materialization: cumulative_aggregate` is also checked here to give a
-        // clear migration error — this value was removed; use `materialization: table`
-        // + `refresh: cumulative` instead.
+        // `materialization: cumulative_aggregate` and `materialization:
+        // materialized_view` are also checked here to give a clear migration
+        // error — `cumulative_aggregate` was removed (use `materialization:
+        // table` + `refresh: incremental` + `grain: key` instead); `materialized_view`
+        // was relocated from the storage axis to the refresh axis (use `refresh:
+        // materialized_view` instead). `incremental:` is checked for the same
+        // reason — the block was retired; use `refresh: incremental` + `grain: partition`
+        // + `batched:` instead.
         for (key, value) in model_map.iter() {
             let key_str = key.as_str().unwrap_or("");
             if key_str == "reuse" {
@@ -758,14 +1093,34 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 serde_yaml::from_value::<StateConfig>(value.clone())
                     .map_err(MetadataError::YamlParseError)?;
             // Fail hard specifically for the removed `cumulative_aggregate`
-            // value so the error is clear. Other unknown materialization values
-            // use the resilient fallback path below (surfaced as diagnostics
-            // by smelt-db rather than hard-failing discovery).
-            } else if key_str == "materialization" && value.as_str() == Some("cumulative_aggregate")
+            // and relocated `materialized_view` values so the error is clear.
+            // Other unknown materialization values use the resilient fallback
+            // path below (surfaced as diagnostics by smelt-db rather than
+            // hard-failing discovery).
+            } else if key_str == "materialization"
+                && matches!(
+                    value.as_str(),
+                    Some("cumulative_aggregate") | Some("materialized_view")
+                )
             {
                 return Err(MetadataError::YamlParseError(
                     serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
                 ));
+            } else if key_str == "incremental" {
+                return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                    "the `incremental:` block has been removed — use `refresh: incremental` + \
+                     `grain: partition` + an optional `batched:` block instead (see \
+                     docs/specs/batched_models.md)",
+                )));
+            // `refresh: cumulative` is a hard error pointing at the renamed
+            // value, not a silently-stripped unknown value — the resilient
+            // fallback below must not swallow this rename.
+            } else if key_str == "refresh" {
+                if let Err(e) =
+                    serde_yaml::from_value::<crate::config::RefreshStrategy>(value.clone())
+                {
+                    return Err(MetadataError::YamlParseError(e));
+                }
             }
         }
 
@@ -777,7 +1132,9 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 // discoverable.
                 let mut fallback = model_map;
                 fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
-                fallback.remove(serde_yaml::Value::String("incremental".to_string()));
+                fallback.remove(serde_yaml::Value::String("batched".to_string()));
+                fallback.remove(serde_yaml::Value::String("refresh".to_string()));
+                fallback.remove(serde_yaml::Value::String("grain".to_string()));
                 serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
             }
         }
@@ -853,8 +1210,9 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
             let (validated_map, _fm_diags) =
                 parse_frontmatter(&yaml_content, DeclarationKind::Model);
             // Pre-validate strict sub-fields before the resilient fallback path.
-            // `materialization: cumulative_aggregate` is caught here for a clear
-            // migration error; other unknown values follow the resilient path.
+            // `materialization: cumulative_aggregate` and `materialization:
+            // materialized_view` are caught here for a clear migration error;
+            // other unknown values follow the resilient path.
             for (key, value) in validated_map.iter() {
                 let key_str = key.as_str().unwrap_or("");
                 if key_str == "reuse" {
@@ -864,11 +1222,20 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     serde_yaml::from_value::<StateConfig>(value.clone())
                         .map_err(MetadataError::YamlParseError)?;
                 } else if key_str == "materialization"
-                    && value.as_str() == Some("cumulative_aggregate")
+                    && matches!(
+                        value.as_str(),
+                        Some("cumulative_aggregate") | Some("materialized_view")
+                    )
                 {
                     return Err(MetadataError::YamlParseError(
                         serde_yaml::from_value::<Materialization>(value.clone()).unwrap_err(),
                     ));
+                } else if key_str == "incremental" {
+                    return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                        "the `incremental:` block has been removed — use `refresh: incremental` + \
+                         `grain: partition` + an optional `batched:` block instead (see \
+                         docs/specs/batched_models.md)",
+                    )));
                 }
             }
 
@@ -877,7 +1244,9 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 Err(_) => {
                     let mut fallback = validated_map;
                     fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
-                    fallback.remove(serde_yaml::Value::String("incremental".to_string()));
+                    fallback.remove(serde_yaml::Value::String("batched".to_string()));
+                    fallback.remove(serde_yaml::Value::String("refresh".to_string()));
+                    fallback.remove(serde_yaml::Value::String("grain".to_string()));
                     serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
                 }
             }
@@ -989,16 +1358,16 @@ SELECT * FROM users"#;
     }
 
     #[test]
-    fn test_single_model_with_incremental() {
+    fn test_single_model_with_batched() {
         let source = r#"---
 name: daily_revenue
 materialization: table
+refresh: incremental
+grain: partition
 timeseries:
   event_time_column: transaction_timestamp
   partition_column: revenue_date
   granularity: day
-incremental:
-  enabled: true
 tags: [revenue, core]
 ---
 SELECT DATE(transaction_timestamp) as revenue_date, SUM(amount)
@@ -1011,9 +1380,8 @@ GROUP BY 1"#;
                 assert_eq!(metadata.name, Some("daily_revenue".to_string()));
                 assert_eq!(metadata.materialization, Some(Materialization::Table));
                 assert_eq!(metadata.tags, vec!["revenue", "core"]);
-
-                let incremental = metadata.incremental.unwrap();
-                assert!(incremental.enabled);
+                assert_eq!(metadata.refresh, Some(RefreshStrategy::Incremental));
+                assert_eq!(metadata.grain, Some(crate::config::Grain::Partition));
 
                 let timeseries = metadata.timeseries.unwrap();
                 assert_eq!(timeseries.event_time_column, "transaction_timestamp");
@@ -1249,19 +1617,14 @@ SELECT * FROM users"#;
     }
 
     #[test]
-    fn test_frontmatter_materialized_view() {
+    fn test_frontmatter_materialized_view_rejected() {
         let source = "---\nname: cached_report\nmaterialization: materialized_view\n---\nSELECT 1";
 
-        let result = extract_file_metadata(source).unwrap();
-        match result {
-            FileMetadata::Single { metadata, .. } => {
-                assert_eq!(
-                    metadata.materialization,
-                    Some(Materialization::MaterializedView)
-                );
-            }
-            _ => panic!("Expected Single variant"),
-        }
+        let err = extract_file_metadata(source).unwrap_err().to_string();
+        assert!(
+            err.contains("refresh: materialized_view"),
+            "expected migration hint pointing to `refresh: materialized_view`, got: {err}"
+        );
     }
 
     #[test]
@@ -1548,39 +1911,366 @@ FROM smelt.orders_raw"#;
         }
     }
 
-    /// A `.sql` file declaring `incremental:` with no `timeseries:` produces
-    /// `TimeseriesRequiredForIncremental` from `validate_timeseries`.
+    /// A `.sql` file declaring `refresh: batched` with no `timeseries:` produces
+    /// `TimeseriesRequiredForBatched` from `validate_timeseries`.
     #[test]
-    fn test_incremental_without_timeseries_errors() {
-        // Build a ModelMetadata with incremental but no timeseries
+    fn test_batched_without_timeseries_errors() {
+        // Build a ModelMetadata with refresh: batched but no timeseries
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            incremental: Some(crate::config::IncrementalConfig {
-                enabled: true,
-                unique_key: vec![],
-                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
-            }),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT event_date FROM foo")
-            .expect_err("must error when incremental: has no timeseries:");
+            .expect_err("must error when refresh: batched has no timeseries:");
         assert!(
-            matches!(err, MetadataError::TimeseriesRequiredForIncremental),
-            "Expected TimeseriesRequiredForIncremental, got: {}",
+            matches!(err, MetadataError::TimeseriesRequiredForBatched),
+            "Expected TimeseriesRequiredForBatched, got: {}",
             err
         );
     }
 
-    /// A `.sql` file declaring `event_time_column` inside `incremental:` has a
-    /// bad nested value (IncrementalConfig has deny_unknown_fields). The recovery
-    /// path strips `incremental:` and returns Ok with partial metadata.
+    /// A `batched:` block without `refresh: batched` is a hard error.
+    #[test]
+    fn test_batched_block_without_refresh_batched_errors() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            batched: Some(crate::config::BatchedConfig::default()),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("must error when batched: has no refresh: batched");
+        assert!(
+            matches!(err, MetadataError::BatchedRequiresRefreshBatched),
+            "Expected BatchedRequiresRefreshBatched, got: {}",
+            err
+        );
+    }
+
+    /// Listing `event_time_column` in `batched.nondeterministic_columns` is a
+    /// configuration error (Constraint 13; `batched_models.md` §Surface) — that
+    /// column governs windowing and can never tolerate non-determinism.
+    #[test]
+    fn test_nondeterministic_columns_rejects_event_time_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec!["order_ts".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
+            .expect_err("listing event_time_column in nondeterministic_columns must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("order_ts"));
+    }
+
+    /// Listing `partition_column` in `batched.nondeterministic_columns` is a
+    /// configuration error — that column governs partition placement.
+    #[test]
+    fn test_nondeterministic_columns_rejects_partition_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec!["order_date".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT order_ts, order_date FROM foo")
+            .expect_err("listing partition_column in nondeterministic_columns must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("order_date"));
+    }
+
+    /// Listing a `unique_key` column in `batched.nondeterministic_columns` is a
+    /// configuration error — that column governs dedup identity.
+    #[test]
+    fn test_nondeterministic_columns_rejects_unique_key_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec!["order_id".to_string()],
+                nondeterministic_columns: vec!["order_id".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT order_ts, order_date, order_id FROM foo")
+            .expect_err("listing a unique_key column in nondeterministic_columns must error");
+        assert!(
+            matches!(err, MetadataError::MalformedTimeseries { .. }),
+            "Expected MalformedTimeseries, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("order_id"));
+    }
+
+    /// A payload column not overlapping event_time/partition/unique_key is a
+    /// legitimate `nondeterministic_columns` entry and parses cleanly.
+    #[test]
+    fn test_nondeterministic_columns_accepts_payload_column() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Partition),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "order_ts".to_string(),
+                partition_column: "order_date".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec!["order_id".to_string()],
+                nondeterministic_columns: vec!["inserted_at".to_string()],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        validate_timeseries(
+            &metadata,
+            "SELECT order_ts, order_date, order_id, inserted_at FROM foo",
+        )
+        .expect("payload-only nondeterministic_columns must pass validation");
+    }
+
+    // ── functional_dependencies: validation (DC2) ────────────────────────────
+
+    fn fd(key: &[&str], determines: &str) -> crate::config::FunctionalDependency {
+        crate::config::FunctionalDependency {
+            key: key.iter().map(|s| s.to_string()).collect(),
+            determines: determines.to_string(),
+        }
+    }
+
+    /// A valid FD naming columns present in the SQL body parses cleanly.
+    #[test]
+    fn test_functional_dependencies_accepts_valid_declaration() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(&["customer_id"], "customer_region")],
+            ..Default::default()
+        };
+        validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect("a valid functional dependency must pass validation");
+    }
+
+    /// An empty `key` is a self-contradictory declaration — fail-loud, not a
+    /// silent default.
+    #[test]
+    fn test_functional_dependencies_rejects_empty_key() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(&[], "customer_region")],
+            ..Default::default()
+        };
+        let err = validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect_err("an empty key must be a configuration error");
+        assert!(matches!(
+            err,
+            MetadataError::MalformedFunctionalDependency { .. }
+        ));
+    }
+
+    /// A `determines` column also listed in `key` cannot determine itself —
+    /// self-contradictory, refused.
+    #[test]
+    fn test_functional_dependencies_rejects_self_contradictory() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(
+                &["customer_id", "customer_region"],
+                "customer_region",
+            )],
+            ..Default::default()
+        };
+        let err = validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect_err("determines column also in key must be a configuration error");
+        assert!(matches!(
+            err,
+            MetadataError::MalformedFunctionalDependency { .. }
+        ));
+    }
+
+    /// An FD naming a column absent from the model's SQL body is a
+    /// configuration error (fail-loud, not silently accepted).
+    #[test]
+    fn test_functional_dependencies_rejects_absent_column() {
+        let metadata = ModelMetadata {
+            functional_dependencies: vec![fd(&["customer_id"], "phone_number")],
+            ..Default::default()
+        };
+        let err = validate_functional_dependencies(
+            &metadata,
+            "SELECT customer_id, customer_region FROM customers",
+        )
+        .expect_err("a determines column absent from the SQL body must error");
+        assert!(matches!(
+            err,
+            MetadataError::MalformedFunctionalDependency { .. }
+        ));
+        assert!(err.to_string().contains("phone_number"));
+    }
+
+    // ── bounded_domain: validation (DC3) ─────────────────────────────────────
+
+    fn bounded_domain(column: &str, max_cardinality: u64) -> crate::config::BoundedDomain {
+        crate::config::BoundedDomain {
+            column: column.to_string(),
+            max_cardinality,
+        }
+    }
+
+    /// A valid bounded-domain declaration naming a column present in the SQL
+    /// body, with a positive cap, parses cleanly.
+    #[test]
+    fn test_bounded_domain_accepts_valid_declaration() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("category", 10_000)),
+            ..Default::default()
+        };
+        validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect("a valid bounded-domain declaration must pass validation");
+    }
+
+    /// No declaration at all is the ordinary case — not an error.
+    #[test]
+    fn test_bounded_domain_absent_is_ok() {
+        let metadata = ModelMetadata {
+            bounded_domain: None,
+            ..Default::default()
+        };
+        validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect("no bounded_domain declaration at all must not error");
+    }
+
+    /// A `max_cardinality: 0` cap can never license anything — fail-loud,
+    /// not a silent default that behaves like "no declaration".
+    #[test]
+    fn test_bounded_domain_rejects_zero_cap() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("category", 0)),
+            ..Default::default()
+        };
+        let err = validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect_err("a zero max_cardinality must be a configuration error");
+        assert!(matches!(err, MetadataError::MalformedBoundedDomain { .. }));
+    }
+
+    /// An empty `column` is a self-contradictory declaration — fail-loud.
+    #[test]
+    fn test_bounded_domain_rejects_empty_column() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("", 10_000)),
+            ..Default::default()
+        };
+        let err = validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect_err("an empty column must be a configuration error");
+        assert!(matches!(err, MetadataError::MalformedBoundedDomain { .. }));
+    }
+
+    /// A `column` absent from the model's SQL body is a configuration error
+    /// (fail-loud, not silently accepted).
+    #[test]
+    fn test_bounded_domain_rejects_absent_column() {
+        let metadata = ModelMetadata {
+            bounded_domain: Some(bounded_domain("region", 10_000)),
+            ..Default::default()
+        };
+        let err = validate_bounded_domains(&metadata, "SELECT category, amount FROM orders")
+            .expect_err("a column absent from the SQL body must error");
+        assert!(matches!(err, MetadataError::MalformedBoundedDomain { .. }));
+        assert!(err.to_string().contains("region"));
+    }
+
+    /// A `.sql` file declaring the retired `incremental:` block is a hard error
+    /// naming `refresh: incremental` + `grain:` as the replacement (models.md hard-cut).
+    #[test]
+    fn test_incremental_block_is_hard_cut() {
+        let source = r#"---
+materialization: table
+incremental:
+  enabled: true
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+---
+SELECT dt FROM foo"#;
+        let err = extract_file_metadata(source)
+            .expect_err("declaring the retired `incremental:` block must hard-error");
+        let message = err.to_string();
+        assert!(
+            message.contains("refresh: incremental") && message.contains("grain:"),
+            "error message must name refresh: incremental + grain: as the replacement; got: {}",
+            message
+        );
+    }
+
+    /// A `.sql` file declaring `event_time_column` inside `batched:` has a
+    /// bad nested value (BatchedConfig has deny_unknown_fields). The recovery
+    /// path strips `batched:` and returns Ok with partial metadata.
     /// Discovery is resilient; smelt-db surfaces a MalformedTimeseries diagnostic.
     #[test]
     fn test_legacy_nested_form_errors() {
         let source = r#"---
 materialization: table
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
+batched:
   event_time_column: ts
   partition_column: dt
   granularity: day
@@ -1592,15 +2282,15 @@ SELECT dt FROM foo"#;
             "discovery must be resilient to bad nested fields; got: {:?}",
             result.unwrap_err()
         );
-        // The incremental block is stripped in recovery; materialization is kept.
+        // The batched block is stripped in recovery; materialization is kept.
         if let Ok(FileMetadata::Single { metadata, .. }) = result {
             assert_eq!(
                 metadata.materialization,
                 Some(crate::config::Materialization::Table)
             );
             assert!(
-                metadata.incremental.is_none(),
-                "malformed incremental block must be stripped in recovery"
+                metadata.batched.is_none(),
+                "malformed batched block must be stripped in recovery"
             );
         }
     }
@@ -1615,6 +2305,7 @@ SELECT dt FROM foo"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1641,6 +2332,7 @@ SELECT dt FROM foo"#;
                 partition_column: "event_date".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1659,10 +2351,10 @@ SELECT dt FROM foo"#;
         );
     }
 
-    // ── cumulative frontmatter tests ─────────────────────────────────────────
+    // ── keyed frontmatter tests ───────────────────────────────────────────────
 
     /// `materialization: cumulative_aggregate` is no longer valid — must fail.
-    /// The new opt-in is `materialization: table` + `refresh: cumulative`.
+    /// The new opt-in is `materialization: table` + `refresh: keyed`.
     #[test]
     fn test_cumulative_aggregate_frontmatter_is_rejected() {
         let source = r#"---
@@ -1679,12 +2371,14 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// `materialization: table` + `refresh: cumulative` parses cleanly.
+    /// `materialization: table` + `refresh: incremental` + `grain: key`
+    /// parses cleanly (the former `refresh: keyed`).
     #[test]
-    fn test_refresh_cumulative_frontmatter_parses() {
+    fn test_refresh_keyed_frontmatter_parses() {
         let source = r#"---
 materialization: table
-refresh: cumulative
+refresh: incremental
+grain: key
 ---
 SELECT device_id, user_id, COUNT(*) AS event_count
 FROM smelt.events
@@ -1699,58 +2393,139 @@ GROUP BY device_id, user_id"#;
                 );
                 assert_eq!(
                     metadata.refresh,
-                    Some(crate::config::RefreshStrategy::Cumulative)
+                    Some(crate::config::RefreshStrategy::Incremental)
                 );
+                assert_eq!(metadata.grain, Some(crate::config::Grain::Key));
                 assert!(metadata.timeseries.is_none());
-                assert!(metadata.incremental.is_none());
+                assert!(metadata.batched.is_none());
             }
             _ => panic!("Expected Single variant"),
         }
     }
 
-    /// A model with `refresh: cumulative` + a `timeseries:` block
-    /// emits `CumulativeForbidsTimeseries`.
+    /// A model with `refresh: keyed` + a `timeseries:` block
+    /// emits `KeyedForbidsTimeseries`.
     #[test]
-    fn test_cumulative_aggregate_forbids_timeseries() {
+    fn test_keyed_forbids_timeseries() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(crate::config::RefreshStrategy::Cumulative),
+            refresh: Some(crate::config::RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Key),
             timeseries: Some(crate::config::TimeseriesConfig {
                 event_time_column: "ts".to_string(),
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Day,
                 week_start: None,
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-            .expect_err("refresh: cumulative + timeseries must error");
+            .expect_err("refresh: keyed + timeseries must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsTimeseries),
-            "Expected CumulativeForbidsTimeseries, got: {}",
+            matches!(err, MetadataError::KeyedForbidsTimeseries),
+            "Expected KeyedForbidsTimeseries, got: {}",
             err
         );
     }
 
-    /// A model with `refresh: cumulative` + an `incremental:` block
-    /// emits `CumulativeForbidsIncremental`.
+    /// A model with `refresh: keyed` + a `batched:` block
+    /// emits `KeyedForbidsBatched`.
     #[test]
-    fn test_cumulative_aggregate_forbids_incremental() {
+    fn test_keyed_forbids_batched() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
-            refresh: Some(crate::config::RefreshStrategy::Cumulative),
-            incremental: Some(crate::config::IncrementalConfig {
-                enabled: true,
+            refresh: Some(crate::config::RefreshStrategy::Incremental),
+            grain: Some(crate::config::Grain::Key),
+            batched: Some(crate::config::BatchedConfig {
                 unique_key: vec![],
-                safety_overrides: crate::config::IncrementalSafetyOverrides::default(),
+                nondeterministic_columns: vec![],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
-            .expect_err("refresh: cumulative + incremental must error");
+            .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::CumulativeForbidsIncremental),
-            "Expected CumulativeForbidsIncremental, got: {}",
+            matches!(err, MetadataError::KeyedForbidsBatched),
+            "Expected KeyedForbidsBatched, got: {}",
+            err
+        );
+    }
+
+    /// `materialization: table` + `refresh: materialized_view` parses cleanly.
+    #[test]
+    fn test_refresh_materialized_view_frontmatter_parses() {
+        let source = r#"---
+materialization: table
+refresh: materialized_view
+---
+SELECT device_id, user_id, COUNT(*) AS event_count
+FROM smelt.events
+GROUP BY device_id, user_id"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        match result {
+            FileMetadata::Single { metadata, .. } => {
+                assert_eq!(
+                    metadata.materialization,
+                    Some(crate::config::Materialization::Table)
+                );
+                assert_eq!(
+                    metadata.refresh,
+                    Some(crate::config::RefreshStrategy::MaterializedView)
+                );
+                assert!(metadata.timeseries.is_none());
+                assert!(metadata.batched.is_none());
+            }
+            _ => panic!("Expected Single variant"),
+        }
+    }
+
+    /// A model with `refresh: materialized_view` + a `timeseries:` block
+    /// emits `MaterializedViewForbidsTimeseries`.
+    #[test]
+    fn test_materialized_view_forbids_timeseries() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(crate::config::RefreshStrategy::MaterializedView),
+            timeseries: Some(crate::config::TimeseriesConfig {
+                event_time_column: "ts".to_string(),
+                partition_column: "dt".to_string(),
+                granularity: crate::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
+            .expect_err("refresh: materialized_view + timeseries must error");
+        assert!(
+            matches!(err, MetadataError::MaterializedViewForbidsTimeseries),
+            "Expected MaterializedViewForbidsTimeseries, got: {}",
+            err
+        );
+    }
+
+    /// A model with `refresh: materialized_view` + a `batched:` block
+    /// emits `MaterializedViewForbidsBatched`.
+    #[test]
+    fn test_materialized_view_forbids_batched() {
+        let metadata = ModelMetadata {
+            materialization: Some(crate::config::Materialization::Table),
+            refresh: Some(crate::config::RefreshStrategy::MaterializedView),
+            batched: Some(crate::config::BatchedConfig {
+                unique_key: vec![],
+                nondeterministic_columns: vec![],
+                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+            }),
+            ..Default::default()
+        };
+        let err = validate_timeseries(&metadata, "SELECT * FROM foo")
+            .expect_err("refresh: materialized_view + batched: must error");
+        assert!(
+            matches!(err, MetadataError::MaterializedViewForbidsBatched),
+            "Expected MaterializedViewForbidsBatched, got: {}",
             err
         );
     }
@@ -1791,6 +2566,7 @@ SELECT * FROM users"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Week,
                 week_start: Some(crate::config::Weekday::Wednesday),
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1818,6 +2594,7 @@ SELECT * FROM users"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Week,
                 week_start: Some(crate::config::Weekday::Monday),
+                assert_monotonic: false,
             }),
             ..Default::default()
         };
@@ -1835,6 +2612,7 @@ SELECT * FROM users"#;
                 partition_column: "dt".to_string(),
                 granularity: crate::config::Granularity::Week,
                 week_start: Some(crate::config::Weekday::Sunday),
+                assert_monotonic: false,
             }),
             ..Default::default()
         };

@@ -8,7 +8,7 @@
 //!
 //! This file owns the model-plan construction (batch dispatch per
 //! `BatchSafety` shape), the per-model compile+execute loop (full refresh,
-//! incremental batches, and cumulative dispatch via `crate::cumulative`),
+//! incremental batches, and keyed dispatch via `crate::cumulative`),
 //! cancellation handling, manifest writes, and interval-store updates.
 
 use std::collections::{HashMap, HashSet};
@@ -27,6 +27,8 @@ use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
+use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
+use smelt_state::reconciliation::{Processed, Region};
 use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
@@ -38,9 +40,12 @@ use crate::schema_evolution::{
     check_and_migrate, ddl_backend_for_dialect, extract_evolution_maps, infer_deployed_columns,
 };
 use crate::select::{select_executable_models, SelectionRequest};
-use crate::transformer::{inject_source_filters, inject_time_filter, TimeRange};
+use crate::transformer::{
+    inject_source_filters, inject_time_filter, is_transparent_single_source,
+    pin_run_deterministic_clocks, TimeRange,
+};
 use crate::types::{ExecuteRequest, ModelPlanRecord, ModelStrategy, PlanSummary, RunOutcome};
-use crate::windowing::{compute_incremental_windows, IncrementalBatch};
+use crate::windowing::{compute_incremental_windows_ordered, IncrementalBatch};
 use crate::{build_fn_body_map, expand_function_calls, EphemeralResolver, UpstreamSchemas};
 
 /// Plan for one model's execution. Internal to `execute_project` — the
@@ -54,10 +59,17 @@ struct ModelPlan {
 }
 
 struct IncrementalPlan {
-    config: smelt_core::IncrementalConfig,
+    config: smelt_core::BatchedConfig,
     timeseries: smelt_core::config::TimeseriesConfig,
     /// Batches with separate partition and filter ranges (bound-aware windowing).
     batches: Vec<IncrementalBatch>,
+    /// The model's own derived partition-column skew bound
+    /// (`docs/specs/model_transforms.md` §Semantics "The output window is
+    /// derived, never assumed"), carried alongside `batches` (whose
+    /// `partition_start`/`partition_end` already reflect it) so
+    /// `derive_batch_filtered_sql` can additionally gate the transparent
+    /// fast path on it without re-deriving it from the SQL a second time.
+    skew: smelt_logical::analysis::source_bounds::Skew,
 }
 
 /// Future returned by `BackendFactory::create`. Pinned + boxed so the trait
@@ -177,6 +189,34 @@ pub async fn execute_project(
         check_bound_derivation(&model_graph, request.enforce_safety)?;
     }
 
+    // ── Time range + source discovery + model-plan (chunk) construction ─────
+    // Built before the dry-run early return because both the dry-run
+    // statement-emission branch and the real run consume the identical chunk
+    // decomposition and window literals — a `--dry-run` must show exactly the
+    // chunks (and their `[start, end)` windows) a real run would execute
+    // (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements").
+    // None of these touch a backend.
+    let (start_date, end_date) = parse_run_window(&request)?;
+
+    // Project-wide `smelt.<path> → timeseries` map. Merges model-frontmatter
+    // timeseries with per-entity source YAML timeseries declarations (BUG-072).
+    // Consumed by the model-plan construction below (BL2's bound-based
+    // batch-safety derivation) and, further down, by keyed dispatch and
+    // incremental pushdown.
+    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
+    let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
+
+    let (model_plans, total_batches) = build_model_plans(
+        &selected,
+        &graph_lock,
+        &config,
+        &fn_bodies,
+        &source_timeseries,
+        start_date,
+        end_date,
+        &request,
+    )?;
+
     // ── Dry-run: build PlanSummary, compile models, and return without any backend call ──────
     // When `dry_run = true` we resolve the execution strategy per model from
     // graph config alone, compile each model's SQL (full-refresh form only),
@@ -197,16 +237,15 @@ pub async fn execute_project(
                         config.get_materialization_with_metadata(model_name, metadata);
                     let inc_config = config
                         .get_incremental_with_metadata(model_name, metadata)
-                        .cloned()
-                        .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+                        .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
                     let ts_config = config
                         .get_timeseries_with_metadata(model_name, metadata)
                         .cloned()
                         .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
 
-                    // Route cumulative detection through is_cumulative().
-                    if metadata.is_some_and(|m| m.is_cumulative()) {
-                        ModelStrategy::Cumulative
+                    // Route keyed detection through is_keyed().
+                    if metadata.is_some_and(|m| m.is_keyed()) {
+                        ModelStrategy::Keyed
                     } else {
                         match materialization {
                             smelt_core::config::Materialization::Ephemeral => {
@@ -355,13 +394,83 @@ pub async fn execute_project(
                     .get(&model_target)
                     .unwrap_or_else(|| EMPTY_RESOLVER.get_or_init(EphemeralResolver::empty));
                 let clean_sql = smelt_parser::strip_frontmatter(&model_file.content);
-                let sql_to_emit = match compiler
+                // The `model_compiled` display shows the unfiltered (full-refresh
+                // form) SELECT, as it always has; the maintenance statements
+                // below carry the per-batch clamped bodies.
+                match compiler
                     .compile_with_sql_and_ephemerals(model_file, schema, &clean_sql, resolver)
                 {
-                    Ok(compiled) => compiled.sql,
-                    Err(_) => String::new(),
+                    Ok(compiled) => reporter.model_compiled(&run_id, model_name, &compiled.sql),
+                    Err(_) => {
+                        reporter.model_compiled(&run_id, model_name, "");
+                        continue;
+                    }
                 };
-                reporter.model_compiled(&run_id, model_name, &sql_to_emit);
+
+                // ── Maintenance statements this invocation would execute ────
+                // Real window literals, one `StatementGroup` per chunk — the
+                // output of the same single-owner emitters a real run consumes
+                // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+                // owner)"), not just the compiled SELECT body. A `grain:
+                // partition` creation trigger lowers to the region-recompute
+                // (DELETE+INSERT) technique; the chunk windows are the SAME
+                // `build_model_plans` decomposition a real run walks, and each
+                // batch's body is clamped by the SAME `derive_batch_filtered_sql`
+                // the live run uses — so `--dry-run` reflects exactly what the
+                // invocation would execute (`docs/specs/cli.md` §"`--dry-run`
+                // prints the maintenance statements"). No SQL is authored here;
+                // the clamp is injected and handed to the emitter.
+                let Some(plan) = model_plans.iter().find(|p| &p.name == model_name) else {
+                    continue;
+                };
+                let Some(inc) = plan.incremental.as_ref() else {
+                    continue;
+                };
+                let dialect = maintenance_dialect_for_target(&config, &model_target);
+                let partition_col = &inc.timeseries.partition_column;
+                let table_name = format!("{schema}.{}", model_file.db_name_owned());
+                let per_model_source_bounds =
+                    build_model_source_bounds(model_file, &source_timeseries, model_name);
+                for (batch_idx, batch) in inc.batches.iter().enumerate() {
+                    let start = batch.partition_start.format("%Y-%m-%d").to_string();
+                    let end = batch.partition_end.format("%Y-%m-%d").to_string();
+                    let run_range = TimeRange {
+                        start: start.clone(),
+                        end: end.clone(),
+                    };
+                    let filtered_sql = derive_batch_filtered_sql(
+                        &clean_sql,
+                        partition_col,
+                        &per_model_source_bounds,
+                        &run_range,
+                        run_start,
+                        inc.skew,
+                    )?;
+                    let compiled = compiler.compile_with_sql_and_ephemerals(
+                        model_file,
+                        schema,
+                        &filtered_sql,
+                        resolver,
+                    )?;
+                    let region = smelt_logical::maintenance::emit::Region {
+                        start: format!("'{}'", start.replace('\'', "''")),
+                        end: format!("'{}'", end.replace('\'', "''")),
+                    };
+                    let group = smelt_logical::maintenance::emit::emit_delete_insert(
+                        &table_name,
+                        partition_col,
+                        &region,
+                        &compiled.sql,
+                        dialect,
+                    );
+                    let chunk = crate::reporter::ChunkInfo {
+                        index: batch_idx,
+                        total: inc.batches.len(),
+                        start,
+                        end,
+                    };
+                    reporter.maintenance_statements(&run_id, model_name, Some(&chunk), &group);
+                }
             }
         }
 
@@ -392,120 +501,10 @@ pub async fn execute_project(
         backends.insert(target_name.clone(), backend);
     }
 
-    // ── Time range parsing ──────────────────────────────────────────────
-    let (start_date, end_date) = match (request.start.as_deref(), request.end.as_deref()) {
-        (Some(s), Some(e)) => {
-            let sd = NaiveDate::parse_from_str(s, "%Y-%m-%d")
-                .with_context(|| format!("Invalid start date: {s}"))?;
-            let ed = NaiveDate::parse_from_str(e, "%Y-%m-%d")
-                .with_context(|| format!("Invalid end date: {e}"))?;
-            if sd >= ed {
-                anyhow::bail!("Start date must be before end date");
-            }
-            (Some(sd), Some(ed))
-        }
-        (None, None) => (None, None),
-        _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
-    };
-
-    // ── Model-plan construction + ephemeral collection ──────────────────
-    let mut model_plans: Vec<ModelPlan> = Vec::new();
-    let mut total_batches: usize = 0;
-
-    for model_name in &selected {
-        let model = graph_lock.get_model(model_name)?;
-        let metadata = model.metadata.as_deref();
-        let frontmatter = Frontmatter::parse(&model.content);
-
-        let inc_config = config
-            .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
-
-        let ts_config = config
-            .get_timeseries_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
-
-        match (inc_config, ts_config, start_date, end_date) {
-            (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
-                // Resolve data latency from model column metadata for the event-time column.
-                let data_latency_days = metadata
-                    .and_then(|m| m.columns.get(&ts.event_time_column))
-                    .and_then(|c| c.data_latency.as_ref())
-                    .map(|l| l.to_days())
-                    .unwrap_or(0);
-
-                let full_range = TimeRange {
-                    start: start_date.format("%Y-%m-%d").to_string(),
-                    end: end_date.format("%Y-%m-%d").to_string(),
-                };
-
-                // Use bound-aware windowing: SQL temporal dependencies + data latency
-                // determine filter widening (not just analyze_batch_safety context_days).
-                let expanded_sql = expand_function_calls(&model.content, &fn_bodies);
-                let inc_windows = compute_incremental_windows(
-                    &ts,
-                    &inc,
-                    &expanded_sql,
-                    data_latency_days,
-                    &full_range,
-                    request.batch_size_days,
-                    request.per_partition,
-                );
-
-                if let Some(ref warning) = inc_windows.wide_batch_warning {
-                    warn!("model '{model_name}': {warning}");
-                }
-
-                let batches = inc_windows.batches;
-                total_batches += batches.len();
-                model_plans.push(ModelPlan {
-                    name: model_name.clone(),
-                    sql: model.content.clone(),
-                    materialization: config.get_materialization_with_metadata(model_name, metadata),
-                    incremental: Some(IncrementalPlan {
-                        config: inc,
-                        timeseries: ts,
-                        batches,
-                    }),
-                    model_file: model.clone(),
-                });
-            }
-            (Some(_inc), Some(_ts), _, _) => {
-                // Incremental config present but no time window. Fall back to
-                // full refresh; the model still compiles and executes.
-                model_plans.push(ModelPlan {
-                    name: model_name.clone(),
-                    sql: model.content.clone(),
-                    materialization: config.get_materialization_with_metadata(model_name, metadata),
-                    incremental: None,
-                    model_file: model.clone(),
-                });
-            }
-            (Some(_inc), None, _, _) => {
-                warn!(
-                    "model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
-                );
-                model_plans.push(ModelPlan {
-                    name: model_name.clone(),
-                    sql: model.content.clone(),
-                    materialization: config.get_materialization_with_metadata(model_name, metadata),
-                    incremental: None,
-                    model_file: model.clone(),
-                });
-            }
-            (None, _, _, _) => {
-                model_plans.push(ModelPlan {
-                    name: model_name.clone(),
-                    sql: model.content.clone(),
-                    materialization: config.get_materialization_with_metadata(model_name, metadata),
-                    incremental: None,
-                    model_file: model.clone(),
-                });
-            }
-        }
-    }
+    // `start_date`/`end_date`, `source_infos`/`source_timeseries`, and
+    // `model_plans`/`total_batches` are all built before the dry-run early
+    // return (see the block just above the dry-run branch) so the two paths
+    // share one chunk decomposition; the real run below consumes them directly.
 
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
@@ -527,11 +526,8 @@ pub async fn execute_project(
             }
         }
     }
-    // Project-wide `smelt.<path> → timeseries` map. Merges model-frontmatter
-    // timeseries with per-entity source YAML timeseries declarations (BUG-072).
-    // Cumulative dispatch and incremental pushdown (Phase 3) both use this map.
-    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
-    let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
+    // `source_infos`/`source_timeseries` are built earlier (before model-plan
+    // construction) — see the comment there.
     drop(graph_lock);
 
     // ── Compile context (UpstreamSchemas + FnBodyMap from Salsa) ────────
@@ -550,6 +546,41 @@ pub async fn execute_project(
     compilers.set_upstream_schemas_all(upstream_schemas);
     if !fn_bodies.is_empty() {
         compilers.set_function_bodies_all(fn_bodies);
+    }
+
+    // ── Cross-engine Parquet reference wiring ────────────────────────────
+    // For each cross-engine edge (consumer_model, producer_dep, consumer_target,
+    // producer_target), ask the producer backend for its materialized filesystem
+    // path and inject a read_parquet(...) substitution into the consumer target's
+    // compiler so smelt.ref(dep) resolves to read_parquet instead of a table name.
+    // Spec oracle: multi_backend.md §"Cross-engine data exchange".
+    if !cross_edges.is_empty() {
+        let mut refs_by_target: HashMap<String, HashMap<String, String>> = HashMap::new();
+        for (_consumer, dep_name, consumer_target, producer_target) in &cross_edges {
+            if let Some(producer) = backends.get(producer_target.as_str()) {
+                let dep_schema = config
+                    .targets
+                    .get(producer_target)
+                    .map(|t| t.schema.as_str())
+                    .unwrap_or("");
+                // Compiler looks up cross-engine refs by the underscore form of the dep path
+                // (segs.join("_"), matching how smelt.<path> refs are resolved in compile.rs).
+                let dep_db_name = dep_name.replace('.', "_");
+                if let Some(path) = producer.materialized_path(dep_schema, &dep_db_name) {
+                    let parquet_expr = format!(
+                        "read_parquet('{}/**/*.parquet', hive_partitioning = true)",
+                        path.display()
+                    );
+                    refs_by_target
+                        .entry(consumer_target.clone())
+                        .or_default()
+                        .insert(dep_db_name, parquet_expr);
+                }
+            }
+        }
+        for (target_name, refs) in refs_by_target {
+            compilers.set_cross_engine_refs(&target_name, refs);
+        }
     }
 
     let mut ephemeral_resolvers: HashMap<String, EphemeralResolver> = HashMap::new();
@@ -783,16 +814,16 @@ pub async fn execute_project(
             }
         }
 
-        // Cumulative-aggregate dispatch — handled separately from the
-        // incremental / full-refresh branches because it has its own per-
-        // partition merge loop (see `smelt_runtime::cumulative` and
-        // `docs/specs/cumulative_aggregate.md`).
-        let plan_is_cumulative = plan
+        // Keyed dispatch — handled separately from the incremental /
+        // full-refresh branches because it has its own per-partition merge
+        // loop (see `smelt_runtime::cumulative` and
+        // `docs/specs/keyed_models.md`).
+        let plan_is_keyed = plan
             .model_file
             .metadata
             .as_deref()
-            .is_some_and(|m| m.is_cumulative());
-        if plan_is_cumulative {
+            .is_some_and(|m| m.is_keyed());
+        if plan_is_keyed {
             let db_table_name = plan.model_file.db_name_owned();
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
@@ -819,15 +850,15 @@ pub async fn execute_project(
                 }
                 _ => {
                     // No run window: single-shot full refresh of the
-                    // cumulative SELECT. Matches CLI's behaviour for
+                    // keyed SELECT. Matches CLI's behaviour for
                     // `smelt build` / `smelt run` without an event-time
                     // window.
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
                     // Classify even on the no-window full-refresh path: a
                     // classifier rejection must REFUSE the model
-                    // (cumulative_aggregate.md Constraint #10 — "No silent
-                    // downgrade. … No fallback to full-refresh"). Without this,
-                    // forbidden cumulative SQL (e.g. a non-allowlisted
+                    // (keyed_models.md Constraint #4 — "The catalogue is
+                    // closed and the classifier is fail-closed"). Without
+                    // this, forbidden keyed SQL (e.g. a non-allowlisted
                     // aggregator) would be silently materialised as a plain
                     // full refresh whenever no event-time window is supplied.
                     crate::cumulative::classify_cumulative_sql(
@@ -851,11 +882,7 @@ pub async fn execute_project(
                         .create_table_as(schema, &db_table_name, &compiled.sql)
                         .await
                         .map_err(|err| {
-                            anyhow::anyhow!(
-                                "Failed to create cumulative model {}: {}",
-                                plan.name,
-                                err
-                            )
+                            anyhow::anyhow!("Failed to create keyed model {}: {}", plan.name, err)
                         })?;
                     let row_count = backend
                         .get_row_count(schema, &db_table_name)
@@ -922,18 +949,145 @@ pub async fn execute_project(
 
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
             Some(inc_plan) => {
-                let resolved_strategy = backend.resolve_strategy(&inc_plan.config);
+                let backend_default_strategy = backend.resolve_strategy(&inc_plan.config);
 
                 // Build source bound map once per model for source-filter pushdown (BUG-073).
                 // The model SQL is the same for every batch — compute once and reuse.
                 // `source_timeseries` is the project-wide smelt-ref → TimeseriesConfig map
-                // (built from model frontmatter + source YAML declarations in Phase 2).
-                // We convert it to the dep_timeseries shape that `build_source_bound_map`
-                // expects: smelt_ref → (address_segments, partition_column).
+                // (built from model frontmatter + source YAML declarations in Phase 2), so it
+                // also contains this model's *own* frontmatter entry (every batched model
+                // declares `timeseries:` on itself). Restrict `dep_ts` to the model's actual
+                // upstream refs (`model.refs`) — otherwise the self-entry would inflate
+                // `per_model_source_bounds` with a spurious zero-margin entry for a ref that
+                // never appears in the model's own SQL, breaking the single-source B0
+                // transparent-slice classification (`is_transparent_single_source`) for every
+                // model that happens to declare `timeseries:` on itself (i.e. every batched
+                // model).
+                let model_ref_paths: std::collections::HashSet<String> = plan
+                    .model_file
+                    .refs
+                    .iter()
+                    .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+                    .collect();
                 let sql_for_bounds = smelt_parser::strip_frontmatter(&plan.sql);
+
+                // MP11 (`maintenance_plan.md` §"Per-cell admission"): read the
+                // creation trigger's write strategy off the derived
+                // `MaintenancePlan` rather than a hardcoded constant.
+                // `SourceFacts` are assembled with the same bare-name
+                // convention `smelt-db::maintenance_plan`'s Salsa query uses
+                // (`SourceFacts::name` strips the `sources.` breadcrumb) so
+                // trigger names agree with `derive_column_groups`'
+                // `mutation_sensitivity` keys. `allow_full_scan: true` is
+                // safe here regardless of the model's real
+                // `maintenance.scan_bounds` declaration: the creation
+                // trigger's `Grain::Partition` arm (`derive_new_data`) always
+                // admits `Technique::DeleteInsert` unconditionally — no
+                // admission check reads `allow_full_scan` on that path — so
+                // this can't spuriously widen what actually executes.
+                let maint_source_facts: Vec<smelt_logical::maintenance::SourceFacts> = plan
+                    .model_file
+                    .refs
+                    .iter()
+                    .filter_map(|r| {
+                        let segs = r.smelt_ref.to_path();
+                        let info = source_infos.iter().find(|s| s.address_segments == segs)?;
+                        // Bare name: strip only a leading `sources` breadcrumb
+                        // (matching `smelt-db::maintenance_plan`'s
+                        // `stripped.strip_prefix("sources.")` exactly) — NOT
+                        // just the last segment, which would collapse a
+                        // multi-level address like `sources.raw.users` down
+                        // to `users` and disagree with `SourceFacts::name`
+                        // elsewhere (`scan_bounds.per_source` keys,
+                        // `derive_column_groups`'s `mutation_sensitivity`).
+                        let bare = match segs.split_first() {
+                            Some((first, rest)) if first == "sources" => rest.join("."),
+                            _ => segs.join("."),
+                        };
+                        Some(smelt_db::queries::maintenance::source_facts(
+                            &bare,
+                            Some(info),
+                            true,
+                        ))
+                    })
+                    .collect();
+                // `explicitly_mutable` names sources whose OWN source YAML
+                // declares `mutation_profile: mutable_snapshot` — checked
+                // against `source_infos`' raw `mutation_profile` field
+                // directly, NOT `maint_source_facts`' already-defaulted
+                // `mutation` field above. `source_facts()` fails closed to
+                // `MutableSnapshot` for an UNDECLARED source too (the
+                // stricter posture for admission purposes elsewhere in this
+                // function); filtering on that defaulted field here would
+                // treat every undeclared, unclocked source (e.g. a plain
+                // `refresh: incremental` model's own append-only-by-default
+                // upstream) as "explicitly mutable", spuriously admitting a
+                // `Trigger::UpstreamMutation` cell
+                // `derive_model_maintenance_plan` never intended to derive
+                // for it (see that function's own doc comment: "explicitly
+                // declares... not merely the fail-closed default"). Mirrors
+                // `crates/smelt-runtime/tests/technique_lowering.rs`'s
+                // `real_fixture_examples_timeseries_admits_column_scoped_merge_cell`.
+                let explicitly_mutable: std::collections::HashSet<String> = plan
+                    .model_file
+                    .refs
+                    .iter()
+                    .filter_map(|r| {
+                        let segs = r.smelt_ref.to_path();
+                        let info = source_infos.iter().find(|s| s.address_segments == segs)?;
+                        let mutable = info.mutation_profile.as_ref().is_some_and(|m| {
+                            m.kind == smelt_core::sources::MutationProfile::Mutable
+                        });
+                        if !mutable {
+                            return None;
+                        }
+                        let bare = match segs.split_first() {
+                            Some((first, rest)) if first == "sources" => rest.join("."),
+                            _ => segs.join("."),
+                        };
+                        Some(bare)
+                    })
+                    .collect();
+                let resolved_strategy = match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => crate::maintenance_driver::resolve_incremental_strategy(
+                        &sql_for_bounds,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        backend_default_strategy.clone(),
+                    ),
+                    None => backend_default_strategy,
+                };
+
+                // MP11 (`maintenance_plan.md` §"Per-cell admission"): consult
+                // the SAME derived `MaintenancePlan` for a live
+                // `ColumnScopedMerge` cell on one of the model's
+                // explicitly-mutable dimension sources. When one resolves
+                // live, the batch loop below dispatches to a column-scoped
+                // `MERGE` instead of the default region-recompute path — "the
+                // driver loop becomes the per-cell technique executor"
+                // (`docs/plans/20260707-maintenance-plan-impl.md` Phase
+                // MP11). Deciding WHETHER a mutation actually happened this
+                // run (forward propagation / scheduling) is MP15's job; this
+                // only asks which technique the plan admits for the trigger,
+                // exactly like `resolve_incremental_strategy` above does for
+                // the creation trigger.
+                let column_scoped_cell = plan.model_file.metadata.as_deref().and_then(|metadata| {
+                    crate::maintenance_driver::resolve_live_column_scoped_cell(
+                        &sql_for_bounds,
+                        &plan.model_file.db_name_owned(),
+                        metadata,
+                        &maint_source_facts,
+                        &explicitly_mutable,
+                        backend.supports_column_scoped_merge(),
+                    )
+                });
+
                 let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
                     source_timeseries
                         .iter()
+                        .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
                         .filter_map(|(smelt_ref, ts)| {
                             // Strip the leading "smelt." prefix to get the path segments.
                             let path = smelt_ref.strip_prefix("smelt.")?;
@@ -941,7 +1095,103 @@ pub async fn execute_project(
                             Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
                         })
                         .collect();
-                let per_model_source_bounds = build_source_bound_map(&sql_for_bounds, &dep_ts);
+                let horizon_ceiling = plan
+                    .model_file
+                    .metadata
+                    .as_ref()
+                    .and_then(|m| m.horizon_ceiling.as_ref());
+                let (per_model_source_bounds, horizon_warnings) =
+                    build_source_bound_map(&sql_for_bounds, &dep_ts, horizon_ceiling);
+                for warning in &horizon_warnings {
+                    warn!("model '{}': {warning}", plan.name);
+                }
+
+                let mut used_column_scoped_merge = false;
+
+                // Which physical corner (if any) THIS run's batches should
+                // dispatch through instead of the default
+                // `execute_model_incremental` (DELETE+INSERT) call — decided
+                // once per run, then applied per batch below so the WRITE
+                // stays scoped to the SAME `[start, end)` window a plain
+                // incremental run would already touch.
+                //
+                // `Corner::ColumnMerge` is "full-input read, targeted write";
+                // `derive_model_maintenance_plan` derives two distinct shapes
+                // of it for an `UpstreamMutation` trigger
+                // (`maintenance_plan.md` §"Per-cell admission"):
+                // - `PartitionLocal::No` (accepted full scan, the operator
+                //   declared `allow_full_scan`): no horizon to clamp the
+                //   WRITE to, so it stays targeted by the run's own batch
+                //   window plus the `unique_key` MERGE semantics —
+                //   `execute_column_scoped_merge_full`.
+                // - `PartitionLocal::Yes` (a genuine derived `ScanClamp`):
+                //   the horizon-clamped corner F15 was built for —
+                //   `execute_column_scoped_merge`/`dimension_horizon_merge`
+                //   additionally clamp the dimension batch to
+                //   `[conv_ts − H, conv_ts]` on the model's own partition
+                //   axis, licensed only when the mutated dimension's join
+                //   contribution is provably monotone
+                //   (`maintenance_driver::dimension_join_contribution`).
+                //
+                // A forward-only advance whose window never revisits an
+                // already-processed partition still leaves that partition
+                // exactly as untouched as the default DELETE+INSERT path
+                // would have left it; only the technique used to write the
+                // requested window differs.
+                let column_merge_dispatch: Option<crate::maintenance_driver::ColumnMergeDispatch> =
+                    match column_scoped_cell.as_ref() {
+                        Some((source, cell)) => {
+                            let table_exists = backend
+                                .table_exists(schema, &plan.model_file.db_name_owned())
+                                .await
+                                .unwrap_or(false);
+                            // The join-contribution proof is only meaningful
+                            // (and only computed) for the `PartitionLocal::Yes`
+                            // corner — the accepted-full-scan corner has no
+                            // such precondition.
+                            let contribution = if matches!(
+                                cell.partition_local,
+                                smelt_logical::maintenance::PartitionLocal::Yes
+                            ) {
+                                // The mutated dimension's own declared
+                                // `unique_key` (`sources.md` §"Row identity")
+                                // — never `SourceFacts`' always-empty
+                                // `unique_key` field (`smelt-db`'s
+                                // `source_facts()` does not populate it
+                                // yet), read straight off the
+                                // already-resolved `source_infos`.
+                                let dimension_unique_key: Vec<String> = source_infos
+                                    .iter()
+                                    .find(|info| {
+                                        let segs = &info.address_segments;
+                                        let bare = match segs.split_first() {
+                                            Some((first, rest)) if first == "sources" => {
+                                                rest.join(".")
+                                            }
+                                            _ => segs.join("."),
+                                        };
+                                        &bare == source
+                                    })
+                                    .and_then(|info| info.unique_key.clone())
+                                    .unwrap_or_default();
+                                crate::maintenance_driver::dimension_join_contribution(
+                                    &sql_for_bounds,
+                                    source,
+                                    &dimension_unique_key,
+                                )
+                            } else {
+                                smelt_logical::analysis::join_shape::ContributionVerdict::Monotone
+                            };
+                            crate::maintenance_driver::decide_column_merge_dispatch(
+                                cell,
+                                source,
+                                table_exists,
+                                !inc_plan.config.unique_key.is_empty(),
+                                &contribution,
+                            )
+                        }
+                        None => None,
+                    };
 
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
@@ -959,29 +1209,60 @@ pub async fn execute_project(
                     let batch_start_time = Instant::now();
 
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
-                    let time_range = TimeRange {
-                        start: batch.filter_start.format("%Y-%m-%d").to_string(),
-                        end: batch.filter_end.format("%Y-%m-%d").to_string(),
-                    };
-                    let filtered_sql = inject_time_filter(
-                        &clean_sql,
-                        &inc_plan.timeseries.event_time_column,
-                        &time_range,
-                    )?;
 
-                    // Source-filter pushdown: narrow each source read to the run window
-                    // (partition_start / partition_end) plus per-source bounds derived from
-                    // the model SQL's INTERVAL patterns. The run window is the unwidened
-                    // partition range — `inject_time_filter` above uses filter_start/filter_end
-                    // (the widened write window) for the model's own output constraint; source
-                    // filters derive from the run window so the source scan tracks the
-                    // partition being produced, not the potentially wider DELETE range.
+                    // Source-filter pushdown: narrow each source read to this batch's
+                    // window (partition_start / partition_end) plus per-source bounds
+                    // derived from the model SQL's INTERVAL patterns. `batch.partition_start
+                    // / partition_end` is the **derived output window**, not the CLI-declared
+                    // run window verbatim (`windowing::compute_incremental_windows`
+                    // widens the declared window by the model's own partition-column
+                    // skew before chunking, `docs/specs/model_transforms.md` §Semantics
+                    // "The output window is derived, never assumed") — a skewed model's
+                    // batch here may already reach outside what the user typed on the
+                    // command line. Source filters derive from this (already-derived)
+                    // window so the source scan tracks the partition being produced,
+                    // not the potentially wider DELETE range.
                     let run_range = TimeRange {
                         start: batch.partition_start.format("%Y-%m-%d").to_string(),
                         end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
-                    let filtered_sql =
-                        inject_source_filters(&filtered_sql, &per_model_source_bounds, &run_range);
+
+                    // Two-layer widened-scan + exact output clamp
+                    // (`docs/specs/model_transforms.md` §Semantics — "Source-filter
+                    // pushdown + the two clamps"): the *scan* may read a margin
+                    // (handled per-source by `inject_source_filters`, which widens
+                    // each bounded source independently), but the *output clamp*
+                    // must equal the output window exactly — the margin is read but
+                    // never re-written. B0 (unified pushdown-depth walk,
+                    // `docs/research/20260703-model-updates.md` §3.3/§3.5): for the
+                    // transparent slice — a single bounded source with no lookback
+                    // margin AND zero partition-column skew — the source-level filter
+                    // on the exact output-window batch *is* the output clamp; the
+                    // outer `inject_time_filter` wrap would inject a textually
+                    // identical, redundant filter. Skip it and rely solely on the
+                    // source-level filter (`derive_batch_filtered_sql`'s
+                    // `is_transparent_single_source(...) && skew == Skew::ZERO` gate).
+                    // A model with a real lookback margin, a genuine partition-column
+                    // skew, or more than one source keeps both layers, but the outer
+                    // clamp uses the narrow output-window batch (`run_range`), not the
+                    // widened scan window — the write window must equal the output
+                    // window.
+                    // Two-layer widened-scan + exact output clamp, then
+                    // compile-time clock pinning — the output clamp ranges over
+                    // the declared `partition_column` (the same output-axis
+                    // column the DELETE below ranges over), and every batch of
+                    // this run shares the one `run_start` literal. Shared with
+                    // the `--dry-run` statement-emission branch via
+                    // `derive_batch_filtered_sql` so a dry-run derives a batch's
+                    // SQL exactly as this live run does.
+                    let filtered_sql = derive_batch_filtered_sql(
+                        &clean_sql,
+                        &inc_plan.timeseries.partition_column,
+                        &per_model_source_bounds,
+                        &run_range,
+                        run_start,
+                        inc_plan.skew,
+                    )?;
 
                     let compiler = compilers.get(model_target);
                     let resolver = &ephemeral_resolvers[model_target];
@@ -993,41 +1274,153 @@ pub async fn execute_project(
                     )?;
                     reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
 
-                    // The DELETE range must cover the full set of partitions the
-                    // INSERT actually writes. `inject_time_filter` clamps the output
-                    // on `event_time_column` to [filter_start, filter_end) — i.e. the
-                    // run window widened backward by `context_days` (the derived
-                    // lookback). For models whose write window spans more than the run
-                    // window (a Form B output rebasing, e.g. a session that started on
-                    // D-1 and is updated by events on D), using the un-widened
-                    // partition_start here would DELETE only the run-window partition
-                    // while the INSERT writes the lookback partition too, accumulating
-                    // duplicates across consecutive day-by-day runs. Deleting the same
-                    // [filter_start, filter_end) the output is clamped to keeps the
-                    // DELETE+INSERT contract idempotent regardless of write-window width.
+                    // The DELETE range must equal exactly what the INSERT writes —
+                    // the write window equals the output window
+                    // (`docs/specs/model_transforms.md` §Constraints — "Write window
+                    // = output window; scan window ⊇ output window"). `inject_time_filter`
+                    // clamps the wrapped output on `partition_column` to the narrow
+                    // `run_range` (`[partition_start, partition_end)`) — the SAME
+                    // column and window this DELETE ranges over, so the two agree
+                    // by construction. Widening the DELETE to the scan's margin
+                    // would re-delete-and-rewrite the neighboring partition using a
+                    // scan sized for *this* batch's margin, not that partition's
+                    // own — silently corrupting it.
                     let partition = PartitionRange {
                         column: inc_plan.timeseries.partition_column.clone(),
-                        start: batch.filter_start.format("%Y-%m-%d").to_string(),
-                        end: batch.filter_end.format("%Y-%m-%d").to_string(),
+                        start: batch.partition_start.format("%Y-%m-%d").to_string(),
+                        end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
 
-                    let strategy = MaterializationStrategy::Incremental {
-                        partition,
-                        strategy: resolved_strategy.clone(),
-                        unique_key: inc_plan.config.unique_key.clone(),
-                    };
+                    let exec_result = if let Some(dispatch) = column_merge_dispatch.as_ref() {
+                        // MP11 (`maintenance_plan.md` §"Per-cell admission"):
+                        // the live `UpstreamMutation` cell resolved to
+                        // `Technique::ColumnScopedMerge` — `compiled.sql` is
+                        // ALREADY filtered to this batch's `run_range`
+                        // (`inject_time_filter`/`inject_source_filters`
+                        // above), so `MERGE`ing it in on `unique_key` keeps
+                        // the write scoped to exactly the window a
+                        // DELETE+INSERT would have touched, but as a keyed
+                        // `MERGE` — the driver loop becoming the per-cell
+                        // technique executor.
+                        used_column_scoped_merge = true;
+                        match dispatch {
+                            crate::maintenance_driver::ColumnMergeDispatch::Full => {
+                                crate::maintenance_driver::execute_column_scoped_merge_full(
+                                    backend,
+                                    schema,
+                                    &plan.model_file.db_name_owned(),
+                                    &inc_plan.config.unique_key,
+                                    &compiled.sql,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?
+                            }
+                            crate::maintenance_driver::ColumnMergeDispatch::Clamped(scan) => {
+                                let batch_width_days = (batch.partition_end - batch.partition_start)
+                                    .num_days()
+                                    .max(0)
+                                    as u64;
+                                let batch_width =
+                                    smelt_logical::analysis::source_bounds::Seconds::days(
+                                        batch_width_days,
+                                    );
+                                let bound = crate::maintenance_driver::widen_horizon_for_batch(
+                                    scan,
+                                    batch_width,
+                                );
+                                // The mutated dimension's join contribution
+                                // was already proven monotone when
+                                // `column_merge_dispatch` was computed above
+                                // (`dimension_join_contribution`) — this is
+                                // not a second, independent re-derivation.
+                                let contribution =
+                                    smelt_logical::analysis::join_shape::ContributionVerdict::Monotone;
+                                let conv_ts = batch.partition_end.format("%Y-%m-%d").to_string();
+                                crate::maintenance_driver::execute_column_scoped_merge(
+                                    backend,
+                                    schema,
+                                    &plan.model_file.db_name_owned(),
+                                    &inc_plan.config.unique_key,
+                                    &contribution,
+                                    &bound,
+                                    &inc_plan.timeseries.partition_column,
+                                    &conv_ts,
+                                    &compiled.sql,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?
+                            }
+                        }
+                    } else {
+                        // Observability: report the region DELETE+INSERT
+                        // group this batch is about to execute — the same
+                        // emitter call `Backend::delete_and_insert_transactional`
+                        // makes to build what it actually executes
+                        // (`docs/specs/maintenance_plan.md` §"Statement
+                        // emission (single owner)"). Pure function, same
+                        // inputs, so the reported text cannot drift from the
+                        // executed text.
+                        //
+                        // `schema.table` is the correct fully-qualified name
+                        // for every dialect this runtime path is exercised
+                        // against today (DuckDB); a catalog-qualifying
+                        // backend (Spark) would need its own qualified name
+                        // here, so the report is scoped to DuckDB until a
+                        // generic `Backend::qualified_table_name` exists —
+                        // Spark's *executed* text is still correct (its own
+                        // `delete_and_insert_transactional` override builds
+                        // it), only this runtime-side report is narrowed.
+                        if backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                            && matches!(
+                                resolved_strategy,
+                                smelt_backend::IncrementalStrategy::DeleteInsert
+                            )
+                        {
+                            let table_name =
+                                format!("{schema}.{}", plan.model_file.db_name_owned());
+                            let region = smelt_logical::maintenance::emit::Region {
+                                start: format!("'{}'", partition.start.replace('\'', "''")),
+                                end: format!("'{}'", partition.end.replace('\'', "''")),
+                            };
+                            let group = smelt_logical::maintenance::emit::emit_delete_insert(
+                                &table_name,
+                                &partition.column,
+                                &region,
+                                &compiled.sql,
+                                smelt_backend::maintenance_dialect(backend.dialect()),
+                            );
+                            let chunk = crate::reporter::ChunkInfo {
+                                index: batch_idx,
+                                total: inc_plan.batches.len(),
+                                start: partition.start.clone(),
+                                end: partition.end.clone(),
+                            };
+                            reporter.maintenance_statements(
+                                &run_id,
+                                &plan.name,
+                                Some(&chunk),
+                                &group,
+                            );
+                        }
 
-                    let exec_result = backend
-                        .execute_model_incremental(
-                            schema,
-                            &plan.model_file.db_name_owned(),
-                            &compiled.sql,
-                            Materialization::Table,
-                            strategy,
-                            false,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let strategy = MaterializationStrategy::Incremental {
+                            partition,
+                            strategy: resolved_strategy.clone(),
+                            unique_key: inc_plan.config.unique_key.clone(),
+                        };
+
+                        backend
+                            .execute_model_incremental(
+                                schema,
+                                &plan.model_file.db_name_owned(),
+                                &compiled.sql,
+                                Materialization::Table,
+                                strategy,
+                                false,
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                    };
 
                     total_rows += exec_result.row_count;
                     total_rows_overall += exec_result.row_count;
@@ -1051,10 +1444,15 @@ pub async fn execute_project(
                     ),
                     _ => (String::new(), String::new()),
                 };
+                let strategy_label = if used_column_scoped_merge {
+                    "column_scoped_merge".to_string()
+                } else {
+                    format!("{:?}", resolved_strategy).to_lowercase()
+                };
                 manifest.models.insert(
                     plan.name.clone(),
                     ModelRunRecord {
-                        strategy: format!("{:?}", resolved_strategy).to_lowercase(),
+                        strategy: strategy_label,
                         time_range: Some(TimeRangeRecord {
                             start: start_str.clone(),
                             end: end_str.clone(),
@@ -1066,12 +1464,92 @@ pub async fn execute_project(
                     },
                 );
 
-                // Update interval store
+                // Update interval store. A column-scoped MERGE (MP11) still
+                // writes exactly the `[start_str, end_str)` run window each
+                // batch was already scoped to (`compiled.sql` carries the
+                // same `inject_time_filter`/`inject_source_filters` clamp a
+                // DELETE+INSERT batch would have used) — only the physical
+                // write technique differs, so the interval store's record
+                // stays accurate regardless of which technique wrote it.
                 if let Ok(mut interval_store) = file_store.load_intervals() {
                     let model_hash = compute_model_hash(&plan.sql);
                     let intervals = interval_store.get_or_create(&plan.name, &model_hash);
                     intervals.record_interval(&start_str, &end_str);
                     let _ = file_store.save_intervals(&interval_store);
+                }
+
+                // Per-source landed-delta recording (P10 v1: `docs/specs/sources.md`
+                // §"World-facts admission consumes"): for every source this
+                // model consumed (`maint_source_facts`, already resolved
+                // above against `source_infos` with the same bare-name
+                // convention `smelt-db::maintenance_plan` uses), record that
+                // `[start_str, end_str)` — this run's own window, the v1
+                // proxy for "what landed" — is now reflected on that
+                // source's own partition axis. An append-only clocked
+                // source (`partition_col: Some(_)`, `mutation: AppendOnly`)
+                // is interval-diffed against prior coverage; a mutable
+                // snapshot or unclocked source (`partition_col: None`) has
+                // no interval representation and always resolves to
+                // `LandedDelta::WholeTable` — never a silent no-op
+                // (`maintenance_plan.md` §"Forward propagation").
+                if !start_str.is_empty() && !end_str.is_empty() {
+                    if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
+                        for sf in &maint_source_facts {
+                            let posture = if sf.partition_col.is_none() {
+                                SourceMutationPosture::Unclocked
+                            } else {
+                                match sf.mutation {
+                                    smelt_logical::maintenance::MutationProfile::AppendOnly => {
+                                        SourceMutationPosture::AppendOnly
+                                    }
+                                    smelt_logical::maintenance::MutationProfile::MutableSnapshot => {
+                                        SourceMutationPosture::MutableSnapshot
+                                    }
+                                }
+                            };
+                            record_landing(
+                                &mut landed_deltas,
+                                &sf.name,
+                                posture,
+                                &start_str,
+                                &end_str,
+                            );
+                        }
+                        let _ = file_store.save_landed_deltas(&landed_deltas);
+                    }
+                }
+
+                // Reconciliation ledger: this batch loop performed a region
+                // recompute of `[start_str, end_str)` (DELETE the write
+                // window, INSERT its recompute — write window = output
+                // window; or, for a column-scoped MERGE cell, MERGE that
+                // SAME window's freshly-recomputed rows in by `unique_key` —
+                // the row VALUES are still a from-scratch recompute of the
+                // window, only the physical write op differs).
+                // `docs/specs/maintenance_plan.md` §"The reconciliation
+                // ledger": a region recompute resets every intersecting
+                // entry to exactly the input it read. This records the
+                // whole-row group `{*}` (matching
+                // `smelt_logical::maintenance::PlanCell::group`'s
+                // whole-row-trigger convention) read from a single nominal
+                // `self` input, watermarked to the region's own end. This
+                // subsumes `IntervalStore`'s role for the region-recompute
+                // shape without regressing it — both stores are written
+                // side by side. Per-cell (not whole-row) ledger grading for
+                // the column-scoped-merge technique is MP12's job
+                // (`maintenance_plan.md` §"The reconciliation ledger").
+                if !start_str.is_empty() && !end_str.is_empty() {
+                    if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
+                        let region = Region::new(start_str.clone(), end_str.clone());
+                        let mut read = std::collections::BTreeMap::new();
+                        read.insert("self".to_string(), end_str.clone());
+                        reconciliation.get_or_create(&plan.name).recompute_reset(
+                            &region,
+                            "{*}",
+                            Processed::Frontier(read),
+                        );
+                        let _ = file_store.save_reconciliation_store(&reconciliation);
+                    }
                 }
 
                 Ok(())
@@ -1092,9 +1570,6 @@ pub async fn execute_project(
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
                     smelt_core::config::Materialization::View => Materialization::View,
-                    smelt_core::config::Materialization::MaterializedView => {
-                        Materialization::MaterializedView
-                    }
                     smelt_core::config::Materialization::Ephemeral => {
                         unreachable!("Ephemeral models should be inlined as CTEs, not executed")
                     }
@@ -1224,6 +1699,303 @@ pub async fn execute_project(
         total_rows_overall,
         check_results,
     ))
+}
+
+/// Parse the run's `[start, end)` event-time window from the request. End is
+/// exclusive; both must be present together or neither. Extracted so the
+/// dry-run statement-emission branch and the real run resolve the window
+/// identically (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
+/// statements": region literals are real, from this same resolved window).
+fn parse_run_window(request: &ExecuteRequest) -> Result<(Option<NaiveDate>, Option<NaiveDate>)> {
+    match (request.start.as_deref(), request.end.as_deref()) {
+        (Some(s), Some(e)) => {
+            let sd = NaiveDate::parse_from_str(s, "%Y-%m-%d")
+                .with_context(|| format!("Invalid start date: {s}"))?;
+            let ed = NaiveDate::parse_from_str(e, "%Y-%m-%d")
+                .with_context(|| format!("Invalid end date: {e}"))?;
+            if sd >= ed {
+                anyhow::bail!("Start date must be before end date");
+            }
+            Ok((Some(sd), Some(ed)))
+        }
+        (None, None) => Ok((None, None)),
+        _ => anyhow::bail!("Both start and end must be provided together (or neither)"),
+    }
+}
+
+/// Build the per-model execution plans (batch/chunk windows via the
+/// bound-aware windowing) for the selected models. Pure with respect to the
+/// backend — it touches only the graph, config, function bodies, and the
+/// project-wide source-timeseries map — so both the dry-run statement-emission
+/// branch and the real run share the identical chunk decomposition
+/// (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements":
+/// backbuild's per-chunk boundaries under `--dry-run` are the real chunks).
+/// Returns the plans plus the total batch count (for `run_started`).
+#[allow(clippy::too_many_arguments)]
+fn build_model_plans(
+    selected: &[String],
+    graph_lock: &DependencyGraph,
+    config: &Config,
+    fn_bodies: &crate::FnBodyMap,
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    start_date: Option<NaiveDate>,
+    end_date: Option<NaiveDate>,
+    request: &ExecuteRequest,
+) -> Result<(Vec<ModelPlan>, usize)> {
+    let mut model_plans: Vec<ModelPlan> = Vec::new();
+    let mut total_batches: usize = 0;
+
+    for model_name in selected {
+        let model = graph_lock.get_model(model_name)?;
+        let metadata = model.metadata.as_deref();
+        let frontmatter = Frontmatter::parse(&model.content);
+
+        let inc_config = config
+            .get_incremental_with_metadata(model_name, metadata)
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
+
+        let ts_config = config
+            .get_timeseries_with_metadata(model_name, metadata)
+            .cloned()
+            .or_else(|| metadata.and_then(|m| m.timeseries.clone()));
+
+        match (inc_config, ts_config, start_date, end_date) {
+            (Some(inc), Some(ts), Some(start_date), Some(end_date)) => {
+                // Resolve data latency from model column metadata for the event-time column.
+                let data_latency_days = metadata
+                    .and_then(|m| m.columns.get(&ts.event_time_column))
+                    .and_then(|c| c.data_latency.as_ref())
+                    .map(|l| l.to_days())
+                    .unwrap_or(0);
+
+                let full_range = TimeRange {
+                    start: start_date.format("%Y-%m-%d").to_string(),
+                    end: end_date.format("%Y-%m-%d").to_string(),
+                };
+
+                // Use bound-aware windowing: SQL temporal dependencies + data latency
+                // determine filter widening (not just analyze_batch_safety context_days).
+                let expanded_sql = expand_function_calls(&model.content, fn_bodies);
+
+                // Dependency timeseries map for this model — mirrors the
+                // restriction to `model.refs` used later for
+                // `build_source_bound_map` (see the comment at that call
+                // site): `source_timeseries` also carries this model's own
+                // frontmatter `timeseries:` entry, which must be excluded or
+                // it inflates the bound map with a spurious self-entry.
+                let model_ref_paths: std::collections::HashSet<String> = model
+                    .refs
+                    .iter()
+                    .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+                    .collect();
+                let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
+                    .iter()
+                    .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
+                    .filter_map(|(smelt_ref, ts_cfg)| {
+                        let path = smelt_ref.strip_prefix("smelt.")?;
+                        let segs: Vec<String> = path.split('.').map(String::from).collect();
+                        Some((smelt_ref.clone(), (segs, ts_cfg.partition_column.clone())))
+                    })
+                    .collect();
+
+                // Own `smelt.ref()` list, unfiltered — a self-edge (BL7,
+                // `window_independence`) is `refs` containing `model_name`
+                // itself, which `model_ref_paths`/`dep_ts` above deliberately
+                // excludes (that map is upstream-*source* timeseries only).
+                let refs: Vec<String> = model
+                    .refs
+                    .iter()
+                    .map(|r| r.smelt_ref.to_path().join("."))
+                    .collect();
+
+                let inc_windows = compute_incremental_windows_ordered(
+                    model_name,
+                    &refs,
+                    &ts,
+                    &inc,
+                    &expanded_sql,
+                    &dep_ts,
+                    data_latency_days,
+                    &full_range,
+                    request.batch_size_days,
+                    request.per_partition,
+                )
+                .map_err(|diag| {
+                    // Fail-closed last line of defense (`batched_models.md` Constraint 10):
+                    // even under `--allow-downgrade` (which only warns at the earlier
+                    // `check_bound_derivation` gate), the batch-safety roll-up here must
+                    // still refuse rather than silently approximate a chunk shape —
+                    // there is no flag that makes an unsafe chunk shape safe.
+                    anyhow::anyhow!(
+                        "Backfill chunk-size derivation refused model '{}':\n  \u{2022} {}",
+                        model_name,
+                        diag
+                    )
+                })?;
+
+                if let Some(ref warning) = inc_windows.wide_batch_warning {
+                    warn!("model '{model_name}': {warning}");
+                }
+
+                let batches = inc_windows.batches;
+                let skew = inc_windows.skew;
+                total_batches += batches.len();
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: Some(IncrementalPlan {
+                        config: inc,
+                        timeseries: ts,
+                        batches,
+                        skew,
+                    }),
+                    model_file: model.clone(),
+                });
+            }
+            (Some(_inc), Some(_ts), _, _) => {
+                // Incremental config present but no time window. Fall back to
+                // full refresh; the model still compiles and executes.
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: None,
+                    model_file: model.clone(),
+                });
+            }
+            (Some(_inc), None, _, _) => {
+                warn!(
+                    "model '{model_name}' has incremental: but no timeseries: — skipping incremental execution"
+                );
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: None,
+                    model_file: model.clone(),
+                });
+            }
+            (None, _, _, _) => {
+                model_plans.push(ModelPlan {
+                    name: model_name.clone(),
+                    sql: model.content.clone(),
+                    materialization: config.get_materialization_with_metadata(model_name, metadata),
+                    incremental: None,
+                    model_file: model.clone(),
+                });
+            }
+        }
+    }
+
+    Ok((model_plans, total_batches))
+}
+
+/// The maintenance-statement dialect for a target, derived from its declared
+/// backend type — the no-backend equivalent of
+/// `smelt_backend::maintenance_dialect(backend.dialect())`, so `--dry-run`
+/// (which never opens a connection) still renders statements in the target's
+/// own dialect (`docs/specs/cli.md` §"`--dry-run` prints the maintenance
+/// statements"). Falls back to DuckDb for an unrecognised target.
+fn maintenance_dialect_for_target(
+    config: &Config,
+    target: &str,
+) -> smelt_logical::maintenance::emit::MaintenanceDialect {
+    config
+        .targets
+        .get(target)
+        .and_then(|t| t.backend_type().ok())
+        .map(|bt| match bt {
+            smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
+            smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+        })
+        .map(smelt_backend::maintenance_dialect)
+        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
+}
+
+/// Per-model source-scan bound map (INTERVAL-derived lookback per upstream
+/// timeseries source), the input `derive_batch_filtered_sql` needs to clamp a
+/// batch's read + write. Mirrors the real run's own inline derivation so the
+/// dry-run statement-emission branch clamps a batch identically to a live run
+/// (`docs/specs/cli.md` §"`--dry-run` prints the maintenance statements").
+///
+/// `pub`: also reused by `smelt-cli`'s `explain --show-sql` statement
+/// emission (`crates/smelt-cli/src/commands/explain.rs`), which must derive a
+/// cell's per-source scan margin identically to a live run — the single-owner
+/// derivation this function already is, never re-implemented at the call site.
+pub fn build_model_source_bounds(
+    model_file: &smelt_core::ModelFile,
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    model_name: &str,
+) -> HashMap<String, crate::transformer::SourceBound> {
+    let sql_for_bounds = smelt_parser::strip_frontmatter(&model_file.content);
+    let model_ref_paths: HashSet<String> = model_file
+        .refs
+        .iter()
+        .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+        .collect();
+    let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
+        .iter()
+        .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
+        .filter_map(|(smelt_ref, ts)| {
+            let path = smelt_ref.strip_prefix("smelt.")?;
+            let segs: Vec<String> = path.split('.').map(String::from).collect();
+            Some((smelt_ref.clone(), (segs, ts.partition_column.clone())))
+        })
+        .collect();
+    let horizon_ceiling = model_file
+        .metadata
+        .as_ref()
+        .and_then(|m| m.horizon_ceiling.as_ref());
+    let (bounds, warnings) = build_source_bound_map(&sql_for_bounds, &dep_ts, horizon_ceiling);
+    for warning in &warnings {
+        warn!("model '{model_name}': {warning}");
+    }
+    bounds
+}
+
+/// Derive the source-clamped, output-clamped, clock-pinned SQL a single
+/// incremental batch reads/writes — the two-layer widened-scan + exact output
+/// clamp of `docs/specs/model_transforms.md` §"Source-filter pushdown + the
+/// two clamps". Shared by the real run and the `--dry-run` statement-emission
+/// branch so the statements a dry-run reports are derived exactly as a live run
+/// derives the ones it executes (`docs/specs/cli.md` §"`--dry-run` prints the
+/// maintenance statements").
+///
+/// `skew` is the model's own derived partition-column skew bound
+/// (`IncrementalPlan::skew`, sourced from `windowing::compute_incremental_windows`
+/// — never re-derived here, maintenance-plan purity). The transparent-slice
+/// fast path (`is_transparent_single_source`) additionally requires
+/// `skew == Skew::ZERO`: for a skewed model the per-source pushdown filter
+/// and the output clamp are genuinely different ranges (the source filter is
+/// built from `run_range`, i.e. this batch's own derived-output-window slice,
+/// while a *different* batch's scan may reach into this one's margin) even
+/// when there is exactly one zero-margin source, so the outer clamp stays
+/// load-bearing (`docs/specs/model_transforms.md` §Semantics "Source-filter
+/// pushdown + the two clamps").
+///
+/// `pub`: `smelt-cli`'s `explain --show-sql` statement emission
+/// (`crates/smelt-cli/src/commands/explain.rs`) calls this directly so the
+/// statements it reports for a `--period`-derived window are built by the
+/// exact same single-owner derivation a live run uses — never a second,
+/// hand-rolled clamp/pushdown composition at the CLI call site.
+pub fn derive_batch_filtered_sql(
+    clean_sql: &str,
+    partition_col: &str,
+    per_model_source_bounds: &HashMap<String, crate::transformer::SourceBound>,
+    run_range: &TimeRange,
+    run_start: chrono::DateTime<Utc>,
+    skew: smelt_logical::analysis::source_bounds::Skew,
+) -> Result<String> {
+    let filtered_sql = if is_transparent_single_source(per_model_source_bounds)
+        && skew == smelt_logical::analysis::source_bounds::Skew::ZERO
+    {
+        inject_source_filters(clean_sql, per_model_source_bounds, run_range)
+    } else {
+        let filtered_sql = inject_time_filter(clean_sql, partition_col, run_range)?;
+        inject_source_filters(&filtered_sql, per_model_source_bounds, run_range)
+    };
+    Ok(pin_run_deterministic_clocks(&filtered_sql, run_start))
 }
 
 fn build_outcome(
@@ -1368,7 +2140,7 @@ async fn run_model_checks(
 }
 
 /// Build the project-wide `smelt.<path> → timeseries` lookup map used by
-/// the planner (cumulative classification) and the incremental execute path
+/// the planner (keyed classification) and the incremental execute path
 /// (source-filter pushdown, Phase 3).
 ///
 /// Merges two sources of timeseries declarations:

@@ -73,7 +73,10 @@ For the full list of DuckDB settings, see the [DuckDB configuration reference](h
 
 ### Spark
 
-Spark is supported via Spark Connect for distributed execution.
+Spark is supported via Spark Connect for distributed execution. smelt compiles the same logical
+models to Spark SQL, handling dialect differences (QUALIFY rewrites, date literal forms, `::` cast
+lowerings) automatically. The smelt web UI also supports Spark targets — select a Spark target in
+the UI and models run on the connected server.
 
 ```yaml
 targets:
@@ -82,6 +85,7 @@ targets:
     connect_url: sc://spark-cluster:15002
     catalog: spark_catalog
     schema: production
+    format: delta  # default; use "parquet" for reduced-capability clusters
 ```
 
 | Field | Required | Description |
@@ -90,6 +94,27 @@ targets:
 | `connect_url` | Yes | Spark Connect URL (e.g., `sc://host:15002`). |
 | `catalog` | No | Spark catalog name. |
 | `schema` | Yes | Default schema for created tables and views. |
+| `format` | No | Table format: `delta` (default) or `parquet`. See [Delta vs Parquet](#delta-vs-parquet) below. |
+
+#### Delta vs Parquet
+
+The `format:` field selects the Spark table format, which determines which capabilities are available:
+
+| Capability | Delta | Parquet |
+|---|:---:|:---:|
+| MERGE (incremental) | ✓ | ✗ |
+| Column mapping / schema evolution | ✓ | ✗ |
+| `supports_nested_array_ddl` | ✓ | ✗ |
+| `supports_struct_field_ddl` | ✓ | ✗ |
+| `supports_merge_schema_write` | ✓ | ✓ |
+
+**Delta is the default and the parity baseline.** MERGE-based incremental models and rich schema
+evolution both require Delta. Use `format: parquet` only on clusters where Delta Lake is not
+available; doing so restricts the available incremental strategies and disables column mapping.
+
+To use Delta, ensure your Spark cluster has Delta Lake installed (e.g. the
+`io.delta:delta-spark_2.13:4.0.0` package). See `scripts/spark-up.sh` for the reference setup
+used in CI.
 
 ## Switching targets
 

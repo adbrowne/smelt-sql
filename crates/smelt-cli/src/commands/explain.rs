@@ -1,8 +1,9 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
-    argument_resolution::{compute_scope, resolve_selector_args},
-    build_explain_output, discover_emitted_model_files, discover_python_models, find_project_root,
-    init_db, parse_selector, Config, ModelDiscovery, SourcesConfig,
+    argument_resolution::{compute_scope, resolve_argument, resolve_selector_args},
+    build_explain_output, build_maintenance_plan_report, discover_emitted_model_files,
+    discover_python_models, find_project_root, init_db, parse_selector, Config, ModelDiscovery,
+    SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
@@ -11,6 +12,10 @@ use std::collections::HashMap;
 use crate::ExplainArgs;
 
 pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
+    if let Some(model_name) = args.model_name.clone() {
+        return explain_maintenance_plan(&args, &model_name, scope).await;
+    }
+
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -122,8 +127,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
         let frontmatter = Frontmatter::parse(&model.content);
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -178,7 +182,7 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
                 if let Some(ref inc) = model.incremental {
                     print!(
                         " (incremental: {} by {}, {})",
-                        serde_json::to_value(&inc.granularity)
+                        serde_json::to_value(inc.granularity)
                             .ok()
                             .and_then(|v| v.as_str().map(|s| s.to_string()))
                             .unwrap_or_else(|| "?".to_string()),
@@ -302,8 +306,7 @@ fn build_physical_section(
 
         let inc_config = config
             .get_incremental_with_metadata(model_name, metadata)
-            .cloned()
-            .or_else(|| frontmatter.as_ref().and_then(|f| f.incremental.clone()));
+            .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()));
         let ts_config = config
             .get_timeseries_with_metadata(model_name, metadata)
             .cloned()
@@ -315,7 +318,7 @@ fn build_physical_section(
                 part_col, gran
             )
         } else if let (Some(_), Some(ts)) = (&inc_config, &ts_config) {
-            let gran = serde_json::to_value(&ts.granularity)
+            let gran = serde_json::to_value(ts.granularity)
                 .ok()
                 .and_then(|v| v.as_str().map(|s| s.to_string()))
                 .unwrap_or_else(|| "?".to_string());
@@ -323,7 +326,7 @@ fn build_physical_section(
                 "incremental (partition: {}, granularity: {})",
                 ts.partition_column, gran
             )
-        } else if metadata.is_some_and(|m| m.is_cumulative()) {
+        } else if metadata.is_some_and(|m| m.is_keyed()) {
             "cumulative_aggregate".to_string()
         } else {
             "full_refresh".to_string()
@@ -350,6 +353,361 @@ fn build_physical_section(
     }
 }
 
+/// `smelt explain <model>` — the maintenance-plan report
+/// (`maintenance_plan.md` §Surface "CLI"). Read-only: consumes
+/// `smelt_db::maintenance_plan_report` (itself a thin wrapper over the pure
+/// derivation in `smelt-logical`) rather than re-deriving admission,
+/// locality, or ledger logic (maintenance-plan-purity invariant,
+/// `architecture.md` §"Constraints & Invariants" item 12).
+async fn explain_maintenance_plan(
+    args: &ExplainArgs,
+    model_name: &str,
+    scope: Option<&str>,
+) -> Result<()> {
+    let project_dir = find_project_root(&args.project_dir)
+        .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
+
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+
+    let sources = SourcesConfig::load(&project_dir).ok();
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let mut models = discovery
+        .discover_models()
+        .with_context(|| "Failed to discover models")?;
+
+    let python_files = discovery
+        .discover_python_files()
+        .with_context(|| "Failed to scan for Python models")?;
+    if !python_files.is_empty() {
+        let python_models = discover_python_models(
+            &python_files,
+            &models,
+            &config,
+            &project_dir,
+            config.python.as_deref(),
+        )
+        .with_context(|| "Failed to discover Python models")?;
+        models.extend(python_models);
+    }
+
+    let db = init_db(&project_dir, &models);
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let project = db
+        .project_input(&project_dir)
+        .expect("project not initialized");
+
+    let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+    let active_scope = compute_scope(&project_dir, &cwd, &config.paths, scope);
+    let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), model_name)
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+    let model = models
+        .iter()
+        .find(|m| m.canonical_path() == canonical)
+        .ok_or_else(|| anyhow::anyhow!("Model '{}' not found", canonical))?;
+
+    let file = db
+        .source_file(&model.path)
+        .expect("model file not registered");
+
+    let Some(result) = smelt_db::maintenance_plan_report(&db, ws, file) else {
+        println!(
+            "no maintenance plan: `{}` is not an incremental model with a declared grain",
+            canonical
+        );
+        return Ok(());
+    };
+
+    let graph = DependencyGraph::build(models.clone(), sources.as_ref())
+        .with_context(|| "Failed to build dependency graph")?;
+    let upstream = graph.get_upstream(&canonical);
+
+    let report = build_maintenance_plan_report(&canonical, &result, &upstream);
+
+    if !args.show_sql {
+        println!("{}", report);
+        return Ok(());
+    }
+
+    // `--show-sql`: print, after the report, the maintenance statements
+    // each cell executes — built from the same pure emitters a run
+    // executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    // (single owner)"). Never connects to a backend: `CompilerRegistry`
+    // only needs `smelt.yml` target metadata, not a live connection.
+    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let target = config.get_target(&canonical, model.metadata.as_deref(), &default_target);
+    let schema = config
+        .targets
+        .get(&target)
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let dialect = config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+        .map(backend_type_to_maintenance_dialect)
+        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+
+    let mut registry = smelt_runtime::CompilerRegistry::new(&config, &config.targets);
+    let fn_bodies = smelt_runtime::build_fn_body_map(&db, ws);
+    // Kept for the `--period` output-window derivation below (`expand_function_calls`
+    // needs its own copy); `set_function_bodies_all` takes the registry's copy by value.
+    let fn_bodies_for_windowing = fn_bodies.clone();
+    registry.set_function_bodies_all(fn_bodies);
+
+    // Wire real upstream-column typing so `apply_type_casts` sees the
+    // actual `smelt.ref()` column types instead of falling through to the
+    // `BigInt` default cast for fractional aggregates over upstream refs.
+    // `UpstreamSchemas::from_database` is purely Salsa/type-inference
+    // derived (`resolved_model_schema`) — no backend connection, so this is
+    // safe inside `explain` (`docs/specs/cli.md` §"`smelt explain <model>`
+    // maintenance-plan report").
+    match smelt_runtime::UpstreamSchemas::from_database(&db, &project_dir, &models) {
+        Ok(upstream_schemas) => {
+            registry.set_upstream_schemas_all(std::sync::Arc::new(upstream_schemas));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "explain --show-sql: upstream schema derivation failed ({e}); \
+                 printed casts may fall back to BIGINT defaults"
+            );
+        }
+    }
+
+    // Wire a real ephemeral resolver (mirrors `smelt-runtime::execute.rs`'s
+    // dry-run compile block) so a `smelt.<ephemeral>` ref in this model's
+    // SELECT body is CTE-inlined exactly as a run would inline it, instead
+    // of resolving as a physical table reference.
+    // Keyed by the underscore-joined `db_name_owned()` form (matching
+    // `SmeltRef::to_path().join("_")`, the key `compile_with_sql_and_ephemerals`
+    // looks referenced ephemerals up by) — not the dotted `canonical_path()`,
+    // which would silently miss multi-segment ephemeral refs.
+    let ephemeral_models: Vec<(String, String)> = models
+        .iter()
+        .filter(|m| {
+            config.get_materialization_with_metadata(&m.canonical_path(), m.metadata.as_deref())
+                == smelt_core::config::Materialization::Ephemeral
+        })
+        .map(|m| (m.db_name_owned(), m.content.clone()))
+        .collect();
+    let resolver = registry
+        .get(&target)
+        .build_ephemeral_resolver(&ephemeral_models, &schema);
+
+    let unique_key: Vec<String> = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.batched.as_ref())
+        .map(|b| b.unique_key.clone())
+        .unwrap_or_default();
+
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);
+
+    let region = match &args.period {
+        Some(p) => {
+            let (start, end) = parse_period(p)?;
+            smelt_cli::explain::RegionLiterals::Period { start, end }
+        }
+        None => smelt_cli::explain::RegionLiterals::Placeholders,
+    };
+
+    // When a concrete `--period` was given, derive the **output window**
+    // (`docs/specs/model_transforms.md` §Semantics "The output window is
+    // derived, never assumed") the same way a live run's `build_model_plans`
+    // does — identity for a plain `partition_column`, skew-inverted when the
+    // model's own SQL declares a Form B relation between the partition
+    // column and its driving date column — plus the per-source scan margin a
+    // `Technique::DeleteInsert` cell's read must widen by. `--period` names
+    // the *run* window a real invocation would be given; the statements
+    // `--show-sql` reports must reflect what that run actually reads/writes,
+    // not the literal text typed on the command line.
+    let derived_window = match &args.period {
+        Some(_) => build_derived_window(
+            &config,
+            model,
+            &canonical,
+            &source_timeseries,
+            &fn_bodies_for_windowing,
+            &region,
+        )?,
+        None => None,
+    };
+
+    let statements = smelt_cli::explain::build_all_cell_statements(
+        &result.plan.cells,
+        model,
+        &schema,
+        &target,
+        &registry,
+        &resolver,
+        dialect,
+        &unique_key,
+        &source_timeseries,
+        &region,
+        derived_window.as_ref(),
+    );
+
+    if args.json {
+        let json = smelt_cli::explain::build_maintenance_plan_json(
+            &canonical,
+            &result.plan.cells,
+            &statements,
+        );
+        println!("{}", serde_json::to_string_pretty(&json)?);
+        return Ok(());
+    }
+
+    println!("{}", report);
+    print!(
+        "{}",
+        smelt_cli::explain::render_cell_statements_text(&statements)
+    );
+
+    Ok(())
+}
+
+/// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
+/// `smelt_backend::maintenance_dialect` takes the richer `SqlDialect`
+/// (which also has `PostgreSQL`); this is the narrow bridge from a target's
+/// declared backend to the maintenance-statement dialect tag.
+fn backend_type_to_maintenance_dialect(
+    backend_type: smelt_core::config::BackendType,
+) -> smelt_logical::maintenance::emit::MaintenanceDialect {
+    let dialect = match backend_type {
+        smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
+        smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+    };
+    smelt_backend::maintenance_dialect(dialect)
+}
+
+/// Derive the `--period`-relative output window + per-source scan margin a
+/// `Technique::DeleteInsert` cell's statements are built from
+/// (`smelt_cli::explain::DerivedWindow`), by calling the exact same
+/// single-owner windowing derivation a live run's `build_model_plans` uses
+/// (`smelt_runtime::windowing::compute_incremental_windows`,
+/// `docs/specs/model_transforms.md` §Semantics "The output window is
+/// derived, never assumed"). Returns `Ok(None)` for a model with no
+/// `timeseries:`/`incremental:` declared (nothing to derive; the caller's
+/// `Technique::DeleteInsert` branch itself already refuses those with a
+/// clear reason) or an empty `--period` range.
+fn build_derived_window(
+    config: &Config,
+    model: &smelt_core::ModelFile,
+    canonical: &str,
+    source_timeseries: &smelt_planner::SourceTimeseriesMap,
+    fn_bodies: &smelt_runtime::FnBodyMap,
+    region: &smelt_cli::explain::RegionLiterals,
+) -> Result<Option<smelt_cli::explain::DerivedWindow>> {
+    let smelt_cli::explain::RegionLiterals::Period { start, end } = region else {
+        return Ok(None);
+    };
+
+    let metadata = model.metadata.as_deref();
+    let frontmatter = Frontmatter::parse(&model.content);
+    let Some(ts) = config
+        .get_timeseries_with_metadata(canonical, metadata)
+        .cloned()
+        .or_else(|| metadata.and_then(|m| m.timeseries.clone()))
+    else {
+        return Ok(None);
+    };
+    let Some(inc) = config
+        .get_incremental_with_metadata(canonical, metadata)
+        .or_else(|| frontmatter.as_ref().and_then(|f| f.batched_config()))
+    else {
+        return Ok(None);
+    };
+
+    let data_latency_days = metadata
+        .and_then(|m| m.columns.get(&ts.event_time_column))
+        .and_then(|c| c.data_latency.as_ref())
+        .map(|l| l.to_days())
+        .unwrap_or(0);
+
+    // Own `smelt.ref()` list, restricted to sources this model actually
+    // depends on — mirrors `execute.rs::build_model_plans`'s `dep_ts`
+    // construction exactly (`source_timeseries` also carries this model's
+    // own frontmatter `timeseries:` entry, which must be excluded or it
+    // inflates the map with a spurious self-entry).
+    let model_ref_paths: std::collections::HashSet<String> = model
+        .refs
+        .iter()
+        .map(|r| format!("smelt.{}", r.smelt_ref.to_path().join(".")))
+        .collect();
+    let dep_ts: HashMap<String, (Vec<String>, String)> = source_timeseries
+        .iter()
+        .filter(|(smelt_ref, _)| model_ref_paths.contains(*smelt_ref))
+        .filter_map(|(smelt_ref, ts_cfg)| {
+            let path = smelt_ref.strip_prefix("smelt.")?;
+            let segs: Vec<String> = path.split('.').map(String::from).collect();
+            Some((smelt_ref.clone(), (segs, ts_cfg.partition_column.clone())))
+        })
+        .collect();
+
+    // Bound derivation (both the skew classifier and the temporal-dependency
+    // scan-widening classifier) must see a `smelt.define` function body's own
+    // `RANGE BETWEEN INTERVAL` frames — expand exactly as
+    // `build_explain_output`/`build_model_plans` already do.
+    let expanded_sql = smelt_runtime::expand_function_calls(&model.content, fn_bodies);
+
+    let full_range = smelt_runtime::TimeRange {
+        start: start.clone(),
+        end: end.clone(),
+    };
+
+    let windows = smelt_runtime::windowing::compute_incremental_windows(
+        &ts,
+        &inc,
+        &expanded_sql,
+        &dep_ts,
+        data_latency_days,
+        &full_range,
+        None,
+        false,
+    )
+    .map_err(|e| anyhow::anyhow!("Failed to derive the output window for '{canonical}': {e}"))?;
+
+    let Some((output_start, output_end)) = windows
+        .batches
+        .iter()
+        .map(|b| (b.partition_start, b.partition_end))
+        .reduce(|(acc_start, acc_end), (s, e)| (acc_start.min(s), acc_end.max(e)))
+    else {
+        return Ok(None);
+    };
+
+    let scan_bounds = smelt_runtime::build_model_source_bounds(model, source_timeseries, canonical);
+
+    Ok(Some(smelt_cli::explain::DerivedWindow {
+        output_start: output_start.format("%Y-%m-%d").to_string(),
+        output_end: output_end.format("%Y-%m-%d").to_string(),
+        scan_bounds,
+        skew: windows.skew,
+        run_start: chrono::Utc::now(),
+    }))
+}
+
+/// Parse `--period <start>..<end>` (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive)
+/// into raw literal date strings. A named CLI error (never a panic) on a
+/// malformed range — mirrors `smelt_runtime::propagation::parse_landed_range`'s
+/// grammar and error shape for the sibling `--landed` flag.
+fn parse_period(value: &str) -> Result<(String, String)> {
+    let (start, end) = value
+        .split_once("..")
+        .with_context(|| format!("malformed --period range '{value}': expected <start>..<end>"))?;
+    let start_date = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d")
+        .with_context(|| format!("malformed --period range '{value}': invalid start date"))?;
+    let end_date = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d")
+        .with_context(|| format!("malformed --period range '{value}': invalid end date"))?;
+    if end_date < start_date {
+        anyhow::bail!("malformed --period range '{value}': end is before start");
+    }
+    Ok((start_date.to_string(), end_date.to_string()))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -362,9 +720,11 @@ mod tests {
         ModelFile,
     };
 
-    /// A model declared with `materialization: table` + `refresh: cumulative`
-    /// must report `"cumulative_aggregate"` as its physical strategy in
-    /// `smelt explain` output (the human-readable strategy label), NOT `"full_refresh"`.
+    /// A model declared with `materialization: table` + `refresh: incremental`
+    /// and `grain: key` (the former `refresh: cumulative`/`keyed`) must
+    /// report `"cumulative_aggregate"` as its physical strategy in `smelt
+    /// explain` output (the human-readable strategy label), NOT
+    /// `"full_refresh"`.
     #[test]
     fn refresh_cumulative_table_strategy_is_cumulative_aggregate() {
         // Minimal smelt.yml in a temp dir.
@@ -377,12 +737,13 @@ mod tests {
         std::fs::write(tmp.path().join("smelt.yml"), yml).unwrap();
         let config = smelt_cli::Config::load(tmp.path()).expect("Config::load from temp smelt.yml");
 
-        // Build a ModelFile with `materialization: table` + `refresh: cumulative`.
+        // Build a ModelFile with `materialization: table` + `refresh: incremental` + `grain: key`.
         let model_name = "my_cumulative_model";
         let path: std::path::PathBuf = format!("models/{}.sql", model_name).into();
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
-            refresh: Some(RefreshStrategy::Cumulative),
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(smelt_core::config::Grain::Key),
             ..ModelMetadata::default()
         };
         let model_file = ModelFile {

@@ -19,3 +19,14 @@ tracing.workspace = true
 
 [dev-dependencies]
 tempfile = "3.8"
+# Dev-only, test-target-only dependency on the Link-C schedule/oracle
+# harness for the MP9 testkit leg (`tests/reconciliation.rs`): the harness
+# itself depends on `smelt-runtime`, which depends on `smelt-state` as a
+# normal dependency. This is a supported Cargo dev-dependency cycle (dev-deps
+# are excluded from a crate's own build graph, only pulled in for its test
+# targets) — the same pattern the harness's own doc comment anticipates
+# ("a shared dev-dependency of any consumer's test tree ... where no
+# dependency cycle results").
+smelt-maintenance-testkit = { path = "../smelt-maintenance-testkit" }
+tokio = { workspace = true, features = ["full"] }
+duckdb.workspace = true

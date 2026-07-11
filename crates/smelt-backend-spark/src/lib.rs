@@ -14,7 +14,10 @@ use arrow::datatypes::SchemaRef;
 use arrow::pyarrow::FromPyArrow;
 use async_trait::async_trait;
 use pyo3::prelude::*;
-use smelt_backend::{Backend, BackendCapabilities, BackendError, PartitionRange, SqlDialect};
+use smelt_backend::{
+    emit_delete_insert, Backend, BackendCapabilities, BackendError, MaintenanceDialect,
+    PartitionRange, Region, SqlDialect,
+};
 
 mod sql;
 
@@ -32,6 +35,10 @@ pub struct SparkBackend {
     schema: String,
     /// Base directory for Parquet output (from target config `warehouse` field).
     warehouse: Option<String>,
+    /// Whether to create managed tables as Delta (`USING DELTA`) or plain Parquet.
+    /// Delta is required for DELETE / MERGE / schema-evolution operations.
+    /// Parquet is used for the cross-engine read path (DuckDB reads raw Parquet).
+    use_delta: bool,
 }
 
 // Safety: Py<PyAny> is Send, and we only access it inside `Python::attach`
@@ -47,11 +54,16 @@ impl SparkBackend {
     /// * `catalog` - Catalog name (e.g., "spark_catalog")
     /// * `schema` - Schema name (e.g., "default")
     /// * `warehouse` - Optional base directory for Parquet output
+    /// * `use_delta` - If true, managed tables are created with `USING DELTA`
+    ///   (required for DELETE / MERGE / schema-evolution; default `true`).
+    ///   Set to `false` for the cross-engine Parquet path where DuckDB reads
+    ///   raw Parquet files via `read_parquet(...)`.
     pub async fn new(
         connect_url: &str,
         catalog: &str,
         schema: &str,
         warehouse: Option<&str>,
+        use_delta: bool,
     ) -> Result<Self, BackendError> {
         let connect_url = connect_url.to_string();
         let catalog = catalog.to_string();
@@ -59,7 +71,6 @@ impl SparkBackend {
 
         let adapter = tokio::task::spawn_blocking({
             let catalog = catalog.clone();
-            let schema = schema.clone();
             move || {
                 Python::attach(|py| {
                     let module = py.import("smelt.spark_adapter").map_err(|e| {
@@ -77,7 +88,9 @@ impl SparkBackend {
                         ))
                     })?;
 
-                    let adapter = cls.call1((&connect_url, &catalog, &schema)).map_err(|e| {
+                    // Pass only connect_url + catalog — schema selection is deferred until
+                    // after ensure_schema() creates the database (see below).
+                    let adapter = cls.call1((&connect_url, &catalog)).map_err(|e| {
                         BackendError::connection_failed(format!(
                             "Failed to create SparkSession: {}",
                             e
@@ -91,18 +104,30 @@ impl SparkBackend {
         .await
         .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))??;
 
-        tracing::info!(
-            "Spark session established (catalog={}, schema={})",
-            catalog,
-            schema
-        );
-
-        Ok(Self {
+        let backend = Self {
             adapter,
             catalog,
-            schema,
+            schema: schema.clone(),
             warehouse: warehouse.map(|s| s.to_string()),
-        })
+            use_delta,
+        };
+
+        // Create the schema before selecting it (spec: multi_backend.md §Semantics
+        // "Session initialization" — requires_schema_init = true for all backends).
+        // ensure_schema() is the single source of the CREATE DATABASE statement;
+        // select_current_schema() then makes it the session default.
+        if !schema.is_empty() {
+            backend.ensure_schema(&schema).await?;
+            backend.py_select_schema(&schema).await?;
+        }
+
+        tracing::info!(
+            "Spark session established (catalog={}, schema={})",
+            backend.catalog,
+            backend.schema
+        );
+
+        Ok(backend)
     }
 
     /// Build a fully qualified table name: catalog.schema.table
@@ -162,6 +187,30 @@ impl SparkBackend {
         .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))?
     }
 
+    /// Call Python `select_current_schema(schema)` to set the session's current database.
+    ///
+    /// Must only be called after `ensure_schema()` has created the schema — Spark's
+    /// `setCurrentDatabase` raises `[SCHEMA_NOT_FOUND]` on a non-existent schema.
+    async fn py_select_schema(&self, schema: &str) -> Result<(), BackendError> {
+        let schema = schema.to_string();
+        let adapter = Python::attach(|py| self.adapter.clone_ref(py));
+        tokio::task::spawn_blocking(move || {
+            Python::attach(|py| {
+                adapter
+                    .call_method1(py, "select_current_schema", (&schema,))
+                    .map_err(|e| {
+                        BackendError::connection_failed(format!(
+                            "Failed to select schema '{}': {}",
+                            schema, e
+                        ))
+                    })?;
+                Ok(())
+            })
+        })
+        .await
+        .map_err(|e| BackendError::Other(anyhow::anyhow!("spawn_blocking join error: {}", e)))?
+    }
+
     /// Execute SQL without collecting results (for DDL/DML statements).
     async fn py_execute_no_result(&self, sql: &str) -> Result<(), BackendError> {
         let sql = sql.to_string();
@@ -197,11 +246,69 @@ impl Backend for SparkBackend {
         tracing::debug!("Spark CREATE TABLE {} AS ...", table_name);
 
         // Spark doesn't reliably support CREATE OR REPLACE TABLE,
-        // so we DROP IF EXISTS first, then CREATE TABLE ... AS SELECT
-        self.py_execute_no_result(&sql::drop_table(&table_name))
-            .await?;
-        self.py_execute_no_result(&sql::create_table_as(&table_name, sql))
-            .await
+        // so we DROP IF EXISTS first, then CREATE TABLE ... AS SELECT.
+        // If the previous run left a VIEW at this name (not a TABLE), Spark's
+        // DROP TABLE rejects it with [WRONG_COMMAND_FOR_OBJECT_TYPE]; fall
+        // back to DROP VIEW in that case so the CREATE TABLE can proceed.
+        let drop_result = self
+            .py_execute_no_result(&sql::drop_table(&table_name))
+            .await;
+        if let Err(ref e) = drop_result {
+            let msg = e.to_string();
+            if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
+                tracing::debug!(
+                    "DROP TABLE failed (object is a VIEW): {} — retrying with DROP VIEW",
+                    table_name
+                );
+                self.py_execute_no_result(&sql::drop_view(&table_name))
+                    .await?;
+            } else {
+                drop_result?;
+            }
+        }
+
+        // After a Spark server restart, DROP TABLE IF EXISTS is a catalog no-op
+        // (the table isn't in the new session's catalog) but the managed table's
+        // warehouse directory persists on the host-visible bind mount (owned by
+        // the Spark container's uid 185, not the host user).  Spark then refuses
+        // CREATE TABLE with [LOCATION_ALREADY_EXISTS].
+        //
+        // Best-effort host-side cleanup: works when test fixtures were written by
+        // the host process (e.g. seeds); silently skips when Spark owns the files.
+        // For Spark-owned warehouse dirs, spark-up.sh cleans on each server restart
+        // (the authoritative resolution — see scripts/spark-up.sh "Clean warehouse").
+        if let Some(path) = self.materialized_path(schema, name) {
+            if path.exists() {
+                match std::fs::remove_dir_all(&path) {
+                    Ok(()) => tracing::debug!(
+                        "Removed stale warehouse directory {:?} before CREATE TABLE",
+                        path
+                    ),
+                    Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                        tracing::debug!(
+                            "Could not remove {:?} (owned by Spark uid): {:?}. \
+                             Relying on spark-up.sh warehouse clean on next restart.",
+                            path,
+                            e
+                        );
+                    }
+                    Err(e) => {
+                        return Err(BackendError::Other(anyhow::anyhow!(
+                            "Failed to remove stale warehouse directory {:?}: {}",
+                            path,
+                            e
+                        )));
+                    }
+                }
+            }
+        }
+
+        self.py_execute_no_result(&sql::create_table_as(
+            &table_name,
+            sql,
+            if self.use_delta { Some("DELTA") } else { None },
+        ))
+        .await
     }
 
     async fn create_view_as(
@@ -218,13 +325,42 @@ impl Backend for SparkBackend {
 
     async fn drop_table_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let table_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::drop_table(&table_name))
+        match self
+            .py_execute_no_result(&sql::drop_table(&table_name))
             .await
+        {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                let msg = e.to_string();
+                if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE") || msg.contains("is a VIEW") {
+                    // The name is occupied by a VIEW from a previous run; drop it instead.
+                    self.py_execute_no_result(&sql::drop_view(&table_name))
+                        .await
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn drop_view_if_exists(&self, schema: &str, name: &str) -> Result<(), BackendError> {
         let view_name = self.qualified_name(schema, name);
-        self.py_execute_no_result(&sql::drop_view(&view_name)).await
+        match self.py_execute_no_result(&sql::drop_view(&view_name)).await {
+            Ok(()) => Ok(()),
+            Err(e) => {
+                // Spark 4.x rejects DROP VIEW on a TABLE with WRONG_COMMAND_FOR_OBJECT_TYPE.
+                // Silently succeed: the name is occupied by a table (which will be cleaned
+                // up by the subsequent drop_table_if_exists call in execute_model).
+                let msg = e.to_string();
+                if msg.contains("WRONG_COMMAND_FOR_OBJECT_TYPE")
+                    || msg.contains("DROP VIEW requires a VIEW")
+                {
+                    Ok(())
+                } else {
+                    Err(e)
+                }
+            }
+        }
     }
 
     async fn get_row_count(&self, schema: &str, name: &str) -> Result<usize, BackendError> {
@@ -308,9 +444,12 @@ impl Backend for SparkBackend {
     }
 
     fn materialized_path(&self, schema: &str, name: &str) -> Option<std::path::PathBuf> {
+        // Spark stores managed tables under {warehouse}/{schema}.db/{table_name} —
+        // the ".db" suffix is the Hive metastore convention used by Spark SQL when
+        // spark.sql.warehouse.dir is set (empirically verified on Spark 4.1.x, W6·P3).
         self.warehouse
             .as_ref()
-            .map(|wh| std::path::PathBuf::from(format!("{}/{}/{}", wh, schema, name)))
+            .map(|wh| std::path::PathBuf::from(format!("{}/{}.db/{}", wh, schema, name)))
     }
 
     async fn delete_partitions(
@@ -335,17 +474,46 @@ impl Backend for SparkBackend {
             .await
     }
 
-    async fn merge_into(
+    /// Overrides the trait default so the emitted `DELETE`/`INSERT` text
+    /// targets the full catalog-qualified table name
+    /// (`catalog.schema.table`) — the generic default in `smelt-backend`
+    /// only sees `schema`/`name` and cannot know Spark's catalog. The text
+    /// itself still comes from `emit_delete_insert`
+    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// owner)"); this crate builds no `DELETE`/`INSERT` string of its own.
+    /// No native multi-statement transaction here (same precedent as the
+    /// pre-Phase-1 default) — statements execute sequentially via
+    /// `execute_statement_group`'s default.
+    async fn delete_and_insert_transactional(
         &self,
         schema: &str,
-        table: &str,
-        source_sql: &str,
-        unique_key: &[String],
+        name: &str,
+        partition: &PartitionRange,
+        sql: &str,
     ) -> Result<(), BackendError> {
-        let table_name = self.qualified_name(schema, table);
-        self.py_execute_no_result(&sql::merge_into(&table_name, source_sql, unique_key))
-            .await
+        let table_name = self.qualified_name(schema, name);
+        let region = Region {
+            start: format!("'{}'", partition.start.replace('\'', "''")),
+            end: format!("'{}'", partition.end.replace('\'', "''")),
+        };
+        let group = emit_delete_insert(
+            &table_name,
+            &partition.column,
+            &region,
+            sql,
+            MaintenanceDialect::Spark,
+        );
+        self.execute_statement_group(&group).await
     }
+
+    // `merge_into` is not overridden here — the `Backend` trait's default
+    // implementation (build the `StatementGroup` via `smelt_logical::
+    // maintenance::emit::emit_column_scoped_merge`, then
+    // `execute_statement_group`) routes through `execute_sql` per statement,
+    // matching this backend's shape exactly (single statement, no native
+    // transaction). `docs/specs/maintenance_plan.md` §"Statement emission
+    // (single owner)" — Spark statement parity is asserted at the emitter
+    // level; the live Spark leg is gated CI, not this default routing.
 
     async fn insert_overwrite(
         &self,
@@ -366,8 +534,8 @@ impl Backend for SparkBackend {
         arrow_schema: SchemaRef,
         batches: Vec<RecordBatch>,
     ) -> Result<(), BackendError> {
-        use parquet::arrow::ArrowWriter;
-        use std::fs::File;
+        use arrow::ipc::writer::StreamWriter;
+        use std::io::Cursor;
 
         let full_table_name = self.qualified_name(schema, name);
 
@@ -389,46 +557,33 @@ impl Backend for SparkBackend {
             }
         }
 
-        // Write batches to a temporary Parquet file.
-        let tmp_file = tempfile::NamedTempFile::new()
-            .map_err(|e| BackendError::execution_failed(full_table_name.clone(), e.to_string()))?;
-        let tmp_path = tmp_file
-            .path()
-            .to_str()
-            .ok_or_else(|| {
-                BackendError::execution_failed(
-                    full_table_name.clone(),
-                    "temp file path is not UTF-8",
-                )
-            })?
-            .to_string();
-
+        // Serialize batches to Arrow IPC stream bytes — no host filesystem path.
+        let mut ipc_buf = Vec::<u8>::new();
         {
-            let file = File::create(tmp_file.path()).map_err(|e| {
+            let cursor = Cursor::new(&mut ipc_buf);
+            let mut writer = StreamWriter::try_new(cursor, &arrow_schema).map_err(|e| {
                 BackendError::execution_failed(full_table_name.clone(), e.to_string())
             })?;
-            let mut writer =
-                ArrowWriter::try_new(file, arrow_schema.clone(), None).map_err(|e| {
-                    BackendError::execution_failed(full_table_name.clone(), e.to_string())
-                })?;
             for batch in &batches {
                 writer.write(batch).map_err(|e| {
                     BackendError::execution_failed(full_table_name.clone(), e.to_string())
                 })?;
             }
-            writer.close().map_err(|e| {
+            writer.finish().map_err(|e| {
                 BackendError::execution_failed(full_table_name.clone(), e.to_string())
             })?;
         }
 
-        // Call the Python adapter to load the Parquet file as a Spark table.
+        // Send IPC bytes across the PyO3 boundary; Python reconstructs the table
+        // via pyarrow.ipc and loads it through createDataFrame (no host path).
         let adapter = Python::attach(|py| self.adapter.clone_ref(py));
         let full_table_name_clone = full_table_name.clone();
 
         tokio::task::spawn_blocking(move || {
             Python::attach(|py| {
+                let ipc_bytes = pyo3::types::PyBytes::new(py, &ipc_buf);
                 adapter
-                    .call_method1(py, "load_arrow_table", (&tmp_path, &full_table_name_clone))
+                    .call_method1(py, "load_arrow_table", (ipc_bytes, &full_table_name_clone))
                     .map_err(|e| {
                         BackendError::execution_failed(
                             full_table_name_clone.clone(),

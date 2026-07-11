@@ -238,6 +238,22 @@ impl TypeContext {
             .or_insert(typed_column);
     }
 
+    /// Add a source column with no schema qualifier — the identity a
+    /// **single-segment** source (a YAML at scan root) resolves by. Only
+    /// the simple `{table}.{column}` key exists for such a source; there is
+    /// no schema segment to build the qualified key from.
+    pub fn add_source_column_unqualified(
+        &mut self,
+        table_name: &str,
+        column_name: &str,
+        typed_column: TypedColumn,
+    ) {
+        let simple_key = format!("{}.{}", table_name, column_name);
+        self.source_columns
+            .entry(simple_key)
+            .or_insert(typed_column);
+    }
+
     /// Add a model column to the context
     pub fn add_model_column(
         &mut self,
@@ -784,6 +800,22 @@ impl TypeContext {
         }
 
         result
+    }
+
+    /// Return all model columns as `(column_name, TypedColumn)` pairs, stripping qualifiers.
+    ///
+    /// Used by pipe-scope inference when we want all columns from the base context
+    /// without knowing the qualifier (e.g. for a fallback when the FROM qualifier
+    /// cannot be determined).
+    pub fn all_model_columns_unqualified(&self) -> Vec<(String, TypedColumn)> {
+        self.model_columns
+            .iter()
+            .filter_map(|(key, tc)| {
+                // Key is "qualifier.column_name" — extract the column part.
+                key.split_once('.')
+                    .map(|(_, col)| (col.to_string(), tc.clone()))
+            })
+            .collect()
     }
 
     /// Take and clear the list of column lookups that returned None.

@@ -63,6 +63,7 @@ fn test_no_compiler_internals_exposed() {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     };
 
     // Only the registry-level entry point is accessible from outside the crate.

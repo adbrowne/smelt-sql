@@ -2523,18 +2523,27 @@ pub fn check_hof_position_diagnostics(
                 };
 
                 // Check: is this pipe expression inside a Data-World grammar slot?
-                // A pipe in a WHERE clause, JOIN condition, or HAVING clause
-                // (any ancestor is a WHERE_CLAUSE node) emits PipeInDataPosition.
+                // A pipe in a WHERE clause (any ancestor is a WHERE_CLAUSE node)
+                // or nested inside a PIPE_STAGE body emits PipeInDataPosition.
+                //
+                // Note: the parser's `in_pipe_stage` flag already prevents PIPE_EXPR
+                // nodes from appearing at stage boundaries inside pipe queries (the
+                // expression parser stops before `|>` when that flag is set). The
+                // PIPE_STAGE check here is belt-and-suspenders for forward compat.
                 let in_data_position = {
                     let mut parent_opt = node.parent();
                     let mut in_data = false;
                     while let Some(p) = parent_opt {
-                        if p.kind() == smelt_parser::SyntaxKind::WHERE_CLAUSE {
+                        if p.kind() == smelt_parser::SyntaxKind::WHERE_CLAUSE
+                            || p.kind() == smelt_parser::SyntaxKind::PIPE_STAGE
+                        {
                             in_data = true;
                             break;
                         }
-                        // Stop at statement boundaries.
+                        // Stop at statement boundaries (do not cross pipe query or
+                        // SELECT statement boundaries when walking upward).
                         if p.kind() == smelt_parser::SyntaxKind::SELECT_STMT
+                            || p.kind() == smelt_parser::SyntaxKind::PIPE_QUERY
                             || p.kind() == smelt_parser::SyntaxKind::FILE
                         {
                             break;

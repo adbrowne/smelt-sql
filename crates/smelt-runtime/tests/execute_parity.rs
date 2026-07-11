@@ -247,7 +247,9 @@ async fn test_cli_ui_manifest_parity() {
         ModelConfig {
             materialization: Some(Materialization::Table),
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            grain: None,
+            batched: None,
             tags: vec![],
             target: None,
             format: None,
@@ -258,7 +260,9 @@ async fn test_cli_ui_manifest_parity() {
         ModelConfig {
             materialization: Some(Materialization::Table),
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            grain: None,
+            batched: None,
             tags: vec![],
             target: None,
             format: None,
@@ -269,7 +273,9 @@ async fn test_cli_ui_manifest_parity() {
         ModelConfig {
             materialization: Some(Materialization::Ephemeral),
             timeseries: None,
-            incremental: None,
+            refresh: None,
+            grain: None,
+            batched: None,
             tags: vec![],
             target: None,
             format: None,
@@ -286,6 +292,7 @@ async fn test_cli_ui_manifest_parity() {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     });
 
     let (db, graph) = build_db_and_graph(project_dir, &config);
@@ -353,6 +360,7 @@ async fn test_cli_ui_manifest_parity() {
         python: None,
         target: None,
         state: Default::default(),
+        maintenance: None,
     });
     let (db2, graph2) = build_db_and_graph(project_dir, &config2);
 

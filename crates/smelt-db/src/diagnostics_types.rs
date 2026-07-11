@@ -635,14 +635,34 @@ pub enum DiagnosticCode {
     UnclosedFrontmatter,
 
     // ── Timeseries diagnostic codes ──────────────────────────────────────────
-    /// A model declares `incremental:` without a sibling `timeseries:` block.
+    /// A model declares `refresh: batched` without a sibling `timeseries:` block.
     /// Anchored at the top of the file (line 0, column 0).
-    /// Message: "TimeseriesRequiredForIncremental: model declares `incremental:` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
-    TimeseriesRequiredForIncremental,
+    /// Message: "TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
+    TimeseriesRequiredForBatched,
     /// The `timeseries:` block parses but violates a structural rule.
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
     MalformedTimeseries,
+    /// A `functional_dependencies:` entry is structurally invalid: an empty
+    /// `key`/`determines`, a `determines` column also listed in `key`, or a
+    /// `key`/`determines` column absent from the model's SQL body.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "MalformedFunctionalDependency: {message}"
+    MalformedFunctionalDependency,
+    /// A `bounded_domain:` declaration is structurally invalid: an absent
+    /// (already a YAML parse error) or non-positive `max_cardinality`, an
+    /// empty `column`, or a `column` absent from the model's SQL body.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "MalformedBoundedDomain: {message}"
+    MalformedBoundedDomain,
+    /// A model declares `refresh: incremental` without a sibling `grain:`.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`"
+    GrainRequiredForIncremental,
+    /// A model declares `grain:` without `refresh: incremental`.
+    /// Anchored at the top of the file (line 0, column 0).
+    /// Message: "GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key"
+    GrainRequiresIncremental,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or
@@ -671,37 +691,48 @@ pub enum DiagnosticCode {
 
     // ── Planner-rule diagnostic codes (surfaced via the uniform rule →
     //    diagnostics interface; see `smelt_logical::rules::rule_diagnostics`) ────
-    /// `cumulative_aggregate` SELECT has no GROUP BY (the key columns).
-    CumulativeRequiresGroupBy,
-    /// A `cumulative_aggregate` projection uses a non-allowlisted aggregator or
+    /// A `refresh: keyed` SELECT has no GROUP BY (the key columns).
+    KeyedRequiresGroupBy,
+    /// A `refresh: keyed` projection uses a non-allowlisted aggregator or
     /// a composite expression over aggregates.
-    CumulativeUnknownAggregator,
-    /// The `cumulative_aggregate` GROUP BY contains the driving source's
-    /// `partition_column` (a per-partition shape, not the cumulative one).
-    CumulativeGroupByContainsPartitionColumn,
-    /// Window functions (`OVER (...)`) are not allowed in a `cumulative_aggregate`.
-    CumulativeForbidsWindowFunctions,
-    /// A non-deterministic function appears in a `cumulative_aggregate` SELECT.
-    CumulativeForbidsNondeterministic,
-    /// No source in a `cumulative_aggregate`'s FROM declares a `timeseries:` block.
-    CumulativeNoDrivingSource,
-    /// Multiple timeseries-tagged sources in a `cumulative_aggregate`'s FROM (v1
-    /// supports exactly one driving source).
-    CumulativeMultipleDrivingSources,
-    /// A `cumulative_aggregate` SELECT could not be parsed for classification.
-    CumulativeSqlNotParseable,
-    /// A `cumulative_aggregate` model incorrectly declares a `timeseries:` block.
-    /// The cumulative output has no partition column; the rule reads it from the
-    /// driving source. Anchored at offset 0. Error severity.
-    CumulativeForbidsTimeseries,
-    /// A `cumulative_aggregate` model incorrectly declares an `incremental:` block.
-    /// The two materializations have different equivalence contracts; pick one.
+    KeyedUnknownCombiner,
+    /// The `refresh: keyed` GROUP BY contains the driving source's
+    /// `partition_column` (a per-partition shape, not the keyed one).
+    KeyedGroupByContainsPartitionColumn,
+    /// Window functions (`OVER (...)`) are not allowed in a `refresh: keyed` model.
+    KeyedForbidsWindowFunctions,
+    /// A non-deterministic function appears in a `refresh: keyed` SELECT.
+    KeyedForbidsNondeterministic,
+    /// Interim not-yet-supported refusal: a `refresh: keyed` model has no
+    /// clocked driving source and the snapshot-reconcile executor is unbuilt
+    /// (`docs/specs/keyed_models.md` §Known Divergences).
+    KeyedSnapshotPostureUnsupported,
+    /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
+    /// (v1 supports exactly one driving source).
+    KeyedMultipleDrivingSources,
+    /// A `refresh: keyed` SELECT could not be parsed for classification.
+    KeyedSqlNotParseable,
+    /// A `refresh: keyed` model incorrectly declares a `timeseries:` block
+    /// (key temporal locality is not established). The keyed output has no
+    /// partition column by default; the rule reads it from the driving
+    /// source. Anchored at offset 0. Error severity.
+    KeyedForbidsTimeseries,
+    /// A `refresh: keyed` model incorrectly declares a `batched:` block.
+    /// The two refresh strategies have different equivalence contracts; pick one.
     /// Anchored at offset 0. Error severity.
-    CumulativeForbidsIncremental,
-    /// Advisory (`Warning`): an `incremental` model's SQL is not batch-safe
-    /// under the planner's incremental safety classifier (the build does not
+    KeyedForbidsBatched,
+    /// A `refresh: materialized_view` model incorrectly declares a
+    /// `timeseries:` block. Like `keyed`, the engine-maintained output
+    /// has no partition column. Anchored at offset 0. Error severity.
+    MaterializedViewForbidsTimeseries,
+    /// A `refresh: materialized_view` model incorrectly declares a
+    /// `batched:` block. The engine, not smelt, owns freshness for this
+    /// mode. Anchored at offset 0. Error severity.
+    MaterializedViewForbidsBatched,
+    /// Advisory (`Warning`): a `batched` model's SQL is not batch-safe
+    /// under the planner's batch safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).
-    IncrementalNotBatchSafe,
+    BatchedNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
@@ -779,6 +810,45 @@ pub enum DiagnosticCode {
     /// reference in a `smelt.test` body names a CTE that is absent from the
     /// referenced model's `WITH` clause. Anchored at the `#<cte>` suffix token.
     UnknownTestCte,
+    /// Emitted when a `|>` in a FROM-first pipe query is followed by a token
+    /// that is not a recognised pipe operator keyword.
+    /// Message: `unknown pipe operator '<kw>'`.
+    /// Anchored at the unrecognised token span.
+    PipeUnknownOperator,
+    /// Emitted when a `|>` in a FROM-first pipe query is followed by a
+    /// recognised-but-deferred operator (`PIVOT`/`UNPIVOT`/`WINDOW`/`CALL`/
+    /// `TABLESAMPLE`/`ASSERT`). Using a deferred operator is a hard error.
+    /// Message: `pipe operator '<kw>' is not supported — <reason>`.
+    /// Anchored at the operator keyword span.
+    PipeOperatorUnsupported,
+    /// Emitted when a pipe stage body does not parse against the operator's
+    /// clause grammar (e.g. `|> WHERE` with no predicate expression).
+    /// Message: `malformed '<kw>' pipe stage`.
+    /// Anchored at the stage span.
+    PipeStageMalformed,
+    /// Emitted when no maintenance technique survives a plan cell's
+    /// admission (`maintenance_plan.md` §"Per-cell admission"). Names the
+    /// cell's trigger and why every candidate technique was refused —
+    /// includes the `maintenance.cells[]` two-group column-span error (a
+    /// cell whose declared `columns` span more than one derived column
+    /// group can never address a single coherent cell). Anchored at the
+    /// model SQL body start.
+    MaintenanceNoAdmissibleTechnique,
+    /// Emitted (the K8 guardrail) when a derived scan or write footprint
+    /// cannot be partition-bounded and no `allow_full_scan` acceptance was
+    /// declared for that source (`maintenance_plan.md` §"Partition-local
+    /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
+    /// start.
+    MaintenanceScanUnbounded,
+    /// Emitted (Error) when a model's declared `timeseries.granularity`
+    /// disagrees with the truncation/grid unit its own `partition_column`
+    /// SELECT-list projection actually derives to (e.g. declaring `day`
+    /// while the SQL groups on `date_trunc('hour', …)`) —
+    /// (`maintenance_plan.md` §Design "Grain is declared": the graph
+    /// layer's edge grain is the declaration, never derived, but the
+    /// classifier checks the declaration against the SQL's own grouping).
+    /// Anchored at the model SQL body start.
+    MaintenanceGranularityMismatch,
 }
 
 /// Structured metadata attached to diagnostics for code actions

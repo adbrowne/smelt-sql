@@ -1,8 +1,9 @@
 //! Dynamic Parquet writer for YAML-configured datasets.
 
-use crate::config::{DatasetConfig, FkCounts};
+use crate::config::{DatasetConfig, FkCounts, RedeliveryConfig};
 use crate::generic::{
-    generate_row, make_entity_pool, sample_pools, GenericValue, LinkedPool, RowContext,
+    apply_spec, generate_row, generic_value_as_i64, make_entity_pool, sample_pools, GenericValue,
+    LinkedPool, PoolSamples, RowContext,
 };
 use anyhow::{Context, Result};
 use arrow::array::{ArrayRef, BooleanBuilder, Float64Builder, Int32Builder, StringBuilder};
@@ -240,6 +241,7 @@ fn write_partitioned(
                 *base_offset,
                 fk_counts,
                 &linked_pools,
+                config.redelivery.as_ref(),
             )?;
 
             let new_total = total_written.fetch_add(count, Ordering::SeqCst) + count;
@@ -295,6 +297,7 @@ fn write_single(
         0,
         fk_counts,
         &linked_pools,
+        config.redelivery.as_ref(),
     )?;
 
     if let Some(cb) = progress {
@@ -321,6 +324,7 @@ fn write_rows_to_file(
     base_offset: usize,
     fk_counts: &FkCounts,
     linked_pools: &HashMap<String, Arc<LinkedPool>>,
+    redelivery: Option<&RedeliveryConfig>,
 ) -> Result<usize> {
     let props = WriterProperties::builder()
         .set_compression(parquet::basic::Compression::SNAPPY)
@@ -330,46 +334,195 @@ fn write_rows_to_file(
         .context("Failed to create Parquet writer")?;
 
     let mut rng = ChaCha8Rng::seed_from_u64(seed);
-    let mut written = 0;
 
-    while written < num_rows {
-        let batch_size = BATCH_SIZE.min(num_rows - written);
+    match redelivery {
+        None => {
+            // Streaming path: batches are written and dropped immediately —
+            // unaffected by (and behaviourally identical to) the pre-redelivery
+            // implementation, so existing datasets that don't configure
+            // `redelivery:` stay byte-identical.
+            let mut written = 0;
+            while written < num_rows {
+                let batch_size = BATCH_SIZE.min(num_rows - written);
 
-        // Collect rows for this batch
-        let rows: Vec<Vec<(String, GenericValue)>> = (0..batch_size)
-            .map(|i| {
-                let row_index = base_offset + written + i;
-                // Sample an entity row if a pool exists
-                let entity_row = entity_pool.map(|pool| {
-                    let idx = (rng.next_u64() as usize) % pool.len();
-                    pool.rows[idx].as_slice()
-                });
-                // Sample one pool-entry index per linked pool (once per row).
-                let pool_samples = sample_pools(&mut rng, linked_pools);
-                let ctx = RowContext {
-                    row_index,
-                    fk_counts,
-                    pools: linked_pools,
-                    pool_samples: &pool_samples,
-                };
-                generate_row(
+                let rows: Vec<Vec<(String, GenericValue)>> = (0..batch_size)
+                    .map(|i| {
+                        generate_one_row(
+                            &mut rng,
+                            base_offset + written + i,
+                            entity_col_specs,
+                            entity_pool,
+                            col_specs,
+                            partition_col,
+                            fk_counts,
+                            linked_pools,
+                        )
+                    })
+                    .collect::<Result<Vec<_>, _>>()?;
+
+                let batch = rows_to_record_batch(&rows, &schema)?;
+                writer.write(&batch).context("Failed to write batch")?;
+                written += batch_size;
+            }
+
+            writer.close().context("Failed to close Parquet writer")?;
+            Ok(written)
+        }
+        Some(redel) => {
+            // Redelivery path: the primary rows must be fully materialized in
+            // memory before the post-pass, so a duplicate can be an exact
+            // clone of its original row (see `append_redelivered_rows`). The
+            // primary generation loop below draws from the same `seed`-derived
+            // `rng` stream, in the same order, as the streaming path above —
+            // so toggling `redelivery:` never perturbs the primary rows (spec
+            // §"Redelivery (duplicate emission)").
+            let mut all_rows: Vec<Vec<(String, GenericValue)>> = Vec::with_capacity(num_rows);
+            for i in 0..num_rows {
+                all_rows.push(generate_one_row(
                     &mut rng,
+                    base_offset + i,
                     entity_col_specs,
-                    entity_row,
+                    entity_pool,
                     col_specs,
                     partition_col,
-                    &ctx,
-                )
-            })
-            .collect::<Result<Vec<_>, _>>()?;
+                    fk_counts,
+                    linked_pools,
+                )?);
+            }
 
-        let batch = rows_to_record_batch(&rows, &schema)?;
-        writer.write(&batch).context("Failed to write batch")?;
-        written += batch_size;
+            append_redelivered_rows(&mut all_rows, seed, num_rows, redel, fk_counts)?;
+
+            let total = all_rows.len();
+            for chunk in all_rows.chunks(BATCH_SIZE) {
+                let batch = rows_to_record_batch(chunk, &schema)?;
+                writer.write(&batch).context("Failed to write batch")?;
+            }
+
+            writer.close().context("Failed to close Parquet writer")?;
+            Ok(total)
+        }
+    }
+}
+
+/// Generate one row at absolute `row_index`, consuming `rng`. Shared by both
+/// the streaming and redelivery-buffered code paths in [`write_rows_to_file`].
+#[allow(clippy::too_many_arguments)]
+fn generate_one_row(
+    rng: &mut ChaCha8Rng,
+    row_index: usize,
+    entity_col_specs: &[crate::config::ColumnConfig],
+    entity_pool: Option<&crate::generic::EntityPool>,
+    col_specs: &[crate::config::ColumnConfig],
+    partition_col: Option<(&str, &str)>,
+    fk_counts: &FkCounts,
+    linked_pools: &HashMap<String, Arc<LinkedPool>>,
+) -> Result<Vec<(String, GenericValue)>> {
+    // Sample an entity row if a pool exists
+    let entity_row = entity_pool.map(|pool| {
+        let idx = (rng.next_u64() as usize) % pool.len();
+        pool.rows[idx].as_slice()
+    });
+    // Sample one pool-entry index per linked pool (once per row).
+    let pool_samples = sample_pools(rng, linked_pools);
+    let ctx = RowContext {
+        row_index,
+        fk_counts,
+        pools: linked_pools,
+        pool_samples: &pool_samples,
+        row_so_far: &[],
+        partition_col: None,
+    };
+    generate_row(
+        rng,
+        entity_col_specs,
+        entity_row,
+        col_specs,
+        partition_col,
+        &ctx,
+    )
+}
+
+/// Post-pass implementing `redelivery:` (per `docs/specs/datagen.md`
+/// §"Redelivery (duplicate emission)"): appends `round(fraction × num_rows)`
+/// duplicate rows to `rows`, each a byte-identical clone of a uniformly
+/// selected original row except `arrival_column`, which is shifted forward by
+/// a per-duplicate draw from `delay_seconds`.
+///
+/// Selection and delay draws come from a dedicated RNG stream seeded
+/// `seed.wrapping_add(200)` — entirely separate from the primary row RNG —
+/// so enabling redelivery never perturbs the primary rows, and the duplicate
+/// pattern is prefix-stable across changes to `num_rows`.
+fn append_redelivered_rows(
+    rows: &mut Vec<Vec<(String, GenericValue)>>,
+    seed: u64,
+    num_rows: usize,
+    redelivery: &RedeliveryConfig,
+    fk_counts: &FkCounts,
+) -> Result<()> {
+    if num_rows == 0 {
+        return Ok(());
+    }
+    let dup_count = (redelivery.fraction * num_rows as f64).round() as usize;
+    if dup_count == 0 {
+        return Ok(());
     }
 
-    writer.close().context("Failed to close Parquet writer")?;
-    Ok(written)
+    let mut redel_rng = ChaCha8Rng::seed_from_u64(seed.wrapping_add(200));
+    let empty_pools: HashMap<String, Arc<LinkedPool>> = HashMap::new();
+    let empty_samples: PoolSamples<'_> = HashMap::new();
+    let arrival_col = redelivery.arrival_column.as_str();
+
+    use rand::distributions::{Distribution, Uniform};
+    let index_dist = Uniform::new(0, num_rows);
+
+    for dup_i in 0..dup_count {
+        let src_idx = index_dist.sample(&mut redel_rng);
+        let mut dup_row = rows[src_idx].clone();
+
+        let ctx = RowContext {
+            row_index: num_rows + dup_i,
+            fk_counts,
+            pools: &empty_pools,
+            pool_samples: &empty_samples,
+            row_so_far: &[],
+            partition_col: None,
+        };
+        let delay_value = apply_spec(&mut redel_rng, &redelivery.delay_seconds, &ctx)?;
+        let delay_secs = generic_value_as_i64(&delay_value).ok_or_else(|| {
+            anyhow::anyhow!(
+                "redelivery `delay_seconds` must produce a numeric value (got {delay_value:?})"
+            )
+        })?;
+
+        let slot = dup_row
+            .iter_mut()
+            .find(|(name, _)| name == arrival_col)
+            .ok_or_else(|| {
+                anyhow::anyhow!(
+                    "redelivery `arrival_column: {arrival_col}` not found in generated row \
+                     (validate_config should have rejected this configuration)"
+                )
+            })?;
+        let GenericValue::Str(ts) = &slot.1 else {
+            anyhow::bail!(
+                "redelivery arrival_column '{arrival_col}' value is not a timestamp string \
+                 (got {:?})",
+                slot.1
+            );
+        };
+        let dt = chrono::NaiveDateTime::parse_from_str(ts, "%Y-%m-%dT%H:%M:%S").map_err(|e| {
+            anyhow::anyhow!(
+                "redelivery arrival_column '{arrival_col}' value {ts:?} is not a valid ISO 8601 \
+                 timestamp: {e}"
+            )
+        })?;
+        let shifted = dt + chrono::Duration::seconds(delay_secs);
+        slot.1 = GenericValue::Str(shifted.format("%Y-%m-%dT%H:%M:%S").to_string());
+
+        rows.push(dup_row);
+    }
+
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -472,6 +625,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "id".to_string(),
@@ -512,6 +666,7 @@ mod tests {
             }),
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "id".to_string(),
                 generator: GeneratorSpec::Uuid,
@@ -553,6 +708,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "event_date".to_string(),
                 generator: GeneratorSpec::Date {
@@ -578,6 +734,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "created_at".to_string(),
                 generator: GeneratorSpec::Timestamp {
@@ -611,6 +768,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "customer_id".to_string(),
                 generator: GeneratorSpec::Optional {
@@ -685,6 +843,7 @@ mod tests {
             }),
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "customer_id".to_string(),
                 generator: GeneratorSpec::Optional {
@@ -773,6 +932,7 @@ mod tests {
                 }],
             }),
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "session_id".to_string(),
                 generator: GeneratorSpec::Uuid,
@@ -847,6 +1007,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "payload".to_string(),
                 generator: GeneratorSpec::JsonObject { fields },
@@ -910,6 +1071,7 @@ mod tests {
             }),
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "payload".to_string(),
                 generator: GeneratorSpec::JsonObject { fields },
@@ -983,6 +1145,7 @@ mod tests {
                 }],
             }),
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "event_id".to_string(),
                 generator: GeneratorSpec::SequentialId,
@@ -1061,6 +1224,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![ColumnConfig {
                 name: "payload".to_string(),
                 generator: GeneratorSpec::JsonObject { fields },
@@ -1152,6 +1316,7 @@ mod tests {
                 }),
                 entity: None,
                 linked_pools: None,
+                redelivery: None,
                 columns: vec![ColumnConfig {
                     name: "payload".to_string(),
                     generator: GeneratorSpec::JsonObject { fields },
@@ -1199,6 +1364,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: None,
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "email".to_string(),
@@ -1287,6 +1453,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: Some(vec![make_two_fk_pool("du", 100, Some(99), 100, 100)]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "device_id".to_string(),
@@ -1379,6 +1546,7 @@ mod tests {
             }),
             entity: None,
             linked_pools: Some(vec![make_two_fk_pool("du", 50, Some(7), 100, 100)]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "device_id".to_string(),
@@ -1505,6 +1673,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: Some(vec![pool]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "device_id".to_string(),
@@ -1612,6 +1781,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: Some(vec![pool_cfg]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "device_id".to_string(),
@@ -1721,6 +1891,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: Some(vec![pool_a.clone(), pool_b.clone()]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "a_x".to_string(),
@@ -1853,6 +2024,7 @@ mod tests {
             partition: None,
             entity: None,
             linked_pools: Some(vec![make_two_fk_pool("du", 50, Some(3), 100, 100)]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "device_id".to_string(),
@@ -1900,6 +2072,7 @@ mod tests {
                 }],
             }),
             linked_pools: Some(vec![make_two_fk_pool("du", 50, Some(9), 50, 50)]),
+            redelivery: None,
             columns: vec![
                 ColumnConfig {
                     name: "event_id".to_string(),

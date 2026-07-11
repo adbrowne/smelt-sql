@@ -1,8 +1,8 @@
 use anyhow::Result;
-use smelt_core::config::{BackendType, Config, Materialization, Target};
+use smelt_core::config::{BackendType, Config, Materialization, RefreshStrategy, Target};
 use smelt_core::{ModelFile, SourcesConfig};
 use smelt_db::type_inference::infer_select_column_types;
-use smelt_db::{build_type_context, StaticRefSchemaProvider};
+use smelt_db::{add_source_info_to_type_context, build_type_context, StaticRefSchemaProvider};
 use smelt_dialect::{
     wrap_with_type_casts, AsStructEmitter, BackendCapabilities, PrintContext, SmeltFnExpander,
     SmeltPathCallExpander, SmeltPathRefResolver, SqlDialect,
@@ -30,14 +30,29 @@ use crate::fn_bodies::FnBodyMap;
 /// * `dep_timeseries` — For each dependency that has `timeseries:`, maps dep name →
 ///   `(address_segments, partition_column)`. Address segments give the full smelt path
 ///   (e.g., `["silver", "events_parsed"]`).
+/// * `horizon_ceiling` — The model's declared `horizon_ceiling:` warning ceiling, if any.
+///   Never narrows or widens the derived bound (see `docs/specs/maintenance_plan.md`
+///   §"Windowed maintenance and the horizon") — it only licenses a warning message in the
+///   returned `Vec<String>` when a source's derived reach exceeds it.
+///
+/// Returns the bound map (used exactly as before) alongside any horizon-ceiling warnings
+/// collected while building it, so callers can surface them (e.g. via `tracing::warn!`)
+/// without a second walk over the sources.
 pub fn build_source_bound_map(
     model_sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
-) -> HashMap<String, crate::transformer::SourceBound> {
-    use smelt_planner::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult};
+    horizon_ceiling: Option<&smelt_core::config::DataLatency>,
+) -> (
+    HashMap<String, crate::transformer::SourceBound>,
+    Vec<String>,
+) {
+    use smelt_logical::analysis::horizon_ceiling::check_horizon_ceiling;
+    use smelt_planner::analysis::source_bounds::{
+        derive_and_classify_bounds, BoundContext, BoundResult,
+    };
 
     if dep_timeseries.is_empty() {
-        return HashMap::new();
+        return (HashMap::new(), Vec::new());
     }
 
     // Build BoundContext: dep_name → partition_col
@@ -46,11 +61,24 @@ pub fn build_source_bound_map(
         ctx.add_source(dep_name, partition_col);
     }
 
-    let raw_bounds = derive_model_bounds(model_sql, &ctx);
+    // The single bound-derivation orchestration entry point (also used by
+    // `rules::incremental::derive_model_source_bounds` on the planner side) —
+    // one `derive_model_bounds` walk feeds both consumers.
+    let raw_bounds = derive_and_classify_bounds(model_sql, &ctx);
 
     let mut result = HashMap::new();
+    let mut warnings = Vec::new();
     for (dep_name, (segs, partition_col)) in dep_timeseries {
-        let bound_result = raw_bounds.get(dep_name).cloned();
+        let bound_result = raw_bounds.get(dep_name).map(|(_, bound)| bound.clone());
+
+        // The horizon ceiling is a warning-only comparison against the derived
+        // reach — it never changes `before_secs`/`after_secs` below. Compare
+        // before the match consumes `bound_result`.
+        if let (Some(bound), Some(ceiling)) = (bound_result.as_ref(), horizon_ceiling) {
+            if let Some(msg) = check_horizon_ceiling(bound, ceiling.seconds) {
+                warnings.push(format!("source '{}': {}", dep_name, msg));
+            }
+        }
 
         let (before_secs, after_secs) = match bound_result {
             Some(BoundResult::Bounded { before, after, .. }) => (before.0, after.0),
@@ -74,7 +102,45 @@ pub fn build_source_bound_map(
         );
     }
 
-    result
+    (result, warnings)
+}
+
+/// Derive the F1 bound-based [`smelt_planner::BatchSafety`] classification for a
+/// model's backfill chunk-size decision.
+///
+/// This is the batched-local consumer of the same `BoundContext` /
+/// `derive_and_classify_bounds` walk `build_source_bound_map` uses — there is
+/// no second, independent bound derivation. `Err` means a source's bound is
+/// `NotDerivable` (fail-closed, `batched_models.md` Constraint 10): the
+/// caller must surface this as a hard refusal, never approximate a chunk
+/// shape from it.
+///
+/// A model with no dependency timeseries info at all (no upstream ref
+/// carries `timeseries:`) has no source to bound against, so it is
+/// `FullyBatchSafe` — there is nothing to chunk around.
+pub fn batch_safety_for_model(
+    model_sql: &str,
+    dep_timeseries: &HashMap<String, (Vec<String>, String)>,
+) -> Result<smelt_planner::BatchSafety, String> {
+    use smelt_planner::analysis::source_bounds::{derive_and_classify_bounds, BoundContext};
+    use smelt_planner::{batch_safety_from_bounds, BoundResult};
+
+    if dep_timeseries.is_empty() {
+        return Ok(smelt_planner::BatchSafety::FullyBatchSafe);
+    }
+
+    let mut ctx = BoundContext::new();
+    for (dep_name, (_segs, partition_col)) in dep_timeseries {
+        ctx.add_source(dep_name, partition_col);
+    }
+
+    let raw_bounds = derive_and_classify_bounds(model_sql, &ctx);
+    let bounds: HashMap<String, BoundResult> = raw_bounds
+        .into_iter()
+        .map(|(name, (_, bound))| (name, bound))
+        .collect();
+
+    batch_safety_from_bounds(&bounds)
 }
 
 /// Build an ordered substitution vector from positional and named arguments,
@@ -692,7 +758,10 @@ impl UpstreamSchemas {
 
 impl SqlCompiler {
     pub(crate) fn new(config: Config, target: &Target) -> Self {
-        let (dialect, capabilities) = dialect_for_backend(target.backend_type());
+        let (dialect, capabilities) = match target.backend_type() {
+            Ok(bt) => dialect_for_backend(bt),
+            Err(_) => (SqlDialect::DuckDB, BackendCapabilities::duckdb()),
+        };
         Self {
             config,
             dialect,
@@ -820,11 +889,10 @@ impl SqlCompiler {
                 models: &self.upstream_schemas.models,
                 seeds: &self.upstream_schemas.seeds,
             };
-            Some(build_type_context(
-                &file,
-                &self.upstream_schemas.sources,
-                &provider,
-            ))
+            let mut ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+            // Per-entity source columns, same as `apply_type_casts`.
+            add_source_info_to_type_context(&self.upstream_schemas.per_entity_sources, &mut ctx);
+            Some(ctx)
         } else {
             None
         };
@@ -995,8 +1063,34 @@ impl SqlCompiler {
         })
     }
 
+    /// Hard-error when a model is `refresh: materialized_view` and the resolved
+    /// backend's capabilities have no native incremental-view maintenance.
+    ///
+    /// No backend advertises `supports_native_ivm` today, so this always fires
+    /// for `refresh: materialized_view` models — never a silent fallback to
+    /// `refresh: incremental` or a full-refresh table
+    /// (`docs/specs/materialized_view.md` §"No silent fallback"). Called from
+    /// every compile entry point (`compile`, `compile_with_sql`,
+    /// `compile_with_sql_and_ephemerals`) so the gate applies uniformly
+    /// whether or not ephemeral inlining or SQL transformation happened first.
+    fn check_native_ivm_gate(&self, model: &ModelFile) -> Result<()> {
+        let refresh = self
+            .config
+            .get_refresh_with_metadata(&model.name, model.metadata.as_ref().map(|b| b.as_ref()));
+        if refresh == RefreshStrategy::MaterializedView && !self.capabilities.supports_native_ivm {
+            anyhow::bail!(
+                "`refresh: materialized_view` requires native incremental-view maintenance; \
+                 this engine has none — use `refresh: incremental` with `grain: key` for \
+                 smelt-driven maintenance."
+            );
+        }
+        Ok(())
+    }
+
     /// Compile a model's SQL by replacing smelt.ref() calls with table references
     pub fn compile(&self, model: &ModelFile, schema: &str) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         // Strip frontmatter to avoid parse errors from YAML metadata
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         // Evaluate in-model meta-language constructs (e.g. list spread) to plain
@@ -1067,7 +1161,15 @@ impl SqlCompiler {
             models: &self.upstream_schemas.models,
             seeds: &self.upstream_schemas.seeds,
         };
-        let ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+        let mut ctx = build_type_context(&file, &self.upstream_schemas.sources, &provider);
+        // Per-entity `sources/*.yml` columns (Phase 6) — the same two-path
+        // source resolution `smelt-db`'s `type_context()` query performs.
+        // Without this, every per-entity source column resolves to Unknown
+        // and `SUM(val)` falls through to the concrete `BigInt` default,
+        // so the `_smelt_typed` wrapper truncates fractional aggregates
+        // (design fork F4's runtime-side sibling; end-to-end pinned by the
+        // property loop's G-01 cell with fractional values).
+        add_source_info_to_type_context(&self.upstream_schemas.per_entity_sources, &mut ctx);
         let column_types = infer_select_column_types(&select_stmt, &ctx);
 
         let select_list = match select_stmt.select_list() {
@@ -1100,7 +1202,7 @@ impl SqlCompiler {
         let col_type_refs: Vec<DataType> =
             column_types.iter().map(|tc| tc.data_type.clone()).collect();
 
-        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs)
+        wrap_with_type_casts(sql, &col_name_refs, &col_type_refs, self.dialect)
     }
 
     /// Compile a model with custom SQL (e.g., for transformed queries).
@@ -1115,6 +1217,8 @@ impl SqlCompiler {
         schema: &str,
         sql: &str,
     ) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         let sql = crate::meta_eval::expand_in_model_meta(sql, &self.meta_ctx());
         let parse = smelt_parser::parse(&sql);
         let (as_struct_emitter, fn_expander, path_call_expander) =
@@ -1169,6 +1273,8 @@ impl SqlCompiler {
         sql: &str,
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         let ephemeral_refs: HashSet<&str> = resolver
             .ephemeral_names
             .iter()
@@ -1713,6 +1819,8 @@ impl SqlCompiler {
         schema: &str,
         resolver: &EphemeralResolver,
     ) -> Result<CompiledModel> {
+        self.check_native_ivm_gate(model)?;
+
         let clean_content = smelt_parser::strip_frontmatter(&model.content);
         let clean_content =
             crate::meta_eval::expand_in_model_meta(&clean_content, &self.meta_ctx());
@@ -1904,6 +2012,7 @@ mod tests {
             python: None,
             target: None,
             state: Default::default(),
+            maintenance: None,
         }
     }
 
@@ -2011,6 +2120,48 @@ JOIN smelt.model_b b ON a.id = b.id
         );
     }
 
+    /// `refresh: materialized_view` on DuckDB (no native IVM) is a hard error —
+    /// never a silent fallback to `keyed` or a full-refresh table
+    /// (`docs/specs/materialized_view.md` §"No silent fallback").
+    #[test]
+    fn test_materialized_view_hard_errors_without_native_ivm() {
+        let model = ModelFile {
+            name: "mv_model".to_string(),
+            path: "models/mv_model.sql".into(),
+            content: "SELECT device_id, COUNT(*) AS n FROM smelt.raw_events GROUP BY device_id"
+                .to_string(),
+            refs: vec![],
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(smelt_core::metadata::ModelMetadata {
+                materialization: Some(Materialization::Table),
+                refresh: Some(RefreshStrategy::MaterializedView),
+                ..Default::default()
+            })),
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("mv_model.sql".into()),
+            address_segments: Vec::new(),
+        };
+
+        let config = make_test_config();
+        // make_test_target() is `duckdb`, which sets `supports_native_ivm = false`.
+        let compiler = SqlCompiler::new(config, &make_test_target());
+
+        let err = compiler
+            .compile(&model, "main")
+            .expect_err("refresh: materialized_view on DuckDB must hard-error");
+        let message = err.to_string();
+        assert!(
+            message.contains("requires native incremental-view maintenance"),
+            "expected the §\"No silent fallback\" hard error, got: {}",
+            message
+        );
+        assert!(
+            message.contains("use `refresh: incremental` with `grain: key`"),
+            "expected the hard error to point at `refresh: incremental` + `grain: key`, got: {}",
+            message
+        );
+    }
+
     #[test]
     fn test_materialization_from_config() {
         let model = ModelFile {
@@ -2032,7 +2183,9 @@ JOIN smelt.model_b b ON a.id = b.id
             ModelConfig {
                 materialization: Some(Materialization::Table),
                 timeseries: None,
-                incremental: None,
+                refresh: None,
+                grain: None,
+                batched: None,
                 tags: Vec::new(),
                 target: None,
                 format: None,

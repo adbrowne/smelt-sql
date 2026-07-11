@@ -82,6 +82,7 @@ nav:
     - Reference: meta-language/reference.md
   - Guide:
     - SQL Models: guide/sql-models.md
+    - Pipe Syntax: guide/pipe-syntax.md
     - Sources: guide/sources.md
     - Materializations: guide/materializations.md
     - Incremental Models: guide/incremental-models.md
@@ -98,12 +99,13 @@ nav:
     - Editor Features: guide/editor-features.md
   - Examples:
     - Web Analytics: examples/web_analytics.md
+    - Web Analytics Maintenance Demo: examples/web-analytics-maintenance.md
   - Reference:
     - CLI Commands: reference/cli.md
     - Project Configuration: reference/smelt-yml.md
     - Sources Configuration: reference/sources-yml.md
     - Timeseries: reference/timeseries.md
-    - cumulative_aggregate: reference/cumulative-aggregate.md
+    - Key-Grain Patterns: reference/cumulative-aggregate.md
     - Language Spec: reference/language.md
   - Developing smelt:
     - Architecture: developing/architecture.md

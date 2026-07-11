@@ -1,5 +1,9 @@
 target/
 .cargo-cache/
+# Local developer build-speed config (e.g. mold linker). Not normative to the
+# project — must not be committed, since it would apply to CI and every
+# contributor (where the chosen linker may not be installed).
+.cargo/config.toml
 .claude/*
 !.claude/settings.json
 !.claude/commands/
@@ -8,6 +12,7 @@ target/
 !.claude/active-plan
 !.claude/hardening-baseline.txt
 !.claude/unknown-census.toml
+!.claude/property-loop-prompt.txt
 /.vscode/
 datagen.duckdb
 output/
@@ -38,3 +43,11 @@ smelt_sql.data/
 
 # Local maturin wheel builds (used by the agent-loop harness)
 /dist/
+
+# Local Spark Connect runtime (scripts/spark-up.sh) — not committed
+.smelt-spark-warehouse/
+.smelt-spark-venv/
+# Delta Lake Ivy cache (bind-mounted into the container; files owned by the
+# container's uid 185, so the host loop's auto-stash/clean cannot remove them —
+# gitignore it to avoid "Permission denied" warnings on every iteration).
+.smelt-spark-ivy/

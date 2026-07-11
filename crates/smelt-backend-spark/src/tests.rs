@@ -40,8 +40,12 @@ fn sql_drop_view() {
 #[test]
 fn sql_create_table_as() {
     assert_eq!(
-        sql::create_table_as("cat.schema.tbl", "SELECT 1 AS id"),
+        sql::create_table_as("cat.schema.tbl", "SELECT 1 AS id", None),
         "CREATE TABLE cat.schema.tbl AS SELECT 1 AS id"
+    );
+    assert_eq!(
+        sql::create_table_as("cat.schema.tbl", "SELECT 1 AS id", Some("DELTA")),
+        "CREATE TABLE cat.schema.tbl USING DELTA AS SELECT 1 AS id"
     );
 }
 
@@ -147,39 +151,11 @@ fn sql_insert_into() {
     );
 }
 
-#[test]
-fn sql_merge_into_single_key() {
-    let sql = sql::merge_into(
-        "cat.db.users",
-        "SELECT 1 AS id, 'Alice' AS name",
-        &["id".to_string()],
-    );
-    assert_eq!(
-        sql,
-        "MERGE INTO cat.db.users AS target \
-         USING (SELECT 1 AS id, 'Alice' AS name) AS source \
-         ON target.id = source.id \
-         WHEN MATCHED THEN UPDATE SET * \
-         WHEN NOT MATCHED THEN INSERT *"
-    );
-}
-
-#[test]
-fn sql_merge_into_composite_key() {
-    let sql = sql::merge_into(
-        "cat.db.events",
-        "SELECT * FROM staging",
-        &["user_id".to_string(), "event_date".to_string()],
-    );
-    assert_eq!(
-        sql,
-        "MERGE INTO cat.db.events AS target \
-         USING (SELECT * FROM staging) AS source \
-         ON target.user_id = source.user_id AND target.event_date = source.event_date \
-         WHEN MATCHED THEN UPDATE SET * \
-         WHEN NOT MATCHED THEN INSERT *"
-    );
-}
+// `sql::merge_into` was removed — the column-scoped MERGE text is now
+// produced by `smelt_logical::maintenance::emit::emit_column_scoped_merge`
+// (single-owner emitter); the Spark-dialect variant's shape (byte-identical
+// to what this function used to produce) is asserted in
+// `crates/smelt-logical/tests/emit_statements.rs`.
 
 #[test]
 fn sql_insert_overwrite() {
@@ -222,6 +198,16 @@ fn capabilities_match_spark_semantics() {
     assert!(caps.supports_insert_overwrite);
 }
 
+#[test]
+fn capabilities_all_backends_require_schema_init() {
+    // W2·P1 spec oracle: multi_backend.md §Surface `requires_schema_init` matrix row.
+    // All backends must create the target schema before selecting it.
+    use smelt_backend::BackendCapabilities;
+    assert!(BackendCapabilities::duckdb().requires_schema_init);
+    assert!(BackendCapabilities::spark_delta().requires_schema_init);
+    assert!(BackendCapabilities::spark_parquet().requires_schema_init);
+}
+
 // ─── Integration Tests (require Spark Connect) ─────────────────────────────
 //
 // These tests need a running Spark Connect server. Set SPARK_CONNECT_URL
@@ -246,7 +232,7 @@ mod integration {
     /// Helper to create a SparkBackend for integration tests.
     async fn create_test_backend() -> Option<crate::SparkBackend> {
         let url = spark_connect_url()?;
-        match crate::SparkBackend::new(&url, "spark_catalog", "default", None).await {
+        match crate::SparkBackend::new(&url, "spark_catalog", "default", None, true).await {
             Ok(backend) => Some(backend),
             Err(e) => {
                 eprintln!(
@@ -256,6 +242,55 @@ mod integration {
                 None
             }
         }
+    }
+
+    #[tokio::test]
+    async fn integration_fresh_schema_auto_creates() {
+        // W2·P1 acceptance test: connecting to a schema that doesn't exist yet must
+        // succeed — the backend auto-creates it before selecting it.
+        let Some(url) = spark_connect_url() else {
+            return;
+        };
+
+        let catalog = "spark_catalog";
+        let fresh_schema = "smelt_fresh_schema_w2p1";
+
+        // Drop the schema first so it is genuinely absent (idempotent, uses default schema).
+        if let Ok(b) = crate::SparkBackend::new(&url, catalog, "default", None, true).await {
+            let _ = b
+                .execute_sql(&format!(
+                    "DROP DATABASE IF EXISTS {}.{} CASCADE",
+                    catalog, fresh_schema
+                ))
+                .await;
+        }
+
+        // Before fix: SparkBackend::new fails with [SCHEMA_NOT_FOUND].
+        // After fix: the backend auto-creates the schema before setCurrentDatabase.
+        let backend = crate::SparkBackend::new(&url, catalog, fresh_schema, None, true)
+            .await
+            .expect("SparkBackend::new must auto-create a fresh schema before selecting it");
+
+        // Verify we can run a model in the newly-created schema.
+        backend
+            .create_table_as(fresh_schema, "smelt_probe_w2p1", "SELECT 42 AS n")
+            .await
+            .expect("create_table_as in auto-created schema should succeed");
+        assert_eq!(
+            backend
+                .get_row_count(fresh_schema, "smelt_probe_w2p1")
+                .await
+                .unwrap(),
+            1
+        );
+
+        // Cleanup.
+        let _ = backend
+            .execute_sql(&format!(
+                "DROP DATABASE IF EXISTS {}.{} CASCADE",
+                catalog, fresh_schema
+            ))
+            .await;
     }
 
     #[tokio::test]

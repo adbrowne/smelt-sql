@@ -56,8 +56,36 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            if self.at(SELECT_KW) || self.at(WITH_KW) {
-                // Bare SELECT/WITH model body. We only parse the first one; any
+            if self.at(FROM_KW) {
+                // Bare FROM-first pipe query body.
+                if seen_model {
+                    break;
+                }
+                self.parse_pipe_query();
+                seen_model = true;
+                self.skip_trivia();
+                continue;
+            }
+
+            if self.at(WITH_KW) {
+                // WITH … — could be a standard SELECT or a FROM-first pipe query.
+                // Peek ahead: if the body after all CTEs begins with FROM_KW, it
+                // is a pipe query; otherwise it is a standard SELECT.
+                if seen_model {
+                    break;
+                }
+                if self.peek_from_first_after_with() {
+                    self.parse_pipe_query();
+                } else {
+                    self.parse_select_stmt();
+                }
+                seen_model = true;
+                self.skip_trivia();
+                continue;
+            }
+
+            if self.at(SELECT_KW) {
+                // Bare SELECT model body. We only parse the first one; any
                 // following top-level tokens are consumed silently (preserving
                 // pre-Phase-1 behavior for statements the child parser does not
                 // fully consume, e.g. comma-separated FROM lists).

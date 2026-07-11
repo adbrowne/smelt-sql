@@ -1,7 +1,7 @@
 ---
 materialization: table
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
 timeseries:
   partition_column: event_date
   event_time_column: event_timestamp

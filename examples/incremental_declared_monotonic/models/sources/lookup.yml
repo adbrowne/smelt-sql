@@ -1,0 +1,10 @@
+description: Slowly-changing lookup dimension, keyed by user.
+columns:
+  - { name: updated_at,      type: TIMESTAMP, nullable: false }
+  - { name: snapshot_key,    type: INTEGER,   nullable: false }
+  - { name: user_id,         type: INTEGER,   nullable: false }
+  - { name: attribute,       type: VARCHAR,   nullable: true }
+timeseries:
+  event_time_column: updated_at
+  partition_column: snapshot_key
+  granularity: day

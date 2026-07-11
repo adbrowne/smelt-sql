@@ -1,5 +1,6 @@
 /// Typed AST wrappers over Rowan CST
 use crate::syntax_kind::SyntaxNode;
+use crate::SyntaxKind;
 use crate::SyntaxKind::*;
 use rowan::TextRange;
 
@@ -22,6 +23,16 @@ impl File {
 
     pub fn select_stmt(&self) -> Option<SelectStmt> {
         self.0.children().find_map(SelectStmt::cast)
+    }
+
+    /// The top-level `PipeQuery` node, if the file body is a FROM-first pipe query.
+    pub fn pipe_query(&self) -> Option<PipeQuery> {
+        self.0.children().find_map(PipeQuery::cast)
+    }
+
+    /// Whether the file has a valid top-level query body (SELECT_STMT or PIPE_QUERY).
+    pub fn has_query_body(&self) -> bool {
+        self.select_stmt().is_some() || self.pipe_query().is_some()
     }
 
     /// Iterate over top-level `smelt.define` declarations in this file.
@@ -4463,5 +4474,121 @@ mod tests {
                 call_text
             );
         }
+    }
+}
+
+// ===== Pipe SQL (Data-World |> pipe query) =====
+
+/// A FROM-first pipe query: `[WITH …] FROM <table_ref> |> STAGE … |> STAGE …`.
+///
+/// Children (in order):
+/// - optional `WITH_CLAUSE`
+/// - `FROM_CLAUSE` (the entry source)
+/// - zero or more `PIPE_STAGE` nodes
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipeQuery(SyntaxNode);
+
+impl PipeQuery {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PIPE_QUERY {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `WITH_CLAUSE` node, if present.
+    pub fn with_clause(&self) -> Option<WithClause> {
+        self.0.children().find_map(WithClause::cast)
+    }
+
+    /// The `FROM_CLAUSE` entry source.
+    pub fn from_clause(&self) -> Option<FromClause> {
+        self.0.children().find_map(FromClause::cast)
+    }
+
+    /// Iterator over all `PIPE_STAGE` children in declaration order.
+    pub fn stages(&self) -> impl Iterator<Item = PipeStage> + '_ {
+        self.0.children().filter_map(PipeStage::cast)
+    }
+}
+
+/// One `|> OPERATOR body` stage inside a `PIPE_QUERY`.
+///
+/// Children:
+/// - a zero-width `PIPE_OP_*` marker identifying the operator
+/// - body tokens/nodes for the stage
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct PipeStage(SyntaxNode);
+
+impl PipeStage {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == PIPE_STAGE {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// The `PIPE_OP_*` marker kind identifying which operator this stage is.
+    /// Returns `None` only for error-recovery stages with no recognised operator.
+    pub fn op_kind(&self) -> Option<SyntaxKind> {
+        self.0.children().find_map(|c| {
+            let k = c.kind();
+            if matches!(
+                k,
+                PIPE_OP_WHERE
+                    | PIPE_OP_SELECT
+                    | PIPE_OP_EXTEND
+                    | PIPE_OP_SET
+                    | PIPE_OP_DROP
+                    | PIPE_OP_RENAME
+                    | PIPE_OP_AS
+                    | PIPE_OP_AGGREGATE
+                    | PIPE_OP_ORDER_BY
+                    | PIPE_OP_LIMIT
+                    | PIPE_OP_JOIN
+                    | PIPE_OP_UNION
+                    | PIPE_OP_INTERSECT
+                    | PIPE_OP_EXCEPT
+                    | PIPE_OP_DISTINCT
+            ) {
+                Some(k)
+            } else {
+                None
+            }
+        })
+    }
+
+    /// The first non-marker child node (the body of the stage), if any.
+    pub fn body(&self) -> Option<SyntaxNode> {
+        self.0.children().find(|c| {
+            !matches!(
+                c.kind(),
+                PIPE_OP_WHERE
+                    | PIPE_OP_SELECT
+                    | PIPE_OP_EXTEND
+                    | PIPE_OP_SET
+                    | PIPE_OP_DROP
+                    | PIPE_OP_RENAME
+                    | PIPE_OP_AS
+                    | PIPE_OP_AGGREGATE
+                    | PIPE_OP_ORDER_BY
+                    | PIPE_OP_LIMIT
+                    | PIPE_OP_JOIN
+                    | PIPE_OP_UNION
+                    | PIPE_OP_INTERSECT
+                    | PIPE_OP_EXCEPT
+                    | PIPE_OP_DISTINCT
+            )
+        })
     }
 }

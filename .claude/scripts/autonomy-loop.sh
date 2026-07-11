@@ -111,9 +111,12 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # stop-autonomy.sh; it is removed automatically when the loop acts on it.
 STOP_FLAG="${STOP_FLAG:-${SCRIPT_DIR}/../autonomy.stop}"
 
-# Currently active: the spec-remediation implementation backlog
-# (docs/plans/20260613-spec-impl.md via .claude/active-plan).
-LOG_DIR="${HOME}/.claude/logs/spec-impl"
+# Currently active: the refresh-as-maintenance-plan programme — spec alignment
+# (SA1–SA5) then implementation (MP1–MP16: surface cut, plan derivation,
+# diagnostics/explain, ledger, targeted-write/fold cells, propagation), under
+# the model-updates master (docs/plans/20260704-model-updates.md via
+# .claude/active-plan).
+LOG_DIR="${HOME}/.claude/logs/maintenance-plan"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
@@ -180,7 +183,42 @@ CRITICAL — sentinel emission contract: your final user-facing message MUST con
 # one sub-plan only).
 PROMPT="${PROMPT:-$(cat "${SCRIPT_DIR}/../sweep-loop-prompt.txt")}"
 
+# Warn when a single iteration's spend crosses this (USD). Purely advisory —
+# the $27 and $34 outlier iterations were reviewer/implementer thrash worth a
+# human look at the time.
+ITER_COST_WARN="${ITER_COST_WARN:-15}"
+
 cd "${REPO_ROOT}"
+
+# Pre-extract the next unit of work from the registry + status tables so the
+# agent doesn't have to read the whole master plan (~45KB) + sub-plan just to
+# find one row. Best-effort: emits a HINT line on stdout, or nothing (in which
+# case the prompt is unchanged and the agent derives the phase itself). The
+# hint is advisory — the tables stay the source of truth (the agent still
+# updates them), so a stale/wrong hint costs nothing but the saved read.
+phase_hint() {
+  local master line sub status phase
+  master="$(grep -E '^master_plan:' "${SCRIPT_DIR}/../active-plan" 2>/dev/null | tail -1 | awk '{print $2}')"
+  [ -n "${master}" ] && [ -f "${master}" ] || return 0
+  # Registry table rows under "## Spawned sub-plans", in order. Skip the
+  # header/divider rows; each data row carries a docs/plans/ path and a
+  # Status in its last cell.
+  while IFS= read -r line; do
+    sub="$(printf '%s' "${line}" | grep -oE 'docs/plans/[A-Za-z0-9._-]+\.md' | head -1)"
+    [ -n "${sub}" ] && [ -f "${sub}" ] || continue
+    status="$(printf '%s' "${line}" | awk -F'|' '{v=$(NF-1); gsub(/^[ `]+|[ `]+$/,"",v); print v}')"
+    case "${status}" in done*|Done*) continue ;; esac
+    # First `pending` row of the sub-plan's Progress table.
+    phase="$(awk -F'|' '/^\|/ { p=$2; s=$3; gsub(/^ +| +$/,"",p); gsub(/^ +| +$/,"",s);
+                               if (s=="pending") { print p; exit } }' "${sub}")"
+    if [ -n "${phase}" ]; then
+      printf 'WRAPPER PRE-SCAN HINT: the first READY sub-plan appears to be `%s` and its next `pending` phase appears to be `%s`. Verify against that sub-plan'"'"'s Progress table (one targeted read) instead of re-deriving from the full master plan; if the tables disagree with this hint, the tables win.' "${sub}" "${phase}"
+      return 0
+    fi
+  done < <(awk '/^## Spawned sub-plans/{f=1; next} f && /^## /{exit} f' "${master}" \
+             | grep -E '^\|' | grep -vE '^\|[-: ]+\||Sub-plan')
+  return 0
+}
 
 # Find our cgroup (the tmux-spawn scope, when launched from tmux). systemd-oomd
 # kills a whole scope when it fires, so memory.current / memory.peak on this
@@ -361,12 +399,17 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   if [ "${#ITER_SCOPE_BASE[@]}" -gt 0 ]; then
     iter_scope=("${ITER_SCOPE_BASE[@]}" --unit="autonomy-iter-${ts}-$(printf '%02d' "${iteration}")" --)
   fi
+  # Recomputed every iteration — the previous iteration flipped a table row.
+  hint="$(phase_hint)"
+  [ -n "${hint}" ] && echo "Pre-scan:   ${hint}"
   "${iter_scope[@]}" claude --print \
     --permission-mode "${PERMISSION_MODE}" \
     --no-session-persistence \
     --model "${MODEL}" \
     --output-format json \
-    "${PROMPT}" 2>&1 | tee "${log}"
+    "${PROMPT}${hint:+
+
+${hint}}" 2>&1 | tee "${log}"
   rc="${PIPESTATUS[0]}"
 
   # Always stop the sampler before any break/continue below.
@@ -400,6 +443,13 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
      }' "${log}" >> "${USAGE_LOG}" 2>/dev/null || \
     echo "{\"ts\":\"${ts}\",\"event\":\"headless-iter\",\"iter\":${iteration},\"rc\":${rc},\"note\":\"unparseable-log\"}" >> "${USAGE_LOG}"
 
+  # Advisory cost check: a single phase costing >$ITER_COST_WARN usually means
+  # implementer/reviewer thrash or a runaway context — worth a post-hoc look.
+  iter_cost="$(jq -r 'select(.type=="result") | .total_cost_usd // 0' "${log}" 2>/dev/null | tail -1)"
+  if [ -n "${iter_cost}" ] && awk -v c="${iter_cost}" -v w="${ITER_COST_WARN}" 'BEGIN{exit !(c>w)}'; then
+    echo "===== WARNING: iteration cost \$${iter_cost} exceeded ITER_COST_WARN=\$${ITER_COST_WARN} — review ${log} ====="
+  fi
+
   echo
 
   if [ "${rc}" -ne 0 ]; then
@@ -412,7 +462,27 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # not anywhere in the streamed log. Plan files document the sentinel strings,
   # so reading them produces tool_use_result payloads that contain the literals
   # verbatim — grepping the whole log false-positives. Extract just .result.
-  final_result="$(jq -r 'select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
+  # -R/fromjson?: tolerate non-JSON lines interleaved into the --output-format
+  # json stream (e.g. "Background tasks still running after 600s; terminating.",
+  # emitted when the agent spawns async background work and returns). Without
+  # this a single stray line makes jq abort before the result envelope, yielding
+  # a spurious no_result_envelope pause instead of the real "no sentinel" path.
+  final_result="$(jq -Rr 'fromjson? | select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
+  api_error_status="$(jq -Rr 'fromjson? | select(.type == "result") | .api_error_status // empty' "${log}" 2>/dev/null | tail -1)"
+
+  # Session/usage-limit hit (HTTP 429, or the "You've hit your session
+  # limit · resets <time>" message the CLI prints instead of any sentinel).
+  # This is NOT a crash — the account is simply out of budget until the
+  # window resets. Classify it distinctly from no_sentinel/claude_nonzero so
+  # the forever-wrapper never counts it toward its crash-loop (fast-fail)
+  # guard; it must always retry, no matter how many times in a row it
+  # recurs while waiting out the reset window.
+  if [ "${api_error_status}" = "429" ] \
+     || printf '%s' "${final_result}" | grep -qiE 'session limit|usage limit'; then
+    echo "===== session/usage limit hit (429) — not a crash, will retry later ====="
+    exit_reason="session_limit"
+    break
+  fi
 
   if [ -z "${final_result}" ]; then
     echo "===== Could not extract final .result from log — pausing loop ====="
@@ -467,10 +537,12 @@ echo "Logs in: ${LOG_DIR}"
 
 # Exit codes: 0 = master backlog done; 2 = needs a human (master exhausted —
 # next cluster needs a sub-plan scaffolded); 3 = graceful stop requested (do
-# not restart); 1 = infra failure / max-iter.
+# not restart); 4 = session/usage limit hit (always retry, never a fast-fail);
+# 1 = infra failure / max-iter.
 case "${exit_reason}" in
   all_done) exit 0 ;;
   master_exhausted) exit 2 ;;
   stopped_by_flag) exit 3 ;;
+  session_limit) exit 4 ;;
   *) exit 1 ;;
 esac

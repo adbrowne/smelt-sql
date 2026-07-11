@@ -1,12 +1,14 @@
 Resume the smelt autonomy loop with fresh context. Each iteration does exactly ONE unit of work and emits exactly one sentinel. You choose the work by a fixed PRIORITY: ready remediation first, scanning only when no remediation is ready.
 
 SETUP (every iteration):
-1. Read `.claude/active-plan` for the `master_plan` path (currently docs/plans/20260613-spec-impl.md — a pure remediation backlog with no probe rows; when no registry sub-plan is READY, go straight to MASTER_EXHAUSTED).
+0. If this prompt ends with a WRAPPER PRE-SCAN HINT naming a sub-plan and phase, verify it with ONE targeted read of that sub-plan's Progress table (plus its per-phase routine section) and skip steps 1-2 entirely — do NOT read the full master plan. Only fall back to steps 1-2 if the hint is absent or the table disagrees with it (the tables always win).
+1. Read `.claude/active-plan` for the `master_plan` path (currently docs/plans/20260704-model-updates.md — a pure feature backlog with no probe rows; when no registry sub-plan is READY, go straight to MASTER_EXHAUSTED so a human can scaffold the next group's sub-plan). Always trust the path in `.claude/active-plan`, not this parenthetical.
 2. Read the master plan's "## Spawned sub-plans (remediation)" registry table.
 
 PRIORITY 1 — READY REMEDIATION (do this before any scanning):
 3. A sub-plan is READY when BOTH hold: (a) its registry-table Status is NOT `done`, and (b) its own Progress-tracking table has at least one `pending` row (a row that is neither `done` nor `blocked`). Consider sub-plans top-to-bottom in the registry; the first READY one is this iteration's target.
 4. If a READY sub-plan exists, execute the next `pending` phase of THAT sub-plan, following the sub-plan's OWN per-phase routine and design decisions (it is self-contained: pre-flight → spec increment only if the row lists one → /smelt:implement red-green with implementer + reviewer, spec as oracle → verification gates → set the row to `done` → commit + push with the phase's commit message).
+   TOKEN DISCIPLINE: run the standard gate as ONE call — `bash .claude/scripts/verify-phase.sh` — never as separate fmt/clippy/test invocations. Brief subagents by file+section REFERENCE (they read the plan/spec sections themselves); never paste plan phases, spec sections, or diffs into subagent prompts, and have the reviewer run its own `git diff` against the sha you give it. Delegate code-location searches to an Explore agent (synchronous) instead of grepping large files into your own context.
    - If that was the sub-plan's LAST pending phase (no `pending` rows remain after it), also flip the sub-plan's Status to `done (<today>)` in the master registry table and commit that with the phase.
    - Emit <<PHASE_COMPLETE>> (or <<PHASE_BLOCKED>> per the block rule below).
 
@@ -24,5 +26,6 @@ CONSERVATIVE RULES (never violate):
 - NEVER scaffold a new sub-plan or author a new spec autonomously. Remediation sub-plans and their spec edits are human-gated; you only execute phases that already exist as `pending` rows. (A sub-plan phase MAY perform a spec increment if that phase's row explicitly lists one — that is pre-authorized by the human who wrote the plan.)
 - During a SCAN phase, never edit a spec; log spec-vs-code conflicts as `needs-review`.
 - Run exactly ONE phase this iteration.
+- Do ALL of the phase's work in THIS response, synchronously. You are running headless (`claude --print`): there is NO follow-up turn to collect a deferred result. NEVER spawn an asynchronous / background sub-agent (a background Task/Agent) and then return — if you use a sub-agent it MUST be one you block on and whose result you fold in BEFORE emitting the sentinel. A response that ends while background work is still running is a FAILED iteration: the background task is killed at the wait ceiling, no sentinel is produced, and the loop pauses. "I'll be notified when the agent finishes" is never a valid way to end an iteration.
 
 SENTINEL CONTRACT: your final user-facing message MUST contain exactly one of <<PHASE_COMPLETE>>, <<PHASE_BLOCKED>>, <<MASTER_EXHAUSTED>>, or <<ALL_DONE>>. Put any one-line reason on the line ABOVE the sentinel. (<<ALL_DONE>> only if the registry is all `done` AND every probe row is `done` AND the full suite is green; in normal operation the idle state is <<MASTER_EXHAUSTED>>, not <<ALL_DONE>>.) Legacy <<PAUSE_FOR_HUMAN>> is accepted as equivalent to <<PHASE_BLOCKED>>.

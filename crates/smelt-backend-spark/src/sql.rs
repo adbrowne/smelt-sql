@@ -20,9 +20,16 @@ pub fn drop_view(view_name: &str) -> String {
     format!("DROP VIEW IF EXISTS {}", view_name)
 }
 
-/// CREATE TABLE ... AS SELECT
-pub fn create_table_as(table_name: &str, query: &str) -> String {
-    format!("CREATE TABLE {} AS {}", table_name, query)
+/// CREATE TABLE [USING format] ... AS SELECT
+///
+/// When `using` is `Some("DELTA")`, emits `CREATE TABLE ... USING DELTA AS SELECT`
+/// which enables DELETE / MERGE / schema-evolution on Spark.
+/// When `None`, omits the USING clause (plain managed Parquet for cross-engine path).
+pub fn create_table_as(table_name: &str, query: &str, using: Option<&str>) -> String {
+    match using {
+        Some(fmt) => format!("CREATE TABLE {} USING {} AS {}", table_name, fmt, query),
+        None => format!("CREATE TABLE {} AS {}", table_name, query),
+    }
 }
 
 /// CREATE OR REPLACE VIEW ... AS SELECT
@@ -76,21 +83,12 @@ pub fn insert_into(table_name: &str, query: &str) -> String {
     format!("INSERT INTO {} {}", table_name, query)
 }
 
-/// MERGE INTO ... USING ... ON ... WHEN MATCHED/NOT MATCHED
-pub fn merge_into(table_name: &str, source_sql: &str, unique_key: &[String]) -> String {
-    let on_clause = unique_key
-        .iter()
-        .map(|k| format!("target.{} = source.{}", k, k))
-        .collect::<Vec<_>>()
-        .join(" AND ");
-
-    format!(
-        "MERGE INTO {} AS target USING ({}) AS source ON {} \
-         WHEN MATCHED THEN UPDATE SET * \
-         WHEN NOT MATCHED THEN INSERT *",
-        table_name, source_sql, on_clause
-    )
-}
+// MERGE INTO text is no longer authored here — `Backend::merge_into`'s
+// default implementation builds it from `smelt_logical::maintenance::emit::
+// emit_column_scoped_merge` (`docs/specs/maintenance_plan.md` §"Statement
+// emission (single owner)"); this crate's Spark-dialect variant is asserted
+// byte-identical to the old text this function used to produce in
+// `crates/smelt-logical/tests/emit_statements.rs`.
 
 /// INSERT OVERWRITE TABLE ... PARTITION (col) (query)
 pub fn insert_overwrite(table_name: &str, query: &str, partition: &PartitionRange) -> String {

@@ -38,33 +38,30 @@ pub fn infer_array_literal_type(
     let mut element_typed: Option<TypedColumn> = None;
 
     for elem in &elements {
-        if let Some(typed) = infer_expression_type(elem, ctx) {
-            match &element_typed {
-                None => {
-                    // First element sets the type (skip Null — it's compatible with anything)
-                    if typed.data_type != DataType::Null {
-                        element_typed = Some(typed);
-                    }
-                }
-                Some(existing) => {
-                    if typed.data_type == DataType::Null {
-                        // NULL is compatible with any element type
-                        continue;
-                    }
-                    if typed.data_type != existing.data_type {
-                        // Try promotion
-                        let promoted = promote_types(existing, &typed);
-                        if promoted.data_type.is_unknown() {
-                            // Mixed types that can't be promoted — reject
-                            return None;
-                        }
-                        element_typed = Some(promoted);
-                    }
+        // Can't infer element type
+        let typed = infer_expression_type(elem, ctx)?;
+        match &element_typed {
+            None => {
+                // First element sets the type (skip Null — it's compatible with anything)
+                if typed.data_type != DataType::Null {
+                    element_typed = Some(typed);
                 }
             }
-        } else {
-            // Can't infer element type
-            return None;
+            Some(existing) => {
+                if typed.data_type == DataType::Null {
+                    // NULL is compatible with any element type
+                    continue;
+                }
+                if typed.data_type != existing.data_type {
+                    // Try promotion
+                    let promoted = promote_types(existing, &typed);
+                    if promoted.data_type.is_unknown() {
+                        // Mixed types that can't be promoted — reject
+                        return None;
+                    }
+                    element_typed = Some(promoted);
+                }
+            }
         }
     }
 

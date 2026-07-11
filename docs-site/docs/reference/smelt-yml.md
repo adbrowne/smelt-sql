@@ -13,6 +13,7 @@ The `smelt.yml` file is the main configuration file for a smelt project. It must
 | `default_materialization` | string | no | `"view"` | Default materialization for all models |
 | `models` | map | no | `{}` | Per-model configuration overrides (see [Model Configuration](#model-configuration)) |
 | `python` | string | no | | Path to Python interpreter. Can also be set via the `SMELT_PYTHON` environment variable, which takes precedence over this field. |
+| `maintenance` | object | no | | Project-level maintenance-plan baseline (today only `scan_bounds`); a per-model `maintenance:` block in SQL frontmatter refines it (see [Maintenance Configuration](#maintenance-configuration)) |
 
 ---
 
@@ -107,7 +108,7 @@ The `default_materialization` field and per-model `materialization` field accept
 
 Test files are identified by a `smelt.test` declaration in the SQL file, not by a materialization value. See [Testing](../guide/testing.md) for details.
 
-A cumulative/running aggregate table is opted in with `materialization: table` + `refresh: cumulative` — see [Cumulative Aggregates](../guide/cumulative-aggregates.md) for details.
+A key-grain running-state table is opted in with `materialization: table` + `refresh: incremental` + `grain: key` — see [Materializations](../guide/materializations.md#refresh-axis) for details.
 
 **Precedence for materialization resolution:**
 
@@ -130,8 +131,10 @@ models:
     materialization: <type>
     tags: [<tag>, ...]
     target: <target_name>
-    incremental:
-      # incremental fields...
+    refresh: incremental
+    grain: partition
+    batched:
+      # batched fields...
 ```
 
 ### Model Fields
@@ -141,8 +144,10 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `timeseries` | object | no | | Time-dimension declaration for incremental/cumulative models (see [Timeseries Configuration](#timeseries-configuration)) |
-| `incremental` | object | no | | Incremental materialization configuration (see [Incremental Configuration](#incremental-configuration)) |
+| `timeseries` | object | no | | Time-dimension declaration for `grain: partition` / `grain: key_per_partition` models. Forbidden on `grain: key` models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
+| `grain` | string | no | | Required with `refresh: incremental`: `partition`, `key`, or `key_per_partition` |
+| `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -153,18 +158,19 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for incremental models and cumulative aggregates. The `timeseries:` and `incremental:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. `grain: key` models must **not** declare `timeseries:` — the keyed output has no partition column, and the rule reads partition shape from the driving source instead (declaring both is a hard error, `KeyedForbidsTimeseries`). The `timeseries:` and `batched:` keys are siblings, not nested.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
       granularity: day
-    incremental:
-      enabled: true
+    batched:
       unique_key:
         - transaction_id
 ```
@@ -184,29 +190,30 @@ Example with weekly granularity:
 models:
   weekly_rollup:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: event_ts
       partition_column: week_start_date
       granularity: week
       week_start: monday
-    incremental:
-      enabled: true
 ```
 
 ### Incremental Configuration
 
-Incremental materialization processes only new or changed data instead of rebuilding the entire table. It is only valid for models with `materialization: table`. A `timeseries:` block must also be present (see above).
+`refresh: incremental` + `grain: partition` processes only new or changed data instead of rebuilding the entire table. This implies a stored `table`. A `timeseries:` block must also be present (see above); the `batched:` block itself is optional.
 
 ```yaml
 models:
   daily_revenue:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
-    incremental:
-      enabled: true
+    batched:
       unique_key:
         - transaction_id
       safety_overrides:
@@ -217,8 +224,8 @@ models:
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `enabled` | bool | no | `true` | Whether incremental processing is active |
 | `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
+| `nondeterministic_columns` | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
 | `safety_overrides` | object | no | _(all false)_ | Override safety checks for patterns that may produce different results on partial data (see [Safety Overrides](#safety-overrides)) |
 
 #### Safety Overrides
@@ -234,6 +241,30 @@ Smelt validates incremental models to ensure they produce the same results wheth
 | `allow_nondeterministic` | bool | `false` | Allow nondeterministic functions (e.g., `RANDOM()`, `NOW()`) |
 | `allow_distinct` | bool | `false` | Allow DISTINCT which may produce different results when data is split across partitions |
 
+### Maintenance Configuration
+
+`maintenance:` is a sibling of `timeseries:`/`batched:` in SQL frontmatter (it is not a `smelt.yml` per-model field). It constrains the derived maintenance plan — the per-`(column-group × trigger)` cell matrix `smelt explain <model>` prints — without ever choosing a strategy the derivation didn't already admit.
+
+```yaml
+maintenance:
+  scan_bounds:
+    per_source:
+      raw.users:
+        allow_full_scan: true
+```
+
+The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, which names your acceptance of a full read of an unclocked source (one with no `partition_column` to bound a scan by). Some maintenance cells — e.g. a column-scoped `MERGE` driven by a mutable dimension's `UpstreamMutation` trigger — can only be admitted by reading that dimension in full; without this acceptance, the plan refuses the cell and `smelt run` falls back to region-recompute (`DELETE`+`INSERT`) instead. See [Enrichment joins and dimension updates](../guide/incremental-models.md#enrichment-joins-and-dimension-updates) for the full example.
+
+#### Maintenance Fields
+
+| Field | Type | Required | Default | Description |
+|-------|------|----------|---------|-------------|
+| `scan_bounds.require` | string | no | `partition_local` | The partition-locality guardrail: `partition_local` or `none`. |
+| `scan_bounds.on_violation` | string | no | `error` | What to do when the derived plan exceeds the stated expectation: `error` or `warn`. |
+| `scan_bounds.per_source.<address>.allow_full_scan` | bool | no | `false` | Named acceptance of a full (unbounded) read of the source at `<address>`. |
+
+A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
+
 ---
 
 ## Validation Rules
@@ -242,13 +273,13 @@ Smelt validates model configurations and reports errors or warnings:
 
 **Errors (block execution):**
 
-- Ephemeral models cannot have incremental configuration
+- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `batched:` block
 - Ephemeral models cannot have a target override
 
 **Warnings (printed to stderr):**
 
-- View models with incremental config (incremental only applies to tables)
-- Materialized view models with incremental config (materialized views are refreshed atomically)
+- View models with `refresh:` set (the refresh axis only applies to stored tables)
+- `refresh: materialized_view` models with a `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
 
 ---
 
@@ -300,15 +331,15 @@ models:
   transactions:
     materialization: table
 
-  # Incremental model — timeseries: and incremental: are sibling keys
+  # Incremental model (grain: partition) — timeseries: and batched: are sibling keys
   daily_revenue:
     materialization: table
+    refresh: incremental
+    grain: partition
     timeseries:
       event_time_column: transaction_timestamp  # column in SOURCE data (WHERE filter)
       partition_column: revenue_date             # column in OUTPUT (DELETE target)
       granularity: day
-    incremental:
-      enabled: true
 
   cube_metrics:
     materialization: table

@@ -115,6 +115,46 @@ Three input shapes are accepted:
 
 **`smelt explain` excludes tests.** `smelt explain` (with or without `--json`) filters out all `smelt.test` declarations from its output via the test-kind predicate applied to every discovered entity. Tests never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
 
+### `smelt explain <model>` maintenance-plan report
+
+`smelt explain` accepts an optional positional model-name argument. When given, it prints that
+model's maintenance plan (`maintenance_plan.md` §Surface "The plan (derived, reported)") instead
+of the whole-project graph: every cell (its trigger, corner, technique, and `ledger_catch_up`
+flag), the derived per-source scan clamps, the per-source partition-locality verdict, any
+admission refusals, and the model's inbound edges (upstream dependencies). The report is
+read-only and plain text. `--select` and `--json` are ignored when a model-name argument is
+given, except `--json` combined with `--show-sql` (below).
+
+**`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
+that cell executes — the output of the same pure emitters a run executes
+(`maintenance_plan.md` §"Statement emission (single owner)"). Each cell's SELECT body is compiled
+through the same `CompilerRegistry` apparatus a real run uses — the real discovered project's
+ephemeral resolver (so a `smelt.<ephemeral>` ref is CTE-inlined, not resolved as a physical table
+reference) and the real upstream column typing derived from static type inference (so `SUM`/`AVG`
+over a `smelt.ref()` column casts to that column's actual type instead of the `BIGINT` default) —
+so the printed SQL matches what a run would compile for the same model and inputs (see Known
+Divergences for the one residual gap: a column aggregated directly off an ephemeral ref). Statements print in execution order; a transactional group is bracketed
+by `BEGIN`/`COMMIT` lines in the printout to show its atomicity (the backend supplies the real
+transaction mechanics at run time). Region literals come from `--period <start>..<end>` when
+given; without `--period`, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand
+in, so the emitted shape is inspectable without choosing a window. `--show-sql` never connects
+to a backend and never executes anything. With `--json` alongside `--show-sql` (the one case
+where `--json` is honored together with a model-name argument), the per-model report is emitted
+as JSON with a `statements` array per cell
+(`{"sql": "<statement>", "transactional_group": <int>}`) — the machine-liftable form
+documentation generators embed.
+
+A model with no maintenance plan (not `refresh: incremental`, or no `grain:` declared) prints a
+one-line notice rather than an error, and exits `0`.
+
+When the plan's column-group derivation could not distinguish per-column provenance (an
+unqualified column ambiguous between two joined sources — `model_properties.md` §"Per-column
+mutation-sensitivity / column provenance"), the report calls out the resulting whole-model
+collapse in plain language rather than printing an indistinguishable single-group plan.
+
+Omitting the model-name argument keeps the existing whole-project graph behavior described below,
+unchanged.
+
 ### `smelt explain --json` output schema
 
 ```json
@@ -123,7 +163,8 @@ Three input shapes are accepted:
     "<model_name>": {
       "dependencies": ["<upstream_model_name>", ...],
       "materialization": "table" | "view" | "ephemeral" | "materialized_view",
-      "refresh": "full" | "cumulative",     // omitted when "full" (default)
+      "refresh": "full" | "incremental" | "materialized_view",     // omitted when "full" (default)
+      "grain": "partition" | "key" | "key_per_partition" | null,  // present iff refresh == "incremental"
       "incremental": {                      // omitted if not incremental
         "granularity": "day" | "hour" | ...,
         "partition_column": "<col>",
@@ -218,6 +259,27 @@ A single `smelt build` performs these steps, in order:
 `smelt run` executes the selected models for the requested time range. Incremental models receive a DELETE+INSERT for the given `[start, end)` window.
 
 `smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
+
+### `--dry-run` prints the maintenance statements
+
+`smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation
+would execute, the maintenance statements the run would execute — the output of the same pure
+emitters a real run consumes (`maintenance_plan.md` §"Statement emission (single owner)") — not
+merely the compiled SELECT body. Region literals are **real**: they come from the invocation's
+resolved `--event-time-start`/`--event-time-end` window, never symbolic placeholders.
+Transactional groups are bracketed by `BEGIN`/`COMMIT` lines, exactly as in
+`smelt explain <model> --show-sql`.
+
+`smelt backbuild --dry-run` additionally reflects the chunking a real backbuild performs: when
+the batch-safety classification splits the range, statements print once per chunk, each chunk
+introduced by a boundary line naming its `[start, end)` window and its position
+(`-- chunk 2/5: [2026-03-21, 2026-03-22)`), in the order a real backbuild would execute them. An
+auto-chunked backfill is thereby inspectable in full before it runs.
+
+`--dry-run` never executes a statement against the target. The division of labour with
+`smelt explain <model> --show-sql`: `--show-sql` is the no-window, single-model plan-inspection
+surface (symbolic bounds unless `--period` is given); `--dry-run` is the "exactly what would
+*this invocation* do" surface — real window, real selection, real chunking.
 
 ### `--allow-downgrade` — incremental safety escape hatch
 
@@ -359,6 +421,33 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **No project-wide compile-only flag (TB-3).** `smelt build --dry-run` does not exist; `smelt build --show-plan` requires a positional model-file argument. There is no single command to compile every model and show the plan without executing. Two candidate resolutions: (1) extend `--show-plan` to accept no positional argument for project-wide output, or (2) add `smelt build --dry-run` mirroring `smelt run --dry-run` semantics across the seed→run lifecycle.
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
 - **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
+- **Most of the maintenance CLI surface is specified but not wired into the CLI parser.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`maintenance_plan.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for both `sources.*` refs and refs to another maintained model in the workspace: the graph builder (`build_forward_graph`) routes a maintained-model upstream through the SAME edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`) that produces the creation cells `smelt explain` reports, so a model-edge clamp in the propagation graph agrees with the clamp `smelt explain` shows for the same edge, and an underivable upstream clock is a `MaintenanceReachNotDerivable` refusal (contributing no walkable edge) rather than a permissive whole-table synthesis. `--source` accepts a maintained-model address as the delta origin (validated through the canonical `resolve_ref_path` resolver — an address that is neither a declared source nor a maintained model is a named error), and the origin model itself is never re-run. What remains is that `execute.rs`'s technique resolution does not yet key off a model-ref cell (`maintenance_plan.md` §"Known Divergences"). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is still unwired; tracked in `docs/plans/20260707-maintenance-plan-impl.md` phase MP13. `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
+- **The keyed-grain fold-candidate detector admits only a single aggregate projection.** The
+  per-model maintenance-plan derivation (`smelt-db`'s `maintenance_plan_report`) resolves a
+  `smelt.<path>` ref to another maintained model in the same project into a creation-trigger cell
+  clocked by the upstream model's own `timeseries:` declaration, recording a
+  `MaintenanceReachNotDerivable` refusal when that clock is underivable
+  (`maintenance_plan.md` §"Upstream model edges"). Separately, a `grain: key` model with two or
+  more aggregate columns falls back to `Trigger::Backfill`'s recompute cell with a
+  `NoAdmissibleTechnique` refusal recorded for `NewData`, even though the same model's actual
+  `refresh: keyed` execution path (`keyed_models.md`) supports arbitrarily many aggregate columns
+  via `smelt-planner`'s `classify_cumulative`. Widening the plan-level derivation to match is
+  tracked as follow-up work; `smelt explain <model> --show-sql` renders whatever cells the current
+  derivation admits — it does not paper over this gap by admitting a cell independently.
+- **`--show-sql` casts a column aggregated directly off an ephemeral ref to the `BIGINT`
+  default, not its real type.** `smelt-runtime`'s shared compiler
+  (`SqlCompiler::compile_with_sql_and_ephemerals`) applies output type casts to a model's SELECT
+  body *before* prepending the resolved ephemeral CTEs, so a column like `SUM(rate)` where `rate`
+  comes straight off a joined ephemeral model cannot be typed from the real upstream schema at
+  cast time regardless of how the caller wires `UpstreamSchemas` — it falls through to the
+  `BIGINT` fallback. This is a compile-order limitation in the shared compiler, not an
+  `explain`-vs-run divergence: a real `smelt run --dry-run` on the same model produces the
+  identical `BIGINT` cast, since both consumers share the one compile path (Run pipeline parity
+  rule, `architecture.md`). `--show-sql` therefore still faithfully reproduces what a run would
+  execute, casting bug included. A column aggregated off a *non-ephemeral* upstream model ref, or
+  an ephemeral ref used outside an aggregate, types correctly. Fixing the underlying ordering is
+  tracked as follow-up `smelt-runtime` work; not addressed by
+  `docs/plans/20260710-emit-unification.md`.
 - **Generator-emitted model `origin` field in `smelt explain --json` is landed.** The `origin` field in §"`smelt explain --json` output schema" surfaces generator emissions distinctly from hand-authored models (per `meta_language.md` §"Multi-model production"). The `ModelOriginKind::Generated { generator_file, generator_name }` enum in `smelt-core/src/origin.rs` is the production type; `ExplainModel.origin` and `CatalogModel.origin` carry it. The `generator_file:<path>` selector parses via `SelectionMethod::GeneratorFile` and resolves against the `emitted_models()` survivor set. The `smelt docs generate` Markdown renderer includes a `**Source**:` line for emitted models. Tracked in `docs/plans/20260509-meta-language-overall.md`.
 
 ## References
@@ -382,7 +471,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
   - `architecture.md` — pipeline stages the CLI orchestrates.
   - `model_selection.md` — `--select` / `--exclude` semantics
   - `models.md` — materialization modes
-  - `incremental_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
+  - `batched_models.md` — `--event-time-start` / `--event-time-end` semantics, batch safety classification, `backbuild` behaviour.
   - `functions.md` — `smelt build` plans function expansion as part of the build lifecycle.
   - `schema_evolution.md` — `smelt diff` change classification
   - `testing.md` — `smelt test` and `smelt check` execution

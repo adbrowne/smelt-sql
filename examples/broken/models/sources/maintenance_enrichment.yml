@@ -1,0 +1,5 @@
+description: Customer enrichment lookup, mutable snapshot, unclocked.
+mutation_profile: mutable_snapshot
+columns:
+  - { name: customer_id, type: INTEGER, nullable: false }
+  - { name: category, type: VARCHAR, nullable: true }

@@ -11,7 +11,7 @@ use std::collections::HashMap;
 use std::sync::Arc;
 
 use rowan::TextRange;
-use smelt_parser::{self, ast::SmeltPathRef, File as AstFile, TableRef};
+use smelt_parser::{self, ast::FromClause, ast::SmeltPathRef, File as AstFile, TableRef};
 use smelt_types::{DataType, TypedColumn};
 
 use crate::function_body_check::{self, infer_tableexpr_return_schema};
@@ -909,6 +909,25 @@ pub fn build_type_context(
         process_from_clause_pure(&select_stmt, refs, &mut ctx);
     }
 
+    // Pipe queries (`FROM … |> …`) have their FROM clause directly on the PIPE_QUERY
+    // node, not on a SELECT_STMT. Process it here so that `type_context()` returns a
+    // properly seeded TypeContext for pipe query files.
+    //
+    // We also process the right-hand table in any `|> JOIN` stages so that those
+    // tables' columns are available to the scope-threading logic in
+    // `infer_pipe_stage_output_schema` (Phase 5: JOIN lowering).
+    if let Some(pipe_query) = file.pipe_query() {
+        if let Some(from_clause) = pipe_query.from_clause() {
+            process_from_clause_node_pure(&from_clause, refs, &mut ctx);
+        }
+        // Seed JOIN right-hand table schemas.
+        for stage in pipe_query.stages() {
+            if stage.op_kind() == Some(smelt_parser::syntax_kind::SyntaxKind::PIPE_OP_JOIN) {
+                process_pipe_join_stage_pure(&stage, refs, &mut ctx);
+            }
+        }
+    }
+
     ctx
 }
 
@@ -918,13 +937,48 @@ fn process_from_clause_pure(
     ctx: &mut TypeContext,
 ) {
     if let Some(from_clause) = select_stmt.from_clause() {
-        for table_ref in from_clause.table_refs() {
+        process_from_clause_node_pure(&from_clause, refs, ctx);
+    }
+}
+
+/// Core FROM-clause processor that operates on a `FromClause` node directly.
+///
+/// Used by both `process_from_clause_pure` (for `SELECT` statements) and the
+/// pipe-query branch in `build_type_context` (for `FROM … |> …` pipe queries).
+fn process_from_clause_node_pure(
+    from_clause: &FromClause,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    for table_ref in from_clause.table_refs() {
+        process_table_ref_pure(&table_ref, refs, ctx);
+    }
+    for join in from_clause.joins() {
+        if let Some(table_ref) = join.table_ref() {
             process_table_ref_pure(&table_ref, refs, ctx);
         }
-        for join in from_clause.joins() {
-            if let Some(table_ref) = join.table_ref() {
-                process_table_ref_pure(&table_ref, refs, ctx);
+    }
+}
+
+/// Process the right-hand TABLE_REF in a `|> JOIN` pipe stage, seeding its
+/// columns into the context so that subsequent scope-threading can find them.
+fn process_pipe_join_stage_pure(
+    stage: &smelt_parser::ast::PipeStage,
+    refs: &dyn RefSchemaProvider,
+    ctx: &mut TypeContext,
+) {
+    use smelt_parser::syntax_kind::SyntaxKind::JOIN_CLAUSE;
+    // Find the JOIN_CLAUSE child of the PIPE_STAGE.
+    for child in stage.syntax().children() {
+        if child.kind() == JOIN_CLAUSE {
+            // The first TABLE_REF inside the JOIN_CLAUSE is the right-hand table.
+            for jc_child in child.children() {
+                if let Some(tr) = TableRef::cast(jc_child) {
+                    process_table_ref_pure(&tr, refs, ctx);
+                    break;
+                }
             }
+            break;
         }
     }
 }
@@ -1293,30 +1347,63 @@ fn entity_name_for_table_ref(table_ref: &TableRef) -> Option<String> {
 /// Pure function: populate a `TypeContext` with column type information from
 /// Phase 6 per-entity `SourceInfo` records.
 ///
-/// The source's identity in the TypeContext is `(schema, table)` where:
+/// For a multi-segment address the source's identity is `(schema, table)`:
 ///   schema = `address_segments[address_segments.len() - 2]` (e.g. "raw")
 ///   table  = `address_segments[address_segments.len() - 1]` (e.g. "users")
-///
-/// This mirrors how `smelt.sources.raw.users` is resolved: the last two
-/// segments of the path are the schema and table.
+/// mirroring how `smelt.sources.raw.users` is resolved by its last two
+/// segments. A **single-segment** address (a source YAML at scan root —
+/// `sources.rs` derives segments from the file stem, so this is a legitimate
+/// layout, not an error) registers under the schema-free `{table}.{column}`
+/// simple key, the identity such a source resolves by. Design fork F4
+/// (`docs/research/20260705-refresh-as-maintenance-plan/03-design-forks.md`):
+/// the previous `< 2` skip silently dropped every declared column of a
+/// scan-root source, and `SUM(DOUBLE)` fell through to the `BigInt` default
+/// — silent truncation of fractional aggregates.
 pub fn add_source_info_to_type_context(sources: &[SourceInfo], ctx: &mut TypeContext) {
     for source in sources {
         let segs = &source.address_segments;
-        if segs.len() < 2 {
-            continue; // degenerate address — skip
-        }
-        let schema_name = &segs[segs.len() - 2];
-        let table_name = &segs[segs.len() - 1];
-        for col in &source.columns {
-            ctx.add_source_column(
-                schema_name,
-                table_name,
-                &col.name,
-                TypedColumn {
-                    data_type: col.data_type.clone(),
-                    nullable: col.nullable,
-                },
-            );
+        match segs.len() {
+            0 => {
+                // Structurally unreachable from the loaders (segments are
+                // derived from a non-empty file stem); fail loud rather
+                // than silently dropping declared columns.
+                debug_assert!(
+                    false,
+                    "SourceInfo with empty address_segments: {:?}",
+                    source.path
+                );
+                tracing::warn!(
+                    path = %source.path.display(),
+                    "source has an empty address — its declared column types were skipped"
+                );
+            }
+            1 => {
+                for col in &source.columns {
+                    ctx.add_source_column_unqualified(
+                        &segs[0],
+                        &col.name,
+                        TypedColumn {
+                            data_type: col.data_type.clone(),
+                            nullable: col.nullable,
+                        },
+                    );
+                }
+            }
+            _ => {
+                let schema_name = &segs[segs.len() - 2];
+                let table_name = &segs[segs.len() - 1];
+                for col in &source.columns {
+                    ctx.add_source_column(
+                        schema_name,
+                        table_name,
+                        &col.name,
+                        TypedColumn {
+                            data_type: col.data_type.clone(),
+                            nullable: col.nullable,
+                        },
+                    );
+                }
+            }
         }
     }
 }

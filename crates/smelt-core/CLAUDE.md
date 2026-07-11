@@ -19,7 +19,7 @@ cargo test -p smelt-core
 ## Where things live
 
 - `src/workspace.rs` — `load_workspace`, `LoadedWorkspace`, `WorkspaceLoadErrors`
-- `src/config.rs` — `Config`, `ModelConfig`, `Materialization`, `IncrementalConfig`
+- `src/config.rs` — `Config`, `ModelConfig`, `Materialization`, `BatchedConfig`
 - `src/project.rs` — `find_smelt_projects`, `find_project_root`, `find_project_root_for_file`
 - `src/discovery.rs` — `ModelDiscovery`, `ModelFile`, `discover_function_file_paths`
 - `src/graph.rs` — `DependencyGraph`

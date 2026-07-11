@@ -16,3 +16,8 @@ serde_yaml = { workspace = true }
 tracing.workspace = true
 
 [dev-dependencies]
+duckdb = { workspace = true }
+
+[features]
+default = []
+bundled-duckdb = ["duckdb/bundled"]

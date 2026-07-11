@@ -11,3 +11,11 @@ columns:
 - name: properties
   type: VARCHAR
   description: JSON-encoded event properties
+mutation_profile:
+  kind: append_only
+  lateness: '2 hours'
+  redelivery: at_least_once
+watermark:
+  complete_through: event_timestamp
+unique_key: [event_id]
+retention: '400 days'

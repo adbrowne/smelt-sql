@@ -19,13 +19,14 @@ async fn round_trips_via_create_dataframe() {
     use smelt_backend_spark::SparkBackend;
     use std::sync::Arc;
 
-    let backend = match SparkBackend::new(&connect_url, "spark_catalog", "default", None).await {
-        Ok(b) => b,
-        Err(e) => {
-            eprintln!("Skipping — could not connect to Spark: {}", e);
-            return;
-        }
-    };
+    let backend =
+        match SparkBackend::new(&connect_url, "spark_catalog", "default", None, true).await {
+            Ok(b) => b,
+            Err(e) => {
+                eprintln!("Skipping — could not connect to Spark: {}", e);
+                return;
+            }
+        };
 
     let schema: SchemaRef = Arc::new(Schema::new(vec![
         Field::new("id", DataType::Int32, false),

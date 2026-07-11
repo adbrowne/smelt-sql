@@ -155,6 +155,25 @@ struct RunArgs {
     /// Combine with --dry-run to see the plan without executing.
     #[arg(long = "show-plan")]
     show_plan: bool,
+
+    /// Forward propagation: run exactly the partitions dirtied by the
+    /// caller-declared per-source deltas (`--source`/`--landed`), computed
+    /// through the maintenance-plan propagation graph
+    /// (`maintenance_plan.md` §"The graph layer"). Requires at least one
+    /// `--source`/`--landed` pair.
+    #[arg(long = "since-upstream")]
+    since_upstream: bool,
+
+    /// A source address whose landed delta is declared via the paired
+    /// `--landed` flag (repeatable — the Nth `--source` pairs with the Nth
+    /// `--landed`). Only meaningful with `--since-upstream`.
+    #[arg(long = "source", requires = "since_upstream")]
+    since_upstream_source: Vec<String>,
+
+    /// The landed interval for the paired `--source`: `<start>..<end>`
+    /// (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`.
+    #[arg(long = "landed", requires = "since_upstream")]
+    since_upstream_landed: Vec<String>,
 }
 
 #[derive(Parser)]
@@ -263,8 +282,9 @@ struct SeedArgs {
 
 #[derive(Parser)]
 struct BuildArgs {
-    /// Optional path to a single model file to plan. Required with --show-plan,
-    /// ignored otherwise.
+    /// Optional path to a single model file to plan (with --show-plan), or a
+    /// model name/selector to backward-resolve (with --include-upstreams).
+    /// Ignored otherwise.
     file: Option<PathBuf>,
 
     /// Path to smelt project root
@@ -313,6 +333,23 @@ struct BuildArgs {
     /// Use this only as a temporary escape hatch while fixing the model SQL.
     #[arg(long = "allow-downgrade")]
     allow_downgrade: bool,
+
+    /// Backward resolution: given the target model (the positional
+    /// argument) and this period, resolve the per-ancestor required
+    /// upstream slices and the ancestor-first/target-last build order
+    /// through the same propagation graph `--since-upstream` assembles
+    /// (`maintenance_plan.md` §"Backward resolution — what must exist"),
+    /// print them, and build exactly that bounded set. Requires
+    /// `--include-upstreams`.
+    #[arg(long = "period", requires = "include_upstreams")]
+    period: Option<String>,
+
+    /// Resolve and build the target model's required upstream slices for
+    /// `--period` (backward resolution) instead of the ordinary
+    /// seed+run-everything build. Requires `--period` and the target model
+    /// as the positional argument.
+    #[arg(long = "include-upstreams", requires = "period")]
+    include_upstreams: bool,
 }
 
 #[derive(Parser)]
@@ -359,6 +396,11 @@ struct HistoryArgs {
 
 #[derive(Parser)]
 struct ExplainArgs {
+    /// Name of a single model to print the maintenance plan report for
+    /// (cells, clamps, locality verdicts, inbound edges). Omit to print the
+    /// whole-project dependency graph as before.
+    model_name: Option<String>,
+
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
@@ -370,6 +412,21 @@ struct ExplainArgs {
     /// Select models to include (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
     #[arg(long = "select", short = 's')]
     select: Vec<String>,
+
+    /// Print, after each cell's report block, the maintenance statements
+    /// that cell executes — the output of the same pure emitters a run
+    /// executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    /// (single owner)"). Only meaningful with a positional model-name
+    /// argument. Never connects to a backend.
+    #[arg(long = "show-sql")]
+    show_sql: bool,
+
+    /// Region literal bounds for `--show-sql`, `<start>..<end>`
+    /// (`YYYY-MM-DD`, end exclusive). Without this flag, the printed
+    /// statements use the symbolic placeholders `{{window_start}}`/
+    /// `{{window_end}}` instead of real literals.
+    #[arg(long = "period", requires = "show_sql")]
+    period: Option<String>,
 }
 
 #[derive(Parser)]

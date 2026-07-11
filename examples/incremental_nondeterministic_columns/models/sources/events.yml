@@ -1,0 +1,10 @@
+description: Raw event stream partitioned by day.
+columns:
+  - { name: event_id,   type: INTEGER,   nullable: false }
+  - { name: event_ts,   type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE,      nullable: false }
+  - { name: user_id,    type: INTEGER,   nullable: false }
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day

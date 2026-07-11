@@ -4,8 +4,9 @@ timeseries:
   event_time_column: event_date
   partition_column: event_date
   granularity: day
-incremental:
-  enabled: true
+refresh: incremental
+grain: partition
+batched:
   unique_key:
     - event_date
 ---

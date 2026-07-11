@@ -74,9 +74,9 @@ const CONDITIONS: &[&str] = &[
     "score >= 50",
 ];
 
-/// YAML frontmatter for incremental models.
+/// YAML frontmatter for batched models.
 fn frontmatter() -> &'static str {
-    "---\nmaterialization: table\nincremental:\n  enabled: true\ntimeseries:\n  event_time_column: event_time\n  partition_column: event_date\n  granularity: day\n---\n"
+    "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\ntimeseries:\n  event_time_column: event_time\n  partition_column: event_date\n  granularity: day\n---\n"
 }
 
 /// Generate SQL content for a model spec using a randomly selected template.

@@ -12,6 +12,7 @@ smelt-parser = { path = "../smelt-parser" }
 smelt-db = { path = "../smelt-db" }
 smelt-types = { path = "../smelt-types" }
 smelt-planner = { path = "../smelt-planner" }
+smelt-logical = { path = "../smelt-logical" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-dialect = { path = "../smelt-dialect" }
 smelt-state = { path = "../smelt-state" }
@@ -32,7 +33,11 @@ pyo3 = { workspace = true, optional = true }
 [dev-dependencies]
 tempfile = "3"
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
+smelt-backends = { path = "../smelt-backends" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
+async-trait = "0.1"
+arrow.workspace = true
+duckdb = { workspace = true }
 
 [features]
 python = ["smelt-core/python", "smelt-planner/python", "pyo3"]

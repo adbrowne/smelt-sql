@@ -179,7 +179,7 @@ classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1073"]
+["crates/smelt-db/src/queries/schema.rs:1127"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"
@@ -359,6 +359,33 @@ classification = "legitimate"
 reason = "list literal element type inference fallback — infer_expression_type returns None; conservative Unknown"
 discriminant = "dynamic"
 
+# ── smelt-db / type_inference/pipe ──────────────────────────────────────────
+
+["crates/smelt-db/src/type_inference/pipe.rs:189"]
+classification = "legitimate"
+reason = "pipe SELECT stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:194"]
+classification = "legitimate"
+reason = "pipe SELECT stage: item has no expression node; Unknown placeholder for column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:523"]
+classification = "legitimate"
+reason = "pipe EXTEND stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for new column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:609"]
+classification = "legitimate"
+reason = "pipe SET stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for updated column"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/pipe.rs:823"]
+classification = "legitimate"
+reason = "pipe AGGREGATE stage: expression type inference fallback (infer_expression_type returns None); conservative Unknown for agg/group-key column"
+discriminant = "dynamic"
+
 # ── smelt-db / type_inference/subquery ────────────────────────────────────────
 
 ["crates/smelt-db/src/type_inference/subquery.rs:72"]
@@ -368,12 +395,12 @@ discriminant = "dynamic"
 
 # ── smelt-db / type_inference/type_context ────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/type_context.rs:363"]
+["crates/smelt-db/src/type_inference/type_context.rs:379"]
 classification = "legitimate"
 reason = "opaque CTE bootstrap — CTE column types unknown at bootstrap time; Unknown is the correct placeholder"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/type_context.rs:687"]
+["crates/smelt-db/src/type_inference/type_context.rs:703"]
 classification = "legitimate"
 reason = "model column binding: non-Concrete SmeltType → Unknown; meta-type has no SQL scalar DataType"
 discriminant = "dynamic"

@@ -1,0 +1,20 @@
+name: incremental_nondeterministic_columns
+version: 1
+
+# Fixture for the `batched.nondeterministic_columns` opt-in
+# (docs/specs/batched_models.md §"Non-determinism and the equivalence
+# contract"): an incremental model that stamps every row with `NOW()`, a
+# run-nondeterministic value the modeller accepts varying between runs. The
+# deterministic columns (event_date, user_id, event_count) must still match a
+# full-refresh rebuild for every partition.
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view

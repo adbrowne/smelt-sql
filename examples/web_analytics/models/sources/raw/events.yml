@@ -9,6 +9,12 @@ columns:
     type: INTEGER
   - name: seconds_in_day
     type: INTEGER
+  - name: event_time
+    type: VARCHAR  # ISO 8601 string emitted by the timestamp_offset generator; DuckDB casts to TIMESTAMP on use
+  - name: arrival_time
+    type: VARCHAR  # ISO 8601 string; ingestion clock, >= event_time (up to 3 days later, the lateness tail; more for a redelivered duplicate)
+  - name: utm_campaign
+    type: VARCHAR  # nullable; present only for traffic that arrived via a tracked marketing link
   - name: payload
     type: VARCHAR
   - name: event_date

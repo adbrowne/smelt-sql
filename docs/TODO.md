@@ -126,3 +126,15 @@ Decision needed (pick one direction):
 - **(C) Exempt bare Map/List loaders from the detector** when no consumer exists —
   contradicts the just-committed P7c forbid-bare-loaders design decision
   (`3c58cd29`), so only with Andrew's sign-off.
+
+## Refresh-as-maintenance-plan: ratification queue (2026-07-06) — CLOSED 2026-07-07
+
+All items done: decisions 1–11 ratified 2026-07-06 (`09-spec-readiness.md` §1); F4 (`25c04a70`)
+and F1/G-11 (`770c77f1`) landed; G-12 probed (double-fold pinned, `b1ead60f`); the spec-diff map's
+headline rows landed (`maintenance_plan.md` new `3f65a671`; `models.md` rewrite `aa326a3f`;
+`sources.md` `fb9a5977`); M0 deleted (`7d1b4f17`). A four-way spec-vs-research review (2026-07-07)
+confirmed the landed specs faithful and identified the residue, now queued as autonomy-loop
+sub-plans: `docs/plans/20260707-maintenance-plan-spec-alignment.md` (SA1–SA5) and
+`docs/plans/20260707-maintenance-plan-impl.md` (MP1–MP16). Pre-framework registry rows
+(keyed-collapse K3–K6, keyed-time-partitioned, L4 batched/versioned/mv) superseded — see the
+master's 2026-07-07 note.

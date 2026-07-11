@@ -15,13 +15,24 @@
 -- load-bearing lookback declaration. They live inside this function body, yet
 -- the planner derives the 1-day bound from them — bound derivation runs on the
 -- expanded SQL (see docs/specs/incremental_models.md) — so a caller does not
--- restate the lookback. The frame is also the session-length cap. Output carries
+-- restate the lookback.
+--
+-- This same `INTERVAL '1 day'` is the **max-session-length cap**, named
+-- `max_session_length` throughout this function and its caller
+-- (`silver.sessions`): a session's running boundary (`session_start_ts`
+-- below) resets to its own event's timestamp once no in-frame boundary
+-- remains, so no session can ever span more than this interval. A window
+-- frame bound must be a literal `INTERVAL '...'` (the grammar admits
+-- `UNBOUNDED` / `CURRENT ROW` / a number / an `INTERVAL` literal — not a
+-- parameter reference), so the value is restated in each of the three frames
+-- below and again in `silver.sessions`'s Form B filter and its explicit
+-- `HAVING` cap assertion; all four occurrences must agree. Output carries
 -- `_prev_ts` / `_prev_platform` / `_boundary_ts` bookkeeping columns; callers
 -- reference only the columns they need.
 smelt.define sessionize(
     source: TableExpr,
     partition_col: Expr<Integer>,
-    ts_col: Expr<Date>,
+    ts_col: Expr<Timestamp>,
     platform_col: Expr<Text>
 ) -> TableExpr AS (
     WITH _marked AS (
@@ -29,11 +40,11 @@ smelt.define sessionize(
             *,
             LAG(ts_col) OVER (
                 PARTITION BY partition_col ORDER BY ts_col
-                RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW
+                RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
             ) AS _prev_ts,
             LAG(platform_col) OVER (
                 PARTITION BY partition_col ORDER BY ts_col
-                RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW
+                RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
             ) AS _prev_platform
         FROM source
     ),
@@ -53,7 +64,7 @@ smelt.define sessionize(
         COALESCE(
             MAX(_boundary_ts) OVER (
                 PARTITION BY partition_col ORDER BY ts_col
-                RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW
+                RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW  -- max_session_length
             ),
             ts_col
         ) AS session_start_ts

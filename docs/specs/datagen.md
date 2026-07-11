@@ -1,7 +1,7 @@
 ---
 feature: datagen
 status: experimental
-last_reviewed: 2026-06-13
+last_reviewed: 2026-07-11
 owners: [andrew]
 ---
 
@@ -97,6 +97,7 @@ datasets:
 |------|------------|-------------|
 | `date` | `start`, `end` (YYYY-MM-DD) | Random date in `[start, end)`; output as `YYYY-MM-DD` string |
 | `timestamp` | `start`, `end` (YYYY-MM-DDTHH:MM:SS) | Random timestamp in range; output as ISO 8601 string |
+| `timestamp_offset` | `base: <column>`, `offset_seconds: <numeric generator>` | Emits `base + offset` where `base` names either **an earlier column in the same dataset** whose generator produces a timestamp, or **this dataset's partition column** (the partition-anchored form — `base` resolves to midnight of that row's partition date), and `offset_seconds` is any numeric generator (e.g. `weighted_choice` over `0` and multi-day delays, or `log_normal`) evaluated per row and added as seconds. Output is an ISO 8601 string like `timestamp`. Referencing a later column, a non-timestamp column, or a name that is neither an earlier column nor the partition column, is a config error. The canonical uses are an ingestion clock derived from an occurrence clock (`arrival_time = event_time + lateness`), and an occurrence clock anchored to its own partition day (`event_time = <partition column> + intraday offset`), which keeps `DATE(event_time)` equal to the partition value even though the two are drawn independently. |
 
 **Boolean and nullable:**
 
@@ -186,6 +187,32 @@ Example — `linked_choice` modelling realistic device/user co-occurrence:
         end:   "2026-03-01T00:00:00"
 ```
 
+### Redelivery (duplicate emission)
+
+A `redelivery:` block under `DatasetConfig` re-emits a deterministic fraction of generated rows
+to model at-least-once delivery:
+
+```yaml
+redelivery:
+  fraction: 0.02                 # share of rows re-emitted (once each)
+  arrival_column: arrival_time   # the ingestion-clock column shifted on the duplicate
+  delay_seconds:                 # numeric generator; added to the original arrival value
+    type: uniform_int
+    min: 3600
+    max: 172800
+```
+
+A redelivered row is byte-identical to its original — same identifiers, same business columns,
+same occurrence timestamps — except `arrival_column`, which is shifted forward by a per-duplicate
+draw from `delay_seconds`. `arrival_column` must name a timestamp-producing column of the
+dataset. Duplicates are appended after the primary rows (dataset row count grows by
+`round(fraction × num_rows)`), and selection + delays draw from a dedicated RNG stream seeded
+`dataset_seed.wrapping_add(200)`, so enabling redelivery does not perturb the primary rows and
+changing `num_rows` reproduces the same duplicate pattern prefix-stably. This is the mechanism
+for exercising downstream dedup (`QUALIFY ROW_NUMBER() OVER (PARTITION BY <id> ORDER BY
+<arrival>) = 1`): the duplicate is a *true* redelivery, so any dedup keyed on the identifier
+converges to the original row.
+
 ### Output format
 
 Each dataset writes Parquet files:
@@ -226,6 +253,8 @@ When `partition:` is configured:
 - Each partition writes to `<output>/<column>=<YYYY-MM-DD>/data.parquet`.
 - The partition column is a row-level column of type `DATE` string.
 - Sequential IDs and foreign keys are assigned globally across all partitions (not restarted per partition).
+
+**Anchoring a timestamp column to its own partition.** A dataset partitioned on a date column (e.g. `event_date`) that also generates an occurrence-clock timestamp column (e.g. `event_time`) needs the two to agree: `DATE(event_time)` must equal the row's `event_date` partition value, or downstream partition/occurrence-alignment reasoning (grain, lookback windows, lateness) is unsound from the first row. A plain `timestamp` generator spanning the whole dataset's date range does **not** provide this — it draws independently of which partition the row lands in. Use `timestamp_offset` with `base:` set to the partition column name (see §"Generator types") to derive the timestamp from the row's own partition day plus an intraday offset; this is the day-anchored form and is the only generator that reads the partition value.
 
 ### `json_object` encoding
 
