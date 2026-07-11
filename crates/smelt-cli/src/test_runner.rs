@@ -318,11 +318,7 @@ pub fn compare_rows(
     }
 
     // Filter actual rows to only include columns from expected
-    let expected_columns: Vec<String> = if let Some(first) = expected.first() {
-        first.keys().cloned().collect()
-    } else {
-        return None;
-    };
+    let expected_columns: Vec<String> = expected.first()?.keys().cloned().collect();
 
     let filtered_actual: Vec<BTreeMap<String, String>> = actual
         .iter()

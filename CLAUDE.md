@@ -73,10 +73,10 @@ These rules constrain how the codebase evolves; the spec is the authoritative so
 
 Using system DuckDB avoids recompiling DuckDB from C++ source, making builds much faster.
 
-**Setup:** Install the DuckDB shared library (v1.5.0) and set `DUCKDB_LIB_DIR`:
+**Setup:** Install the DuckDB shared library (v1.5.4) and set `DUCKDB_LIB_DIR`:
 ```bash
 # Download and install (one-time setup)
-curl -sL https://github.com/duckdb/duckdb/releases/download/v1.5.0/libduckdb-linux-amd64.zip -o /tmp/libduckdb.zip
+curl -sL https://github.com/duckdb/duckdb/releases/download/v1.5.4/libduckdb-linux-amd64.zip -o /tmp/libduckdb.zip
 cd /tmp && unzip -o libduckdb.zip libduckdb.so
 sudo cp libduckdb.so /usr/local/lib/ && sudo ldconfig
 # Or for user-local install:
