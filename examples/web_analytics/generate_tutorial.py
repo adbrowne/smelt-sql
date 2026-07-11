@@ -276,6 +276,54 @@ whole range at once. Skew and chunk width compose independently — a
 multi-day backfill over this model still emits one bounded chunk at a time,
 each carrying its own one-day skew inversion at its edges.
 
+### What about a session that spans two midnights?
+
+The Form B filter above is not a heuristic that happens to catch most
+cross-midnight sessions — it is a **semantic cap**, declared in the model's
+own SQL, and it applies identically no matter how far a session's events
+would otherwise chain. A session whose events span **two** midnights —
+further from its root than the declared `±1 day` — is truncated at that
+bound, and truncated the same way whether the pipeline replays day-by-day or
+rebuilds the whole range from scratch in one pass: the relation, not the
+run shape, decides which rows contribute to which partition.
+
+Concretely (this dataset's browsing behaviour never happens to produce a
+chain this long, so the numbers below come from a synthetic 60-event chain
+injected into `raw.events` and run through the real pipeline —
+`sessionize` and this model, unmodified — rather than from a
+`smelt-generate` block over the seeded data): one device emits a
+continuous event chain from `2026-03-19 23:50` to `2026-03-21 00:15`,
+every pairwise gap under 30 minutes, same platform throughout. No
+inactivity gap ever breaks that chain, so the only thing that can end the
+session rooted at `23:50` is the cap itself — and it does, at exactly
+`root + 1 day`: the session carries the 58 events up through
+`2026-03-20 23:30` and settles at `event_count=58`,
+`session_end=2026-03-20 23:30`, identically in a day-by-day replay and in
+one full-range build. The remaining two events are not lost: each falls
+outside `sessionize`'s one-day lookback frame, strikes a new root at its
+own timestamp, and surfaces as its own single-event session
+(`2026-03-20 23:55` and `2026-03-21 00:15`) — sessions never overlap, and
+every one of the 60 events is counted exactly once (58 + 1 + 1).
+
+The cap works at two granularities here, and it is worth seeing why they
+agree. The operative row-membership cut is `sessionize`'s frame reach in
+**timestamp** space — the `2026-03-20 23:55` event is 24 hours and 5
+minutes past the root, so it leaves the session even though its
+`event_date` is within ±1 day of the root's date. The Form B relation
+restates the same one-day cap in **date** space over `(event_date,
+session_start_date)` — coarser, so it removes no row the timestamp-space
+frame kept. That is exactly what makes the declaration sound as the
+planner's source of truth for the derived output window: the relation
+holds for every row the model can produce.
+
+A model that must never truncate a session this long widens its declared
+relation — `session_start_date - INTERVAL '2 days'` instead of `'1 day'`,
+matched by a wider `max_session_length` cap in `sessionize`'s own frames and
+this model's `HAVING` assertion — and the derived output window widens with
+it, automatically: no separate configuration for how far a run's write
+range reaches, because the reach is read from the same relation that
+decided the truncation in the first place.
+
 ## Event-grain enrichment and upstream-model edges: `silver.events_enriched`
 
 `silver.events_enriched` joins each event's `session_id` and the session's

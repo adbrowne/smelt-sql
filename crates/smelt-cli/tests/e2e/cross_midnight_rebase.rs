@@ -337,6 +337,313 @@ async fn single_day_replay_rewrites_prior_day_partition() {
     );
 }
 
+// ── Two-boundary truncation: the declared relation is a semantic cap ────────
+
+/// Batch-insert pre-sessionized events (`(event_ts, event_date,
+/// session_start_ts)` rows) for device 1 into the staged source table.
+fn seed_events_batch(db_path: &Path, rows: &[(String, String, String)]) -> anyhow::Result<()> {
+    let conn = duckdb::Connection::open(db_path)?;
+    let values: Vec<String> = rows
+        .iter()
+        .map(|(ts, date, root)| format!("(1, TIMESTAMP '{ts}', DATE '{date}', TIMESTAMP '{root}')"))
+        .collect();
+    conn.execute_batch(&format!(
+        "INSERT INTO main.sources_events VALUES {};",
+        values.join(", ")
+    ))?;
+    Ok(())
+}
+
+/// All session rows, ordered by `session_start`, as
+/// `(session_start_date, event_count, session_start, session_end)`.
+fn fetch_all_sessions(db_path: &Path) -> anyhow::Result<Vec<(String, i64, String, String)>> {
+    let conn = duckdb::Connection::open(db_path)?;
+    let mut stmt = conn.prepare(
+        "SELECT CAST(session_start_date AS VARCHAR), event_count, \
+                CAST(session_start AS VARCHAR), CAST(session_end AS VARCHAR) \
+         FROM main.sessions ORDER BY session_start",
+    )?;
+    let rows = stmt
+        .query_map([], |row| {
+            Ok((
+                row.get::<_, String>(0)?,
+                row.get::<_, i64>(1)?,
+                row.get::<_, String>(2)?,
+                row.get::<_, String>(3)?,
+            ))
+        })?
+        .collect::<Result<Vec<_>, _>>()?;
+    Ok(rows)
+}
+
+/// The continuous two-boundary chain: 60 events for one device, every
+/// pairwise gap under 30 minutes, spanning **two** midnights —
+/// `2024-01-01 23:50`, then `2024-01-02 00:10` + 25-minute steps through
+/// `2024-01-02 23:55`, then `2024-01-03 00:15`. Returns
+/// `(event_ts, event_date, session_start_ts)` rows with `session_start_ts`
+/// assigned exactly as `examples/web_analytics/functions/sessionize.sql`
+/// computes it (this fixture's stand-in mirror; the *real* function is
+/// pinned to the same shape end-to-end by
+/// `per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild`):
+///
+/// - The chain never breaks on inactivity or platform, so its only session
+///   boundary (`_boundary_ts`) is the root, `2024-01-01 23:50`.
+/// - An event roots to that boundary iff the boundary is inside its
+///   `RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW` frame —
+///   i.e. iff `event_ts <= root + 1 day` (**timestamp** granularity). That
+///   covers the root plus the 25-minute grid through `2024-01-02 23:30`
+///   (58 events).
+/// - An event past `root + 1 day` (`2024-01-02 23:55` and
+///   `2024-01-03 00:15`) sees no boundary in frame, and
+///   `COALESCE(MAX(_boundary_ts) OVER …, ts_col)` falls back to its **own**
+///   timestamp. The fallback does not strike a new `_boundary_ts` later
+///   events could chain to, so each post-cap event is its own singleton
+///   session — they do *not* merge into a second multi-event session.
+fn two_boundary_chain() -> Vec<(String, String, String)> {
+    let root = chrono::NaiveDateTime::parse_from_str("2024-01-01 23:50:00", "%Y-%m-%d %H:%M:%S")
+        .expect("parse chain root");
+    let day2_base =
+        chrono::NaiveDateTime::parse_from_str("2024-01-02 00:10:00", "%Y-%m-%d %H:%M:%S")
+            .expect("parse day-2 base");
+    let tail = chrono::NaiveDateTime::parse_from_str("2024-01-03 00:15:00", "%Y-%m-%d %H:%M:%S")
+        .expect("parse chain tail");
+
+    let mut timestamps = vec![root];
+    // k = 0..=57: 2024-01-02 00:10 … 2024-01-02 23:55 in 25-minute steps.
+    for k in 0..=57 {
+        timestamps.push(day2_base + chrono::Duration::minutes(25 * k));
+    }
+    timestamps.push(tail);
+
+    let cap = root + chrono::Duration::days(1);
+    timestamps
+        .into_iter()
+        .map(|ts| {
+            let assigned_root = if ts <= cap { root } else { ts };
+            (
+                ts.format("%Y-%m-%d %H:%M:%S").to_string(),
+                ts.format("%Y-%m-%d").to_string(),
+                assigned_root.format("%Y-%m-%d %H:%M:%S").to_string(),
+            )
+        })
+        .collect()
+}
+
+/// The day-46 shape (above) stretched across **two** midnights
+/// (`docs/specs/model_transforms.md` §Semantics "The output window is
+/// derived, never assumed" — the "semantic cap" paragraph): a continuous
+/// 60-event chain, every gap under 30 minutes, running `2024-01-01 23:50` →
+/// `2024-01-03 00:15` — longer than the declared 1-day cap. Only the cap
+/// can end the session rooted at `23:50`; see `two_boundary_chain` for the
+/// event grid and the mirrored sessionize root assignment.
+///
+/// Note the cap's two granularities: the *operative* row-membership cut is
+/// sessionize's frame reach in **timestamp** space (`event_ts <= root + 1
+/// day`, so the `2024-01-02 23:55` event is out despite its `event_date`
+/// being within ±1 day of the root's date), while the model's Form B
+/// relation restates the same 1-day cap in **date** space over
+/// `(event_date, session_start_date)` — the declared relation the planner
+/// derives the output window from. The date-space filter is implied by the
+/// timestamp-space one (it removes no rows the sessionize cap kept), which
+/// is exactly why declaring it is sound.
+///
+/// Claims pinned here:
+/// - (a) truncation at the declared bound: the day-1 session carries
+///   exactly the 58 in-cap events (`session_end = 2024-01-02 23:30`), never
+///   the post-cap ones — in a day-by-day replay and a from-scratch full
+///   build alike;
+/// - (b) excess-event behaviour: each post-cap event roots its own
+///   **singleton** session (`2024-01-02 23:55`, `2024-01-03 00:15`) — they
+///   are neither absorbed, nor dropped, nor merged together;
+/// - (c) day-by-day ≡ full build on the full per-session tuple;
+/// - (d) invariants: the device's sessions never overlap in time, and
+///   event counts conserve (58 + 1 + 1 = 60 — no event lost or
+///   double-counted).
+#[tokio::test]
+async fn two_boundary_session_truncated_at_declared_bound() {
+    let chain = two_boundary_chain();
+    assert_eq!(chain.len(), 60, "fixture: expected a 60-event chain");
+    let day1_rows: Vec<_> = chain
+        .iter()
+        .filter(|(_, d, _)| d == "2024-01-01")
+        .cloned()
+        .collect();
+    let day2_rows: Vec<_> = chain
+        .iter()
+        .filter(|(_, d, _)| d == "2024-01-02")
+        .cloned()
+        .collect();
+    let day3_rows: Vec<_> = chain
+        .iter()
+        .filter(|(_, d, _)| d == "2024-01-03")
+        .cloned()
+        .collect();
+    assert_eq!(
+        (day1_rows.len(), day2_rows.len(), day3_rows.len()),
+        (1, 58, 1),
+        "fixture: expected 1 + 58 + 1 events across the three days"
+    );
+
+    // ── Day-by-day replay: each day's events land before that day's run ──
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_project(&project_dir, &db_path);
+
+    let (ts, date, root) = &day1_rows[0];
+    seed_event(&db_path, 1, ts, date, root, true).expect("seed day-1 event");
+
+    let config = Arc::new(Config::load(&project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(&project_dir, &config);
+
+    let outcome = run_single_day_window(
+        &project_dir,
+        &db_path,
+        &config,
+        &graph,
+        &db,
+        "2024-01-01",
+        "2024-01-02",
+    )
+    .await
+    .expect("day 1 run must succeed");
+    assert!(!outcome.models.is_empty(), "day 1: expected a model run");
+    assert_eq!(
+        fetch_session(&db_path, "2024-01-01").expect("fetch after day 1"),
+        Some((1, "2024-01-01 23:50:00".to_string())),
+        "day 1 alone must see event_count=1"
+    );
+
+    seed_events_batch(&db_path, &day2_rows).expect("seed day-2 events");
+    let outcome = run_single_day_window(
+        &project_dir,
+        &db_path,
+        &config,
+        &graph,
+        &db,
+        "2024-01-02",
+        "2024-01-03",
+    )
+    .await
+    .expect("day 2 run must succeed");
+    assert!(!outcome.models.is_empty(), "day 2: expected a model run");
+
+    assert_eq!(
+        fetch_session(&db_path, "2024-01-01").expect("fetch day-1 partition after day 2"),
+        Some((58, "2024-01-02 23:30:00".to_string())),
+        "(a) day 2's derived output window [2024-01-01, 2024-01-04) must \
+         rewrite the day-1 session with exactly the 58 in-cap events — \
+         truncated at root + 1 day, so session_end is the last in-cap event \
+         (2024-01-02 23:30), not the chain's last day-2 event (23:55)"
+    );
+    assert_eq!(
+        fetch_session(&db_path, "2024-01-02").expect("fetch day-2 partition after day 2"),
+        Some((1, "2024-01-02 23:55:00".to_string())),
+        "(b) the first post-cap event (2024-01-02 23:55) must root its own \
+         singleton session in the 2024-01-02 partition"
+    );
+
+    seed_events_batch(&db_path, &day3_rows).expect("seed day-3 event");
+    let outcome = run_single_day_window(
+        &project_dir,
+        &db_path,
+        &config,
+        &graph,
+        &db,
+        "2024-01-03",
+        "2024-01-04",
+    )
+    .await
+    .expect("day 3 run must succeed");
+    assert!(!outcome.models.is_empty(), "day 3: expected a model run");
+
+    let day_by_day = fetch_all_sessions(&db_path).expect("fetch all sessions (day-by-day)");
+    assert_eq!(
+        day_by_day,
+        vec![
+            (
+                "2024-01-01".to_string(),
+                58,
+                "2024-01-01 23:50:00".to_string(),
+                "2024-01-02 23:30:00".to_string(),
+            ),
+            (
+                "2024-01-02".to_string(),
+                1,
+                "2024-01-02 23:55:00".to_string(),
+                "2024-01-02 23:55:00".to_string(),
+            ),
+            (
+                "2024-01-03".to_string(),
+                1,
+                "2024-01-03 00:15:00".to_string(),
+                "2024-01-03 00:15:00".to_string(),
+            ),
+        ],
+        "(a)+(b) final day-by-day state: the truncated 58-event day-1 \
+         session plus two singleton post-cap sessions — the post-cap events \
+         must not merge into one session (falling out of the frame strikes \
+         no new boundary), and the day-1 session must survive day 3's run \
+         unchanged"
+    );
+
+    // (d) invariants: non-overlap + event conservation.
+    for pair in day_by_day.windows(2) {
+        let (_, _, _, prev_end) = &pair[0];
+        let (_, _, next_start, _) = &pair[1];
+        assert!(
+            next_start > prev_end,
+            "(d) sessions must not overlap in time: session starting \
+             {next_start} begins at or before the previous session's end \
+             {prev_end}"
+        );
+    }
+    let total: i64 = day_by_day.iter().map(|(_, n, _, _)| n).sum();
+    assert_eq!(
+        total, 60,
+        "(d) event conservation: the device's sessions must account for \
+         every injected event exactly once (58 + 1 + 1 = 60)"
+    );
+
+    // ── From-scratch full-window build over the same 60 events ──
+    let tmp2 = tempfile::TempDir::new().expect("tempdir");
+    let project_dir2 = tmp2.path().to_path_buf();
+    let db_path2 = project_dir2.join("dev.duckdb");
+
+    stage_project(&project_dir2, &db_path2);
+    let (ts, date, root) = &chain[0];
+    seed_event(&db_path2, 1, ts, date, root, true).expect("full build: seed first event");
+    seed_events_batch(&db_path2, &chain[1..]).expect("full build: seed remaining events");
+
+    let config2 = Arc::new(Config::load(&project_dir2).expect("load config"));
+    let (db2, graph2) = build_db_and_graph(&project_dir2, &config2);
+
+    let outcome = run_single_day_window(
+        &project_dir2,
+        &db_path2,
+        &config2,
+        &graph2,
+        &db2,
+        "2024-01-01",
+        "2024-01-04",
+    )
+    .await
+    .expect("full-window run must succeed");
+    assert!(
+        !outcome.models.is_empty(),
+        "full-window build: expected a model run"
+    );
+
+    let full = fetch_all_sessions(&db_path2).expect("fetch all sessions (full build)");
+    assert_eq!(
+        full, day_by_day,
+        "(c) the from-scratch full-window build must equal the day-by-day \
+         replay row-for-row — truncation at the declared bound is a property \
+         of the model's own SQL, identical in every build shape"
+    );
+}
+
 // ── Identity model: derived output window equals the run window ──────────────
 
 fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {

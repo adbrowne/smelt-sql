@@ -301,4 +301,32 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
          window's skew inversion in {}",
         page_path.display()
     );
+
+    // Two-boundary truncation subsection: prose-only (no `smelt-generate`
+    // block — `examples/web_analytics`' datagen fixture never produces a
+    // session long enough to realise this shape). The numbers quoted in
+    // prose come from the injected 60-event chain the real pipeline is run
+    // over in `per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild`
+    // (mirrored by
+    // `cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound`);
+    // freshness for this subsection is guaranteed by those tests asserting
+    // the exact pinned values, not by re-deriving a fenced block here — so
+    // this gate only checks the subsection exists and quotes them.
+    assert!(
+        page.contains("What about a session that spans two midnights?"),
+        "expected the two-boundary-truncation subsection ('What about a \
+         session that spans two midnights?') in {} — run \
+         `python3 examples/web_analytics/generate_tutorial.py` to regenerate \
+         it",
+        page_path.display()
+    );
+    for pinned in ["event_count=58", "session_end=2026-03-20 23:30"] {
+        assert!(
+            page.contains(pinned),
+            "expected the two-boundary-truncation subsection to quote the \
+             pinned truncated-session value '{pinned}' (asserted against the \
+             real pipeline in per_partition_equivalence.rs) in {}",
+            page_path.display()
+        );
+    }
 }

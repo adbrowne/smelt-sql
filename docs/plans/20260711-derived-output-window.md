@@ -69,8 +69,8 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 | 2     | done     | fe7f13c5 | 2026-07-11 |
 | 3     | done     | 98813033 | 2026-07-11 |
 | 4     | done     | 23d5c35b | 2026-07-11 |
-| 5     | done     |        | 2026-07-11 |
-| 6     | pending  |        |      |
+| 5     | done     | dd686a5c | 2026-07-11 |
+| 6     | done     |        | 2026-07-11 |
 
 ---
 
@@ -238,13 +238,14 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 **Pre-conditions.** Phase 5 merged (extends the tutorial section it creates).
 
 **TDD tests to write first.**
-- `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound` — fixture with an event chain spanning two midnights, every gap < 30 min (e.g. day 1 23:50 → day 2 00:10 → … → day 2 23:55 → day 3 00:15): replay day-by-day as single-day windows; assert the session rooted on day 1 is truncated at the declared bound (its `session_end`/`event_count` exclude the events outside `[root − 1 day, root + 1 day]`), pin what happens to the excess events (the test documents the model's actual behaviour for them — e.g. they root a new session), and assert the day-by-day result set-equals a from-scratch full-window build of the same source data (truncation identical in both shapes).
+- `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound` — fixture with a **continuous** event chain spanning two midnights: one event roughly every 29 minutes from day 1 ~23:50 through day 3 ~00:15 (≈ 50 events), so no inter-event gap ever reaches the 30-minute inactivity threshold and the *only* mechanism that can cut the session is the declared 1-day cap. (A sparse chain like 23:50 → 00:10 → 23:55 → 00:15 is wrong: its ~23.7 h interior gap trips the inactivity split, testing the wrong mechanism entirely.) Replay day-by-day as single-day windows; assert the session rooted on day 1 is truncated at the declared bound (its `session_end`/`event_count` exclude the events outside `[root − 1 day, root + 1 day]`), pin what happens to the excess events (the test documents the model's actual behaviour for them — e.g. they root a new session), and assert the day-by-day result set-equals a from-scratch full-window build of the same source data (truncation identical in both shapes).
 - `crates/smelt-cli/tests/tutorial_freshness.rs` — gate entry for the new tutorial block(s), red before the section exists.
 
 **Implementation shape.** Test + docs only; no runtime or model-SQL semantics changes expected. If the equivalence assertion fails (day-by-day ≠ full build for the two-boundary shape), STOP — that is a real bug, pause and report rather than adjusting the test. Tutorial: extend `examples/web_analytics/generate_tutorial.py` with a follow-on subsection after the cross-midnight rewrite — "What about a session that spans two midnights?" — narrating the truncation with real emitted/queried output (`smelt-generate` block), and stating the cap/widen trade-off in spec vocabulary. Regenerate `docs-site/docs/examples/web-analytics-maintenance.md`. If the web_analytics fixture data cannot exhibit a two-boundary chain deterministically, demonstrate with the e2e fixture's numbers in prose instead of a generated block, and say so in the phase notes.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs`
+- `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs` — inject a deterministic two-boundary event chain (second synthetic device, same technique as the cross-midnight pair) so the *real* `sessionize.sql` truncates it and the strengthened equivalence assertion covers the shape end to end
 - `crates/smelt-cli/tests/tutorial_freshness.rs`
 - `examples/web_analytics/generate_tutorial.py`
 - `docs-site/docs/examples/web-analytics-maintenance.md` (generated)
@@ -267,6 +268,7 @@ A run's DELETE range and output clamp are built from the batch's run window verb
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - **(Phase 2) Skew-anchor matching is name-only** — a table-qualified Form B anchor on a foreign table (`b.d`) matches a model partition column named `d`, deriving a spurious over-wide (correctness-safe, never under-wide) output window. Documented in `docs/specs/model_transforms.md` §Known Divergences; a precise fix needs the anchor proven to be the model's own output column. Evidence: `crates/smelt-cli/tests/since_upstream.rs` fixture rename.
+- **(Phase 6) Possible product rule: only continue a session across midnight if it rooted in the last 30 minutes of the previous day.** The current semantics are unambiguous and bounded (cap at root + 24h timestamp space; no overlap; event conservation — pinned by the two-boundary tests), so this is not a correctness gap. But a ~24h continuously-active "session" is bot-shaped; the tighter rule would cut it at the first midnight and shrink the realistic skew. A semantics change to the example's sessionize — needs its own spec discussion if pursued.
 - **(Phase 4) `SqlCompiler::apply_type_casts` is silently inert on every clamped incremental statement** — the output clamp always makes the outermost query a bare `SELECT *`, which `apply_type_casts` (`crates/smelt-runtime/src/compile.rs`) never wraps, so the static `CAST(col AS T)` machinery never applies to a real incremental run's executed statement. Pre-existing, confirmed independent of this plan (live run and explain now agree). Needs its own investigation/plan.
 
 ## Verification

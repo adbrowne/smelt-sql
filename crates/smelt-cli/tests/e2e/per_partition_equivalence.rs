@@ -333,6 +333,86 @@ fn inject_cross_midnight_session_pair(db_path: &Path) {
         .unwrap_or_else(|e| panic!("insert cross-midnight session pair: {e}\nSQL:\n{sql}"));
 }
 
+/// Synthetic `device_id` for the forced **two-boundary** event chain — a
+/// second device, distinct from `CROSS_MIDNIGHT_DEVICE_ID`, so the two
+/// injected shapes never interact.
+const TWO_BOUNDARY_DEVICE_ID: i64 = 999_900_002;
+
+/// Insert a synthetic 60-event chain into `raw.events` that spans **two**
+/// midnights with every pairwise gap under `sessionize`'s 30-minute
+/// inactivity threshold and a constant `platform` — the shape a live
+/// sessionize step treats as one continuous, never-idle activity stream:
+///
+///   - `2026-03-19 23:50` (the chain root, day 1),
+///   - `2026-03-20 00:10` + 25-minute steps through `2026-03-20 23:55`
+///     (58 events, crossing the first midnight),
+///   - `2026-03-21 00:15` (crossing the second midnight).
+///
+/// No inactivity gap ever breaks this chain, so the only thing that can end
+/// the session rooted at `23:50` is the declared one-day cap itself
+/// (`docs/specs/model_transforms.md` §Semantics — the "semantic cap"
+/// paragraph): `sessionize`'s `RANGE BETWEEN INTERVAL '1 day' PRECEDING`
+/// frames stop seeing the root boundary once an event's timestamp passes
+/// `root + 1 day` (= `2026-03-20 23:50`), so each later event falls back to
+/// its own timestamp as a fresh session root. The truncation this chain
+/// realises is therefore the *real* function's, end to end — not a
+/// precomputed stand-in — and the harness's set-equality plus the pinned
+/// per-session assertions in
+/// `web_analytics_session_attribution_matches_full_rebuild` verify it is
+/// identical between the day-by-day replay and the full rebuild.
+///
+/// All `arrival_time`s equal `event_time` (on-time delivery) and all rows
+/// are inserted before *any* `smelt run`, exactly like
+/// `inject_cross_midnight_session_pair` above.
+fn inject_two_boundary_session_chain(db_path: &Path) {
+    let root = chrono::NaiveDateTime::parse_from_str("2026-03-19 23:50:00", "%Y-%m-%d %H:%M:%S")
+        .expect("parse chain root");
+    let day2_base =
+        chrono::NaiveDateTime::parse_from_str("2026-03-20 00:10:00", "%Y-%m-%d %H:%M:%S")
+            .expect("parse day-2 base");
+    let tail = chrono::NaiveDateTime::parse_from_str("2026-03-21 00:15:00", "%Y-%m-%d %H:%M:%S")
+        .expect("parse chain tail");
+
+    let mut timestamps = vec![root];
+    // k = 0..=57: 2026-03-20 00:10 … 2026-03-20 23:55 in 25-minute steps.
+    for k in 0..=57 {
+        timestamps.push(day2_base + chrono::Duration::minutes(25 * k));
+    }
+    timestamps.push(tail);
+
+    let values: Vec<String> = timestamps
+        .iter()
+        .enumerate()
+        .map(|(i, ts)| {
+            use chrono::Timelike;
+            let seconds_in_day = i64::from(ts.time().num_seconds_from_midnight());
+            format!(
+                "(9000000{:02}, {dev}, NULL, {seconds_in_day}, \
+                    TIMESTAMP '{ts}', TIMESTAMP '{ts}', NULL, \
+                    '{{\"event_name\": \"page_view\", \"platform\": \"web\", \
+                       \"url\": \"https://example.com/home\"}}', \
+                    DATE '{date}')",
+                i + 11, // event_id 900000011 … 900000070 (past the pair's 01/02)
+                dev = TWO_BOUNDARY_DEVICE_ID,
+                ts = ts.format("%Y-%m-%d %H:%M:%S"),
+                date = ts.format("%Y-%m-%d"),
+            )
+        })
+        .collect();
+
+    let sql = format!(
+        "INSERT INTO raw.events \
+            (event_id, device_id, user_id, seconds_in_day, event_time, arrival_time, \
+             utm_campaign, payload, event_date) \
+         VALUES {};",
+        values.join(", ")
+    );
+    let conn = duckdb::Connection::open(db_path)
+        .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
+    conn.execute_batch(&sql)
+        .unwrap_or_else(|e| panic!("insert two-boundary session chain: {e}\nSQL:\n{sql}"));
+}
+
 // ── Constants ─────────────────────────────────────────────────────────────────
 
 /// We run 7 days (2026-03-19 … 2026-03-26) rather than the full 60-day window
@@ -958,6 +1038,7 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
 
     let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
     inject_cross_midnight_session_pair(&db_path);
+    inject_two_boundary_session_chain(&db_path);
 
     // ── Pipeline A: full-window single rebuild ────────────────────────────
     smelt_run(
@@ -974,6 +1055,7 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
     fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
     repopulate_sources(&db_path, &setup_abs);
     inject_cross_midnight_session_pair(&db_path);
+    inject_two_boundary_session_chain(&db_path);
 
     for (ws, we) in DAY_WINDOWS {
         smelt_run(
@@ -1084,6 +1166,80 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
          utm_campaign) differs between full rebuild and day-by-day replay.\n\
          only in A (first 10): {only_in_a:?}\nonly in B (first 10): {only_in_b:?}"
     );
+
+    // ── Two-boundary truncation, pinned against the REAL sessionize ───────
+    //
+    // The injected 60-event chain (`inject_two_boundary_session_chain`)
+    // never breaks on inactivity or platform, so its only session boundary
+    // is the root at 2026-03-19 23:50. `sessionize`'s `RANGE BETWEEN
+    // INTERVAL '1 day' PRECEDING` frame keeps that boundary visible only to
+    // events with `event_ts <= root + 1 day` (**timestamp** granularity):
+    // the root plus the 25-minute grid through 2026-03-20 23:30 — 58
+    // events. The two later events (2026-03-20 23:55, 2026-03-21 00:15)
+    // fall back to their own timestamps, and since that fallback strikes no
+    // new boundary later events could chain to, each is its own singleton
+    // session. The model's Form B relation restates the same cap in *date*
+    // space (`event_date BETWEEN session_start_date ± 1 day`) — the
+    // declared relation the output window derives from — and removes no
+    // rows the sessionize frame kept (note 2026-03-20 23:55 passes the
+    // date-space filter but is cut by the timestamp-space frame).
+    //
+    // These pins are asserted per pipeline (not just via the set-equality
+    // above) so the real function's truncation behaviour is documented
+    // here, and any divergence from the mirrored fixture expectation in
+    // `cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound`
+    // surfaces as an explicit failure.
+    for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
+        let mut chain: Vec<&SessionRow> = rows
+            .iter()
+            .filter(|r| r.device_id == TWO_BOUNDARY_DEVICE_ID)
+            .collect();
+        chain.sort_by(|a, b| a.session_start.cmp(&b.session_start));
+
+        let observed: Vec<(&str, &str, i64, Option<&str>)> = chain
+            .iter()
+            .map(|r| {
+                (
+                    r.session_start.as_str(),
+                    r.session_end.as_str(),
+                    r.event_count,
+                    r.utm_campaign.as_deref(),
+                )
+            })
+            .collect();
+        assert_eq!(
+            observed,
+            vec![
+                ("2026-03-19 23:50:00", "2026-03-20 23:30:00", 58, None),
+                ("2026-03-20 23:55:00", "2026-03-20 23:55:00", 1, None),
+                ("2026-03-21 00:15:00", "2026-03-21 00:15:00", 1, None),
+            ],
+            "pipeline {label}: the real sessionize must truncate the \
+             two-boundary chain at the declared 1-day cap — a 58-event \
+             session ending at the last in-cap event (2026-03-20 23:30, not \
+             the chain's last day-2 event at 23:55) plus two singleton \
+             sessions rooted by the post-cap events; got {observed:?}"
+        );
+
+        // Non-overlap: the device's sessions never overlap in time.
+        for pair in chain.windows(2) {
+            assert!(
+                pair[1].session_start > pair[0].session_end,
+                "pipeline {label}: sessions must not overlap — session \
+                 starting {} begins at or before the previous session's end {}",
+                pair[1].session_start,
+                pair[0].session_end,
+            );
+        }
+
+        // Event conservation: every injected event counted exactly once.
+        let total: i64 = chain.iter().map(|r| r.event_count).sum();
+        assert_eq!(
+            total, 60,
+            "pipeline {label}: the chain device's sessions must account for \
+             all 60 injected events exactly once (58 + 1 + 1)"
+        );
+    }
 }
 
 // ─────────────────────────────────────────────────────────────────────────────
