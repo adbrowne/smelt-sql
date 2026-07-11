@@ -52,6 +52,7 @@ pub(super) use subquery::infer_subquery_type;
 
 // ─── Public surface re-exports ───────────────────────────────────────────────
 
+pub use function_call::registry_migrated_names;
 pub use type_context::TypeContext;
 
 pub use dispatch::{

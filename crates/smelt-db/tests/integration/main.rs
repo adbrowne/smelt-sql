@@ -40,6 +40,7 @@ mod path_resolution;
 mod phase52_lints;
 mod phase_d_wiring;
 mod provenance_validator;
+mod registry_consistency;
 mod registry_inference;
 mod seed_temporal_inference;
 mod session_rollup;
