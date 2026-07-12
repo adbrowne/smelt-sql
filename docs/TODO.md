@@ -138,3 +138,14 @@ sub-plans: `docs/plans/20260707-maintenance-plan-spec-alignment.md` (SA1–SA5) 
 `docs/plans/20260707-maintenance-plan-impl.md` (MP1–MP16). Pre-framework registry rows
 (keyed-collapse K3–K6, keyed-time-partitioned, L4 batched/versioned/mv) superseded — see the
 master's 2026-07-07 note.
+
+## 2026-07-12 — TABLESAMPLE/PIVOT/UNPIVOT vs alias ordering (parser + printer)
+
+Found during the parser-gap-closure review (PR #158, derived-table alias fix f68ebd86).
+smelt's parser accepts only `base TABLESAMPLE(...) AS alias` and the printer emits that
+same order — but real DuckDB v1.5.4 REJECTS it and requires `base AS alias TABLESAMPLE(...)`
+(oracle-verified). Pre-existing parser grammar bug (`parser/select.rs` parses TABLESAMPLE
+before alias); previously masked because the old printer dropped both clauses, now live:
+the printer emits DuckDB-invalid SQL whenever TABLESAMPLE/PIVOT/UNPIVOT co-occurs with an
+alias. Not exercised by the current corpus/seed gates. Fix: swap grammar+printer to
+alias-first order and add a seed line; PIVOT/UNPIVOT ordering unprobed, verify while there.
