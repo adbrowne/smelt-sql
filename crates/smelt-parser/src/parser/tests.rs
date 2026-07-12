@@ -9048,3 +9048,356 @@ fn walrus_named_arg_round_trips() {
         reparsed.errors
     );
 }
+
+// ===== UNION [ALL] BY NAME (DuckDB) =====
+
+#[test]
+fn union_by_name_parses() {
+    let (parse, select) = parse_select("SELECT x FROM t1 UNION BY NAME SELECT x FROM t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    assert!(select.has_set_operation());
+}
+
+#[test]
+fn union_all_by_name_parses() {
+    let (parse, _select) = parse_select("SELECT x FROM t1 UNION ALL BY NAME SELECT x FROM t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn union_by_name_round_trips() {
+    let input = "SELECT x FROM t1 UNION BY NAME SELECT x FROM t2";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("UNION BY NAME"),
+        "printed SQL should preserve BY NAME: {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn union_all_by_name_round_trips() {
+    let input = "SELECT x FROM t1 UNION ALL BY NAME SELECT x FROM t2";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("UNION ALL BY NAME"),
+        "printed SQL should preserve ALL BY NAME order: {printed:?}"
+    );
+}
+
+#[test]
+fn plain_union_still_parses_without_by_name() {
+    // Guard: BY NAME support must not affect the plain UNION/UNION ALL path.
+    let (parse, select) = parse_select("SELECT 1 UNION ALL SELECT 2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    assert!(select.has_set_operation());
+    let printed = select.to_string();
+    assert_eq!(printed, "SELECT 1 UNION ALL SELECT 2");
+}
+
+#[test]
+fn by_and_name_remain_usable_as_plain_identifiers() {
+    // `by`/`name` outside a set-operation position must not be misread as
+    // the BY NAME modifier. `by` is a reserved keyword already exercised by
+    // GROUP BY/ORDER BY; `name` (contextual) must still work as a column.
+    let (parse, _select) = parse_select("SELECT name FROM t1");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+// ===== WITH ... AS [NOT] MATERIALIZED (DuckDB / PostgreSQL) =====
+
+#[test]
+fn cte_materialized_parses() {
+    let (parse, select) = parse_select("WITH a AS MATERIALIZED (SELECT 1) SELECT * FROM a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let with_clause = select.with_clause().expect("should have WITH clause");
+    let cte = with_clause.ctes().next().expect("should have a CTE");
+    assert!(cte.is_materialized());
+    assert!(!cte.is_not_materialized());
+}
+
+#[test]
+fn cte_not_materialized_parses() {
+    let (parse, select) = parse_select("WITH a AS NOT MATERIALIZED (SELECT 1) SELECT * FROM a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let with_clause = select.with_clause().expect("should have WITH clause");
+    let cte = with_clause.ctes().next().expect("should have a CTE");
+    assert!(cte.is_not_materialized());
+    assert!(!cte.is_materialized());
+}
+
+#[test]
+fn cte_materialized_with_column_list_and_recursive() {
+    let (parse, _select) = parse_select(
+        "WITH RECURSIVE t(x) AS MATERIALIZED (SELECT 1 AS x UNION ALL SELECT x + 1 FROM t WHERE x < 3) SELECT * FROM t",
+    );
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn cte_materialized_round_trips() {
+    let input = "WITH a AS MATERIALIZED (SELECT 1) SELECT * FROM a";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("AS MATERIALIZED ("),
+        "printed SQL should preserve MATERIALIZED: {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn cte_not_materialized_round_trips() {
+    let input = "WITH a AS NOT MATERIALIZED (SELECT 1) SELECT * FROM a";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("AS NOT MATERIALIZED ("),
+        "printed SQL should preserve NOT MATERIALIZED: {printed:?}"
+    );
+}
+
+#[test]
+fn plain_cte_still_parses_without_materialized_hint() {
+    // Guard: MATERIALIZED support must not affect the plain WITH CTE path.
+    let (parse, select) = parse_select("WITH a AS (SELECT 1) SELECT * FROM a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let with_clause = select.with_clause().expect("should have WITH clause");
+    let cte = with_clause.ctes().next().expect("should have a CTE");
+    assert!(!cte.is_materialized());
+    assert!(!cte.is_not_materialized());
+    assert_eq!(select.to_string(), "WITH a AS (SELECT 1) SELECT * FROM a");
+}
+
+// ===== VALUES trailing comma (DuckDB) =====
+
+#[test]
+fn values_trailing_comma_after_last_row_parses() {
+    let parse = crate::parse("VALUES (1, 2),");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn values_trailing_comma_round_trips() {
+    let input = "VALUES (1, 2),";
+    let parse = crate::parse(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn plain_values_still_parses_without_trailing_comma() {
+    // Guard: trailing-comma support must not affect the plain VALUES path.
+    let parse = crate::parse("VALUES (1, 2), (3, 4)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).unwrap();
+    assert_eq!(file.to_string(), "VALUES (1, 2), (3, 4)");
+}
+
+// ===== NATURAL JOIN (DuckDB / PostgreSQL) =====
+
+#[test]
+fn natural_join_parses() {
+    let (parse, select) = parse_select("SELECT * FROM t1 NATURAL JOIN t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    let join = from.joins().next().expect("should have a JOIN");
+    assert!(join.is_natural());
+    assert_eq!(join.join_type(), None);
+}
+
+#[test]
+fn natural_full_outer_join_parses() {
+    let (parse, select) = parse_select("SELECT * FROM t1 NATURAL FULL OUTER JOIN t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    let join = from.joins().next().expect("should have a JOIN");
+    assert!(join.is_natural());
+    assert_eq!(join.join_type(), Some(JoinType::Full));
+}
+
+#[test]
+fn natural_join_round_trips() {
+    let input = "SELECT * FROM t1 NATURAL JOIN t2";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("NATURAL JOIN"),
+        "printed SQL should preserve NATURAL: {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn parenthesized_join_sequence_parses() {
+    let (parse, select) = parse_select(
+        "SELECT * FROM (a NATURAL FULL OUTER JOIN b NATURAL FULL OUTER JOIN c) NATURAL FULL OUTER JOIN (d NATURAL FULL OUTER JOIN e)",
+    );
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    // Two top-level natural joins: the left parenthesized group, and the
+    // right parenthesized group.
+    assert_eq!(from.joins().count(), 1);
+    let top_join = from.joins().next().unwrap();
+    assert!(top_join.is_natural());
+}
+
+#[test]
+fn parenthesized_join_sequence_round_trips() {
+    let input = "SELECT * FROM (a NATURAL JOIN b) NATURAL JOIN (c NATURAL JOIN d)";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} (from {input:?}) failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn parenthesized_table_ref_without_join_parses() {
+    // A bare parenthesized table reference (no JOIN inside) is also a valid
+    // table primary and falls out of the same grammar branch.
+    let (parse, select) = parse_select("SELECT * FROM (t1) x");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    assert_eq!(from.joins().count(), 0);
+}
+
+#[test]
+fn natural_join_with_alias_and_column_list_parses() {
+    let (parse, _select) = parse_select("SELECT * FROM t1 (a, b) NATURAL JOIN t2 (a)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn natural_join_of_subqueries_parses() {
+    let (parse, _select) =
+        parse_select("SELECT (SELECT * FROM (SELECT 42) tbl(a) NATURAL JOIN (SELECT 42) tbl2(a))");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn plain_join_still_parses_without_natural() {
+    // Guard: NATURAL support must not affect the plain JOIN path.
+    let (parse, select) = parse_select("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    let join = from.joins().next().expect("should have a JOIN");
+    assert!(!join.is_natural());
+    assert_eq!(
+        select.to_string(),
+        "SELECT * FROM t1 JOIN t2 ON t1.a = t2.a"
+    );
+}
+
+#[test]
+fn implicit_alias_named_natural_still_works() {
+    // Guard: `NATURAL` is only special right after a table_ref in a
+    // position where a join could start. A column/table literally aliased
+    // `natural` elsewhere is unaffected (this checks the SELECT-list case,
+    // which never touches the FROM-clause NATURAL lookahead at all).
+    let (parse, _select) = parse_select("SELECT 1 AS natural");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}

@@ -1008,6 +1008,12 @@ impl<'a> super::Parser<'a> {
             self.skip_trivia();
             if self.at(COMMA) {
                 self.advance();
+                self.skip_trivia();
+                if !self.at(LPAREN) {
+                    // Trailing comma after the last row — DuckDB accepts
+                    // `VALUES (1, 2),` with nothing following the comma.
+                    break;
+                }
             } else {
                 break;
             }

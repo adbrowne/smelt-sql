@@ -30,6 +30,12 @@ impl File {
         self.0.children().find_map(PipeQuery::cast)
     }
 
+    /// The top-level `VALUES_CLAUSE` node, if the file body is a bare
+    /// `VALUES (…), (…)` statement (no `SELECT` wrapper).
+    pub fn values_clause(&self) -> Option<ValuesClause> {
+        self.0.children().find_map(ValuesClause::cast)
+    }
+
     /// Whether the file has a valid top-level query body (SELECT_STMT or PIPE_QUERY).
     pub fn has_query_body(&self) -> bool {
         self.select_stmt().is_some() || self.pipe_query().is_some()
@@ -1263,6 +1269,37 @@ impl SelectStmt {
             .any(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
     }
 
+    /// Whether this SELECT's set operation (if any) carries a `BY NAME`
+    /// modifier (DuckDB): operands are unified by column name rather than
+    /// position, and the result widens to the union of column names across
+    /// all operands — a different algorithm from smelt's positional set-op
+    /// column combination. Returns `false` when there is no set operation.
+    pub fn is_set_operation_by_name(&self) -> bool {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        let Some(op_idx) = tokens
+            .iter()
+            .position(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
+        else {
+            return false;
+        };
+        let mut idx = op_idx + 1;
+        if tokens.get(idx).is_some_and(|t| t.kind() == ALL_KW) {
+            idx += 1;
+        }
+        matches!(
+            (tokens.get(idx), tokens.get(idx + 1)),
+            (Some(by), Some(name))
+                if by.kind() == BY_KW
+                    && name.kind() == IDENT
+                    && name.text().eq_ignore_ascii_case("NAME")
+        )
+    }
+
     /// Get the SELECT statement after any set operation (UNION, INTERSECT,
     /// or EXCEPT). The operand may be a bare `SELECT_STMT` or a
     /// parenthesized `SUBQUERY` wrapping one (`A EXCEPT (B)`); both unwrap
@@ -1542,6 +1579,18 @@ impl JoinClause {
     /// Get the join condition (ON or USING clause)
     pub fn condition(&self) -> Option<JoinCondition> {
         self.0.children().find_map(JoinCondition::cast)
+    }
+
+    /// Whether this JOIN carries a `NATURAL` prefix (`NATURAL [INNER |
+    /// LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`). `NATURAL` is a
+    /// contextual keyword (lexed as a plain IDENT) and, when present, is
+    /// always the first non-trivia token of the `JOIN_CLAUSE`.
+    pub fn is_natural(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .is_some_and(|t| t.kind() == IDENT && t.text().eq_ignore_ascii_case("NATURAL"))
     }
 }
 
@@ -3750,6 +3799,51 @@ impl Cte {
                 .map(|t| t.text().to_string())
                 .collect(),
         }
+    }
+
+    /// Whether this CTE carries an explicit `MATERIALIZED` hint
+    /// (`AS MATERIALIZED (…)`). Purely informational (DuckDB/PostgreSQL
+    /// materialization directive) — does not change the CTE's schema.
+    pub fn is_materialized(&self) -> bool {
+        self.materialization_hint().0
+    }
+
+    /// Whether this CTE carries an explicit `NOT MATERIALIZED` hint
+    /// (`AS NOT MATERIALIZED (…)`).
+    pub fn is_not_materialized(&self) -> bool {
+        self.materialization_hint().1
+    }
+
+    /// `(is_materialized, is_not_materialized)`, scanning the direct child
+    /// tokens for `AS [NOT] MATERIALIZED`. `MATERIALIZED` is a contextual
+    /// keyword (lexed as a plain IDENT), matched only immediately after
+    /// `AS` or `AS NOT`.
+    fn materialization_hint(&self) -> (bool, bool) {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        let Some(as_idx) = tokens.iter().position(|t| t.kind() == AS_KW) else {
+            return (false, false);
+        };
+        let rest = &tokens[as_idx + 1..];
+        let mut it = rest.iter();
+        if let Some(first) = it.next() {
+            if first.kind() == IDENT && first.text().eq_ignore_ascii_case("MATERIALIZED") {
+                return (true, false);
+            }
+            if first.kind() == NOT_KW {
+                if let Some(second) = it.next() {
+                    if second.kind() == IDENT && second.text().eq_ignore_ascii_case("MATERIALIZED")
+                    {
+                        return (false, true);
+                    }
+                }
+            }
+        }
+        (false, false)
     }
 }
 

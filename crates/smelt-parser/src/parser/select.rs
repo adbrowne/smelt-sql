@@ -141,6 +141,22 @@ impl<'a> super::Parser<'a> {
                 self.advance();
             }
             self.skip_trivia();
+            // Optional BY NAME (DuckDB): unify operands by column name
+            // rather than position. `BY` is the reserved `BY_KW` (shared
+            // with `GROUP BY`/`ORDER BY`); `NAME` is a contextual keyword
+            // (lexed as plain IDENT), matched only in this exact sequence
+            // so it stays an ordinary identifier everywhere else
+            // (`SELECT name FROM t`).
+            if self.at(BY_KW)
+                && self
+                    .peek_nth_non_trivia_text(1)
+                    .is_some_and(|t| t.eq_ignore_ascii_case("NAME"))
+            {
+                self.advance(); // BY
+                self.skip_trivia();
+                self.advance(); // NAME
+                self.skip_trivia();
+            }
             // Parse next operand: a plain SELECT/WITH statement, or a
             // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
             // arbitrarily nested. The parenthesized form recurses through
@@ -335,7 +351,9 @@ impl<'a> super::Parser<'a> {
         // Parse zero or more JOIN clauses
         loop {
             self.skip_trivia();
-            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW]) {
+            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
+                || self.at_contextual_keyword("NATURAL")
+            {
                 self.parse_join_clause();
             } else {
                 break;
@@ -426,6 +444,29 @@ impl<'a> super::Parser<'a> {
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();
+            } else if self.at(IDENT) || self.at(LATERAL_KW) || self.at(LPAREN) {
+                // Parenthesized table reference or joined-table sequence:
+                // `(t1)`, `(t1 JOIN t2 ON …)`, `(t1 NATURAL JOIN t2 NATURAL
+                // JOIN t3)` — a table primary DuckDB/PostgreSQL both accept.
+                // The nested `parse_table_ref` call recurses through this
+                // same LPAREN branch, so arbitrarily nested parenthesized
+                // join chains (`(a JOIN b) JOIN (c JOIN d)`) fall out for
+                // free. No dedicated node kind: the printer's `TableRef`
+                // Display detects a nested `TABLE_REF` child and renders it
+                // structurally (see `printer.rs`).
+                self.parse_table_ref();
+                loop {
+                    self.skip_trivia();
+                    if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
+                        || self.at_contextual_keyword("NATURAL")
+                    {
+                        self.parse_join_clause();
+                    } else {
+                        break;
+                    }
+                }
+                self.skip_trivia();
+                self.expect(RPAREN);
             } else {
                 // Not a subquery, error
                 self.error("Expected SELECT in subquery".to_string());
@@ -437,6 +478,18 @@ impl<'a> super::Parser<'a> {
             // function name (LEFT()/RIGHT() keyword-as-function-name precedent).
             let checkpoint = self.builder.checkpoint();
             self.advance(); // Consume GLOB_KW
+            self.skip_trivia();
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            self.parse_arg_list();
+            self.finish_node(); // Close FUNCTION_CALL
+        } else if self.at(RANGE_KW) && self.is_keyword_followed_by_lparen() {
+            // DuckDB's range(start, stop[, step]) table-generating
+            // function. RANGE is also the window-frame unit keyword
+            // (`RANGE BETWEEN …`), but when directly followed by `(` in
+            // table-ref position it is unambiguously the table function
+            // (GLOB()/LEFT()/RIGHT() keyword-as-function-name precedent).
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // Consume RANGE_KW
             self.skip_trivia();
             self.start_node_at(checkpoint, FUNCTION_CALL);
             self.parse_arg_list();
@@ -670,6 +723,19 @@ impl<'a> super::Parser<'a> {
     #[allow(clippy::if_same_then_else)]
     pub(super) fn parse_join_clause(&mut self) {
         self.start_node(JOIN_CLAUSE);
+
+        // Optional NATURAL modifier (contextual keyword): `NATURAL [INNER |
+        // LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`. Join columns
+        // are all identically named columns between the two sides; smelt's
+        // schema inference already unions all columns from every table_ref
+        // without deduping by ON/USING (see `process_from_clause_node_pure`
+        // in smelt-db), so NATURAL needs no special-cased column-matching
+        // logic — it is consistent with the existing (non-deduping)
+        // treatment of ON/USING joins.
+        if self.at_contextual_keyword("NATURAL") {
+            self.advance();
+            self.skip_trivia();
+        }
 
         // Parse JOIN type modifiers (INNER, LEFT, RIGHT, FULL OUTER, CROSS)
         // Note: The if-else blocks are intentionally similar for clarity
@@ -1176,6 +1242,29 @@ impl<'a> super::Parser<'a> {
             self.error("Expected AS in CTE".to_string());
             self.finish_node();
             return;
+        }
+
+        // Optional [NOT] MATERIALIZED hint (DuckDB/PostgreSQL): a purely
+        // informational CTE-materialization directive that does not change
+        // the CTE's schema or logic, so it needs no dedicated inference
+        // support — only round-trip parse/print fidelity. `MATERIALIZED` is
+        // a contextual keyword (lexed as a plain IDENT); `NOT` is only
+        // consumed here when directly followed by `MATERIALIZED`, so a
+        // (syntactically impossible in this position, but defensive) bare
+        // `NOT` doesn't get silently swallowed.
+        self.skip_trivia();
+        if self.at_contextual_keyword("MATERIALIZED") {
+            self.advance();
+            self.skip_trivia();
+        } else if self.at(NOT_KW)
+            && self
+                .peek_nth_non_trivia_text(1)
+                .is_some_and(|t| t.eq_ignore_ascii_case("MATERIALIZED"))
+        {
+            self.advance(); // NOT
+            self.skip_trivia();
+            self.advance(); // MATERIALIZED
+            self.skip_trivia();
         }
 
         self.skip_trivia();

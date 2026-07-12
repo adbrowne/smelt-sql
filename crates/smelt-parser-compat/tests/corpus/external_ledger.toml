@@ -171,10 +171,6 @@ note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (trac
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap (list comprehension itself now parses; residual failure is elsewhere in the statement); first smelt parser error: Expected RPAREN, found LPAREN"
 
-["aa4b6f5c0bbe1d9a"]
-category = "natural_join_chain"
-note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
-
 ["4d1c47594b381d8e"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
@@ -279,29 +275,9 @@ note = "A glob/path string literal used directly as a FROM target is not parsed"
 category = "file_glob_or_path_literal_from"
 note = "A glob/path string literal used directly as a FROM target is not parsed"
 
-["c1d9cfadd96c2de0"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
-
-["d02f115bf8aaf855"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
-
-["b1a3f652eadb0084"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
-
 ["a5e238d31d51c3b6"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
-
-["a52e10e9c9b6a4ba"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
-
-["6bb0c9d1bbc982d2"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING (double-quoted identifiers, e.g. fib_n as an alias, are not accepted — a distinct, broader gap from MATERIALIZED, which this statement also happens to use and which parses fine on its own; verified via SELECT 1 AS 'fib_n' (double-quoted) failing identically with no MATERIALIZED involved)"
 
 ["d8d88b608d1f5372"]
 category = "recursive_cte_cycle_using_key"
@@ -495,10 +471,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["f16d828fc730974f"]
-category = "natural_join_chain"
-note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
-
 ["32b190f08513f4c0"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -528,10 +500,6 @@ category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found PLUS"
 
 ["da676b8ed997d2e7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
-["744042caf9e788fe"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
@@ -566,14 +534,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 ["340d518ead2e82d9"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap (list comprehension itself now parses; residual failure is the COLUMNS(* EXCLUDE (...)) source-list expression); first smelt parser error: Expected RPAREN, found IDENT"
-
-["9f1dab2702dd484e"]
-category = "bare_top_level_values_not_printed"
-note = "a bare top-level `VALUES (...)` model body (no wrapping SELECT) parses onto a VALUES_CLAUSE child directly under FILE; File::select_stmt() only looks for a SELECT_STMT child, so it returns None and the printer emits an empty string — a distinct silent-mis-parse root cause from the derived-table-alias-list printer bug this statement was previously (mis-)filed under"
-
-["3cb23549de01fe86"]
-category = "values_trailing_comma"
-note = "Trailing comma inside a VALUES row is not parsed"
 
 ["59b6e8884651ae90"]
 category = "grouping_sets_trailing_comma"
@@ -611,29 +571,9 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["45383c22a08e098e"]
-category = "union_by_name"
-note = "DuckDB UNION [ALL] BY NAME is not parsed"
-
-["ea5c0ab10c7a83ca"]
-category = "union_by_name"
-note = "DuckDB UNION [ALL] BY NAME is not parsed"
-
-["92d92b0265459ed6"]
-category = "union_by_name"
-note = "DuckDB UNION [ALL] BY NAME is not parsed"
-
 ["6687ca4f8399d92c"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
-
-["c9c3dbc3b91c8643"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference (`range(...)` as a FROM table function is not parsed — RANGE is reserved for window-frame RANGE BETWEEN and isn't accepted as a function name in FROM position; unrelated to set-operation nesting)"
-
-["cb4f1ada7439d9aa"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference (`range(...)` as a FROM table function is not parsed — RANGE is reserved for window-frame RANGE BETWEEN and isn't accepted as a function name in FROM position; unrelated to set-operation nesting)"
 
 ["dca844a46bc203da"]
 category = "smelt_fails_unclassified"
@@ -735,10 +675,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
 
-["973b2c687ef3d02b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
 ["d019f39e7d6696a6"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
@@ -759,10 +695,6 @@ note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (trac
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
-["ba2c116405ff7dbf"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
 ["01c0f2fdd4823d7d"]
 category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
@@ -778,10 +710,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RBRACKET, fo
 ["36d81cb73e5419a1"]
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
-
-["f204f83e26a1db9b"]
-category = "map_type_or_literal"
-note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
 
 ["08aa64e509d114a3"]
 category = "lambda_or_lateral_syntax"
@@ -898,14 +826,6 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 ["9c8c8884d1846598"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected frame bound (UNBOUNDED, CURRENT ROW, number, or INTERVAL literal)"
-
-["b51d6e336c50e974"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
-["934ccb4bd945e173"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
 ["2eeeab6e1921780c"]
 category = "window_frame_non_integer_bound"
@@ -1243,14 +1163,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["6827d4f00ad27d04"]
-category = "natural_join_chain"
-note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
-
-["b7420dba588d631a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected SELECT in subquery"
-
 ["0b571b09988e1c59"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -1562,10 +1474,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["9480ec7e9fa51e51"]
 category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
-
-["fa29104c42b17d44"]
-category = "materialized_cte"
-note = "WITH ... AS [NOT] MATERIALIZED CTE materialization hint is not parsed"
 
 ["1f8daeacf6b69560"]
 category = "smelt_fails_unclassified"

@@ -77,6 +77,12 @@ impl Display for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(stmt) = self.select_stmt() {
             write!(f, "{}", stmt)?;
+        } else if let Some(values) = self.values_clause() {
+            // No dedicated pretty-printer for a bare top-level VALUES body
+            // (same rationale as `TableRef`'s subquery-VALUES fallback):
+            // raw text is a faithful, lossless rendering, and it correctly
+            // preserves a trailing comma after the last row.
+            write!(f, "{}", values.syntax().text())?;
         }
         Ok(())
     }
@@ -153,6 +159,9 @@ impl Display for SelectStmt {
             write!(f, " {}", set_op.keyword)?;
             if set_op.all {
                 write!(f, " ALL")?;
+            }
+            if set_op.by_name {
+                write!(f, " BY NAME")?;
             }
             match set_op.operand {
                 SetOperand::Select(select) => write!(f, " {}", select)?,
@@ -253,6 +262,17 @@ impl Display for TableRef {
             write!(f, "{}", subquery.syntax().text())?;
         } else if let Some(ident) = self.identifier() {
             write!(f, "{}", ident)?;
+        } else if let Some(inner) = self.syntax().children().find_map(TableRef::cast) {
+            // Parenthesized table reference or joined-table sequence:
+            // `(t1)`, `(t1 NATURAL JOIN t2)`. Printed structurally (rather
+            // than via the raw-text fallback below) so a trailing alias on
+            // the outer TABLE_REF — printed separately further down — isn't
+            // double-printed.
+            write!(f, "({}", inner)?;
+            for join in self.syntax().children().filter_map(JoinClause::cast) {
+                write!(f, " {}", join)?;
+            }
+            write!(f, ")")?;
         } else {
             write!(f, "{}", self.syntax().text())?;
         }
@@ -283,6 +303,10 @@ impl Display for TableRef {
 
 impl Display for JoinClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_natural() {
+            write!(f, "NATURAL ")?;
+        }
+
         // Join type
         match self.join_type() {
             Some(JoinType::Inner) => write!(f, "INNER JOIN")?,
@@ -591,6 +615,12 @@ impl Display for Cte {
 
         write!(f, " AS ")?;
 
+        if self.is_materialized() {
+            write!(f, "MATERIALIZED ")?;
+        } else if self.is_not_materialized() {
+            write!(f, "NOT MATERIALIZED ")?;
+        }
+
         if let Some(query) = self.query() {
             write!(f, "{}", query)?;
         }
@@ -665,6 +695,7 @@ fn extract_group_by_expressions(node: &SyntaxNode) -> String {
 struct SetOperation {
     keyword: &'static str,
     all: bool,
+    by_name: bool,
     operand: SetOperand,
 }
 
@@ -689,19 +720,30 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
     // Find the set operation keyword
     let mut op_kind = None;
     let mut has_all = false;
+    let mut has_by_name = false;
 
     for (i, token) in tokens.iter().enumerate() {
         if set_op_kinds.contains(&token.kind()) {
             op_kind = Some(token.kind());
-            // Check for ALL after the keyword
-            for next_token in &tokens[i + 1..] {
-                match next_token.kind() {
-                    WHITESPACE | COMMENT => continue,
-                    ALL_KW => {
-                        has_all = true;
-                        break;
-                    }
-                    _ => break,
+            // Check for ALL after the keyword.
+            let non_trivia: Vec<_> = tokens[i + 1..]
+                .iter()
+                .filter(|t| !matches!(t.kind(), WHITESPACE | COMMENT))
+                .collect();
+            let mut idx = 0;
+            if non_trivia.first().is_some_and(|t| t.kind() == ALL_KW) {
+                has_all = true;
+                idx = 1;
+            }
+            // Check for BY NAME (DuckDB): `BY_KW` followed by the
+            // contextual `NAME` keyword (plain IDENT), matched only as
+            // this exact sequence.
+            if let (Some(by_tok), Some(name_tok)) = (non_trivia.get(idx), non_trivia.get(idx + 1)) {
+                if by_tok.kind() == BY_KW
+                    && name_tok.kind() == IDENT
+                    && name_tok.text().eq_ignore_ascii_case("NAME")
+                {
+                    has_by_name = true;
                 }
             }
             break;
@@ -747,6 +789,7 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
     Some(SetOperation {
         keyword,
         all: has_all,
+        by_name: has_by_name,
         operand,
     })
 }

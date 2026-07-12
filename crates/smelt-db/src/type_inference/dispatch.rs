@@ -801,7 +801,23 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
 
     // If there's a set operation (UNION/INTERSECT/EXCEPT), recursively get types and combine
     if select_stmt.has_set_operation() {
-        if let Some(next_select) = select_stmt.set_operation_select() {
+        if select_stmt.is_set_operation_by_name() {
+            // `UNION/EXCEPT/INTERSECT ... BY NAME` (DuckDB) unifies operands
+            // by column NAME, not position, and widens the result to the
+            // union of column names across every operand — a fundamentally
+            // different algorithm from the positional, column-count-
+            // preserving combination below. That widening isn't implemented;
+            // silently reusing the positional promotion would produce a
+            // confidently wrong type whenever the branches don't already
+            // align 1:1 by position (the common case — the whole point of
+            // BY NAME is reordering/differently-named columns). Mark every
+            // column Unknown so `cannot_infer_type_for_schema` surfaces an
+            // honest `ColumnTypeUnresolved` instead.
+            for col in &mut column_types {
+                col.data_type = DataType::Unknown(smelt_types::UnknownReason::Unresolved);
+                col.nullable = true;
+            }
+        } else if let Some(next_select) = select_stmt.set_operation_select() {
             let next_types = infer_select_column_types(&next_select, ctx);
 
             // Combine types - use the wider type for each column position
@@ -1000,4 +1016,86 @@ pub fn check_mixed_tz_case_diagnostics(
     }
 
     diags
+}
+
+#[cfg(test)]
+mod set_operation_tests {
+    use super::*;
+    use crate::type_inference::TypeContext;
+    use smelt_parser::ast::File;
+
+    fn parse_select(sql: &str) -> SelectStmt {
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        file.select_stmt().expect("no SelectStmt in parsed SQL")
+    }
+
+    #[test]
+    fn plain_union_promotes_types_positionally() {
+        // Guard: BY NAME handling must not affect the plain positional path.
+        let select = parse_select("SELECT 1 UNION ALL SELECT 2");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 1);
+        assert!(
+            !matches!(types[0].data_type, DataType::Unknown(_)),
+            "plain positional UNION should infer a concrete type, got {:?}",
+            types[0].data_type
+        );
+    }
+
+    #[test]
+    fn union_by_name_is_conservatively_unknown() {
+        // UNION BY NAME unifies by column name (and widens to the union of
+        // names across operands), not by position — smelt doesn't implement
+        // that algorithm, so every column must come back Unknown(Unresolved)
+        // rather than a silently-wrong positionally-promoted type.
+        let select = parse_select("SELECT 1 AS x UNION BY NAME SELECT 2 AS x");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 1);
+        assert!(
+            matches!(
+                types[0].data_type,
+                DataType::Unknown(smelt_types::UnknownReason::Unresolved)
+            ),
+            "UNION BY NAME must infer Unknown(Unresolved), got {:?}",
+            types[0].data_type
+        );
+    }
+
+    #[test]
+    fn union_all_by_name_is_conservatively_unknown() {
+        let select = parse_select("SELECT 1 AS x UNION ALL BY NAME SELECT 2 AS x");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 1);
+        assert!(
+            matches!(
+                types[0].data_type,
+                DataType::Unknown(smelt_types::UnknownReason::Unresolved)
+            ),
+            "UNION ALL BY NAME must infer Unknown(Unresolved), got {:?}",
+            types[0].data_type
+        );
+    }
+
+    #[test]
+    fn union_by_name_with_multiple_columns_marks_all_unknown() {
+        let select = parse_select("SELECT 1 AS x, 'a' AS y UNION BY NAME SELECT 2 AS x, 'b' AS y");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 2);
+        for t in &types {
+            assert!(
+                matches!(
+                    t.data_type,
+                    DataType::Unknown(smelt_types::UnknownReason::Unresolved)
+                ),
+                "every column of a BY NAME union must be Unknown(Unresolved), got {:?}",
+                t.data_type
+            );
+        }
+    }
 }

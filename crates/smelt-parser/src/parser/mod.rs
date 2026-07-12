@@ -287,6 +287,7 @@ impl<'a> Parser<'a> {
             INTERSECT_KW,
             EXCEPT_KW,
         ]) || self.at_contextual_keyword("FETCH")
+            || self.at_contextual_keyword("NATURAL")
     }
 
     /// Check if current token can start an expression
@@ -438,7 +439,7 @@ impl<'a> Parser<'a> {
     /// need to inspect a fixed sequence of tokens before committing to a
     /// grammar path. Companion to [`peek_nth_non_trivia`](Self::peek_nth_non_trivia)
     /// (`parser/types.rs`), which returns only the token kind.
-    fn peek_nth_non_trivia_text(&self, n: usize) -> Option<&str> {
+    pub(super) fn peek_nth_non_trivia_text(&self, n: usize) -> Option<&str> {
         let mut la = 0usize;
         let mut seen = 0usize;
         loop {

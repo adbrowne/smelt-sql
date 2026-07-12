@@ -247,6 +247,11 @@ classification = "legitimate"
 reason = "UNION branch SELECT item (no expression) fallback — Unknown placeholder"
 discriminant = "dynamic"
 
+["crates/smelt-db/src/type_inference/dispatch.rs:817"]
+classification = "legitimate"
+reason = "UNION/EXCEPT/INTERSECT ... BY NAME (DuckDB): column unification is by name and widens to the union of names across operands, not smelt's positional promotion — that algorithm isn't implemented, so every column is marked Unknown(Unresolved) rather than reusing positional promotion, which would be silently wrong whenever branches don't already align 1:1 by position. cannot_infer_type_for_schema surfaces ColumnTypeUnresolved to the user."
+discriminant = "unresolved"
+
 # ── smelt-db / type_inference/function_call ───────────────────────────────────
 
 ["crates/smelt-db/src/type_inference/function_call.rs:67"]
