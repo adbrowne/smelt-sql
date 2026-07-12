@@ -447,6 +447,48 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
     smelt_dialect::print(&parse.syntax(), &ctx)
 }
 
+/// Whether `model` is **self-referential** — it reads its own prior output
+/// via `smelt.<self>` (`docs/specs/batched_models.md` §"Window independence
+/// and self-referential models"). The single shared predicate for every
+/// runtime consumer (the first-run bootstrap dispatch in `execute.rs`, both
+/// windowed and unwindowed arms, and the output-schema fixpoint in
+/// `UpstreamSchemas::from_database`), so the sites can never drift apart.
+///
+/// A ref is a self-edge **iff its full dotted path equals the model's
+/// canonical dot-path** (`ModelFile::canonical_path`, the same key
+/// `DependencyGraph::build` keys models by and suppresses self-edges with
+/// (`dep == canonical`), and the same `model_name` the ordered-execution
+/// proof `smelt_logical::analysis::window_independence` matches `refs`
+/// against). Matching anything looser is wrong in both directions:
+///
+/// - **Leaf-name matching false-positives**: `smelt.gold.sessions` referenced
+///   from `silver/sessions.sql` shares the leaf `sessions` but is a different
+///   model.
+/// - **There is no false-negative for a "relative" self-ref**, because smelt
+///   has no relative-ref resolution: an unqualified `smelt.sessions_chained`
+///   written inside `silver/` is refused at the diagnostic gate
+///   (`UndefinedModelRef`, with a fix-it naming the canonical path) before
+///   any run dispatch, and would in any case compile to a *different*
+///   physical table (`<schema>.sessions_chained`, not
+///   `<schema>.silver_sessions_chained`) — it is not a working self-reference
+///   under any predicate. The canonical path is the only self-ref spelling
+///   that resolves.
+///
+/// Falls back to `model.name` when `address_segments` is empty (the same
+/// fallback `ModelFile::db_name_owned` uses for test-constructed models).
+pub(crate) fn is_self_referential(model: &ModelFile) -> bool {
+    let canonical = model.canonical_path();
+    let canonical: &str = if canonical.is_empty() {
+        &model.name
+    } else {
+        &canonical
+    };
+    model
+        .refs
+        .iter()
+        .any(|r| r.smelt_ref.to_path().join(".") == canonical)
+}
+
 /// Inline `smelt.define` function-call bodies into `sql` using `fn_bodies`,
 /// leaving `smelt.<path>` source references intact (`smelt_path_ref: None`).
 ///
@@ -591,6 +633,58 @@ pub struct UpstreamSchemas {
     /// §"Diagnostic parity rule"). Consumed at compile time by the build-path
     /// loader evaluator; never reaches the engine.
     pub loaders: std::collections::BTreeMap<String, crate::meta_eval::LoaderFileMeta>,
+    /// Self-referential models whose output-schema fixpoint
+    /// (`from_database`'s self-ref refinement pass) exhausted its round cap
+    /// without converging. Their `models` entry is the last (unconverged)
+    /// iterate — usable as a best-effort hint for type-cast wrapping, but
+    /// NOT reliable enough to author DDL from: the first-run bootstrap
+    /// (`execute.rs`) refuses such a model with a diagnostic instead of
+    /// creating a table from an unconverged schema
+    /// (`architecture.md` §"Fail-loud discipline").
+    pub unconverged_self_ref_models: std::collections::HashSet<String>,
+}
+
+/// Adapts per-entity `SourceInfo`s into the LEGACY aggregate `SourcesConfig`
+/// shape so `build_type_context` bakes their columns in from the start,
+/// rather than via the separate `add_source_info_to_type_context` call that
+/// runs too late for a FROM-clause derived table reading a per-entity
+/// source directly (see the doc comment at this function's one call site,
+/// `UpstreamSchemas::from_database`'s self-referential-model fixpoint).
+/// Only the table name (the address's last segment) and column list matter
+/// for the lookup this feeds — `build_type_context`'s `add_source_column`
+/// always also registers the unqualified `{table}.{column}` key, which is
+/// the one a bare `t.col` reference through an alias actually resolves
+/// through — so the synthetic source/schema name is a fixed placeholder.
+fn sources_config_from_source_infos(infos: &[smelt_core::SourceInfo]) -> SourcesConfig {
+    let sources = infos
+        .iter()
+        .filter_map(|info| {
+            let table_name = info.address_segments.last()?.clone();
+            let columns = info
+                .columns
+                .iter()
+                .map(|c| smelt_core::SourceColumnDef {
+                    name: c.name.clone(),
+                    data_type: Some(c.data_type.clone()),
+                    description: None,
+                    data_latency: None,
+                })
+                .collect();
+            Some(smelt_core::SourceDef {
+                name: "sources".to_string(),
+                database: None,
+                schema: None,
+                description: None,
+                tables: vec![smelt_core::SourceTableDef {
+                    name: table_name,
+                    identifier: None,
+                    description: None,
+                    columns,
+                }],
+            })
+        })
+        .collect();
+    SourcesConfig { sources }
 }
 
 impl UpstreamSchemas {
@@ -668,6 +762,126 @@ impl UpstreamSchemas {
         // at SQL generation time. These take precedence over the legacy
         // `SourcesConfig` when resolving `smelt.sources.*` path refs.
         let per_entity_sources = smelt_core::discover_source_infos(project_dir, &paths);
+
+        // Self-referential models: refine `model_schemas`'s own self-entry by
+        // a bounded local fixpoint (`docs/specs/batched_models.md` §"First-run
+        // and backfill" — "First-run bootstrap for a self-referential
+        // model"). `resolved_model_schema` (Salsa) cannot help here: its
+        // `cycle_initial` BREAKS a genuine self-referential cycle with an
+        // empty schema rather than iterating it to a fixpoint, so a self-
+        // dependent column's type comes back `Unknown` (or a poisoned
+        // default like `SUM`'s BIGINT fallback) from the pass above. But the
+        // model's self-read exposes EXACTLY its own output columns by
+        // construction — a genuine fixed point over `model_schemas[model.
+        // name]` itself — and the pure functions already imported here
+        // (`build_type_context`/`infer_select_column_types`) can converge on
+        // it directly: re-infer the model's own top-level SELECT's column
+        // types using `model_schemas` (including this model's own,
+        // currently-rough self-entry) as the ref-schema source, feed the
+        // result back as this model's entry, and repeat. Most shapes
+        // converge in one or two rounds (e.g. `COALESCE(self.balance, 0) +
+        // SUM(amount)`'s only self-dependency is on a column whose type
+        // becomes concrete once fed back, not on iterating the aggregate
+        // itself); the round cap below is a safety bound, not a tuned
+        // parameter.
+        //
+        // `build_type_context` only bakes the LEGACY aggregate `sources:`
+        // block into the context it builds; per-entity source columns are
+        // layered in afterwards by a separate `add_source_info_to_type_
+        // context` call. That later call is too late for a FROM-clause
+        // derived table that itself reads a per-entity source (a query
+        // shaped `SELECT … FROM (SELECT … FROM smelt.sources.x t …) inner`)
+        // — `build_type_context`'s own recursive derived-table handling
+        // infers the inner SELECT's column types eagerly, before the
+        // per-entity call ever runs, so a straight per-entity source column
+        // read through such a wrapper resolves `Unknown` regardless of any
+        // self-reference. Feeding the per-entity columns in as a synthetic
+        // legacy `SourcesConfig` instead sidesteps this ordering gap for the
+        // fixpoint below (`sources_config_from_source_infos`) — this is a
+        // local, scoped workaround for the self-referential-model schema
+        // fixpoint, not a general fix to `build_type_context`'s ordering
+        // (that lives in `smelt-db`, outside this phase's file scope).
+        let per_entity_as_legacy_sources = sources_config_from_source_infos(&per_entity_sources);
+        let mut unconverged_self_ref_models: std::collections::HashSet<String> =
+            std::collections::HashSet::new();
+        for model in models {
+            // Shared self-edge predicate (`is_self_referential`, canonical
+            // dot-path equality — the same test the first-run bootstrap
+            // dispatch in `execute.rs` uses). `model_schemas` itself stays
+            // keyed on `model.name` (the bare leaf, the SAME identifier
+            // `StaticRefSchemaProvider::resolved_columns` looks up by);
+            // only the self-edge *detection* uses the canonical path.
+            if !is_self_referential(model) {
+                continue;
+            }
+            let Some(current) = model_schemas.get(&model.name).cloned() else {
+                continue;
+            };
+            let clean_sql = smelt_parser::strip_frontmatter(&model.content);
+            let parse = smelt_parser::parse(&clean_sql);
+            let Some(file) = File::cast(parse.syntax()) else {
+                continue;
+            };
+            let Some(select_stmt) = file.select_stmt() else {
+                continue;
+            };
+
+            let mut names: Vec<String> = current.iter().map(|(n, _)| n.clone()).collect();
+            let mut previous_types: Vec<TypedColumn> =
+                current.iter().map(|(_, t)| t.clone()).collect();
+
+            // Fail-loud (`architecture.md` §"Fail-loud discipline"): a
+            // fixpoint that exhausts its round cap without converging must
+            // not silently pass off the last iterate as "the schema" —
+            // record the model so the bootstrap consumer (`execute.rs`)
+            // refuses with a diagnostic instead of executing DDL derived
+            // from an unconverged result. Non-convergence is not expected
+            // to be reachable — each round's types move monotonically
+            // through the finite promotion lattice
+            // (`type_comparison`/`promote_types`), so re-running the same
+            // pure inference over a fed-back result reaches a fixed point
+            // well inside the cap — but "not expected" is exactly what a
+            // guard is for; the cap is a safety bound, not a proof.
+            let mut converged = false;
+            const MAX_ROUNDS: usize = 5;
+            for _ in 0..MAX_ROUNDS {
+                let provider = StaticRefSchemaProvider {
+                    models: &model_schemas,
+                    seeds: &seed_schemas,
+                };
+                let mut ctx = build_type_context(&file, &per_entity_as_legacy_sources, &provider);
+                add_source_info_to_type_context(&per_entity_sources, &mut ctx);
+                let next_types = infer_select_column_types(&select_stmt, &ctx);
+
+                if next_types == previous_types {
+                    converged = true;
+                    break;
+                }
+                previous_types = next_types.clone();
+                if names.len() != next_types.len() {
+                    // A struct-spread or other name/type-count mismatch this
+                    // simple positional fixpoint doesn't model — keep
+                    // whatever names we already have and stop refining
+                    // rather than zip mismatched vectors.
+                    names.truncate(next_types.len());
+                }
+                let refined: Vec<(String, TypedColumn)> = names
+                    .iter()
+                    .cloned()
+                    .zip(next_types.iter().cloned())
+                    .collect();
+                model_schemas.insert(model.name.clone(), refined);
+            }
+            if !converged {
+                tracing::warn!(
+                    "self-referential model '{}': output-schema fixpoint did not converge \
+                     within {MAX_ROUNDS} rounds; its resolved schema is unreliable and a \
+                     first-run bootstrap will be refused",
+                    model.name
+                );
+                unconverged_self_ref_models.insert(model.name.clone());
+            }
+        }
 
         // Compile-time `vars:` for `smelt.config.var`. Parse the `vars:` block
         // and coerce each scalar to its `Text` rendering using the SAME helpers
@@ -752,6 +966,7 @@ impl UpstreamSchemas {
             model_refs,
             source_refs,
             loaders,
+            unconverged_self_ref_models,
         })
     }
 }
@@ -2971,5 +3186,88 @@ LEFT JOIN main.category_hierarchy AS ch ON p.category_code = ch.category_code"#;
             !result.contains("source"),
             "param name must be fully replaced for CTE arg, got: {result}"
         );
+    }
+
+    /// Builds a `ModelFile` with an explicit address (layer path) and refs
+    /// extracted from real SQL, for `is_self_referential` predicate tests.
+    fn make_addressed_model(name: &str, address_segments: &[&str], sql: &str) -> ModelFile {
+        ModelFile {
+            name: name.to_string(),
+            path: format!("models/{}.sql", address_segments.join("/")).into(),
+            content: sql.to_string(),
+            refs: extract_refs_from_sql(sql),
+            parse_errors: Vec::new(),
+            metadata: None,
+            kind: smelt_core::ModelKind::Sql,
+            model_id: smelt_core::ModelId::from_path("test.sql".into()),
+            address_segments: address_segments.iter().map(|s| s.to_string()).collect(),
+        }
+    }
+
+    /// The shared self-edge predicate matches a layered model's fully
+    /// qualified (canonical dot-path) self-reference — the only self-ref
+    /// spelling that resolves (see `is_self_referential`'s doc comment).
+    #[test]
+    fn self_ref_predicate_matches_canonical_layered_self_ref() {
+        let model = make_addressed_model(
+            "sessions",
+            &["silver", "sessions"],
+            "SELECT a FROM smelt.silver.sessions",
+        );
+        assert!(is_self_referential(&model));
+    }
+
+    /// A cross-layer reference that merely SHARES the model's leaf name
+    /// (`gold.sessions` referenced from `silver/sessions.sql`) is NOT a
+    /// self-edge. This pins the false positive the previous leaf-name
+    /// matching had: under `to_path().last() == model.name` this model
+    /// would (wrongly) classify as self-referential.
+    #[test]
+    fn self_ref_predicate_rejects_same_leaf_model_in_another_layer() {
+        let model = make_addressed_model(
+            "sessions",
+            &["silver", "sessions"],
+            "SELECT a FROM smelt.gold.sessions",
+        );
+        assert!(!is_self_referential(&model));
+    }
+
+    /// An unlayered model's self-reference is its bare name — canonical
+    /// path and leaf coincide, so the predicate matches (the g_08 fixture
+    /// shape: `models/running_balance.sql` reading `smelt.running_balance`).
+    #[test]
+    fn self_ref_predicate_matches_unlayered_self_ref() {
+        let model = make_addressed_model(
+            "running_balance",
+            &["running_balance"],
+            "SELECT a FROM smelt.running_balance",
+        );
+        assert!(is_self_referential(&model));
+    }
+
+    /// Test-constructed models with empty `address_segments` fall back to
+    /// `model.name` (the same fallback `db_name_owned` uses), so the
+    /// predicate still works for fixtures that never ran discovery.
+    #[test]
+    fn self_ref_predicate_falls_back_to_name_when_segments_empty() {
+        let mut model = make_addressed_model(
+            "running_balance",
+            &["running_balance"],
+            "SELECT a FROM smelt.running_balance",
+        );
+        model.address_segments = Vec::new();
+        assert!(is_self_referential(&model));
+    }
+
+    /// A model with no self-edge at all (ordinary upstream ref) is not
+    /// self-referential.
+    #[test]
+    fn self_ref_predicate_rejects_plain_upstream_ref() {
+        let model = make_addressed_model(
+            "daily",
+            &["gold", "daily"],
+            "SELECT a FROM smelt.silver.events",
+        );
+        assert!(!is_self_referential(&model));
     }
 }

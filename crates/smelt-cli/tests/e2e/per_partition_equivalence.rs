@@ -349,14 +349,16 @@ const TWO_BOUNDARY_DEVICE_ID: i64 = 999_900_002;
 ///   - `2026-03-21 00:15` (crossing the second midnight).
 ///
 /// No inactivity gap ever breaks this chain, so the only thing that can end
-/// the session rooted at `23:50` is the declared one-day cap itself
-/// (`docs/specs/model_transforms.md` §Semantics — the "semantic cap"
-/// paragraph): `sessionize`'s `RANGE BETWEEN INTERVAL '1 day' PRECEDING`
-/// frames stop seeing the root boundary once an event's timestamp passes
-/// `root + 1 day` (= `2026-03-20 23:50`), so each later event falls back to
-/// its own timestamp as a fresh session root. The truncation this chain
-/// realises is therefore the *real* function's, end to end — not a
-/// precomputed stand-in — and the harness's set-equality plus the pinned
+/// the session rooted at `23:50` is the **clock-anchored cut**
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"silver.sessions — clock-anchored cut"): the root's time-of-day
+/// (`23:50`) is `>= 00:30`, so its deadline reaches to the *second*
+/// midnight (the start of `2026-03-21`). Every event strictly before that
+/// deadline — the root plus the full day-2 grid — merges into one 59-event
+/// session; the first event at or past the deadline (`2026-03-21 00:15`)
+/// is a forced root and starts its own singleton session. The truncation
+/// this chain realises is therefore the *real* function's, end to end — not
+/// a precomputed stand-in — and the harness's set-equality plus the pinned
 /// per-session assertions in
 /// `web_analytics_session_attribution_matches_full_rebuild` verify it is
 /// identical between the day-by-day replay and the full rebuild.
@@ -1095,7 +1097,7 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
         );
     }
 
-    // ── Cap: no session exceeds the explicit max-session-length cap (1 day) ──
+    // ── Cap: no session exceeds the explicit max-session-span cap (< 2 days) ──
     for (label, rows) in [("A (full rebuild)", &rows_a), ("B (day-by-day)", &rows_b)] {
         for row in rows {
             let start =
@@ -1115,8 +1117,8 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
                     .unwrap_or_else(|e| panic!("parse session_end {:?}: {e}", row.session_end));
             let duration = end - start;
             assert!(
-                duration <= chrono::Duration::days(1),
-                "pipeline {label}: session_id={} exceeds the max-session-length cap: \
+                duration < chrono::Duration::days(2),
+                "pipeline {label}: session_id={} exceeds the max-session-span cap: \
                  session_start={} session_end={} duration={duration}",
                 row.session_id,
                 row.session_start,
@@ -1170,19 +1172,19 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
     // ── Two-boundary truncation, pinned against the REAL sessionize ───────
     //
     // The injected 60-event chain (`inject_two_boundary_session_chain`)
-    // never breaks on inactivity or platform, so its only session boundary
-    // is the root at 2026-03-19 23:50. `sessionize`'s `RANGE BETWEEN
-    // INTERVAL '1 day' PRECEDING` frame keeps that boundary visible only to
-    // events with `event_ts <= root + 1 day` (**timestamp** granularity):
-    // the root plus the 25-minute grid through 2026-03-20 23:30 — 58
-    // events. The two later events (2026-03-20 23:55, 2026-03-21 00:15)
-    // fall back to their own timestamps, and since that fallback strikes no
-    // new boundary later events could chain to, each is its own singleton
-    // session. The model's Form B relation restates the same cap in *date*
-    // space (`event_date BETWEEN session_start_date ± 1 day`) — the
-    // declared relation the output window derives from — and removes no
-    // rows the sessionize frame kept (note 2026-03-20 23:55 passes the
-    // date-space filter but is cut by the timestamp-space frame).
+    // never breaks on inactivity or platform, so its only natural boundary
+    // is the root at 2026-03-19 23:50. That root's time-of-day is `>= 00:30`,
+    // so its deadline reaches to the *second* midnight (the start of
+    // 2026-03-21) — the clock-anchored cut
+    // (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+    // §"silver.sessions — clock-anchored cut"). Every event strictly before
+    // that deadline — the root plus the full 25-minute day-2 grid — merges
+    // into one 59-event session; the first event at or past the deadline
+    // (2026-03-21 00:15) is a forced root and starts its own singleton
+    // session. The model's Form B relation restates the same one-day-forward
+    // reach in *date* space (`event_date BETWEEN session_start_date AND
+    // session_start_date + INTERVAL '1 day'`) — the declared relation the
+    // output window derives from.
     //
     // These pins are asserted per pipeline (not just via the set-equality
     // above) so the real function's truncation behaviour is documented
@@ -1210,15 +1212,14 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
         assert_eq!(
             observed,
             vec![
-                ("2026-03-19 23:50:00", "2026-03-20 23:30:00", 58, None),
-                ("2026-03-20 23:55:00", "2026-03-20 23:55:00", 1, None),
+                ("2026-03-19 23:50:00", "2026-03-20 23:55:00", 59, None),
                 ("2026-03-21 00:15:00", "2026-03-21 00:15:00", 1, None),
             ],
-            "pipeline {label}: the real sessionize must truncate the \
-             two-boundary chain at the declared 1-day cap — a 58-event \
-             session ending at the last in-cap event (2026-03-20 23:30, not \
-             the chain's last day-2 event at 23:55) plus two singleton \
-             sessions rooted by the post-cap events; got {observed:?}"
+            "pipeline {label}: the real sessionize must cut the two-boundary \
+             chain at the clock-anchored deadline (the second midnight) — a \
+             59-event session (root plus the full day-2 grid, ending at \
+             2026-03-20 23:55) plus one singleton session rooted by the \
+             first post-deadline event; got {observed:?}"
         );
 
         // Non-overlap: the device's sessions never overlap in time.
@@ -1237,7 +1238,7 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
         assert_eq!(
             total, 60,
             "pipeline {label}: the chain device's sessions must account for \
-             all 60 injected events exactly once (58 + 1 + 1)"
+             all 60 injected events exactly once (59 + 1)"
         );
     }
 }
@@ -1259,7 +1260,20 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
 // day only ever changes `event_date` partitions within the derived window.
 
 /// One row from `main.silver_events_enriched`, keyed for equivalence checks.
-type EventEnrichedRow = (i64, Option<String>, Option<String>); // (event_id, session_id, session_utm_campaign)
+///
+/// `(event_id, session_id, session_utm_campaign, session_id_chained,
+/// session_utm_campaign_chained)` — the last two carry the root-anchored
+/// identity from `silver.sessions_chained`
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"Enrichment"), alongside the primary clock-anchored pair from
+/// `silver.sessions`.
+type EventEnrichedRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Every `silver.events_enriched` row grouped by its `event_date` partition.
 fn query_events_enriched_by_partition(
@@ -1269,7 +1283,8 @@ fn query_events_enriched_by_partition(
         .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
     let mut stmt = conn
         .prepare(
-            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign \
+            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign, \
+                    session_id_chained, session_utm_campaign_chained \
              FROM main.silver_events_enriched",
         )
         .unwrap_or_else(|e| panic!("prepare events_enriched query: {e}"));
@@ -1280,6 +1295,8 @@ fn query_events_enriched_by_partition(
                 row.get::<_, i64>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .unwrap_or_else(|e| panic!("query events_enriched rows: {e}"))
@@ -1290,11 +1307,21 @@ fn query_events_enriched_by_partition(
         String,
         std::collections::BTreeSet<EventEnrichedRow>,
     > = std::collections::BTreeMap::new();
-    for (event_date, event_id, session_id, session_utm_campaign) in rows {
+    for (
+        event_date,
+        event_id,
+        session_id,
+        session_utm_campaign,
+        session_id_chained,
+        session_utm_campaign_chained,
+    ) in rows
+    {
         by_partition.entry(event_date).or_default().insert((
             event_id,
             session_id,
             session_utm_campaign,
+            session_id_chained,
+            session_utm_campaign_chained,
         ));
     }
     by_partition
@@ -1445,5 +1472,102 @@ fn web_analytics_events_enriched_narrow_update() {
         "narrow update touched previously-written partition(s) it should not \
          have (a run touching only 2026-03-25 must not rewrite earlier \
          partitions): {unexpected_changes:?}"
+    );
+}
+
+/// `silver.events_enriched` is now downstream of **two** maintained session
+/// tables (`docs/plans/20260711-clock-vs-root-anchored-sessions.md` Phase
+/// 4): `silver.sessions` (window-independent, clock-anchored) and
+/// `silver.sessions_chained` (self-referential, `Ordered`, root-anchored —
+/// Phase 3). The per-partition equivalence contract must still hold end to
+/// end even though one of the two upstreams now builds under strict
+/// sequential ordering rather than in parallel: day-by-day incremental
+/// maintenance of `events_enriched` must equal a full-window rebuild,
+/// column-for-column, including the added `session_id_chained` /
+/// `session_utm_campaign_chained` pair — not just the pre-existing
+/// `session_id` / `session_utm_campaign` pair from `silver.sessions`.
+#[test]
+fn events_enriched_dual_ids_replay_matches_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "enriched-dual-pipeline-A",
+    );
+    let by_partition_a = query_events_enriched_by_partition(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("enriched-dual-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let by_partition_b = query_events_enriched_by_partition(&db_path);
+
+    assert!(
+        !by_partition_a.is_empty(),
+        "Pipeline A produced no silver.events_enriched rows"
+    );
+    assert_eq!(
+        by_partition_a.keys().collect::<Vec<_>>(),
+        by_partition_b.keys().collect::<Vec<_>>(),
+        "silver.events_enriched partition sets (event_date) differ between \
+         full rebuild and day-by-day replay once sessions_chained (Ordered) \
+         is joined in"
+    );
+
+    let mut mismatches = Vec::new();
+    for (partition, rows_a) in &by_partition_a {
+        let rows_b = by_partition_b.get(partition);
+        if rows_b != Some(rows_a) {
+            mismatches.push(format!(
+                "  partition {partition}: A has {} rows, B has {:?} rows",
+                rows_a.len(),
+                rows_b.map(|r| r.len())
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "silver.events_enriched (dual session ids) differs between full \
+         rebuild and day-by-day replay on at least one partition:\n{}",
+        mismatches.join("\n")
+    );
+
+    // Every event carries both identities: `session_id` (primary,
+    // `silver.sessions`) and `session_id_chained` (`silver.sessions_chained`)
+    // must both be populated for every row — the join is inner on both
+    // upstreams, so a missing id on either side would mean the row dropped
+    // out of the result set entirely rather than surfacing as NULL, but we
+    // assert it directly against the materialized rows as the ground truth.
+    let mut missing_id = Vec::new();
+    for (partition, rows) in &by_partition_a {
+        for (event_id, session_id, _, session_id_chained, _) in rows {
+            if session_id.is_none() || session_id_chained.is_none() {
+                missing_id.push(format!(
+                    "partition {partition} event_id {event_id}: session_id={session_id:?} \
+                     session_id_chained={session_id_chained:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        missing_id.is_empty(),
+        "every silver.events_enriched row must carry both session_id and \
+         session_id_chained: {}",
+        missing_id.join("\n")
     );
 }

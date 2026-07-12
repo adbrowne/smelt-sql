@@ -19,7 +19,7 @@ use chrono::{Datelike, Duration, NaiveDate};
 use smelt_core::config::TimeseriesConfig;
 use smelt_core::{BatchedConfig, Granularity};
 use smelt_logical::analysis::source_bounds::{Seconds, Skew};
-use smelt_logical::analysis::walk::model_partition_skew;
+use smelt_logical::analysis::walk::{model_partition_skew, model_partition_skew_excluding_self};
 use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
 use smelt_planner::{
     analyze_temporal_dependencies, compute_effective_window, granularity_period_days, BatchSafety,
@@ -56,12 +56,17 @@ pub struct IncrementalWindows {
     /// The model's own derived partition-column skew bound (`docs/specs/
     /// model_transforms.md` §Semantics "The output window is derived, never
     /// assumed"), as [`model_partition_skew`] reads it off the (expanded)
-    /// model SQL. `Skew::ZERO` for an identity model. Reported regardless of
-    /// whether this run actually widened its batches by it (see
-    /// [`compute_incremental_windows_ordered`]'s `Ordered` branch) — a
-    /// consumer that needs to know whether the transparent-slice fast path
-    /// (`is_transparent_single_source`) is still eligible reads this field
-    /// directly rather than re-deriving it from the SQL a second time.
+    /// model SQL — always the value that actually widened `batches` below,
+    /// `Skew::ZERO` for an identity model. For an `Ordered` self-referential
+    /// model (`docs/specs/batched_models.md` §"Window independence and
+    /// self-referential models") this is the skew derived with the
+    /// self-edge's own bounding relation excluded as a candidate anchor (see
+    /// [`compute_incremental_windows_ordered`]) — never the self-edge's own
+    /// bound, which is a distinct, already-proven mechanism, not a partition-
+    /// column skew declaration. A consumer that needs to know whether the
+    /// transparent-slice fast path (`is_transparent_single_source`) is still
+    /// eligible reads this field directly rather than re-deriving it from the
+    /// SQL a second time.
     pub skew: Skew,
 }
 
@@ -127,34 +132,28 @@ pub fn compute_incremental_windows(
         full_range,
         batch_size_days,
         per_partition,
-        true,
+        None,
     )
 }
 
 /// The shared implementation behind [`compute_incremental_windows`] and
 /// [`compute_incremental_windows_ordered`]'s `Ordered` branch.
 ///
-/// `apply_output_window_derivation` gates whether `full_range` is widened by
-/// [`model_partition_skew`] before chunking. It is `true` for every ordinary
-/// call ([`compute_incremental_windows`] always passes `true`) and `false`
-/// only when [`compute_incremental_windows_ordered`] has forced strictly
-/// sequential single-partition batches for a **convergent self-edge**
-/// (`WindowIndependence::Ordered`) — a self-referential model reading its own
-/// immediately-prior partition is the *windowed-keyed-maintenance driver*
-/// mechanism (`docs/specs/model_transforms.md`'s own catalog entry, distinct
-/// from the *default plan (recompute corner)* the output-window-derivation
-/// entry belongs to), and its own convergence proof already establishes
-/// correctness without any output-window widening. Skipping it here also
-/// sidesteps a textual false positive: a self-edge's own bounding relation
-/// (e.g. `bal.d >= t.d - INTERVAL '1 day'`) reads, to a text-level anchor
-/// scan, identically to a genuine partition-column skew declaration when the
-/// self-referenced table's column happens to share the model's own
-/// `partition_column` name — the model's own output column is a direct
-/// passthrough of the self-reference in that case, not a derived, skewing
-/// value, so no genuine skew exists to invert. `windows.skew` still reports
-/// the raw derived value in both cases (only whether it *widens the chunked
-/// range* differs) — a `false` here never turns a real skew into a lie, it
-/// only declines to compose it with the Ordered driver's own mechanism.
+/// `skew_override`, when `Some`, is used in place of deriving
+/// [`model_partition_skew`] from `sql` directly — [`compute_incremental_windows_ordered`]'s
+/// `Ordered` branch supplies a skew derived with the self-edge's own
+/// bounding relation excluded as a candidate anchor (`docs/specs/
+/// batched_models.md` §"Window independence and self-referential models": the
+/// self-edge is never a skew anchor). Every ordinary call
+/// ([`compute_incremental_windows`], and [`compute_incremental_windows_ordered`]'s
+/// `WindowIndependent` branch) passes `None`, deriving skew from `sql`
+/// unmodified exactly as before. Output-window derivation always runs — a
+/// convergent self-edge's own proof establishes correctness for the
+/// self-reference itself, but a *separate* genuine Form B relation elsewhere
+/// in the same model (anchored on a non-self source) still declares a real
+/// partition-column skew, and an `Ordered` model's write window rebases by it
+/// exactly like a window-independent model's; ordering then applies over the
+/// rebased partitions, strictly sequential either way.
 #[allow(clippy::too_many_arguments)]
 fn compute_incremental_windows_impl(
     timeseries: &TimeseriesConfig,
@@ -165,7 +164,7 @@ fn compute_incremental_windows_impl(
     full_range: &TimeRange,
     batch_size_days: Option<u32>,
     per_partition: bool,
-    apply_output_window_derivation: bool,
+    skew_override: Option<Skew>,
 ) -> Result<IncrementalWindows, String> {
     let start_date = match parse_date(&full_range.start) {
         Ok(d) => d,
@@ -214,27 +213,30 @@ fn compute_incremental_windows_impl(
 
     // The model's own derived partition-column skew bound — a pure leaf
     // classifier `smelt-logical` owns (`crate::analysis::walk::model_partition_skew`);
-    // consumed here, never re-derived (maintenance-plan purity). Reported on
-    // `IncrementalWindows` regardless of `apply_output_window_derivation`, so
-    // a caller can always tell a genuinely skewed model from an identity one.
-    let skew = model_partition_skew(&stripped, &timeseries.partition_column);
+    // consumed here, never re-derived (maintenance-plan purity). `skew_override`
+    // (set only by `compute_incremental_windows_ordered`'s `Ordered` branch)
+    // substitutes a skew derived with the self-edge's own bounding relation
+    // excluded as a candidate anchor; every other caller derives directly
+    // from `sql` unmodified.
+    let skew = skew_override
+        .unwrap_or_else(|| model_partition_skew(&stripped, &timeseries.partition_column));
 
     // Invert the run window through the skew bound
     // (`docs/specs/model_transforms.md` §Semantics "The output window is
     // derived, never assumed"): `after` extends the window earlier (it
     // bounds how far the driving date can sit *after* the partition column,
     // i.e. how far a partition can be dated *before* the data that reaches
-    // it), `before` extends it later. Skipped for the Ordered driver — see
-    // `compute_incremental_windows_impl`'s doc comment.
-    let (output_start, output_end) = if apply_output_window_derivation {
-        let raw_start = start_date - Duration::days(days_ceil(skew.after) as i64);
-        let raw_end = end_date + Duration::days(days_ceil(skew.before) as i64);
+    // it), `before` extends it later. Always applied — see
+    // `compute_incremental_windows_impl`'s doc comment; `skew` is
+    // `Skew::ZERO` (a no-op here) for both an identity model and an `Ordered`
+    // model whose only bounding relation is its own self-edge.
+    let (output_start, output_end) = {
+        let raw_start = start_date - Duration::days(days_ceil(skew.after));
+        let raw_end = end_date + Duration::days(days_ceil(skew.before));
         (
             align_output_start(raw_start, &timeseries.granularity),
             align_output_end(raw_end, &timeseries.granularity),
         )
-    } else {
-        (start_date, end_date)
     };
 
     // Compute filter widening. Unbounded lookback can't be widened; use zero.
@@ -379,11 +381,24 @@ pub fn compute_incremental_windows_ordered(
         WindowIndependence::WindowIndependent => per_partition,
     };
 
-    // The `Ordered` driver does not compose with output-window derivation —
-    // see `compute_incremental_windows_impl`'s doc comment for why (a
-    // distinct licensed mechanism, plus a real risk of a same-named
-    // self-referenced column reading as a false-positive skew anchor).
-    let apply_output_window_derivation = !matches!(verdict, WindowIndependence::Ordered);
+    // `Ordered` composes with output-window derivation exactly like
+    // `WindowIndependent` (`compute_incremental_windows_impl`'s doc comment)
+    // — but the self-edge itself is never a skew anchor: its own bounding
+    // relation reads, to the anchor scan, identically to a genuine
+    // partition-column skew declaration whenever the self-referenced table's
+    // column shares the model's own `partition_column` name. The exclusion
+    // is owned by `smelt-logical`'s shared composition walk
+    // (`model_partition_skew_excluding_self`, resolved per scope — a genuine
+    // Form B relation anchored on a non-self source still contributes);
+    // this function only consumes the derived value (maintenance-plan
+    // purity, property-composition-walk rule).
+    let skew_override = matches!(verdict, WindowIndependence::Ordered).then(|| {
+        model_partition_skew_excluding_self(
+            &stripped,
+            &timeseries.partition_column,
+            Some(model_name),
+        )
+    });
 
     compute_incremental_windows_impl(
         timeseries,
@@ -394,7 +409,7 @@ pub fn compute_incremental_windows_ordered(
         full_range,
         batch_size_days,
         forced_per_partition,
-        apply_output_window_derivation,
+        skew_override,
     )
 }
 
