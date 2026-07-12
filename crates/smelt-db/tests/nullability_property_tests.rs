@@ -1263,6 +1263,149 @@ proptest! {
     }
 }
 
+// ---- Generator reachability smoke tests ----
+//
+// `prop_nullability_sound` drives `test_scenario_strategy()` / `generate_expr` —
+// the exact same shared generators `type_property_tests.rs` uses (see
+// `prop_helpers::generators`), which were widened in July 2026 to cover
+// temporal/interval arithmetic, decimal ops and casts, EXTRACT(EPOCH), and
+// mixed naive/tz-aware timestamp comparisons. Nothing in this file's use of
+// those generators narrows that space back down. These are statistical
+// guards, mirroring `type_property_tests.rs`'s `mod reachability`: over a
+// deterministic sample of generated scenarios, assert at least one occurrence
+// of each "hard" path reaches the nullability property, so a future edit that
+// silently stops emitting one of these paths (here, or upstream in the shared
+// generator) is caught rather than papered over by vacuous coverage.
+mod reachability {
+    use super::{generate_expr, test_scenario_strategy, TypedExpr};
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+
+    /// Deterministically sample `n` generated expression-kind corpora from the
+    /// same top-level scenario strategy `prop_nullability_sound` drives, and
+    /// render each surviving expression's raw SQL text (not the assembled
+    /// query) — sufficient for the substring/token reachability checks below.
+    fn sample_generated_expr_sql(n: usize) -> Vec<String> {
+        let mut runner = TestRunner::deterministic();
+        let strat = test_scenario_strategy();
+        let mut out = Vec::with_capacity(n);
+        for _ in 0..n {
+            let tree = strat
+                .new_tree(&mut runner)
+                .expect("strategy generated a value");
+            let (columns, _shape, expr_kinds, func_indices) = tree.current();
+            let mut exprs: Vec<TypedExpr> = Vec::new();
+            for (i, kind) in expr_kinds.iter().enumerate() {
+                let func_idx = func_indices.get(i).copied().unwrap_or(0);
+                if let Some(expr) = generate_expr(&columns, *kind, i, func_idx) {
+                    exprs.push(expr);
+                }
+            }
+            out.extend(exprs.into_iter().map(|e| e.sql));
+        }
+        out
+    }
+
+    const N: usize = 500;
+
+    fn has_binop(corpus: &[String], left_prefix: &str, ops: &[&str], right_prefix: &str) -> bool {
+        corpus.iter().any(|sql| {
+            for token_l in tokens_starting_with(sql, left_prefix) {
+                for op in ops {
+                    let needle_lr = format!("{token_l} {op} ");
+                    if let Some(pos) = sql.find(&needle_lr) {
+                        let rest = &sql[pos + needle_lr.len()..];
+                        if starts_with_prefix_token(rest, right_prefix) {
+                            return true;
+                        }
+                    }
+                }
+            }
+            false
+        })
+    }
+
+    fn tokens_starting_with(sql: &str, prefix: &str) -> Vec<String> {
+        sql.split(|c: char| !(c.is_alphanumeric() || c == '_'))
+            .filter(|t| t.starts_with(prefix) && !t.is_empty())
+            .map(|t| t.to_string())
+            .collect()
+    }
+
+    fn starts_with_prefix_token(rest: &str, prefix: &str) -> bool {
+        let tok: String = rest
+            .chars()
+            .take_while(|c| c.is_alphanumeric() || *c == '_')
+            .collect();
+        tok.starts_with(prefix) && !tok.is_empty()
+    }
+
+    #[test]
+    fn reaches_interval_plus_timestamp() {
+        let corpus = sample_generated_expr_sql(N);
+        let hit = has_binop(&corpus, "ts_col", &["+", "-"], "interval_col")
+            || has_binop(&corpus, "interval_col", &["+", "-"], "ts_col")
+            || has_binop(&corpus, "tstz_col", &["+", "-"], "interval_col")
+            || has_binop(&corpus, "interval_col", &["+", "-"], "tstz_col");
+        assert!(
+            hit,
+            "nullability generators never produced interval±timestamp over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_temporal_difference() {
+        let corpus = sample_generated_expr_sql(N);
+        let hit = has_binop(&corpus, "ts_col", &["-"], "ts_col")
+            || has_binop(&corpus, "tstz_col", &["-"], "tstz_col");
+        assert!(
+            hit,
+            "nullability generators never produced a temporal difference over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_decimal_arithmetic() {
+        let corpus = sample_generated_expr_sql(N);
+        assert!(
+            has_binop(&corpus, "dec_col", &["+"], "dec_col")
+                || has_binop(&corpus, "dec_col", &["*"], "dec_col")
+                || has_binop(&corpus, "dec_col", &["/"], "dec_col"),
+            "nullability generators never produced decimal binary arithmetic over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_decimal_cast() {
+        let corpus = sample_generated_expr_sql(N);
+        assert!(
+            corpus.iter().any(|s| s.contains("DECIMAL(12,3)")),
+            "nullability generators never produced CAST(... AS DECIMAL(12,3)) over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_extract_epoch() {
+        let corpus = sample_generated_expr_sql(N);
+        assert!(
+            corpus.iter().any(|s| s.contains("EXTRACT(EPOCH")),
+            "nullability generators never produced EXTRACT(EPOCH ...) over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_mixed_tz_comparison() {
+        let corpus = sample_generated_expr_sql(N);
+        let cmp = &["=", "<>", "<", ">", "<=", ">="];
+        let hit = has_binop(&corpus, "ts_col", cmp, "tstz_col")
+            || has_binop(&corpus, "tstz_col", cmp, "ts_col");
+        assert!(
+            hit,
+            "nullability generators never produced a mixed-tz comparison over {N} cases"
+        );
+    }
+}
+
 // ---- Helpers ----
 
 /// Parse a CTE query with smelt and return `(alias, TypedColumn)` pairs with nullability.
