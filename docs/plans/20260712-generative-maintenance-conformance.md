@@ -73,7 +73,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 3 — S-tracked oracle + standing gate (append-only, partition grain) | done | b629c4c0 | 2026-07-12 |
 | 4 — Mutable sources + settled-point oracle + sensitivity probe | done | 34440187 | 2026-07-12 |
 | 5 — Keyed grain + ledger probes + carve-outs | done | 0ebe6e02 | 2026-07-12 |
-| 6 — Schedule enrichment | done | PENDING_SHA | 2026-07-12 |
+| 6 — Schedule enrichment | done | 3ffa9ffd | 2026-07-12 |
 | 7 — Plan-claim probes | pending | | |
 | 8 — Simulated change feed | pending | | |
 | 9 — Definition-change steps | pending | | |
