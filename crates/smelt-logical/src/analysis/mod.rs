@@ -110,6 +110,21 @@ pub fn classify_select_items(
             }
         }
 
+        // Window-function projections (`ROW_NUMBER() OVER (...)`, etc.) are
+        // neither an aggregate nor a plain grouping expression: DuckDB never
+        // treats a window item as a `GROUP BY ALL` key. Route it to the
+        // non-key `OtherAggregate` kind so every consumer of grouping keys
+        // (`group_by_all_keys` and friends) excludes it, the same way it
+        // already excludes real aggregates.
+        if expr.window_spec().is_some() {
+            items.push(SelectItemKind::OtherAggregate {
+                text: expr_text,
+                alias,
+                expr: expr.clone(),
+            });
+            continue;
+        }
+
         items.push(SelectItemKind::GroupByKey {
             text: expr_text,
             alias,

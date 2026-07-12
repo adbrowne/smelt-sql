@@ -43,6 +43,33 @@ fn walk_group_by_all_matches_explicit_twin() {
 }
 
 #[test]
+fn walk_group_by_all_excludes_window_function_select_item() {
+    // A bare window-function projection is neither an aggregate nor a plain
+    // grouping expression; DuckDB never treats it as a GROUP BY ALL key.
+    let all = group_by_scope(
+        "SELECT k, SUM(v) AS s, ROW_NUMBER() OVER (ORDER BY k) AS rn FROM t GROUP BY ALL",
+    );
+    let explicit = group_by_scope(
+        "SELECT k, SUM(v) AS s, ROW_NUMBER() OVER (ORDER BY k) AS rn FROM t GROUP BY k",
+    );
+
+    assert!(
+        all.is_some(),
+        "GROUP BY ALL must still produce a GroupBy scope"
+    );
+    assert_eq!(
+        all.as_ref().map(|s| &s.keys),
+        explicit.as_ref().map(|s| &s.keys),
+        "GROUP BY ALL scope keys must match the explicit GROUP BY k twin"
+    );
+    assert_eq!(
+        all.expect("group by scope").keys,
+        vec!["k".to_string()],
+        "the window-function select item must not become a grouping key"
+    );
+}
+
+#[test]
 fn walk_group_by_all_multi_key_matches_explicit_twin() {
     let all = group_by_scope("SELECT a, b, COUNT(*) AS n FROM t GROUP BY ALL");
     let explicit = group_by_scope("SELECT a, b, COUNT(*) AS n FROM t GROUP BY a, b");
