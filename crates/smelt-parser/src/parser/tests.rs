@@ -8484,6 +8484,24 @@ fn at_time_zone_nested_in_parenthesized_tz_operand() {
 }
 
 #[test]
+fn at_time_zone_nested_in_case_tz_operand() {
+    // The tz operand may be a CASE expression whose arms themselves contain
+    // `AT TIME ZONE`. CASE WHEN/THEN/ELSE arms enter expression parsing via
+    // `parse_pipe_expr` directly (not `parse_expression_inner`), so the
+    // operand guard must be scoped there too. DuckDB's PARSER accepts this
+    // shape (it only fails later, at bind, on the arm-type mix):
+    //   SELECT ts AT TIME ZONE
+    //     CASE WHEN 1 = 1 THEN b AT TIME ZONE 'UTC' ELSE c END FROM t
+    let sql = "SELECT ts AT TIME ZONE CASE WHEN 1 = 1 THEN b AT TIME ZONE 'UTC' ELSE c END FROM t";
+    let result = parse(sql);
+    assert!(
+        result.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
 fn at_time_zone_parenthesized_left_operand() {
     // `(ts AT TIME ZONE 'UTC') AT TIME ZONE 'EST'` — explicit parens around
     // the left operand (verified to execute on DuckDB). The outer node's

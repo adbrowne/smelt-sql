@@ -47,19 +47,6 @@ impl<'a> super::Parser<'a> {
     pub(super) fn parse_expression_inner(&mut self) {
         let checkpoint = self.builder.checkpoint();
 
-        // Scope the `in_at_time_zone_operand` guard to the current nesting
-        // level. The guard exists only to keep a *directly chained* `AT TIME
-        // ZONE` out of the tz operand (that chain path runs through
-        // `parse_unary_expr` → `parse_primary_expr` without re-entering this
-        // function). Any delimited sub-context — parenthesized group,
-        // subquery, function-call argument, CASE branch, bracket list —
-        // re-enters expression parsing here, and starts a fresh expression
-        // where `AT TIME ZONE` must parse normally again (e.g.
-        // `ts AT TIME ZONE (b AT TIME ZONE 'UTC')`, whose inner form DuckDB's
-        // parser accepts).
-        let saved_in_at_time_zone_operand = self.in_at_time_zone_operand;
-        self.in_at_time_zone_operand = false;
-
         if self.at(IF_KW) {
             // Ternary expression: `if COND then THEN else ELSE`.
             self.parse_ternary_from_if(checkpoint);
@@ -67,8 +54,6 @@ impl<'a> super::Parser<'a> {
             // Non-ternary expression — pass through to pipe.
             self.parse_pipe_expr();
         }
-
-        self.in_at_time_zone_operand = saved_in_at_time_zone_operand;
     }
 
     /// Parse a full ternary expression starting at the `if` keyword.
@@ -149,6 +134,28 @@ impl<'a> super::Parser<'a> {
     /// in Data-World positions.  The parser does not gate — it produces the CST
     /// node unconditionally.
     pub(super) fn parse_pipe_expr(&mut self) {
+        // Scope the `in_at_time_zone_operand` guard to the current nesting
+        // level. The guard exists only to keep a *directly chained* `AT TIME
+        // ZONE` out of the tz operand — that chain path runs through
+        // `parse_unary_expr` → `parse_primary_expr` and never enters this
+        // function, so clearing here cannot break left-associative chaining.
+        // Every nested sub-context — parenthesized group, subquery select
+        // item, function-call argument, CASE WHEN/THEN/ELSE arm, ternary
+        // slot, list spread, bracket list element — funnels through
+        // `parse_pipe_expr` (directly or via `parse_expression`), and each
+        // starts a fresh expression where `AT TIME ZONE` must parse normally
+        // again (e.g. `ts AT TIME ZONE (b AT TIME ZONE 'UTC')` or
+        // `ts AT TIME ZONE CASE WHEN p THEN b AT TIME ZONE 'UTC' ELSE c END`,
+        // both of which DuckDB's parser accepts).
+        let saved_in_at_time_zone_operand = self.in_at_time_zone_operand;
+        self.in_at_time_zone_operand = false;
+
+        self.parse_pipe_expr_impl();
+
+        self.in_at_time_zone_operand = saved_in_at_time_zone_operand;
+    }
+
+    fn parse_pipe_expr_impl(&mut self) {
         // Use a checkpoint so we can wrap the already-parsed LHS inside
         // a PIPE_EXPR node when we encounter `|>`.
         let checkpoint = self.builder.checkpoint();
