@@ -263,6 +263,54 @@ pub struct GrainDecl {
     pub unique_key: Vec<String>,
 }
 
+/// A definition-change edit a `RewriteModel` schedule step
+/// (`crate::schedule_gen::ConformanceStep::RewriteModel`) can apply to an
+/// already-staged recipe's model body
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
+/// `maintenance_plan.md` §"The definition-change trigger"). Both variants
+/// are deliberately narrow, hand-picked shapes — not a generated construct
+/// pool — since Phase 9's scope is asserting TODAY's contract (model-hash
+/// change invalidates the interval store; the run pipeline always compiles
+/// and executes whatever SQL is currently on disk), not the spec's
+/// `SkeletonAdd`/`PureBackfill`/`UpstreamRederive` classification, which is
+/// unbuilt (no `derive_model_maintenance_plan` caller reads a prior
+/// definition to classify an added column — confirmed by the same `rg`
+/// sweep noted in this plan's "Deferred during implementation" section for
+/// Phase 7's pin surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelEdit {
+    /// Adds a derived, non-skeleton payload column computed from the
+    /// existing payload column (e.g. `COUNT(*) AS row_count` alongside an
+    /// aggregate's existing `SUM(val)`) — same `GROUP BY`/identity shape,
+    /// so [`ModelRecipe::grain`]'s declared `unique_key` is unchanged.
+    AddPayloadColumn,
+    /// Adds the source's row-key column into the aggregate's `GROUP BY` (a
+    /// skeleton/identity position) — a grain change:
+    /// `maintenance_plan.md`'s `SkeletonAdd` territory. Only meaningful for
+    /// the aggregate constructs (`AdditiveAgg`/`IdempotentAgg`/
+    /// `DecomposedAgg`/`HolisticAgg`), which have a `GROUP BY` skeleton to
+    /// widen; the row-shaped constructs (`PassThrough`/`Filter`) already
+    /// project every source column and have none.
+    AddGroupingColumn,
+}
+
+/// The [`ModelEdit`]s meaningful for `construct` — [`ModelRecipe::evolution`]'s
+/// value, and the set [`crate::render::render_model_body_with_edit`] must
+/// handle for that construct.
+fn applicable_evolutions(construct: BodyConstruct) -> Vec<ModelEdit> {
+    match construct {
+        BodyConstruct::PassThrough | BodyConstruct::Filter { .. } => {
+            vec![ModelEdit::AddPayloadColumn]
+        }
+        BodyConstruct::AdditiveAgg
+        | BodyConstruct::IdempotentAgg
+        | BodyConstruct::DecomposedAgg
+        | BodyConstruct::HolisticAgg => {
+            vec![ModelEdit::AddPayloadColumn, ModelEdit::AddGroupingColumn]
+        }
+    }
+}
+
 /// A fully-typed model recipe: one source, one body construct, one grain
 /// declaration, ready for [`crate::render`] to turn into SQL/YAML text.
 #[derive(Debug, Clone)]
@@ -271,6 +319,9 @@ pub struct ModelRecipe {
     pub source: SourceRecipe,
     pub grain: GrainDecl,
     pub construct: BodyConstruct,
+    /// The [`ModelEdit`]s a `RewriteModel` schedule step may apply to this
+    /// recipe (Phase 9) — empty for constructs with no meaningful edit.
+    pub evolution: Vec<ModelEdit>,
 }
 
 impl ModelRecipe {
@@ -288,6 +339,7 @@ impl ModelRecipe {
             source,
             grain,
             construct,
+            evolution: applicable_evolutions(construct),
         }
     }
 }

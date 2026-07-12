@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use crate::recipe::{BodyConstruct, KeyedRecipe, ModelRecipe, SourcePosture};
+use crate::recipe::{BodyConstruct, KeyedRecipe, ModelEdit, ModelRecipe, SourcePosture};
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
 /// derives the incremental filter; `model_shapes.rs`'s documented
@@ -51,6 +51,120 @@ pub fn render_model_body(recipe: &ModelRecipe) -> String {
             )
         }
     }
+}
+
+/// The model's `SELECT` body with `edit` applied (Phase 9;
+/// `crate::recipe::ModelEdit`) — the `RewriteModel` schedule step's
+/// rendering, kept alongside [`render_model_body`] so both share the same
+/// "renders once, serves three" discipline for the edited body (model file
+/// AND its oracle, [`render_oracle_sql_with_edit`]). Only the `AdditiveAgg`/
+/// `IdempotentAgg`/`DecomposedAgg`/`HolisticAgg`/`PassThrough`/`Filter`
+/// combinations `ModelEdit::applicable_evolutions` (see `recipe.rs`)
+/// actually names are handled; any other combination is a generator/caller
+/// bug, panicking loudly rather than silently rendering something bogus.
+pub fn render_model_body_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> String {
+    let src = format!("smelt.sources.{}", recipe.source.name);
+    let d = &recipe.source.clock_column;
+    let id = &recipe.source.key_column;
+    let val = &recipe.source.payload_column;
+    match (recipe.construct, edit) {
+        (BodyConstruct::PassThrough, ModelEdit::AddPayloadColumn) => {
+            format!("SELECT {d}, {id}, {val}, {val} * 2 AS val_doubled FROM {src}")
+        }
+        (BodyConstruct::Filter { threshold }, ModelEdit::AddPayloadColumn) => {
+            format!(
+                "SELECT {d}, {id}, {val}, {val} * 2 AS val_doubled FROM {src} \
+                 WHERE {val} > {threshold}"
+            )
+        }
+        (BodyConstruct::AdditiveAgg, ModelEdit::AddPayloadColumn) => {
+            format!(
+                "SELECT {d}, SUM({val}) AS total, COUNT(*) AS row_count FROM {src} GROUP BY {d}"
+            )
+        }
+        (BodyConstruct::AdditiveAgg, ModelEdit::AddGroupingColumn) => {
+            format!("SELECT {d}, {id}, SUM({val}) AS total FROM {src} GROUP BY {d}, {id}")
+        }
+        (BodyConstruct::IdempotentAgg, ModelEdit::AddPayloadColumn) => {
+            format!(
+                "SELECT {d}, MAX({val}) AS max_val, COUNT(*) AS row_count FROM {src} \
+                 GROUP BY {d}"
+            )
+        }
+        (BodyConstruct::IdempotentAgg, ModelEdit::AddGroupingColumn) => {
+            format!("SELECT {d}, {id}, MAX({val}) AS max_val FROM {src} GROUP BY {d}, {id}")
+        }
+        (BodyConstruct::DecomposedAgg, ModelEdit::AddPayloadColumn) => {
+            format!(
+                "SELECT {d}, AVG({val}) AS avg_val, COUNT(*) AS row_count FROM {src} \
+                 GROUP BY {d}"
+            )
+        }
+        (BodyConstruct::DecomposedAgg, ModelEdit::AddGroupingColumn) => {
+            format!("SELECT {d}, {id}, AVG({val}) AS avg_val FROM {src} GROUP BY {d}, {id}")
+        }
+        (BodyConstruct::HolisticAgg, ModelEdit::AddPayloadColumn) => {
+            format!(
+                "SELECT {d}, MEDIAN({val}) AS med_val, COUNT(DISTINCT {id}) AS distinct_ids, \
+                 COUNT(*) AS row_count FROM {src} GROUP BY {d}"
+            )
+        }
+        (BodyConstruct::HolisticAgg, ModelEdit::AddGroupingColumn) => {
+            format!(
+                "SELECT {d}, {id}, MEDIAN({val}) AS med_val, COUNT(DISTINCT {id}) AS \
+                 distinct_ids FROM {src} GROUP BY {d}, {id}"
+            )
+        }
+        (BodyConstruct::PassThrough, ModelEdit::AddGroupingColumn)
+        | (BodyConstruct::Filter { .. }, ModelEdit::AddGroupingColumn) => {
+            panic!(
+                "ModelEdit::AddGroupingColumn is not applicable to {:?} — row-shaped \
+                 constructs already project every source column and have no GROUP BY \
+                 skeleton to widen (recipe.rs's applicable_evolutions must never offer this \
+                 combination)",
+                recipe.construct
+            )
+        }
+    }
+}
+
+/// The declared `batched.unique_key` after applying `edit` (Phase 9): unchanged
+/// for [`ModelEdit::AddPayloadColumn`] (same skeleton); the source's row-key
+/// column appended for [`ModelEdit::AddGroupingColumn`] (the widened `GROUP
+/// BY`'s own new column).
+pub fn rewritten_unique_key(recipe: &ModelRecipe, edit: ModelEdit) -> Vec<String> {
+    match edit {
+        ModelEdit::AddPayloadColumn => recipe.grain.unique_key.clone(),
+        ModelEdit::AddGroupingColumn => {
+            let mut key = recipe.grain.unique_key.clone();
+            key.push(recipe.source.key_column.clone());
+            key
+        }
+    }
+}
+
+/// The full rewritten model file contents (Phase 9): same frontmatter shape
+/// as [`render_model_file`], with [`rewritten_unique_key`]'s declared key and
+/// [`render_model_body_with_edit`]'s body.
+pub fn render_model_file_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> String {
+    let unique_key = rewritten_unique_key(recipe, edit).join(", ");
+    format!(
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+        etc = recipe.grain.event_time_column,
+        pc = recipe.grain.partition_column,
+        gran = recipe.grain.granularity,
+        body = render_model_body_with_edit(recipe, edit),
+    )
+}
+
+/// The rewritten oracle query (Phase 9) — [`render_model_body_with_edit`]
+/// with `smelt.sources.<x>` replaced by its physical table name, mirroring
+/// [`render_oracle_sql`]'s substitution for the un-rewritten body.
+pub fn render_oracle_sql_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> String {
+    render_model_body_with_edit(recipe, edit).replace(
+        &format!("smelt.sources.{}", recipe.source.name),
+        &format!("main.sources_{}", recipe.source.name),
+    )
 }
 
 /// The full model file contents: frontmatter (`timeseries:` + `refresh:

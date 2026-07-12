@@ -76,7 +76,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 6 — Schedule enrichment | done | 3ffa9ffd | 2026-07-12 |
 | 7 — Plan-claim probes | done | 7c0478cb | 2026-07-13 |
 | 8 — Simulated change feed | done | 7d3f3195 | 2026-07-13 |
-| 9 — Definition-change steps | pending | | |
+| 9 — Definition-change steps | done | PLACEHOLDER_SHA | 2026-07-13 |
 | 10 — Generated DAGs | pending | | |
 | 11 — Graduation & consolidation | pending | | |
 
@@ -426,6 +426,17 @@ You are executing this plan from the start of a new session. Your job is to driv
   Wiring the pin into `derive_model_maintenance_plan`'s callers (and into keyed-grain dispatch,
   which has no technique-choice hook at all today) is real, scoped follow-up work outside this
   plan's Critical files.
+
+- **Phase 9**: windowed incremental (`DELETE`+`INSERT`) runs never persist a deployed-schema
+  snapshot — `save_deployed_schema` in `crates/smelt-runtime/src/execute.rs` is called only from
+  the full-refresh branch, never from the incremental (`Some(inc_plan)`) branch. Consequently
+  `schema_evolution::check_and_migrate`'s ALTER-TABLE detection always observes `FirstDeployment`
+  for incremental models and never fires; a plain windowed re-run against an already-materialized
+  table after a column-add rewrite hits a raw DuckDB "table has N columns but M values were
+  supplied" binder error instead of migrating gracefully. Phase 9's tests route recovery through
+  `FullRefreshRun` (today's actual working recovery path) rather than a plain windowed rerun, and
+  document the gap inline. Fixing incremental-path schema-evolution support is real, scoped
+  follow-up work outside this plan's Critical files (`smelt-runtime/src/execute.rs`).
 
 ## Verification
 

@@ -20,7 +20,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 use proptest::prelude::*;
 
-use crate::recipe::{arb_payload_value, ModelRecipe, SourceRecipe};
+use crate::recipe::{arb_payload_value, ModelEdit, ModelRecipe, SourceRecipe};
 
 /// One row of the `events`-shaped source every Phase 1/2 recipe stages —
 /// integer-valued `val` (design §5's numeric-payload discipline), unlike
@@ -87,6 +87,26 @@ pub enum ConformanceStep {
     /// same execution shape, but the design intent is catching up a region
     /// rather than processing newly-landed data or a late-row catch-up.
     BackfillRegion { start: NaiveDate, end: NaiveDate },
+    /// A definition-change step (Phase 9;
+    /// `docs/plans/20260712-generative-maintenance-conformance.md`
+    /// "Definition-change steps"): rewrites `models/<name>.sql` on disk with
+    /// `edit` applied (`crate::render::render_model_file_with_edit`), with
+    /// NO accompanying run — the next `RunWindow`/`RerunWindow`/
+    /// `BackfillRegion` step re-discovers the model from disk (already the
+    /// harness's behaviour, `link_c_harness::LinkCProject`'s doc comment)
+    /// and compiles/executes whatever SQL is currently on disk. Asserts
+    /// TODAY's contract: the model-hash the run records changes
+    /// (`smelt_state::intervals::compute_model_hash`, keyed per model name)
+    /// invalidates the interval store's coverage bookkeeping for this
+    /// model — the run pipeline itself always uses the CURRENT on-disk SQL
+    /// regardless, so a full DELETE+INSERT recompute of whichever window a
+    /// later step names always reflects the rewritten body. This is
+    /// deliberately NOT the spec's `SkeletonAdd`/`PureBackfill`/
+    /// `UpstreamRederive` definition-change classification
+    /// (`maintenance_plan.md` §"The definition-change trigger") — that
+    /// classification is unbuilt (no `derive_model_maintenance_plan` caller
+    /// reads a prior definition to classify an added column against it).
+    RewriteModel { edit: ModelEdit },
 }
 
 /// Whether every window in `schedule` is mutually independent under
@@ -529,13 +549,14 @@ mod tests {
                         run_windows.push((*start, *end))
                     }
                     ConformanceStep::AppendLateRow(row) => late_windows.push(row.d),
-                    // Phase 6 hazard steps never appear in `arb_schedule_for`'s
+                    // Phase 6/9 hazard steps never appear in `arb_schedule_for`'s
                     // own generated output (see that fn's doc comment) — this
                     // self-check is scoped to the generator, not hand-written
                     // schedules.
                     ConformanceStep::RerunWindow { .. }
                     | ConformanceStep::FullRefreshRun
-                    | ConformanceStep::BackfillRegion { .. } => {}
+                    | ConformanceStep::BackfillRegion { .. }
+                    | ConformanceStep::RewriteModel { .. } => {}
                 }
             }
             assert!(
@@ -591,6 +612,49 @@ mod tests {
             check_profile(&corrupted).is_err(),
             "removing the catch-up RunWindow must be caught by check_profile, got Ok for \
              {corrupted:?}"
+        );
+    }
+
+    /// `rewrite_model_step_changes_the_hash` (plan Phase 9 TDD list): the
+    /// `RewriteModel` step's rendered body
+    /// (`crate::render::render_model_body_with_edit`) differs from the
+    /// original recipe's own body under
+    /// `smelt_state::intervals::compute_model_hash` — the SAME hash
+    /// function `execute.rs`'s interval-store bookkeeping keys coverage on
+    /// (`compute_model_hash(&plan.sql)`), consumed here rather than
+    /// re-implemented, so this test actually exercises production hashing
+    /// rather than a harness-local stand-in.
+    #[test]
+    fn rewrite_model_step_changes_the_hash() {
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_recipe(RecipePool::partition_append_only());
+        let mut checked = 0;
+        for _ in 0..30 {
+            let recipe = strat.new_tree(&mut runner).unwrap().current();
+            if !recipe
+                .evolution
+                .contains(&crate::recipe::ModelEdit::AddPayloadColumn)
+            {
+                continue;
+            }
+            let before = crate::render::render_model_body(&recipe);
+            let after = crate::render::render_model_body_with_edit(
+                &recipe,
+                crate::recipe::ModelEdit::AddPayloadColumn,
+            );
+            assert_ne!(
+                smelt_state::intervals::compute_model_hash(&before),
+                smelt_state::intervals::compute_model_hash(&after),
+                "AddPayloadColumn rewrite must change the model hash (recipe {recipe:?}); \
+                 an unchanged hash would mean the interval store never invalidates \
+                 coverage on a real definition change"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no recipe in the deterministic sample carried the AddPayloadColumn evolution \
+             — generator regression"
         );
     }
 

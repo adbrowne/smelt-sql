@@ -28,7 +28,7 @@ use chrono::NaiveDate;
 use duckdb::Connection;
 
 use crate::oracle_modes::OracleMode;
-use crate::recipe::{ModelRecipe, SourceRecipe};
+use crate::recipe::{ModelEdit, ModelRecipe, SourceRecipe};
 use crate::render;
 use crate::schedule_gen::GenRow;
 
@@ -173,6 +173,24 @@ impl STracker {
     /// the body itself is still rendered exactly once.
     pub fn s_restricted_oracle_sql(&self, recipe: &ModelRecipe) -> String {
         render::render_model_body(recipe).replace(
+            &format!("smelt.sources.{}", self.source.name),
+            &self.oracle_table_name(),
+        )
+    }
+
+    /// The S-restricted oracle body query for `recipe` AFTER a `RewriteModel`
+    /// step has applied `edit` (Phase 9) — [`render::render_model_body_with_edit`]
+    /// (the REWRITTEN body, never the pre-rewrite one — the plan Phase 9
+    /// review checklist: "Oracle re-renders post-rewrite, never compares
+    /// old body against new output") over the materialized `S_k` table,
+    /// mirroring [`Self::s_restricted_oracle_sql`]'s un-rewritten
+    /// counterpart.
+    pub fn s_restricted_oracle_sql_with_edit(
+        &self,
+        recipe: &ModelRecipe,
+        edit: ModelEdit,
+    ) -> String {
+        render::render_model_body_with_edit(recipe, edit).replace(
             &format!("smelt.sources.{}", self.source.name),
             &self.oracle_table_name(),
         )

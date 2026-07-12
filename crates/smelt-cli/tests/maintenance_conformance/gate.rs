@@ -15,7 +15,7 @@ use smelt_maintenance_testkit::oracle_modes::{
 };
 use smelt_maintenance_testkit::recipe::{
     arb_keyed_combiner, arb_keyed_schedule, arb_recipe, ConstructKind, KeyedCombiner, KeyedRecipe,
-    KeyedSchedule, ModelRecipe, MutableEnrichedRecipe, RecipePool,
+    KeyedSchedule, ModelEdit, ModelRecipe, MutableEnrichedRecipe, RecipePool,
 };
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
@@ -81,6 +81,11 @@ pub async fn drive_and_assert(
 ) -> anyhow::Result<(STracker, usize)> {
     let mut tracker = STracker::new(&recipe.source);
     let mut last_k: Option<usize> = None;
+    // The most recent `RewriteModel` step's edit (Phase 9), or `None` before
+    // any rewrite — threads into every subsequent assertion so the oracle
+    // re-renders against the CURRENT on-disk body, never the pre-rewrite one
+    // (plan Phase 9 review checklist).
+    let mut current_edit: Option<ModelEdit> = None;
 
     for (i, step) in schedule.0.iter().enumerate() {
         match step {
@@ -102,7 +107,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence(project, recipe, &tracker, k)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
             }
             ConformanceStep::AppendLateRow(row) => {
                 insert_row(project, recipe, row)?;
@@ -124,7 +129,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence(project, recipe, &tracker, k)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
             }
             ConformanceStep::FullRefreshRun => {
                 // Unwindowed run: `execute_project` takes the full-refresh
@@ -144,7 +149,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_full_refresh(snapshot);
                 last_k = Some(k);
 
-                assert_equivalence(project, recipe, &tracker, k)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
             }
             ConformanceStep::BackfillRegion { start, end } => {
                 // An explicit backfill: same execution shape as `RunWindow`
@@ -162,7 +167,22 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence(project, recipe, &tracker, k)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
+            }
+            ConformanceStep::RewriteModel { edit } => {
+                // Definition change (Phase 9): rewrite the model file on
+                // disk with `edit` applied. No run happens here — the next
+                // *Window step re-discovers the model from disk (already
+                // the harness's behaviour) and compiles/executes whatever
+                // SQL is now on disk.
+                let model_path = project
+                    .project_dir
+                    .join(format!("models/{}.sql", recipe.model_name));
+                std::fs::write(
+                    &model_path,
+                    render::render_model_file_with_edit(recipe, *edit),
+                )?;
+                current_edit = Some(*edit);
             }
         }
     }
@@ -181,14 +201,34 @@ pub fn assert_equivalence(
     tracker: &STracker,
     k: usize,
 ) -> anyhow::Result<()> {
+    assert_equivalence_with_edit(project, recipe, tracker, k, None)
+}
+
+/// [`assert_equivalence`] generalised over an optional post-`RewriteModel`
+/// [`ModelEdit`] (Phase 9): when `edit` is `Some`, the oracle re-renders
+/// against the REWRITTEN body
+/// (`STracker::s_restricted_oracle_sql_with_edit`) rather than the
+/// original recipe's own body — never comparing the old body against the
+/// new output (plan Phase 9 review checklist). `edit: None` reproduces
+/// [`assert_equivalence`]'s exact pre-Phase-9 behaviour.
+pub fn assert_equivalence_with_edit(
+    project: &LinkCProject,
+    recipe: &ModelRecipe,
+    tracker: &STracker,
+    k: usize,
+    edit: Option<ModelEdit>,
+) -> anyhow::Result<()> {
     let conn = project.connect()?;
     tracker.materialize_s(&conn, k)?;
     let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
-    let oracle_sql = tracker.s_restricted_oracle_sql(recipe);
+    let oracle_sql = match edit {
+        Some(edit) => tracker.s_restricted_oracle_sql_with_edit(recipe, edit),
+        None => tracker.s_restricted_oracle_sql(recipe),
+    };
     let equal = multiset_equal(&conn, &maintained_sql, &oracle_sql);
     if !equal {
         anyhow::bail!(
-            "S-restricted equivalence violated for model {:?} at run {k}: \
+            "S-restricted equivalence violated for model {:?} at run {k} (edit {edit:?}): \
              maintained ({maintained_sql:?}) != oracle ({oracle_sql:?})",
             recipe.model_name
         );
@@ -1461,5 +1501,216 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                  ({live_oracle_sql:?}), schedule={schedule:?}"
             );
         });
+    }
+}
+
+// ---------------------------------------------------------------------
+// Phase 9: definition-change steps — `ConformanceStep::RewriteModel`
+// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
+// `maintenance_plan.md` §"The definition-change trigger"). Asserts TODAY's
+// contract only: whatever technique executes for a window always compiles
+// and runs the model's CURRENT on-disk SQL (`link_c_harness::LinkCProject`'s
+// per-run re-discovery), so a rewrite followed by a re-run of the affected
+// window(s) recovers full equivalence against the REWRITTEN body's own
+// oracle. This is deliberately NOT the spec's unbuilt `SkeletonAdd`/
+// `PureBackfill`/`UpstreamRederive` definition-change classification — see
+// `schedule_gen::ConformanceStep::RewriteModel`'s doc comment.
+// ---------------------------------------------------------------------
+
+/// `column_add_between_runs_recovers_equivalence` (plan Phase 9 TDD list):
+/// schedule: runs → `RewriteModel` (add integer payload column) → catch-up
+/// runs; final state equals the oracle of the NEW body over full S.
+///
+/// The catch-up is a `FullRefreshRun`, not a plain windowed re-run: today's
+/// windowed (DELETE+INSERT) incremental path never persists a deployed
+/// schema snapshot (`execute.rs`'s "Save deployed schema for full-refresh
+/// models" comment marks that as full-refresh-only), so
+/// `schema_evolution::check_and_migrate`'s ALTER-TABLE detection always sees
+/// `FirstDeployment` for an incremental model and never fires — a windowed
+/// re-run against an already-materialized table with a changed column shape
+/// hits a raw DuckDB column-count mismatch, not a graceful recompute. A
+/// `full_refresh` run (`DROP`+recreate, taking the non-incremental
+/// materialization arm — `execute.rs`'s `(Some(_inc), None, _, _)` "no time
+/// window ... fall back to full refresh" arm) sidesteps this cleanly: it is
+/// today's actual recovery path, matching the interval-store hash
+/// invalidation's own "the next run recovers equivalence" framing (Phase
+/// 9's Goal) rather than the unbuilt `PureBackfill` classification.
+#[test]
+fn column_add_between_runs_recovers_equivalence() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected additive-agg append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+    let w2_start = w1_end;
+    let w2_end = w2_start + chrono::Duration::days(1);
+    let w3_start = w2_end;
+    let w3_end = w3_start + chrono::Duration::days(1);
+
+    let schedule = ConformanceSchedule(vec![
+        // Two windows run under the ORIGINAL body.
+        ConformanceStep::RunWindow {
+            start: w1_start,
+            end: w1_end,
+            rows: vec![GenRow {
+                d: w1_start,
+                id: 1,
+                val: 10,
+            }],
+        },
+        ConformanceStep::RunWindow {
+            start: w2_start,
+            end: w2_end,
+            rows: vec![GenRow {
+                d: w2_start,
+                id: 2,
+                val: 20,
+            }],
+        },
+        // Definition change: add a derived payload column, same skeleton.
+        ConformanceStep::RewriteModel {
+            edit: ModelEdit::AddPayloadColumn,
+        },
+        // Catch-up: a full-refresh run recomputes the WHOLE table under the
+        // rewritten body over the current full source contents — today's
+        // actual recovery path (see this test's doc comment).
+        ConformanceStep::FullRefreshRun,
+        // A subsequent ordinary windowed run must keep working post-recovery
+        // — the rewrite's effect must persist, not just paper over the one
+        // full-refresh run.
+        ConformanceStep::RunWindow {
+            start: w3_start,
+            end: w3_end,
+            rows: vec![GenRow {
+                d: w3_start,
+                id: 3,
+                val: 30,
+            }],
+        },
+    ]);
+
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(drive_and_assert(&project, &recipe, &schedule))
+        .expect(
+            "a column-add RewriteModel followed by a full-refresh catch-up must recover full \
+             equivalence against the rewritten body's own oracle, and stay recovered through \
+             a subsequent windowed run",
+        );
+}
+
+/// `skeleton_position_add_is_refused_or_recomputed_never_corrupted` (plan
+/// Phase 9 TDD list): adding a column in a grouping/skeleton position
+/// mid-schedule never yields a silently-wrong maintained state — either a
+/// named refusal (via the real [`classify`] verdict protocol) or a full
+/// recompute whose result equals the rewritten body's own oracle. The
+/// recompute is driven via `FullRefreshRun`, the only technique that
+/// actually survives a schema-shape change today — see
+/// `column_add_between_runs_recovers_equivalence`'s doc comment for why a
+/// plain windowed re-run against an already-materialized table hits a raw
+/// column-count mismatch instead.
+#[test]
+fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_recipe(&recipe, &tmp).expect("stage recipe");
+    let verdict = classify(&project, &recipe).expect("classify");
+    assert!(
+        matches!(verdict, Verdict::Admitted(_)),
+        "expected additive-agg append-only recipe to admit: {verdict:?}"
+    );
+
+    let w1_start = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid date");
+    let w1_end = w1_start + chrono::Duration::days(1);
+
+    let mut tracker = STracker::new(&recipe.source);
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    // Pre-rewrite run, under the original body — establishes a green
+    // baseline before the skeleton-changing rewrite.
+    insert_row(
+        &project,
+        &recipe,
+        &GenRow {
+            d: w1_start,
+            id: 1,
+            val: 10,
+        },
+    )
+    .expect("seed row");
+    let snapshot = {
+        let conn = project.connect().expect("connect");
+        read_source_snapshot(&conn, &recipe.source)
+    };
+    let mut request = base_request("dev");
+    request.start = Some(w1_start.format("%Y-%m-%d").to_string());
+    request.end = Some(w1_end.format("%Y-%m-%d").to_string());
+    rt.block_on(project.run_quiet("run-0", request))
+        .expect("initial run before rewrite");
+    let k0 = tracker.record_run(w1_start, w1_end, snapshot);
+    assert_equivalence(&project, &recipe, &tracker, k0).expect("pre-rewrite equivalence");
+
+    // Rewrite: add the source's row-key column into the GROUP BY — a
+    // grain/skeleton change, `maintenance_plan.md`'s `SkeletonAdd`
+    // territory.
+    std::fs::write(
+        project
+            .project_dir
+            .join(format!("models/{}.sql", recipe.model_name)),
+        render::render_model_file_with_edit(&recipe, ModelEdit::AddGroupingColumn),
+    )
+    .expect("write rewritten model file");
+
+    // Classify the NOW-rewritten project through the real derivation
+    // (`verdict.rs`'s fail-loud protocol: a refusal always carries a named
+    // Maintenance*/admission diagnostic, never an unexplained empty plan).
+    let post_verdict = classify(&project, &recipe).expect("classify after rewrite");
+    match post_verdict {
+        Verdict::Refused(diags) => {
+            assert!(
+                !diags.is_empty(),
+                "a refused skeleton-position rewrite must carry a named diagnostic \
+                 (verdict.rs's own fail-loud check already enforces this — asserted here too \
+                 so this test would fail if that changed)"
+            );
+        }
+        Verdict::Admitted(_) => {
+            let mut request2 = base_request("dev");
+            request2.full_refresh = true;
+            rt.block_on(project.run_quiet("run-1", request2))
+                .expect("an admitted post-rewrite plan must not fail to execute");
+
+            let snapshot = {
+                let conn = project.connect().expect("connect");
+                read_source_snapshot(&conn, &recipe.source)
+            };
+            let k1 = tracker.record_full_refresh(snapshot);
+            assert_equivalence_with_edit(
+                &project,
+                &recipe,
+                &tracker,
+                k1,
+                Some(ModelEdit::AddGroupingColumn),
+            )
+            .expect(
+                "an admitted skeleton-position rewrite's recompute must equal the rewritten \
+                 body's own oracle — never silently diverge",
+            );
+        }
     }
 }
