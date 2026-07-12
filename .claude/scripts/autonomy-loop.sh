@@ -403,8 +403,15 @@ while [ "${iteration}" -lt "${MAX_ITERATIONS}" ]; do
   # Recomputed every iteration — the previous iteration flipped a table row.
   hint="$(phase_hint)"
   [ -n "${hint}" ] && echo "Pre-scan:   ${hint}"
+  # --disallowedTools: ScheduleWakeup/Monitor structurally removed — wakeups
+  #                    and monitors never fire in --print mode, and an agent
+  #                    that "schedules a check-in" then ends its turn strands
+  #                    the iteration with no sentinel (2026-07-12 iteration 1).
+  #                    Single comma-joined arg on purpose: the variadic form
+  #                    would swallow the positional prompt that follows.
   "${iter_scope[@]}" claude --print \
     --permission-mode "${PERMISSION_MODE}" \
+    --disallowedTools "ScheduleWakeup,Monitor" \
     --no-session-persistence \
     --model "${MODEL}" \
     --output-format json \
