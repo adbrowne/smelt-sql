@@ -1138,11 +1138,13 @@ async fn chained_never_idle_device_yields_one_session_per_two_days() {
     let roots = assign_session_roots_chained(&timestamps);
     let mut unique_roots: Vec<NaiveDateTime> = roots.clone();
     unique_roots.dedup();
-    assert!(
-        (3..=6).contains(&unique_roots.len()),
-        "expected roughly 1 session per 2 days over 9 elapsed days (half the \
-         clock table's own ~1-per-day cadence), got {} sessions: {:?}",
+    assert_eq!(
         unique_roots.len(),
+        5,
+        "expected exactly 5 sessions (~1 per 2 days over 9 elapsed days, \
+         half the clock table's own ~1-per-day cadence — the deterministic \
+         closed-form outcome for this fixture, quoted verbatim by the \
+         generated tutorial's never-idle comparison table), got {:?}",
         unique_roots
     );
 

@@ -112,13 +112,15 @@ possible future extension.
 ```
 bronze/raw_events                  (table; passthrough)
   └── silver/events_parsed         (INCR by event_date)
-        ├── silver/sessions        (INCR by session_start_date; 1-day lookback)
+        ├── silver/sessions        (INCR by session_start_date; clock-anchored cut)
         │     └── gold/identity_forward_only         (INCR by session_start_date)
+        ├── silver/sessions_chained (INCR by session_start_date; root-anchored,
+        │     self-referential, ordered — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
         ├── silver/device_user_edges                 (refresh: keyed)
         │     ├── gold/identity_backward_fill        (view; rebuilt on query)
         │     └── gold/identity_connected_components (view; rebuilt on query)
-        ├── silver/events_enriched (INCR by event_date) ← silver/sessions
-        │     (event-grain: session_id + session-attributed utm_campaign)
+        ├── silver/events_enriched (INCR by event_date) ← silver/sessions, silver/sessions_chained
+        │     (event-grain: dual session_id/utm_campaign pairs, one per cut rule)
         ↓
         gold/eventstream_with_identity (INCR by event_date)
               ├── marts/daily_active_users_by_method (INCR by event_date)
@@ -131,7 +133,9 @@ Source files:
 - [`models/silver/events_parsed.sql`](models/silver/events_parsed.sql) +
   [`functions/parse_event_payload.sql`](functions/parse_event_payload.sql)
 - [`models/silver/sessions.sql`](models/silver/sessions.sql) +
-  [`functions/sessionize.sql`](functions/sessionize.sql) (bounded cross-midnight sessionization — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
+  [`functions/sessionize.sql`](functions/sessionize.sql) (clock-anchored cut, bounded cross-midnight sessionization — see [Sessions](#why-sessions-spans-midnight-with-a-bounded-lookback))
+- [`models/silver/sessions_chained.sql`](models/silver/sessions_chained.sql)
+  (root-anchored cut, self-referential, ordered execution)
 - [`models/silver/device_user_edges.sql`](models/silver/device_user_edges.sql)
 - [`models/silver/events_enriched.sql`](models/silver/events_enriched.sql) (see [Event-grain enrichment](#event-grain-enrichment))
 - [`models/gold/identity_forward_only.sql`](models/gold/identity_forward_only.sql)
@@ -141,15 +145,25 @@ Source files:
 - [`models/marts/daily_active_users_by_method.sql`](models/marts/daily_active_users_by_method.sql)
 - [`models/marts/identity_method_comparison.sql`](models/marts/identity_method_comparison.sql)
 
+The generated tutorial page
+([Generated tutorial page](#generated-tutorial-page) below) walks the
+sessions/sessions_chained split in full — same 30-minute inactivity +
+platform-boundary rule and 5-minute first-touch attribution in both tables,
+differing only in where their session-length cap's phase comes from (the
+clock vs. the session's own root), which is exactly what flips
+`silver.sessions_chained`'s execution from window-independent/parallel to
+self-referential/ordered.
+
 ## Incremental shape
 
-Five models are incremental, one is a cumulative aggregate (`refresh: keyed`), one is a
+Seven models are incremental, one is a cumulative aggregate (`refresh: keyed`), one is a
 plain (non-incremental) table, and the rest are views.
 
 | Model                                         | Materialization     | Partition column     |
 |-----------------------------------------------|---------------------|----------------------|
 | `silver/events_parsed`                        | INCR table          | `event_date`         |
-| `silver/sessions`                             | INCR table          | `session_start_date` |
+| `silver/sessions`                             | INCR table (window-independent) | `session_start_date` |
+| `silver/sessions_chained`                     | INCR table (self-referential, ordered) | `session_start_date` |
 | `silver/device_user_edges`                    | table + refresh: keyed | (driven by source)   |
 | `silver/events_enriched`                      | INCR table          | `event_date`         |
 | `gold/identity_forward_only`                  | INCR table          | `session_start_date` |
@@ -231,43 +245,49 @@ a sanity check.
 
 `silver/sessions` reconstructs sessions across midnight while reading and
 writing only a bounded window — the property that keeps per-day cost flat as
-history grows.
+history grows. Its cap is **clock-anchored**: a session is cut at the
+midnight ending day D iff it has an event in the first 30 minutes of day D
+(`[D 00:00, D 00:30)`). A session rooted before `00:30` dies at its own
+day's end; a session rooted at or after `00:30` may cross one midnight but
+always dies at the *second* one (the crossing gap is itself under the
+30-minute inactivity threshold, so the crossing session always has an event
+before `00:30` of the new day). Every session therefore spans at most two
+calendar days — under 48 hours — computable purely from the event's own
+timestamp, with no memory of the session's own history required. That is
+what keeps `silver/sessions` window-independent: any partition can build in
+any order, including in parallel, even under a device that never idles for
+the full 30 minutes (see [the never-idle comparison in the generated
+tutorial](../../docs-site/docs/examples/web-analytics-maintenance.md#same-rule-three-fates-the-never-idle-comparison)
+for what a clock-anchored cap does differently from an unbounded-history
+cap in that scenario). `silver/sessions_chained` right below cuts on a
+different signal — the session's own root age rather than the clock — which
+is what forces it to be self-referential and ordered instead.
 
 The sessionization lives in the reusable `smelt.functions.sessionize` function.
 Each `LAG`/`MAX OVER` in its body carries a
-`RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW` frame: the planner
-derives a 1-day lookback from those frames — bound derivation runs on the
-*expanded* SQL, so a frame declared inside the function body is honored — and
-widens the `silver/events_parsed` read to the previous day, so a session whose
-events straddle midnight is reconstructed as **one** row instead of being split
-at the partition boundary. This same interval is the **max-session-length
-cap**, named `max_session_length` throughout `sessionize.sql` and
-`sessions.sql`: a session whose sub-30-minute activity chain runs longer than
-the lookback is clipped at the frame edge rather than reading unbounded
-history, and it is the bound that seals old partitions for safe
-partition-level maintenance — a session cannot span more than this interval,
-so a partition older than it can never be touched by a later event.
-
-A window-frame bound must be a literal `INTERVAL '...'` — the grammar admits
-`UNBOUNDED` / `CURRENT ROW` / a number / an `INTERVAL` literal there, not a
-parameter reference — so `max_session_length` cannot be threaded through
-`sessionize` as an argument; instead `sessions.sql` restates it as an
-explicit, checkable `HAVING MAX(event_ts) - MIN(event_ts) <= INTERVAL '1 day'`
-assertion, so the cap is visible and verifiable in the emitted SQL rather than
-only implicit in the window-frame mechanics that happen to enforce it.
+`RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW` frame (`max_lookback`):
+the planner derives a bound from those frames — bound derivation runs on the
+*expanded* SQL, so a frame declared inside the function body is honored —
+and widens the `silver/events_parsed` read accordingly, so a session whose
+events straddle midnight is reconstructed as **one** row instead of being
+split at the partition boundary. `sessions.sql` restates the ≤2-day span as
+an explicit, checkable `HAVING MAX(event_ts) - MIN(event_ts) < INTERVAL '2 days'`
+assertion, so the cap is visible and verifiable in the emitted SQL rather
+than only implicit in the window-frame mechanics that happen to enforce it.
 
 Because the partition column `session_start_date` is *derived* and can skew
-earlier than the events that update it (a session that started yesterday gains
-events today), the model carries a Form B filter
-(`event_date BETWEEN session_start_date - INTERVAL '1 day' AND … + INTERVAL '1 day'`)
+earlier than the events that update it (a session that started yesterday
+gains events today), the model carries a Form B filter
+(`event_date BETWEEN session_start_date AND session_start_date + INTERVAL '1 day'`)
 that widens the **write** window for a `[D, D+1)` run to `[D-1, D+2)` —
-half-open, covering partitions `D-1`, `D`, and `D+1` (`[start − after,
-end + before)` with the symmetric ±1-day skew). The planner's DELETE+INSERT
-deletes the same widened window the INSERT writes, so re-running consecutive
-days stays idempotent (no duplicate rows in the lookback partition).
+half-open, covering partitions `D-1`, `D`, and `D+1`. The planner's
+DELETE+INSERT deletes the same widened window the INSERT writes, so
+re-running consecutive days stays idempotent (no duplicate rows in the
+lookback partition).
 
 Session identity is `(device_id, session_start_ts)` — stable across run windows,
 so a session reprocessed in a different window keeps the same `session_id`.
+`silver/sessions_chained` uses the identical identity scheme.
 
 ### Session campaign attribution
 
@@ -282,19 +302,22 @@ timestamp so the value returned is the one at the smallest `event_ts`. A
 campaign arriving later in a long-running session never attributes — only the
 first 5 minutes count, mirroring first-touch campaign attribution in
 production analytics pipelines. Because the 5-minute attribution window sits
-well inside the `max_session_length` cap, it never needs a wider source read
-than the sessionization already declares.
+well inside the clock-anchored cap, it never needs a wider source read than
+the sessionization already declares.
 
 ### Event-grain enrichment
 
 `silver/events_enriched` demonstrates a maintenance-plan creation cell over
-**two** maintained-model upstreams in the same body, rather than one. It
-joins every `silver/events_parsed` row to its `silver/sessions` row (the same
-join shape `gold/eventstream_with_identity` uses, with the same 1-day
-session-cap Form B filter widening the `sessions` read across midnight) and
-projects `session_id` plus the session-attributed `utm_campaign` — the
-first-touch campaign `silver/sessions` resolves — alongside the event's own
-raw `utm_campaign`, so the two can be compared row-by-row.
+**three** maintained-model upstreams in the same body, rather than one. It
+joins every `silver/events_parsed` row to both its `silver/sessions` row
+(clock-anchored, 1-day cap) and its `silver/sessions_chained` row
+(root-anchored, 2-day cap), the same join shape `gold/eventstream_with_identity`
+uses for its own single upstream, and projects **two** id/campaign pairs —
+`session_id`/`session_utm_campaign` (primary; what the gold identity models
+consume) and `session_id_chained`/`session_utm_campaign_chained` (additive) —
+alongside the event's own raw `utm_campaign`, so all of it can be compared
+row-by-row. Per-event divergence between the two session ids is directly
+queryable.
 
 `smelt explain silver.events_enriched` shows one creation cell per model
 upstream, each carrying the clamp derived from that edge
@@ -306,18 +329,22 @@ upstream, each carrying the clamp derived from that edge
         - source=silver.events_parsed column=event_date before=Seconds(0) after=Seconds(0)
   - group {*} on trigger NewData { source: "silver.sessions" }
       scan clamps:
-        - source=silver.sessions column=session_start_date before=Seconds(86400) after=Seconds(86400)
+        - source=silver.sessions column=session_start_date before=Seconds(172800) after=Seconds(172800)
+  - group {*} on trigger NewData { source: "silver.sessions_chained" }
+      scan clamps:
+        - source=silver.sessions_chained column=session_start_date before=Seconds(172800) after=Seconds(172800)
 ```
 
 `events_parsed`'s edge is a direct 1:1 read (`event_date` is this model's own
 partition column, unfiltered against that upstream) — a `Bounded(0,0)` clamp.
-`sessions`'s edge carries the same ±1-day clamp as its own session-cap Form B
-filter — the downstream's scan reach over that ref, expressed in the
-upstream's own clock. Because neither edge write-rebases the output
-partition column, a run touching one `event_date` partition only ever writes
-that partition here: running one additional arrival day changes exactly its
-own `event_date` partition and leaves every previously-written partition
-byte-identical
+`sessions`'s and `sessions_chained`'s edges both carry a ±2-day clamp — each
+the downstream's own join-window Form B filter (±1 day for `sessions`, ±2
+days for `sessions_chained`) composed with that upstream's own derived skew
+(`sessions`'s own ±1-day Form B relation), so the wider of the two dominates
+for both. Because no edge write-rebases the output partition column, a run
+touching one `event_date` partition only ever writes that partition here:
+running one additional arrival day changes exactly its own `event_date`
+partition and leaves every previously-written partition byte-identical
 (`crates/smelt-cli/tests/e2e/per_partition_equivalence.rs
 ::web_analytics_events_enriched_narrow_update`).
 
@@ -464,11 +491,27 @@ cases rather than aggregate statistics.
 
 - [`tests/session_boundary_invariants.test.sql`](tests/session_boundary_invariants.test.sql) —
   asserts the 30-minute inactivity rule and the platform-boundary split
-  produce the expected session_id assignments on a mocked event sequence.
-  Session campaign attribution and the explicit max-session-length cap are
-  covered end-to-end by
-  `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild`
+  produce the expected session_id assignments on a mocked event sequence for
+  `silver/sessions`, plus the clock-anchored deadline (early-root sessions cut
+  at their own day's end; late-root sessions crossing one midnight cut at
+  the second). Session campaign attribution and the explicit clock-anchored
+  cap are covered end-to-end by
+  `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs::web_analytics_session_attribution_matches_full_rebuild`,
+  `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs::never_idle_device_yields_one_session_per_day`,
   and by `verify_incremental_equivalence.py`'s session-attribution assertion.
+- [`tests/session_boundary_chained_invariants.test.sql`](tests/session_boundary_chained_invariants.test.sql) —
+  mirrors the same gap/platform fixtures against `silver/sessions_chained`
+  (identical outcomes — the two tables share the gap rule) plus a fixture
+  pinning where the root-anchored cut diverges from the clock-anchored one.
+  The self-referential model's `Ordered` planner verdict, its from-scratch
+  bootstrap, and the never-idle root-anchored cadence are covered end-to-end
+  by `crates/smelt-cli/tests/e2e/cross_midnight_rebase.rs
+  ::chained_run_is_refused_or_ordered_never_parallel` and
+  `::chained_never_idle_device_yields_one_session_per_two_days`.
+- [`tests/enrichment_dual_session_invariants.test.sql`](tests/enrichment_dual_session_invariants.test.sql) —
+  asserts `silver/events_enriched` carries both session id/campaign pairs,
+  that they agree whenever neither table's cap fires, and diverge only on
+  the fixture where the two caps disagree.
 - [`tests/device_user_edges_per_day_invariants.test.sql`](tests/device_user_edges_per_day_invariants.test.sql) —
   asserts the cumulative aggregation shape (one row per `(device, user)`,
   `event_count` = SUM across days, `first_seen` = MIN, `last_seen` = MAX) and
@@ -510,15 +553,15 @@ incremental model:
 
 - **Bound derivation reads the expanded SQL.** The `RANGE BETWEEN INTERVAL`
   frames live in the function body; the run pipeline expands the function before
-  deriving source bounds (`SqlCompiler::expand_function_calls`), so the 1-day
-  lookback is honored rather than silently defaulting to zero.
+  deriving source bounds (`SqlCompiler::expand_function_calls`), so the 2-day
+  `max_lookback` is honored rather than silently defaulting to zero.
 - **Bounded-frame windows are admitted regardless of `PARTITION BY`.** The window
   partitions by `device_id`, which does not include the model's
   `partition_column` (`session_start_date`); it is admitted because each frame is
   a bounded `RANGE BETWEEN INTERVAL` (see
   `docs/specs/incremental_models.md` § "Batch safety classification").
 - **The write window covers the lookback partition.** The outer Form B filter
-  (`WHERE event_date BETWEEN session_start_date - INTERVAL '1 day' AND …`)
+  (`WHERE event_date BETWEEN session_start_date AND session_start_date + INTERVAL '1 day'`)
   references `session_start_date`, a column produced by the function — resolvable
   because column references through a `TableExpr` function are inferred, and a
   typed literal like `INTERVAL '1 day'` is no longer mistaken for a column.
