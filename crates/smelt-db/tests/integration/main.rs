@@ -46,6 +46,7 @@ mod seed_temporal_inference;
 mod session_rollup;
 mod smelt_fn_call_check;
 mod source_leaf_collision;
+mod sql_standard_function_forms;
 mod state_mode_widening;
 mod strict_refs;
 mod struct_field_type;

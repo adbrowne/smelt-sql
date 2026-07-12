@@ -7819,3 +7819,151 @@ fn glob_operator_still_wins_after_expression() {
         .expect("must have a BINARY_EXPR for the GLOB comparison");
     assert_eq!(binary.operator().as_deref(), Some("GLOB"));
 }
+
+// ── SQL-standard TRIM/SUBSTRING/POSITION forms ──────────────────────────
+//
+// Closes `duckdb_trim_modifier`, `duckdb_substring_from_for`, and
+// `duckdb_position_in` in `crates/smelt-parser-compat/src/gaps.rs`. Each
+// accepted form was verified against a real DuckDB (v1.5.4) first — see
+// the task report for the oracle transcript.
+
+fn first_function_call(sql: &str) -> FunctionCall {
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    parse
+        .syntax()
+        .descendants()
+        .find_map(FunctionCall::cast)
+        .expect("must have a FUNCTION_CALL node")
+}
+
+#[test]
+fn trim_both_from_parses() {
+    let call = first_function_call("SELECT trim(BOTH ' ' FROM b) FROM t");
+    assert_eq!(call.name().as_deref(), Some("trim"));
+    assert_eq!(call.arguments().len(), 2, "chars + string expressions");
+    assert!(call.syntax().text().to_string().contains("BOTH"));
+}
+
+#[test]
+fn trim_leading_from_parses() {
+    let call = first_function_call("SELECT trim(LEADING ' ' FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn trim_trailing_from_parses() {
+    let call = first_function_call("SELECT trim(TRAILING ' ' FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn trim_both_from_no_chars_parses() {
+    let call = first_function_call("SELECT trim(BOTH FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 1, "only the string expression");
+}
+
+#[test]
+fn trim_bare_from_parses() {
+    // TRIM(FROM string) — no modifier at all.
+    let call = first_function_call("SELECT trim(FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 1);
+}
+
+#[test]
+fn trim_plain_call_still_parses() {
+    // Guard: the ordinary 1-arg call form must keep working.
+    let call = first_function_call("SELECT trim(b) FROM t");
+    assert_eq!(call.arguments().len(), 1);
+    assert!(!call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains("FROM"));
+}
+
+#[test]
+fn trim_plain_two_arg_call_still_parses() {
+    // Guard: TRIM(x, chars) (regular comma form) must keep working.
+    let call = first_function_call("SELECT trim(b, 'x') FROM t");
+    assert_eq!(call.arguments().len(), 2);
+    assert!(!call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains("FROM"));
+}
+
+#[test]
+fn trim_identifier_named_both_still_parses_as_plain_call() {
+    // A column literally named `both` used as TRIM's sole argument must not
+    // be misparsed as the BOTH modifier (no top-level FROM follows it).
+    let sql = "SELECT trim(both) FROM (SELECT b AS both FROM t)";
+    let call = first_function_call(sql);
+    assert_eq!(call.arguments().len(), 1);
+}
+
+#[test]
+fn substring_from_parses() {
+    let call = first_function_call("SELECT substring(b FROM 2) FROM t");
+    assert_eq!(call.name().as_deref(), Some("substring"));
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn substring_from_for_parses() {
+    let call = first_function_call("SELECT substring(b FROM 2 FOR 3) FROM t");
+    assert_eq!(call.arguments().len(), 3);
+}
+
+#[test]
+fn substring_for_only_parses() {
+    // DuckDB accepts FOR with an implied start of 1.
+    let call = first_function_call("SELECT substring(b FOR 3) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn substring_plain_call_still_parses() {
+    let call = first_function_call("SELECT substring(b, 2, 3) FROM t");
+    assert_eq!(call.arguments().len(), 3);
+    assert!(!call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains("FROM"));
+}
+
+#[test]
+fn substr_from_for_is_not_parsed_as_std_form() {
+    // DuckDB itself rejects `substr(x FROM i FOR n)` (only SUBSTRING gets the
+    // SQL-standard form) — SUBSTR keeps the plain comma-only grammar, so this
+    // must fail to parse cleanly.
+    let parse = parse("SELECT substr(b FROM 2 FOR 3) FROM t");
+    assert!(
+        !parse.errors.is_empty(),
+        "substr(FROM...FOR...) should not parse cleanly (DuckDB itself rejects it)"
+    );
+}
+
+#[test]
+fn position_in_parses() {
+    let call = first_function_call("SELECT position('wor' IN b) FROM t");
+    assert_eq!(call.name().as_deref(), Some("position"));
+    assert_eq!(call.arguments().len(), 2);
+    assert!(call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains(" IN "));
+}
+
+#[test]
+fn position_in_with_expressions_parses() {
+    let call = first_function_call("SELECT position(a || 'x' IN b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}

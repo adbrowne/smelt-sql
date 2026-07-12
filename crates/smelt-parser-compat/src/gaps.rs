@@ -95,33 +95,12 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // formerly registered here; smelt now parses, prints, and infers them
     // (GLOB infers Boolean), so their entries were removed and the ratchet
     // baseline shrank accordingly.
-    KnownGap {
-        id: "duckdb_trim_modifier",
-        description: "SQL-standard trim(BOTH|LEADING|TRAILING … FROM …) form is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\btrim\s*\(\s*(BOTH|LEADING|TRAILING)\b"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_substring_from_for",
-        description: "SQL-standard substring(x FROM i FOR n) form is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bsubstring\s*\([^)]*\bFROM\b"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_position_in",
-        description: "SQL-standard position(sub IN str) form is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bposition\s*\([^)]*\bIN\b"],
-        severity: "low",
-        planned_fix: false,
-    },
+    // TRIM(BOTH|LEADING|TRAILING … FROM …), SUBSTRING(x FROM i FOR n), and
+    // POSITION(sub IN str) were formerly registered here (`duckdb_trim_modifier`,
+    // `duckdb_substring_from_for`, `duckdb_position_in`); smelt now parses,
+    // prints, and infers all three (TRIM/SUBSTRING → Text, POSITION → BigInt
+    // via the existing registry-backed function-call typing), so their entries
+    // were removed and the ratchet baseline shrank accordingly.
     KnownGap {
         id: "duckdb_dollar_quoted_string",
         description: "Dollar-quoted string literals ($$…$$) are not lexed",

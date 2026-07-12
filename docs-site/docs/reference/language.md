@@ -315,6 +315,34 @@ EXTRACT(WEEK FROM date_col)          -- returns BIGINT
 
 `EXTRACT(EPOCH FROM ...)` returns a `DOUBLE` (floating-point Unix timestamp). All other fields return `BIGINT`.
 
+## SQL-standard string function forms
+
+`TRIM`, `SUBSTRING`, and `POSITION` accept both the ordinary comma-separated
+call form and the SQL-standard keyword-argument form:
+
+```sql
+TRIM(x)                              -- ordinary form
+TRIM(x, chars)                       -- ordinary form
+TRIM(BOTH chars FROM x)              -- SQL-standard form
+TRIM(LEADING chars FROM x)
+TRIM(TRAILING chars FROM x)
+TRIM(BOTH FROM x)                    -- modifier without explicit chars
+TRIM(FROM x)                         -- no modifier at all
+
+SUBSTRING(x, start)                  -- ordinary form
+SUBSTRING(x, start, length)          -- ordinary form
+SUBSTRING(x FROM start)              -- SQL-standard form
+SUBSTRING(x FROM start FOR length)
+SUBSTRING(x FOR length)              -- start implied as 1
+
+POSITION(sub IN x)                   -- SQL-standard form only — POSITION has
+                                      -- no comma-separated equivalent; use
+                                      -- STRPOS(x, sub) for that
+```
+
+Both forms produce the same result type: `TRIM`/`SUBSTRING` return `VARCHAR`;
+`POSITION` returns `BIGINT` (a 1-based match offset).
+
 ## Aggregate result types
 
 smelt assigns canonical return types to aggregates so the same model writes the same output schema on every backend — `SUM(integer)` gives you `BIGINT` whether you target DuckDB or PostgreSQL, even though the engines disagree natively. Knowing the exact widening rules matters when a downstream column or test expects a specific type; `COUNT(*)` is a frequent surprise because it returns `BIGINT` rather than `INTEGER`.

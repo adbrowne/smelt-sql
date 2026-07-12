@@ -539,10 +539,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["864cfe155c84cd0f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
-
 ["eb04a0882f486e64"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
@@ -1131,14 +1127,6 @@ note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VA
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
-["b77945503d530cd8"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
-
-["cda3bdc8fca3f704"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected LPAREN, found STRING"
-
 ["fd2fd77ba205e851"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -1166,14 +1154,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["b8783ca07ad8a5f7"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
-
-["5e6eb2a470302cec"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
-
-["041141d753598563"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
 
 ["fad296cb1984b3c2"]
 category = "smelt_fails_unclassified"

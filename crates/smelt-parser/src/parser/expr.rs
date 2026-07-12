@@ -675,7 +675,20 @@ impl<'a> super::Parser<'a> {
                 } else {
                     // Simple function call: func()
                     self.start_node_at(checkpoint, FUNCTION_CALL);
-                    self.parse_arg_list();
+                    // TRIM/SUBSTRING/POSITION additionally accept SQL-standard
+                    // keyword-argument forms (`TRIM(BOTH … FROM …)`,
+                    // `SUBSTRING(x FROM i FOR n)`, `POSITION(sub IN str)`);
+                    // dispatch to their dedicated arg-list parsers, which also
+                    // handle the regular comma-separated call forms.
+                    if ident_text.eq_ignore_ascii_case("trim") {
+                        self.parse_trim_arg_list();
+                    } else if ident_text.eq_ignore_ascii_case("substring") {
+                        self.parse_substring_arg_list();
+                    } else if ident_text.eq_ignore_ascii_case("position") {
+                        self.parse_position_arg_list();
+                    } else {
+                        self.parse_arg_list();
+                    }
                     self.parse_within_group_if_present();
                     self.parse_filter_clause_if_present();
                     self.finish_node();
@@ -1313,6 +1326,180 @@ impl<'a> super::Parser<'a> {
         // call clause, not keyed to any specific function name.
         self.parse_null_treatment_if_present();
 
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Look ahead from the current position (which must be immediately after
+    /// the `(` of a call's argument list) for a top-level `FROM` keyword
+    /// before the matching `)`, without consuming any tokens. Depth tracks
+    /// nested parens so a `FROM` inside a nested call/subquery doesn't count.
+    ///
+    /// Used only to disambiguate the SQL-standard `TRIM([BOTH|LEADING|TRAILING]
+    /// … FROM …)` form from a plain call whose sole/first argument happens to
+    /// be a bare identifier that reads like a trim-modifier keyword (`BOTH`,
+    /// `LEADING`, `TRAILING` are contextual, not reserved, keywords).
+    fn peek_top_level_from_before_close_paren(&self) -> bool {
+        let mut depth: i32 = 0;
+        let mut idx = self.pos;
+        while let Some(tok) = self.tokens.get(idx) {
+            match tok.kind {
+                LPAREN => depth += 1,
+                RPAREN => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                FROM_KW if depth == 0 => return true,
+                _ => {}
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    /// Parse the argument list of a `TRIM(...)` call.
+    ///
+    /// Handles both the regular comma-separated form (`TRIM(x)`,
+    /// `TRIM(x, chars)`) and the SQL-standard keyword form
+    /// `TRIM([BOTH|LEADING|TRAILING] [chars] FROM string)` / `TRIM(FROM
+    /// string)`, which DuckDB also accepts (closes the `duckdb_trim_modifier`
+    /// gap in `crates/smelt-parser-compat/src/gaps.rs`). The value
+    /// sub-expressions are parsed as ordinary `EXPRESSION` nodes (via
+    /// `parse_expression`), in source order, so `FunctionCall::arguments()`
+    /// sees them exactly as it would for a plain call — the modifier/`FROM`
+    /// keyword tokens are plain children of `ARG_LIST`, not wrapped in an
+    /// argument node, so type inference (which reuses the existing
+    /// TRIM/SUBSTRING/POSITION function-call typing) is unaffected.
+    pub(super) fn parse_trim_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        let at_modifier_kw = self.at_contextual_keyword("BOTH")
+            || self.at_contextual_keyword("LEADING")
+            || self.at_contextual_keyword("TRAILING");
+        let is_std_form =
+            self.at(FROM_KW) || (at_modifier_kw && self.peek_top_level_from_before_close_paren());
+
+        if is_std_form {
+            if at_modifier_kw {
+                self.advance(); // consume BOTH / LEADING / TRAILING
+                self.skip_trivia();
+            }
+            if !self.at(FROM_KW) {
+                self.parse_expression(); // optional trim characters
+                self.skip_trivia();
+            }
+            if !self.expect(FROM_KW) {
+                self.error("Expected FROM in TRIM expression".to_string());
+            }
+            self.skip_trivia();
+            self.parse_expression(); // string to trim
+            self.skip_trivia();
+        } else if !self.at(RPAREN) {
+            loop {
+                self.parse_argument();
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                    self.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.parse_null_treatment_if_present();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Parse the argument list of a `SUBSTRING(...)` call.
+    ///
+    /// Handles the regular comma-separated form (`SUBSTRING(x)`,
+    /// `SUBSTRING(x, start[, len])`) and the SQL-standard keyword form
+    /// `SUBSTRING(x FROM start [FOR len])` (also `SUBSTRING(x FOR len)`,
+    /// which DuckDB accepts with an implied start of 1) — closes the
+    /// `duckdb_substring_from_for` gap. `FROM`/`FOR` are unambiguous once the
+    /// first argument has been parsed: no other grammar construct expects a
+    /// bare `FROM` or contextual `FOR` immediately after a call argument, so
+    /// no lookahead is needed (unlike TRIM's modifier keywords).
+    pub(super) fn parse_substring_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        if !self.at(RPAREN) {
+            self.parse_argument(); // string expression
+            self.skip_trivia();
+
+            if self.at(FROM_KW) {
+                self.advance();
+                self.skip_trivia();
+                self.parse_expression(); // start position
+                self.skip_trivia();
+                if self.at_contextual_keyword("FOR") {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_expression(); // length
+                    self.skip_trivia();
+                }
+            } else if self.at_contextual_keyword("FOR") {
+                self.advance();
+                self.skip_trivia();
+                self.parse_expression(); // length (implied start of 1)
+                self.skip_trivia();
+            } else {
+                while self.at(COMMA) {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_argument();
+                    self.skip_trivia();
+                }
+            }
+        }
+
+        self.parse_null_treatment_if_present();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Parse the argument list of a `POSITION(...)` call.
+    ///
+    /// Handles the SQL-standard keyword form `POSITION(sub IN string)` —
+    /// closes the `duckdb_position_in` gap. DuckDB does not accept a
+    /// comma-separated `POSITION(sub, string)` form (use `STRPOS` for that),
+    /// so no comma fallback is provided here; a plain `IDENT(...)` call with
+    /// commas still reaches this function but will error on the unexpected
+    /// `,`/trailing tokens the same way it would for any other malformed
+    /// call, which is acceptable since DuckDB itself rejects that form.
+    ///
+    /// The left operand is parsed at `parse_concat_expr` precedence (below
+    /// the comparison-operator level that owns `IN`) — parsing it via the
+    /// full `parse_expression` would let the comparison-expression loop
+    /// greedily consume the `IN` as the start of an `IN (values…)` clause
+    /// and then fail expecting `(`. This mirrors how `BETWEEN`'s bounds are
+    /// parsed at `parse_additive_expr` to avoid `AND` ambiguity.
+    pub(super) fn parse_position_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        if !self.at(RPAREN) {
+            self.parse_concat_expr(); // substring to search for
+            self.skip_trivia();
+            if !self.expect(IN_KW) {
+                self.error("Expected IN in POSITION expression".to_string());
+            }
+            self.skip_trivia();
+            self.parse_expression(); // string to search within
+            self.skip_trivia();
+        }
+
+        self.parse_null_treatment_if_present();
         self.expect(RPAREN);
         self.finish_node();
     }
