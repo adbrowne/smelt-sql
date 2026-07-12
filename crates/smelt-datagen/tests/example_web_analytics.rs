@@ -2881,3 +2881,66 @@ fn test_sessions_chained_invariants_inline_pass() {
         "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 22: enrichment_dual_session_invariants inline .test.sql passes
+// ---------------------------------------------------------------------------
+
+/// Inline test gate: run `smelt test --select silver.events_enriched` against
+/// the web_analytics project cloned into a temp dir, and assert exit 0 (all
+/// matched tests pass).
+///
+/// The test file `tests/enrichment_dual_session_invariants.test.sql`
+/// exercises the real `silver/events_enriched` model
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"Enrichment — silver.events_enriched carries both"): every event row
+/// carries both the clock-anchored session identity (from `silver.sessions`)
+/// and the root-anchored session identity (from `silver.sessions_chained`),
+/// agreeing when neither table's cap fired differently and diverging on the
+/// cap-divergence fixture mirroring device 8 from
+/// `session_boundary_chained_invariants.test.sql`.
+#[test]
+fn test_enrichment_dual_session_invariants_inline_pass() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // Clone the web_analytics project tree into tmp_path so the build artefacts
+    // (DuckDB file, .smelt/ schema cache) never land in the checked-in source.
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    // Run `smelt test --select silver.events_enriched` from the cloned project dir.
+    let test_out = Command::new(&smelt)
+        .args([
+            "test",
+            "--project-dir",
+            tmp_path.to_str().expect("tmp_path is valid UTF-8"),
+            "--select",
+            "silver.events_enriched",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt test`: {e}"));
+
+    let stdout = String::from_utf8_lossy(&test_out.stdout);
+    let stderr = String::from_utf8_lossy(&test_out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        test_out.status.success(),
+        "`smelt test --select silver.events_enriched` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        test_out.status,
+    );
+
+    // Verify the named test reported PASS in the output.
+    assert!(
+        combined.contains("PASS") || combined.contains("passed"),
+        "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
+    );
+}

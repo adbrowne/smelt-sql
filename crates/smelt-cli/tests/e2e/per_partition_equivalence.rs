@@ -1260,7 +1260,20 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
 // day only ever changes `event_date` partitions within the derived window.
 
 /// One row from `main.silver_events_enriched`, keyed for equivalence checks.
-type EventEnrichedRow = (i64, Option<String>, Option<String>); // (event_id, session_id, session_utm_campaign)
+///
+/// `(event_id, session_id, session_utm_campaign, session_id_chained,
+/// session_utm_campaign_chained)` — the last two carry the root-anchored
+/// identity from `silver.sessions_chained`
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"Enrichment"), alongside the primary clock-anchored pair from
+/// `silver.sessions`.
+type EventEnrichedRow = (
+    i64,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+    Option<String>,
+);
 
 /// Every `silver.events_enriched` row grouped by its `event_date` partition.
 fn query_events_enriched_by_partition(
@@ -1270,7 +1283,8 @@ fn query_events_enriched_by_partition(
         .unwrap_or_else(|e| panic!("open duckdb {db_path:?}: {e}"));
     let mut stmt = conn
         .prepare(
-            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign \
+            "SELECT event_date::VARCHAR, event_id, session_id, session_utm_campaign, \
+                    session_id_chained, session_utm_campaign_chained \
              FROM main.silver_events_enriched",
         )
         .unwrap_or_else(|e| panic!("prepare events_enriched query: {e}"));
@@ -1281,6 +1295,8 @@ fn query_events_enriched_by_partition(
                 row.get::<_, i64>(1)?,
                 row.get::<_, Option<String>>(2)?,
                 row.get::<_, Option<String>>(3)?,
+                row.get::<_, Option<String>>(4)?,
+                row.get::<_, Option<String>>(5)?,
             ))
         })
         .unwrap_or_else(|e| panic!("query events_enriched rows: {e}"))
@@ -1291,11 +1307,21 @@ fn query_events_enriched_by_partition(
         String,
         std::collections::BTreeSet<EventEnrichedRow>,
     > = std::collections::BTreeMap::new();
-    for (event_date, event_id, session_id, session_utm_campaign) in rows {
+    for (
+        event_date,
+        event_id,
+        session_id,
+        session_utm_campaign,
+        session_id_chained,
+        session_utm_campaign_chained,
+    ) in rows
+    {
         by_partition.entry(event_date).or_default().insert((
             event_id,
             session_id,
             session_utm_campaign,
+            session_id_chained,
+            session_utm_campaign_chained,
         ));
     }
     by_partition
@@ -1446,5 +1472,102 @@ fn web_analytics_events_enriched_narrow_update() {
         "narrow update touched previously-written partition(s) it should not \
          have (a run touching only 2026-03-25 must not rewrite earlier \
          partitions): {unexpected_changes:?}"
+    );
+}
+
+/// `silver.events_enriched` is now downstream of **two** maintained session
+/// tables (`docs/plans/20260711-clock-vs-root-anchored-sessions.md` Phase
+/// 4): `silver.sessions` (window-independent, clock-anchored) and
+/// `silver.sessions_chained` (self-referential, `Ordered`, root-anchored —
+/// Phase 3). The per-partition equivalence contract must still hold end to
+/// end even though one of the two upstreams now builds under strict
+/// sequential ordering rather than in parallel: day-by-day incremental
+/// maintenance of `events_enriched` must equal a full-window rebuild,
+/// column-for-column, including the added `session_id_chained` /
+/// `session_utm_campaign_chained` pair — not just the pre-existing
+/// `session_id` / `session_utm_campaign` pair from `silver.sessions`.
+#[test]
+fn events_enriched_dual_ids_replay_matches_rebuild() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    let (workspace, db_path, setup_abs) = stage_workspace(tmp_path);
+
+    // ── Pipeline A: full-window single rebuild ────────────────────────────
+    smelt_run(
+        &workspace,
+        START_DATE,
+        END_DATE_EXCLUSIVE,
+        "enriched-dual-pipeline-A",
+    );
+    let by_partition_a = query_events_enriched_by_partition(&db_path);
+
+    // ── Pipeline B: day-by-day replay ─────────────────────────────────────
+    reset_db(&workspace);
+    fs::create_dir_all(db_path.parent().unwrap()).expect("mkdir target/");
+    repopulate_sources(&db_path, &setup_abs);
+
+    for (ws, we) in DAY_WINDOWS {
+        smelt_run(
+            &workspace,
+            ws,
+            we,
+            &format!("enriched-dual-pipeline-B [{ws}..{we})"),
+        );
+    }
+    let by_partition_b = query_events_enriched_by_partition(&db_path);
+
+    assert!(
+        !by_partition_a.is_empty(),
+        "Pipeline A produced no silver.events_enriched rows"
+    );
+    assert_eq!(
+        by_partition_a.keys().collect::<Vec<_>>(),
+        by_partition_b.keys().collect::<Vec<_>>(),
+        "silver.events_enriched partition sets (event_date) differ between \
+         full rebuild and day-by-day replay once sessions_chained (Ordered) \
+         is joined in"
+    );
+
+    let mut mismatches = Vec::new();
+    for (partition, rows_a) in &by_partition_a {
+        let rows_b = by_partition_b.get(partition);
+        if rows_b != Some(rows_a) {
+            mismatches.push(format!(
+                "  partition {partition}: A has {} rows, B has {:?} rows",
+                rows_a.len(),
+                rows_b.map(|r| r.len())
+            ));
+        }
+    }
+    assert!(
+        mismatches.is_empty(),
+        "silver.events_enriched (dual session ids) differs between full \
+         rebuild and day-by-day replay on at least one partition:\n{}",
+        mismatches.join("\n")
+    );
+
+    // Every event carries both identities: `session_id` (primary,
+    // `silver.sessions`) and `session_id_chained` (`silver.sessions_chained`)
+    // must both be populated for every row — the join is inner on both
+    // upstreams, so a missing id on either side would mean the row dropped
+    // out of the result set entirely rather than surfacing as NULL, but we
+    // assert it directly against the materialized rows as the ground truth.
+    let mut missing_id = Vec::new();
+    for (partition, rows) in &by_partition_a {
+        for (event_id, session_id, _, session_id_chained, _) in rows {
+            if session_id.is_none() || session_id_chained.is_none() {
+                missing_id.push(format!(
+                    "partition {partition} event_id {event_id}: session_id={session_id:?} \
+                     session_id_chained={session_id_chained:?}"
+                ));
+            }
+        }
+    }
+    assert!(
+        missing_id.is_empty(),
+        "every silver.events_enriched row must carry both session_id and \
+         session_id_chained: {}",
+        missing_id.join("\n")
     );
 }
