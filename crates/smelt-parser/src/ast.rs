@@ -3302,10 +3302,7 @@ impl Subquery {
             if let Some(select) = node.children().find_map(SelectStmt::cast) {
                 return Some(select);
             }
-            match node.children().find(|n| n.kind() == SUBQUERY) {
-                Some(inner) => node = inner,
-                None => return None,
-            }
+            node = node.children().find(|n| n.kind() == SUBQUERY)?;
         }
     }
 

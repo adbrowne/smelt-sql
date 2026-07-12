@@ -105,6 +105,7 @@ fn is_keyword(s: &str) -> bool {
         "only",
         "or",
         "order",
+        "out",
         "outer",
         "over",
         "overlaps",
