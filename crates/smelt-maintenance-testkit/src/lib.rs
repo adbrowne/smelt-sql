@@ -32,6 +32,11 @@
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 1).
 //! - [`render`] — renders a `ModelRecipe` into model/source/oracle SQL and a
 //!   staged project.
+//! - [`verdict`] — classifies a staged recipe through the *real* maintenance
+//!   derivation (`smelt_db::maintenance_plan_report` + `file_diagnostics`)
+//!   into `Admitted`/`Refused`, plus the adversarial leaf pool and the
+//!   over-refusal ledger
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 2).
 
 pub mod link_c_harness;
 pub mod model_shapes;
@@ -39,3 +44,4 @@ pub mod oracle;
 pub mod recipe;
 pub mod render;
 pub mod run_schedule;
+pub mod verdict;

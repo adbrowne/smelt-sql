@@ -10,6 +10,7 @@ description = "Dev-only Link-C schedule/oracle harness + model-shape catalogue f
 [dependencies]
 smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
+smelt-logical = { path = "../smelt-logical" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-runtime = { path = "../smelt-runtime" }
@@ -21,3 +22,4 @@ anyhow.workspace = true
 chrono = "0.4"
 proptest.workspace = true
 tempfile = "3"
+rowan.workspace = true

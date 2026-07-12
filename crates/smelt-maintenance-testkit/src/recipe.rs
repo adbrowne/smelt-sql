@@ -267,6 +267,167 @@ pub fn arb_recipe(pool: RecipePool) -> impl Strategy<Value = ModelRecipe> {
         })
 }
 
+/// Adversarial leaf constructs (`docs/plans/20260712-generative-maintenance-conformance.md`
+/// Phase 2's "Implementation shape"): each deliberately defeats one of
+/// `model_properties.md`'s fail-closed proofs rather than merely being an
+/// unusual-but-provable shape. Kept as a type *separate* from
+/// [`BodyConstruct`] — [`BodyConstruct`]'s only renderer
+/// (`render::render_model_body`) is an exhaustive match, and `render.rs` is
+/// outside Phase 2's edit scope (Critical files: `verdict.rs` new,
+/// `recipe.rs` for the adversarial pool) — so [`AdversarialLeafRecipe`]
+/// renders itself instead of routing through that match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialLeaf {
+    /// An opaque/unrecognised function call wraps the projected event-time
+    /// column. `model_properties.md`'s event-time trace classifies an
+    /// unrecognised function call as `Undecidable` — fail-closed, never an
+    /// optimistic pass.
+    OpaqueEventTime,
+    /// `INTERSECT` combines two arms of the same source.
+    /// `model_properties.md` §Known Divergences: set-operation distribution
+    /// covers `UNION ALL` only; `derive_column_groups` fails closed on any
+    /// other set operation, collapsing every payload column into one group
+    /// sensitive to every declared source (`maintenance_plan.md` §Known
+    /// Divergences' `INTERSECT`/`EXCEPT` entry).
+    IntersectBody,
+    /// `RANDOM()` occupies a skeleton (identity/dedup-key) position — a
+    /// row-nondeterministic function feeding the column the plan needs a
+    /// stable identity from.
+    NondeterministicSkeleton,
+    /// The projected event-time column is shifted by a calendar-variable
+    /// (`INTERVAL '1 month'`) offset — `Offset::Symbolic`, which cannot
+    /// populate a `Bounded{before, after}` scan window, forcing
+    /// `NotDerivable` for the source rather than an approximate fixed-day
+    /// guess (`model_properties.md`'s interval-literal parsing note).
+    SymbolicIntervalBound,
+}
+
+/// Stable, human-readable identifier for an [`AdversarialLeaf`] — mirrors
+/// [`construct_kind_name`]'s role for [`BodyConstruct`].
+fn adversarial_leaf_name(leaf: AdversarialLeaf) -> &'static str {
+    match leaf {
+        AdversarialLeaf::OpaqueEventTime => "opaque_event_time",
+        AdversarialLeaf::IntersectBody => "intersect_body",
+        AdversarialLeaf::NondeterministicSkeleton => "nondeterministic_skeleton",
+        AdversarialLeaf::SymbolicIntervalBound => "symbolic_interval_bound",
+    }
+}
+
+/// A fully-typed adversarial recipe: one [`SourceRecipe`] (always the
+/// append-only `events` shape, `KeyShape::Single`) paired with one
+/// [`AdversarialLeaf`]. Self-rendering (see [`AdversarialLeaf`]'s doc
+/// comment for why): [`Self::model_body`]/[`Self::model_file`]/
+/// [`Self::source_yaml`] produce the same artifacts
+/// [`crate::render::render_model_body`]/[`crate::render::render_model_file`]/
+/// [`crate::render::render_source_yaml`] do for [`ModelRecipe`], without
+/// routing through `render.rs`.
+#[derive(Debug, Clone)]
+pub struct AdversarialLeafRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub leaf: AdversarialLeaf,
+}
+
+impl AdversarialLeafRecipe {
+    fn new(leaf: AdversarialLeaf) -> Self {
+        Self {
+            model_name: format!("adversarial_{}", adversarial_leaf_name(leaf)),
+            source: SourceRecipe::events(KeyShape::Single),
+            leaf,
+        }
+    }
+
+    /// The declared `batched.unique_key` for this leaf's body shape: the
+    /// source's own row key, plus the nondeterministic `tag` column for
+    /// [`AdversarialLeaf::NondeterministicSkeleton`] (the whole point of
+    /// that leaf is putting the nondeterministic function in a skeleton/
+    /// identity position).
+    pub fn unique_key(&self) -> Vec<String> {
+        match self.leaf {
+            AdversarialLeaf::NondeterministicSkeleton => {
+                vec![self.source.key_column.clone(), "tag".to_string()]
+            }
+            _ => vec![self.source.key_column.clone()],
+        }
+    }
+
+    /// The coverage-matrix cell id this leaf inhabits
+    /// (`construct × source-property`, matching [`BodyConstruct::matrix_cell_ids`]'s
+    /// convention).
+    pub fn matrix_cell_id(&self) -> String {
+        format!("{}×adversarial", adversarial_leaf_name(self.leaf))
+    }
+
+    /// The model's `SELECT` body — no frontmatter, mirroring
+    /// [`crate::render::render_model_body`]'s contract for [`ModelRecipe`].
+    pub fn model_body(&self) -> String {
+        let src = format!("smelt.sources.{}", self.source.name);
+        let d = &self.source.clock_column;
+        let id = &self.source.key_column;
+        let val = &self.source.payload_column;
+        match self.leaf {
+            AdversarialLeaf::OpaqueEventTime => {
+                format!("SELECT smelt_testkit_opaque_udf({d}) AS {d}, {id}, {val} FROM {src}")
+            }
+            AdversarialLeaf::IntersectBody => {
+                format!(
+                    "SELECT {d}, {id}, {val} FROM {src} \
+                     INTERSECT \
+                     SELECT {d}, {id}, {val} FROM {src}"
+                )
+            }
+            AdversarialLeaf::NondeterministicSkeleton => {
+                format!("SELECT {d}, {id}, {val}, RANDOM() AS tag FROM {src}")
+            }
+            AdversarialLeaf::SymbolicIntervalBound => {
+                format!("SELECT {d} + INTERVAL '1 month' AS {d}, {id}, {val} FROM {src}")
+            }
+        }
+    }
+
+    /// The full model file contents: frontmatter (`timeseries:` + `refresh:
+    /// incremental` + `grain: partition` + `batched.unique_key`) followed by
+    /// [`Self::model_body`] — the same shape
+    /// [`crate::render::render_model_file`] produces for [`ModelRecipe`].
+    pub fn model_file(&self) -> String {
+        let d = &self.source.clock_column;
+        let unique_key = self.unique_key().join(", ");
+        format!(
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+            body = self.model_body(),
+        )
+    }
+
+    /// The source YAML sidecar — same append-only `events(d, id, val)`
+    /// shape [`crate::render::render_source_yaml`] renders for
+    /// [`ModelRecipe`].
+    pub fn source_yaml(&self) -> String {
+        format!(
+            "description: adversarial-leaf conformance source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+            d = self.source.clock_column,
+            id = self.source.key_column,
+            val = self.source.payload_column,
+        )
+    }
+}
+
+/// A `Strategy` drawing uniformly from the four named [`AdversarialLeaf`]
+/// kinds (plan Phase 2 TDD list: "proptest over the adversarial pool").
+pub fn arb_adversarial_leaf() -> impl Strategy<Value = AdversarialLeaf> {
+    prop_oneof![
+        Just(AdversarialLeaf::OpaqueEventTime),
+        Just(AdversarialLeaf::IntersectBody),
+        Just(AdversarialLeaf::NondeterministicSkeleton),
+        Just(AdversarialLeaf::SymbolicIntervalBound),
+    ]
+}
+
+/// The typed generator over [`AdversarialLeafRecipe`] — the adversarial-pool
+/// counterpart of [`arb_recipe`].
+pub fn arb_adversarial_recipe() -> impl Strategy<Value = AdversarialLeafRecipe> {
+    arb_adversarial_leaf().prop_map(AdversarialLeafRecipe::new)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
