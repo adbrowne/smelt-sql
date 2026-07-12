@@ -257,3 +257,20 @@ categories in the table above, which together with `roundtrip_mismatch` account 
   parse — likely a parse_expression precedence gap around `::` on NULL/named-arg value
   positions; fails standalone too, pre-existing. 1 ledger entry recategorized under
   `smelt_fails_unclassified` carries the actual error (`Expected expression, found DOUBLE_COLON`).
+
+## 2026-07-12 — Final whole-branch review residue (PR #158)
+
+- `SELECT a FROM t UNION (SELECT a FROM t) ORDER BY a` fails to parse (DuckDB accepts;
+  trailing ORDER BY/LIMIT after a parenthesized set-op operand is unhandled in
+  `parse_select_stmt`'s set-op tail). Fail-loud, but the parenthesized form exists precisely
+  to attach a trailing ORDER BY to the whole union — likely the most user-visible hole in
+  the new set-op surface. Same family as the ledgered `((A) UNION B)` scalar-subquery residual.
+- `SELECT {'a': 1}.a` (dot-access on a brace-literal receiver) fails to parse — same class
+  as the ledgered `postfix_dot_field_access_on_parenthesized_expr` (7 entries); fold in.
+- `printer.rs` `Display for TableRef` final raw-text `else` fallback: believed unreachable
+  now that subquery/nested/identifier branches are explicit, but if ever reached the
+  TABLESAMPLE loop + alias printing after it could double-print — add a defensive early
+  return when touching this next.
+- `ast.rs` `strip_ident_quotes` handles `"…"`/`'…'` but not `$$…$$` dollar-quoted STRING
+  tokens (e.g. `CollateExpr::collation_name`) — delimiters silently kept if one ever reaches
+  such a call site.
