@@ -5,21 +5,26 @@
 //! line naming its `[start, end)` window and position, in real execution order.
 //!
 //! Real fixture: `examples/web_analytics/silver.sessions` has a derived
-//! `partition_column` (`session_start_date`) that skews ±1 day from the
-//! driving `event_date` column (a Form B relation), so its **derived output
-//! window** (`docs/specs/model_transforms.md` §Semantics "The output window
-//! is derived, never assumed") is 2 days wider than the declared
-//! `[2026-03-01, 2026-03-29)` run window: `[2026-02-28, 2026-03-30)`. That
-//! 30-day derived window is what the `bounded_safe(chunk=7d,…)` classification
-//! auto-splits — no `--per-partition`/`--batch-size` override is used.
+//! `partition_column` (`session_start_date`) whose Form B relation
+//! (`event_date BETWEEN session_start_date AND session_start_date + INTERVAL
+//! '1 day'`) skews the driving `event_date` column forward by one day, so
+//! its **derived output window** (`docs/specs/model_transforms.md`
+//! §Semantics "The output window is derived, never assumed") widens the
+//! declared `[2026-03-01, 2026-03-29)` run window one day *backward* (the
+//! Form B skew inverted): `[2026-02-28, 2026-03-29)`. That 29-day derived
+//! window is what the `bounded_safe(chunk=9d,…)` classification auto-splits
+//! — no `--per-partition`/`--batch-size` override is used. The 9-day chunk
+//! size comes from the model's own 3-day context (a 2-day backward source
+//! read, from `sessionize`'s `max_lookback` window frames, plus the 1-day
+//! forward Form B skew): `context_days * 3`, clamped to `[7, 90]`.
 
 use std::path::Path;
 use std::process::Command;
 
-/// The 28-day declared run window `[2026-03-01, 2026-03-29)` derives a 30-day
-/// output window `[2026-02-28, 2026-03-30)` (the model's own 1-day skew,
-/// inverted), which a `bounded_safe(chunk=7d,…)` classification auto-splits
-/// into five chunks (four full 7-day chunks plus a 2-day remainder); the
+/// The 28-day declared run window `[2026-03-01, 2026-03-29)` derives a 29-day
+/// output window `[2026-02-28, 2026-03-29)` (the model's own Form B skew,
+/// inverted), which a `bounded_safe(chunk=9d,…)` classification auto-splits
+/// into four chunks (three full 9-day chunks plus a 2-day remainder); the
 /// dry-run prints one `DELETE`+`INSERT` block per chunk for `silver.sessions`,
 /// each introduced by `-- chunk k/N: [start, end)` in execution order, and no
 /// backend is opened (the run succeeds against a project whose `.duckdb`
@@ -52,30 +57,29 @@ fn chunked_range_prints_per_chunk_boundaries() {
     let stdout = String::from_utf8_lossy(&output.stdout);
 
     // Each chunk introduced by its boundary line, in order. The derived
-    // output window [2026-02-28, 2026-03-30) — the declared window widened
-    // by the model's own 1-day skew on both edges — splits into four full
-    // 7-day chunks plus a 2-day remainder.
+    // output window [2026-02-28, 2026-03-29) — the declared window widened
+    // one day backward by the model's own Form B skew, inverted — splits
+    // into three full 9-day chunks plus a 2-day remainder.
     for (k, (start, end)) in [
-        ("2026-02-28", "2026-03-07"),
-        ("2026-03-07", "2026-03-14"),
-        ("2026-03-14", "2026-03-21"),
-        ("2026-03-21", "2026-03-28"),
-        ("2026-03-28", "2026-03-30"),
+        ("2026-02-28", "2026-03-09"),
+        ("2026-03-09", "2026-03-18"),
+        ("2026-03-18", "2026-03-27"),
+        ("2026-03-27", "2026-03-29"),
     ]
     .iter()
     .enumerate()
     {
-        let line = format!("-- chunk {}/5: [{}, {})", k + 1, start, end);
+        let line = format!("-- chunk {}/4: [{}, {})", k + 1, start, end);
         assert!(
             stdout.contains(&line),
             "expected per-chunk boundary line `{line}` in the dry-run output:\n{stdout}"
         );
     }
 
-    // The chunks print in execution order (chunk 1 before chunk 5).
-    let pos1 = stdout.find("-- chunk 1/5:").expect("chunk 1 present");
-    let pos5 = stdout.find("-- chunk 5/5:").expect("chunk 5 present");
-    assert!(pos1 < pos5, "chunks must print in execution order");
+    // The chunks print in execution order (chunk 1 before chunk 4).
+    let pos1 = stdout.find("-- chunk 1/4:").expect("chunk 1 present");
+    let pos4 = stdout.find("-- chunk 4/4:").expect("chunk 4 present");
+    assert!(pos1 < pos4, "chunks must print in execution order");
 
     // Each chunk carries the emitted maintenance statements, transactionally
     // bracketed, with real literals (no symbolic placeholders).
@@ -94,7 +98,7 @@ fn chunked_range_prints_per_chunk_boundaries() {
     );
     // The real (derived output) window literals appear in the DELETE predicates.
     assert!(
-        stdout.contains("'2026-02-28'") && stdout.contains("'2026-03-21'"),
+        stdout.contains("'2026-02-28'") && stdout.contains("'2026-03-18'"),
         "expected real chunk window literals in the statements:\n{stdout}"
     );
 }

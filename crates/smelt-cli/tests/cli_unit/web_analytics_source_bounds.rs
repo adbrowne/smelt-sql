@@ -202,12 +202,16 @@ fn test_explain_json_events_parsed_late_window_bound() {
 
 /// Real fixture: `examples/web_analytics/models/silver/sessions.sql`
 /// declares `partition_column: session_start_date` and filters `WHERE
-/// event_date BETWEEN session_start_date - INTERVAL '1 day' AND
-/// session_start_date + INTERVAL '1 day'` — a Form B relation anchored on
-/// the model's own partition column (`docs/specs/model_transforms.md`
-/// §Semantics "The output window is derived, never assumed"). The
-/// walk-composed skew fold (`model_partition_skew`, the property-composition
-/// walk's entry) must read this as a symmetric 1-day skew bound.
+/// event_date BETWEEN session_start_date AND session_start_date + INTERVAL
+/// '1 day'` — a Form B relation anchored on the model's own partition column
+/// (`docs/specs/model_transforms.md` §Semantics "The output window is
+/// derived, never assumed"). `session_start_date` is always the *earliest*
+/// calendar day of the session under the clock-anchored cut
+/// (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"silver.sessions — clock-anchored cut"), so the relation is a
+/// zero-backward, one-day-forward skew, not symmetric. The walk-composed
+/// skew fold (`model_partition_skew`, the property-composition walk's entry)
+/// must read it that way.
 #[test]
 fn sessions_skew_bound_derived() {
     let sessions_sql_path = examples_dir()
@@ -222,8 +226,9 @@ fn sessions_skew_bound_derived() {
     let skew = model_partition_skew(sql, "session_start_date");
     assert_eq!(
         skew.before,
-        Seconds::days(1),
-        "sessions.sql must derive a 1-day backward skew"
+        Seconds::ZERO,
+        "sessions.sql must derive a zero backward skew (session_start_date \
+         is always the session's earliest day)"
     );
     assert_eq!(
         skew.after,

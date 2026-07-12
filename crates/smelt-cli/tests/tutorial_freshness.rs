@@ -244,6 +244,12 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
     // period argument distinguishes it from the earlier generic sessions
     // block (`EXPLAIN_PERIOD`, 2026-04-10..2026-04-11) in the same page.
     let mut found_cross_midnight_sessions = false;
+    // The two-table teaching arc requires a real `explain --show-sql` block
+    // for EACH session table — the clock-anchored `silver.sessions` and the
+    // root-anchored, self-referential `silver.sessions_chained` — never just
+    // one of the two.
+    let mut found_sessions_explain = false;
+    let mut found_sessions_chained_explain = false;
 
     for block in &blocks {
         let subcommand = block
@@ -271,6 +277,14 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
             && block.args.iter().any(|a| a.contains("2026-05-04"))
         {
             found_cross_midnight_sessions = true;
+        }
+        if block.args.first().map(String::as_str) == Some("explain") {
+            if block.args.iter().any(|a| a == "silver.sessions") {
+                found_sessions_explain = true;
+            }
+            if block.args.iter().any(|a| a == "silver.sessions_chained") {
+                found_sessions_chained_explain = true;
+            }
         }
 
         assert_eq!(
@@ -301,6 +315,18 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
          window's skew inversion in {}",
         page_path.display()
     );
+    assert!(
+        found_sessions_explain,
+        "expected at least one `explain silver.sessions` smelt-generate block \
+         (the clock-anchored session table) in {}",
+        page_path.display()
+    );
+    assert!(
+        found_sessions_chained_explain,
+        "expected at least one `explain silver.sessions_chained` smelt-generate \
+         block (the root-anchored, self-referential session table) in {}",
+        page_path.display()
+    );
 
     // Two-boundary truncation subsection: prose-only (no `smelt-generate`
     // block — `examples/web_analytics`' datagen fixture never produces a
@@ -311,7 +337,11 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
     // `cross_midnight_rebase.rs::two_boundary_session_truncated_at_declared_bound`);
     // freshness for this subsection is guaranteed by those tests asserting
     // the exact pinned values, not by re-deriving a fenced block here — so
-    // this gate only checks the subsection exists and quotes them.
+    // this gate only checks the subsection exists and quotes them. The
+    // clock-anchored rule's deadline for a root at or after 00:30 reaches
+    // the *second* midnight, so the day-1 session now carries 59 events
+    // (root + the full day-2 grid), one more than the old frame-cap design's
+    // 58 — the old `event_count=58` pin is gone.
     assert!(
         page.contains("What about a session that spans two midnights?"),
         "expected the two-boundary-truncation subsection ('What about a \
@@ -320,7 +350,7 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
          it",
         page_path.display()
     );
-    for pinned in ["event_count=58", "session_end=2026-03-20 23:30"] {
+    for pinned in ["event_count=59", "session_end=2026-03-20 23:55"] {
         assert!(
             page.contains(pinned),
             "expected the two-boundary-truncation subsection to quote the \
@@ -329,4 +359,40 @@ fn web_analytics_maintenance_tutorial_sql_is_fresh() {
             page_path.display()
         );
     }
+    assert!(
+        !page.contains("event_count=58"),
+        "the old frame-cap design's event_count=58 pin must be gone — the \
+         clock-anchored cut's closed form yields 59 events for this chain, \
+         quoted only as a narrated anti-example number (447/9 confetti), \
+         never as this subsection's own pinned value, in {}",
+        page_path.display()
+    );
+
+    // The never-idle comparison table (`docs/research/20260711-clock-vs-root-anchored-sessions.md`
+    // §"The lesson"): both prose values must be present, sourced from the
+    // real e2e fixtures (`cross_midnight_rebase.rs::never_idle_device_yields_one_session_per_day`,
+    // `::chained_never_idle_device_yields_one_session_per_two_days`), never
+    // hand-arithmetic.
+    assert!(
+        page.contains("447"),
+        "expected the never-idle comparison to quote the 447-event fixture \
+         size (pinned in cross_midnight_rebase.rs) in {}",
+        page_path.display()
+    );
+    assert!(
+        page.contains("9 sessions"),
+        "expected the never-idle comparison to quote the clock-anchored \
+         table's exact '9 sessions' (~1 per day over the 447-event, \
+         10-calendar-day fixture; pinned by \
+         never_idle_device_yields_one_session_per_day) in {}",
+        page_path.display()
+    );
+    assert!(
+        page.contains("5 sessions"),
+        "expected the never-idle comparison to quote the root-anchored \
+         table's exact '5 sessions' (~1 per 2 days over the 447-event \
+         fixture; pinned by \
+         chained_never_idle_device_yields_one_session_per_two_days) in {}",
+        page_path.display()
+    );
 }

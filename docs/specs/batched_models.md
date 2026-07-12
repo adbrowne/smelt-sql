@@ -1,7 +1,7 @@
 ---
 feature: batched_models
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-12
 owners: [andrew]
 ---
 
@@ -149,6 +149,8 @@ A model with **any** `NotDerivable` source is **refused at planning time**, not 
 
 A first run (no output table) and a backfill (re-run of a written range) follow the same DELETE+INSERT contract — the DELETE is a no-op when the partition is absent. The planner picks a **backfill-chunking** shape (a partition-grain-local transform, `model_transforms.md` §"Transforms that stay in a mode spec") from the batch-safety class:
 
+**First-run bootstrap for a self-referential model.** A non-self-referential model's first run creates its target directly with `CREATE TABLE ... AS SELECT ...` over the first batch. A **self-referential** model (`window_independence`'s `Ordered` self-edge, §"Window independence and self-referential models") cannot take that path: the first batch's own SELECT reads the target table via `smelt.<self>`, and no engine can resolve a table to itself mid-creation. Instead, when the target does not yet exist, the runtime first materialises an **empty** target table carrying the model's inferred output schema (column names and types, derived the same way any downstream consumer's schema is resolved), then executes every batch — including the first — as the ordinary partition DELETE+INSERT. The self-read over the empty table correctly yields no prior state for the model's first partition, so the trajectory it builds from there is identical to seeding the table by hand before the run. This bootstrap is a one-time, structural step keyed only on "does the target exist yet", not a property of the batch-safety class below.
+
 | Class                | Chunking                                                                                   |
 |----------------------|--------------------------------------------------------------------------------------------|
 | `FullyBatchSafe`     | A single DELETE+INSERT pair covers any `[start, end)`. No chunking.                        |
@@ -236,6 +238,8 @@ Whether windows may be built **in parallel** or must be built **sequentially in 
 
 This is the same stateless/stateful spine that separates the partition grain from the key grain: a self-referential partition-grain model is *stateful-ordered* in execution yet keeps the partition-grain *output shape* (partitioned, per-partition-equivalent within each window's input).
 
+**Ordered execution composes with the derived output window.** An `Ordered` self-referential model's write window is rebased by the same derived-output-window rule a window-independent model gets (§"Execution model (DuckDB, current)" above, `model_transforms.md` §"The output window is derived, never assumed"): when the model's `partition_column` is itself derived and a genuine Form B relation — anchored on a *non-self* source — declares that it skews away from the driving date column, a run requesting `[D, D+1)` also rewrites the skew-reached neighbouring partitions, exactly as it would for a window-independent model. Ordering then applies over the *rebased* partitions, not just the originally requested ones: every partition in the rebased range still builds strictly sequentially, in temporal order, one partition per batch. The self-edge itself is never a skew anchor — its own bounding relation (the backward-bounded read that proves the `Ordered` verdict) is a distinct, already-proven convergence mechanism, not a partition-column skew declaration, even when the self-referenced table's column happens to share the model's own `partition_column` name.
+
 ### State ownership
 
 smelt does not track watermarks, offsets, or run history for partition-grain models — the backend owns computational state (DuckDB: table state + transactions; future Delta/Spark: transaction log + MERGE; future Flink: checkpoints). Optional run-state tracking with gap detection is opt-in via the `state.mode: intervals` posture (`virtual_environments.md`); the on-disk layout is owned by `run_state.md`.
@@ -279,7 +283,6 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
 - **The mode value is cut; the sub-block remains.** `refresh: batched` is a hard error with a fix-it naming `refresh: incremental` + `grain: partition` (`crates/smelt-core/src/config.rs`); the `batched:` sub-block (`batched.unique_key`, `batched.nondeterministic_columns`, `batched.safety_overrides`) is still the live surface for those options and is refused without `refresh: incremental` + `grain: partition` (`crates/smelt-core/src/metadata.rs`). Top-level `unique_key`/`safety_overrides` do not yet parse; `columns.<c>.contract` does (`models.md` §Known Divergences). The `smelt migrate` assist does not exist. Delivered/tracked by `docs/plans/20260707-maintenance-plan-impl.md`.
 - **`nondeterministic_columns` predates `columns.<c>.contract`.** The pre-cut `batched.nondeterministic_columns` list and the target `columns.<c>.contract: plausible` declaration are the same mechanism under two surfaces; the column-scoped `contract` key is owned by `models.md` §"`columns:` — column metadata" (semantics: `maintenance_plan.md`). The `columns.<c>.contract` key parses today; the pre-cut list form remains the live surface inside the `batched:` sub-block (previous divergence).
-- **A self-referential model's very first partition cannot be created via `CREATE TABLE ... AS SELECT ...`.** DuckDB (and SQL generally) cannot resolve a table to itself mid-creation, so a self-referential partition-grain model's target table must already exist (e.g. seeded with an opening row before the run window) before the first backfill batch runs; there is no automatic bootstrap. Tracked in `docs/plans/20260704-model-updates-l4-batched.md`.
 - **Rule module file still carries the old spelling.** `crates/smelt-logical/src/rules/incremental.rs` retains the file path; the diagnostic codes (`TimeseriesRequiredForBatched`, `CumulativeForbidsBatched`, `BatchedNotSafe`) and config types (`BatchedConfig`, `BatchedSafetyOverrides`) are renamed. A pure internal file rename is deferred.
 - **One non-hot classification call site still reads the outer SQL body.** The bound-`NotDerivable` refusal gate (`derive_model_source_bounds`, pure planner) classifies on the outer `model.sql`; a lookback living only inside a function body with no outer Form B filter is the sole case that would behave differently, and none exists in the repo. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
 - **Window-function batch-safety check runs on unexpanded outer SQL.** `find_inadmissible_over` scans the outer model SQL before function expansion, so an `OVER` clause inside a `smelt.define` body is invisible to it. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.

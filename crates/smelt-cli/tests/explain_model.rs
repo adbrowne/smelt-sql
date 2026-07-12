@@ -119,10 +119,10 @@ fn events_enriched_shows_creation_cells_for_both_model_upstreams() {
 
 /// `silver.sessions`'s outermost FROM is a `TableExpr`-returning function
 /// call (`smelt.functions.sessionize(...)`, nested inside a CTE), and its
-/// `partition_column` (`session_start_date`) skews ±1 day from the driving
-/// `event_date` column (a Form B relation) — the derived output window for a
-/// requested `[2026-04-10, 2026-04-11)` run is the skew-inverted
-/// `[2026-04-09, 2026-04-12)` (`docs/specs/model_transforms.md` §Semantics
+/// `partition_column` (`session_start_date`) skews the driving `event_date`
+/// column forward by one day (a Form B relation) — the derived output
+/// window for a requested `[2026-04-10, 2026-04-11)` run is the skew-inverted
+/// `[2026-04-09, 2026-04-11)` (`docs/specs/model_transforms.md` §Semantics
 /// "The output window is derived, never assumed").
 ///
 /// `smelt explain silver.sessions --show-sql --json --period …` must emit a
@@ -130,11 +130,11 @@ fn events_enriched_shows_creation_cells_for_both_model_upstreams() {
 /// "failed to inject the output clamp: No FROM clause found" refusal a
 /// compile-then-clamp ordering bug produced against a `TableExpr` FROM — with
 /// the DELETE range and output clamp at the skew-inverted window and the
-/// source-scan pushdown filter widened a further day beyond it
-/// (`[2026-04-08, 2026-04-13)`, the same 1-day Form B relation applied again,
-/// relative to the already-widened output window, per the two-layer
-/// widened-scan design). No backend is opened — `--show-sql` never connects
-/// to one.
+/// source-scan pushdown filter widened a further two days backward and one
+/// day forward beyond it (`[2026-04-07, 2026-04-12)`, `sessionize`'s own
+/// `max_lookback` reach applied on top of the already-widened output
+/// window, per the two-layer widened-scan design). No backend is opened —
+/// `--show-sql` never connects to one.
 #[test]
 fn sessions_show_sql_emits_statements() {
     let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
@@ -201,25 +201,25 @@ fn sessions_show_sql_emits_statements() {
         assert!(
             joined.contains(
                 "DELETE FROM main.silver_sessions WHERE session_start_date >= '2026-04-09' \
-                 AND session_start_date < '2026-04-12'"
+                 AND session_start_date < '2026-04-11'"
             ),
-            "expected the skew-inverted DELETE range [2026-04-09, 2026-04-12) for cell {:?}: {joined}",
+            "expected the skew-inverted DELETE range [2026-04-09, 2026-04-11) for cell {:?}: {joined}",
             cell["trigger"]
         );
         assert!(
             joined.contains(
                 "_smelt_output_clamp WHERE session_start_date >= '2026-04-09' \
-                 AND session_start_date < '2026-04-12'"
+                 AND session_start_date < '2026-04-11'"
             ),
-            "expected the skew-inverted output clamp [2026-04-09, 2026-04-12) for cell {:?}: {joined}",
+            "expected the skew-inverted output clamp [2026-04-09, 2026-04-11) for cell {:?}: {joined}",
             cell["trigger"]
         );
         assert!(
             joined.contains(
-                "main.silver_events_parsed WHERE event_date >= '2026-04-08' \
-                 AND event_date < '2026-04-13'"
+                "main.silver_events_parsed WHERE event_date >= '2026-04-07' \
+                 AND event_date < '2026-04-12'"
             ),
-            "expected the widened source scan [2026-04-08, 2026-04-13) for cell {:?}: {joined}",
+            "expected the widened source scan [2026-04-07, 2026-04-12) for cell {:?}: {joined}",
             cell["trigger"]
         );
         saw_delete_insert_group = true;

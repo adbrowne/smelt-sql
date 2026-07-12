@@ -7,32 +7,47 @@ timeseries:
   partition_column: event_date
   granularity: day
 ---
--- Event-grain enrichment: attaches each event's `session_id` and the
--- session's attributed `utm_campaign` (first-touch, `silver/sessions`) back
--- onto the event row, alongside the event's own raw `utm_campaign` from
--- `silver/events_parsed` for comparison. Two model upstreams, both
--- maintained: `silver.events_parsed` (this model's own `event_date` clock,
--- read 1:1) and `silver.sessions` (clocked by `session_start_date`, joined
--- across the session boundary). `smelt explain silver.events_enriched`
--- shows a creation cell for each upstream, each clamped by that upstream's
--- own derived reach (`docs/specs/maintenance_plan.md` §"Upstream model
--- edges") — so a run touching one `event_date` partition only ever
--- re-touches the corresponding `event_date` partition here, never the
--- whole table.
+-- Event-grain enrichment: attaches each event's session identity — under
+-- BOTH upstream session tables' cut rules — back onto the event row,
+-- alongside the event's own raw `utm_campaign` from `silver/events_parsed`
+-- for comparison. Three model upstreams, all maintained:
+-- `silver.events_parsed` (this model's own `event_date` clock, read 1:1),
+-- `silver.sessions` (clock-anchored cut, clocked by `session_start_date`,
+-- joined across the session boundary), and `silver.sessions_chained`
+-- (root-anchored cut, self-referential, same partition-column shape). The
+-- two session upstreams differ only in *where the cap's phase comes from*
+-- (the clock vs. the session's own root —
+-- `docs/research/20260711-clock-vs-root-anchored-sessions.md`
+-- §"Design"); `session_id`/`session_utm_campaign` (from `silver.sessions`)
+-- stay primary and are what the gold identity models consume — the
+-- root-anchored pair is additive, for direct per-event comparison.
+-- `smelt explain silver.events_enriched` shows a creation cell for each of
+-- the three upstreams, each clamped by that upstream's own derived reach
+-- (`docs/specs/maintenance_plan.md` §"Upstream model edges") — so a run
+-- touching one `event_date` partition only ever re-touches the
+-- corresponding `event_date` partition here, never the whole table.
 --
--- The join carries the same 1-day session-cap Form B filter as
--- `gold/eventstream_with_identity`: a session that started on the previous
--- day can still own an event on this day (a session cannot span more than
--- `max_session_length`, `silver/sessions`' explicit cap), so declaring
--- `session_start_date` stays within 1 day of `event_date` widens the
--- `sessions` read by exactly that cap, composing with `sessions`' own
--- derived clamp rather than re-deriving it. `silver.events_parsed`'s own
--- 3-day late-arrival window (`docs/specs/datagen.md` §"Redelivery
--- (duplicate emission)") is absorbed upstream already — a late arrival
--- landing today re-touches `events_parsed`'s [D-3, D) partitions, and this
--- model's own `event_date`-clocked creation cell on that upstream
--- re-touches the same partitions here, purely through clamp composition
--- (no additional filter needed in this model's own body).
+-- Each session join carries a bounded Form B filter mirroring the same
+-- pattern as `gold/eventstream_with_identity`: a session can still own an
+-- event on a later day than it rooted on (a session cannot outlive its own
+-- table's explicit cap), so declaring `session_start_date` stays within the
+-- cap of `event_date` widens that table's read by exactly that cap,
+-- composing with the upstream's own derived clamp rather than re-deriving
+-- it.
+--   * `silver.sessions`: 1-day cap (`max_session_length` — every session
+--     spans at most two calendar days by the clock-anchored closed form).
+--   * `silver.sessions_chained`: 2-day cap, wider than `sessions`' own
+--     because the root-anchored cut's cap is asserted as a raw duration
+--     (`< INTERVAL '2 days'` in `sessions_chained.sql`'s own `HAVING`)
+--     rather than a clock-aligned deadline — the 2-day bound is the
+--     conservative reach that covers it.
+-- `silver.events_parsed`'s own 3-day late-arrival window
+-- (`docs/specs/datagen.md` §"Redelivery (duplicate emission)") is absorbed
+-- upstream already — a late arrival landing today re-touches
+-- `events_parsed`'s [D-3, D) partitions, and this model's own
+-- `event_date`-clocked creation cell on that upstream re-touches the same
+-- partitions here, purely through clamp composition (no additional filter
+-- needed in this model's own body).
 SELECT
     e.event_id,
     e.device_id,
@@ -45,13 +60,23 @@ SELECT
     e.url,
     e.utm_campaign AS event_utm_campaign,
     s.session_id,
-    s.utm_campaign AS session_utm_campaign
+    s.utm_campaign AS session_utm_campaign,
+    sc.session_id AS session_id_chained,
+    sc.utm_campaign AS session_utm_campaign_chained
 FROM smelt.silver.events_parsed e
 JOIN smelt.silver.sessions s
     ON e.device_id = s.device_id
    AND e.event_ts >= s.session_start
    AND e.event_ts <= s.session_end
--- Form B: the session-cap composition described above.
+JOIN smelt.silver.sessions_chained sc
+    ON e.device_id = sc.device_id
+   AND e.event_ts >= sc.session_start
+   AND e.event_ts <= sc.session_end
+-- Form B: the sessions session-cap composition described above.
 WHERE s.session_start_date
     BETWEEN e.event_date - INTERVAL '1 day'
         AND e.event_date + INTERVAL '1 day'
+-- Form B: the sessions_chained session-cap composition described above.
+  AND sc.session_start_date
+      BETWEEN e.event_date - INTERVAL '2 days'
+          AND e.event_date + INTERVAL '2 days'

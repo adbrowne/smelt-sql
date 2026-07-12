@@ -269,3 +269,74 @@ pub fn emit_create_table_as(
         transactional: false,
     }
 }
+
+/// First-run bootstrap for a **self-referential** partition-grain model
+/// (`docs/specs/batched_models.md` §"First-run and backfill" —
+/// "First-run bootstrap for a self-referential model"): the target does not
+/// exist yet, and the model's own first-batch SELECT reads that same target
+/// via `smelt.<self>`, so `CREATE TABLE … AS SELECT …` cannot resolve it —
+/// no engine can create a table and read it in the same statement. Instead
+/// this emitter authors a plain, empty `CREATE TABLE` from the caller's own
+/// inferred output schema (column name, SQL type) — no `SELECT`, no read of
+/// any table. The subsequent batch loop then executes the model's first
+/// partition (and every later one) as the ordinary region `DELETE`+`INSERT`
+/// (`emit_delete_insert`); the self-read over this empty table correctly
+/// sees no prior state.
+///
+/// `columns` is plain data the caller already resolved — a self-
+/// referential model's own output-schema fixpoint
+/// (`smelt-runtime`'s `UpstreamSchemas::from_database`, which refines what
+/// `resolved_model_schema` alone cannot: that Salsa query's `cycle_initial`
+/// BREAKS a genuine self-referential cycle with an empty schema rather than
+/// iterating it to a fixpoint). This function does no inference of its own,
+/// only string assembly, preserving the maintenance-plan purity invariant
+/// (`docs/specs/architecture.md` §"Constraints & Invariants" item 12).
+///
+/// `table` is already fully qualified (`schema.table`). `dialect` selects
+/// the SQL type spelling for `Text`/`Varchar` columns: Spark 4+ rejects a
+/// bare `VARCHAR` (no length), so those columns render as `STRING`; DuckDB
+/// takes bare `VARCHAR`. Every other `DataType` renders via
+/// `DataType::to_backend_sql()`, the same mapping `wrap_with_type_casts`
+/// (`smelt-dialect`) uses for its CAST wrapper.
+///
+/// # Panics
+/// Panics if `columns` is empty — a model with no resolvable output columns
+/// cannot be bootstrapped into a valid `CREATE TABLE`; the caller must not
+/// reach this emitter without a non-empty resolved schema.
+pub fn emit_create_empty_table(
+    table: &str,
+    columns: &[(String, smelt_types::DataType)],
+    dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !columns.is_empty(),
+        "emit_create_empty_table requires a non-empty resolved output schema for {table}"
+    );
+    let col_defs = columns
+        .iter()
+        .map(|(name, dt)| format!("{name} {}", bootstrap_column_sql_type(dt, dialect)))
+        .collect::<Vec<_>>()
+        .join(", ");
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "CREATE TABLE {table} ({col_defs})"
+        ))],
+        transactional: false,
+    }
+}
+
+/// The SQL type spelling `emit_create_empty_table` uses for one column.
+/// Mirrors `smelt_dialect::type_conformance::type_cast_sql`'s Spark-STRING
+/// carve-out (that function is not reused directly: `smelt-logical` and
+/// `smelt-dialect` are sibling crates over `smelt-types`/`smelt-parser`, and
+/// this module's dependency footprint is deliberately kept to `smelt-types`
+/// alone, matching every other emitter in this file).
+fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDialect) -> String {
+    match (dt, dialect) {
+        (smelt_types::DataType::Text, MaintenanceDialect::Spark)
+        | (smelt_types::DataType::Varchar { max_length: None }, MaintenanceDialect::Spark) => {
+            "STRING".to_string()
+        }
+        _ => dt.to_backend_sql(),
+    }
+}
