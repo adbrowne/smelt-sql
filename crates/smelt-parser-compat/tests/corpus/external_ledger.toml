@@ -28,60 +28,52 @@
 # or no longer matches any corpus statement — remove the entry then.
 
 ["b86e3620c3472ed0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
-
-["b4424d249fbc1310"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found LAST_KW"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["60f4625d09268f8f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found FIRST_KW"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["c37e044f4cdbca2b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["430fadb76ce45e99"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["d16194276459eb33"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "group_by_tuple_expression"
+note = "GROUP BY (col1, col2, ...) / ROLLUP((expr), (expr)) grouping-tuple-of-expressions syntax is not parsed"
 
 ["a0c862cd03f7795f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "qualify_with_window_alias"
+note = "QUALIFY referencing a named WINDOW clause alias (WINDOW w AS (...) QUALIFY ... OVER w) is not parsed"
 
 ["844a4cf2785f72ce"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["dcfad1c21ca2871b"]
 category = "star_exclude_clause"
 note = "SELECT * EXCLUDE (col_list) is not parsed at all (recategorized: the chained-dot column reference inside the EXCLUDE list now parses fine on its own; the blocker is the missing star-exclude clause grammar, which is out of scope for this pass since it also needs wildcard-expansion semantics in smelt-db)"
 
 ["d4664bad27b9ae0f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["68209df8cf51bf2f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
-["47dcd69c1a6af374"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["f6ebc1f04febf925"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["4ad43ad287680e7f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["f81816ae565ef848"]
 category = "multidim_array_type_literal"
@@ -100,8 +92,8 @@ category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
 ["8435920558dfc484"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "struct_type_name_cast"
+note = "STRUCT(field TYPE, ...) used as a cast/type-literal target (e.g. col::STRUCT(a INT, b VARCHAR)) is not parsed as a type name"
 
 ["f099a4257eff7688"]
 category = "dollar_quoted_or_backslash_literal"
@@ -120,8 +112,8 @@ category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
 
 ["c4b11046e37641d3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "struct_type_name_cast"
+note = "STRUCT(field TYPE, ...) used as a cast/type-literal target (e.g. col::STRUCT(a INT, b VARCHAR)) is not parsed as a type name"
 
 ["0fc51a5a43ff6ee9"]
 category = "dollar_quoted_or_backslash_literal"
@@ -144,76 +136,76 @@ category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
 
 ["e7f8101e8ebcb4aa"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap (list comprehension itself now parses; residual failure is elsewhere in the statement); first smelt parser error: Expected RPAREN, found LPAREN"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["4d1c47594b381d8e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+category = "range_keyword_as_identifier_or_function"
+note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["bfd77a838c18b1ee"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "not_prefixed_binary_operator"
+note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["f4f84f035bf107c7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
+category = "double_equals_operator"
+note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
 
 ["fe081f2437428f8a"]
 category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
 
 ["4563e9312dc33851"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body (SELECT * EXCLUDE (col) list is not parsed; unrelated to set-operation nesting)"
+category = "star_exclude_or_rename_clause"
+note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in all positions (nested in list comprehensions, or with a trailing comma in the column list)"
 
 ["72346eb01e27547a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["315571c158974ea3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["abc0037ef1a7ff76"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found HASH"
+category = "postgres_hash_prefix_operator"
+note = "A bare `#` prefix operator/path-reference token (e.g. #1, #thepath) is not parsed as an expression"
 
 ["90757f69e6f1528c"]
 category = "file_glob_or_path_literal_from"
 note = "A glob/path string literal used directly as a FROM target is not parsed"
 
 ["4eb105e1f83bc57b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["bb06d51958809d45"]
 category = "file_glob_or_path_literal_from"
 note = "A glob/path string literal used directly as a FROM target is not parsed"
 
 ["f21f0cdd5e4a6bdc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["be1b96a2e833999b"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
 
 ["6888fd274860944f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["110435db7d28187b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["e40913acdce167cb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["4b5f29a8027c361a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+category = "range_keyword_as_identifier_or_function"
+note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["3156d5843df8e3df"]
 category = "file_glob_or_path_literal_from"
@@ -224,8 +216,8 @@ category = "file_glob_or_path_literal_from"
 note = "A glob/path string literal used directly as a FROM target is not parsed"
 
 ["309df939f0e0e423"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found PARTITION_KW"
+category = "filter_clause_without_where"
+note = "FILTER(condition) (DuckDB's bare-condition FILTER shorthand, without a WHERE keyword) is not parsed"
 
 ["403890fe1405f8ed"]
 category = "file_glob_or_path_literal_from"
@@ -239,45 +231,41 @@ note = "A glob/path string literal used directly as a FROM target is not parsed"
 category = "file_glob_or_path_literal_from"
 note = "A glob/path string literal used directly as a FROM target is not parsed"
 
-["a5e238d31d51c3b6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING (double-quoted identifiers, e.g. fib_n as an alias, are not accepted — a distinct, broader gap from MATERIALIZED, which this statement also happens to use and which parses fine on its own; verified via SELECT 1 AS 'fib_n' (double-quoted) failing identically with no MATERIALIZED involved)"
-
 ["d8d88b608d1f5372"]
 category = "recursive_cte_cycle_using_key"
 note = "WITH RECURSIVE ... USING KEY cycle-detection clause is not parsed"
 
 ["4bfa6e902d2fed4e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "not_prefixed_binary_operator"
+note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["0287efd3e8516d74"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["8bd4b8deb3f3dbf4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["555d4c72d46225cc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["9821e4e6dd8018e7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["232928ca73dc0ee1"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "if_function_vs_ternary_ambiguity"
+note = "SQL IF(cond, a, b) 3-argument function call is not parsed; IF is reserved for the meta-language ternary and is not in at_keyword_as_function_name's list"
 
 ["0a525a0e6cb3124d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+category = "range_keyword_as_identifier_or_function"
+note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["11364d332cae94d5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+category = "range_keyword_as_identifier_or_function"
+note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["bb786c3a21b69bb3"]
 category = "lambda_or_lateral_syntax"
@@ -320,120 +308,116 @@ category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
 ["c32e459dcc171212"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; corpus artifact: un-substituted DuckDB test-suite template placeholder `${f}` is not valid SQL; first smelt parser error: Unexpected character: '$' (unrelated to set-operation nesting)"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["3d2f3a348900dcb0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found LBRACKET"
+category = "list_type_bracket_subscript_in_call"
+note = "A bracket-typed array literal used as a nested function-call argument (e.g. list_contains(list_value([1,2]::INTEGER[2], ...), ...)) is not parsed"
 
 ["d6b2b42e7fbd5615"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["42fc08aa5a971e67"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["eaa0a8e22ad859bb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["dd08f6ff9fa4843a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+category = "backslash_escape_in_plain_string_literal"
+note = "A trailing backslash immediately before a string literal's closing quote (e.g. parse_dirname('\', ...)) is consumed as an escape by smelt's lexer, which treats backslash as an always-active string escape; this shifts where the literal is judged to close"
 
 ["846e3d125c8e02a9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "caret_at_string_starts_with_operator"
+note = "DuckDB's ^@ string starts-with operator is not parsed"
 
 ["31e5bad5703082a4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "caret_at_string_starts_with_operator"
+note = "DuckDB's ^@ string starts-with operator is not parsed"
 
 ["62a960aea7213de2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["eb04a0882f486e64"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["165601706514a57b"]
 category = "at_time_zone_or_time_tz_type"
 note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["bf4f9acc846503da"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "asof_join_syntax"
+note = "DuckDB ASOF JOIN is not parsed"
 
 ["fdf234c9e21cdf34"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["3fc21ada2d17e40e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["24b75a39c9c0bf23"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["f4619b3187dea570"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "join_condition_missing_after_join"
+note = "A JOIN whose ON/USING condition itself contains a construct smelt can't parse leaves the table-ref parser positioned such that the JOIN's required table reference is reported missing"
 
 ["32b190f08513f4c0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["f1c243266bfc7ecd"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["c566463312d1e03f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["bcba706ae690b376"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["65b42acc411df115"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
 ["4370f8971e388a7d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found PLUS"
+category = "sql_json_constructor_functions"
+note = "SQL/JSON constructor functions (JSON_OBJECT, JSON_ARRAY) with the standard FORMAT/ON NULL/RETURNING/ENCODING clauses, or a nested SELECT argument, are not parsed"
 
 ["da676b8ed997d2e7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "file_glob_or_path_literal_from"
+note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["7dca435889a53d09"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["32f26decb2020f32"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["34c0d550b05d75c8"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["ed076a4bed786a82"]
 category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
 
-["8fb37406c9ff66c2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
 ["340d518ead2e82d9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap (list comprehension itself now parses; residual failure is the COLUMNS(* EXCLUDE (...)) source-list expression); first smelt parser error: Expected RPAREN, found IDENT"
+category = "star_exclude_or_rename_clause"
+note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in all positions (nested in list comprehensions, or with a trailing comma in the column list)"
 
 ["59b6e8884651ae90"]
 category = "grouping_sets_trailing_comma"
@@ -444,120 +428,116 @@ category = "pivot_unpivot"
 note = "PIVOT/UNPIVOT clauses are not parsed (tracked gaps.rs::pivot_unpivot)"
 
 ["327d2fe1686ecd7c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "star_exclude_or_rename_clause"
+note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in all positions (nested in list comprehensions, or with a trailing comma in the column list)"
 
 ["85572a0abe900ae0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
-
-["c3c38ae23374bad2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found LAST_KW"
+category = "star_exclude_or_rename_clause"
+note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in all positions (nested in list comprehensions, or with a trailing comma in the column list)"
 
 ["4d0dd132657b256e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "not_prefixed_binary_operator"
+note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["fbe13b47bb1dacaf"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["dca844a46bc203da"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected SELECT in subquery"
+category = "describe_as_table_source"
+note = "DESCRIBE ... used as a nested table source (SELECT ... FROM (DESCRIBE SELECT ...))  is not parsed"
 
 ["ea88b2757d9c71e2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "is_boolean_literal_predicate"
+note = "`IS <boolean literal>` (e.g. WHERE a IS false) is not parsed"
 
 ["159b1c43ab513ae5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["cfa83f6ab8d0b3f2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "row_value_comparison"
+note = "A row-value constructor compared with a binary operator, ANY/ALL subquery, IN subquery, or OVERLAPS (e.g. (a,b) < (c,d), (a,b) NOT IN (SELECT ...)) is not parsed"
 
 ["7c63c0ec32a851c2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "row_value_comparison"
+note = "A row-value constructor compared with a binary operator, ANY/ALL subquery, IN subquery, or OVERLAPS (e.g. (a,b) < (c,d), (a,b) NOT IN (SELECT ...)) is not parsed"
 
 ["8ffa23b311216bca"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body (comma-separated FROM items — implicit CROSS JOIN via `FROM a, b` — are not parsed; the UNION appears only inside an already-parenthesized, aliased derived table and is not the cause)"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["a2a0218136085c71"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected SELECT after EXISTS ("
+category = "exists_with_cte_subquery"
+note = "EXISTS(...) whose body is a CTE-scoped subquery (WITH ... SELECT) is not parsed; parse_exists_expr expects a bare SELECT"
 
 ["c1307297692b3fcc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "quoted_table_name_in_from"
+note = "A double-quoted table name in FROM position (e.g. FROM 'flights' (double-quoted in the source)) is not parsed; parse_table_ref only accepts IDENT, not the STRING token smelt's lexer produces for double-quoted text"
 
 ["909102b28165f9f6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["4e81a9226eafcc77"]
 category = "information_schema_roundtrip"
 note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
 
 ["1fdfbfc3284379d1"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["98685dc6055e7793"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["4444edd7851561d6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+category = "duckdb_typed_literal_prefix"
+note = "A DuckDB typed-string-literal prefix outside the recognized keyword set (e.g. blob '...', BITSTRING'...') is not parsed"
 
 ["8150a207f52fa0e4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["bedcd41917f4c6be"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
+category = "double_equals_operator"
+note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
 
 ["55e2372801d9d8d6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
+category = "double_equals_operator"
+note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
 
 ["adbd9123def3a1ae"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOT"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["86d5f8c89a0e4fe2"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
 ["9aec02ab7e317a8e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["d01c409e1c257644"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["d106520b2b903a2a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["0f470924dc083f2e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["0a0802d2ce42c4bb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["d019f39e7d6696a6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["f75f39efc83ae601"]
 category = "multidim_array_type_literal"
@@ -576,12 +556,12 @@ category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
 
 ["364300d0dca2b341"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found COLON"
+category = "array_subscript_slice_with_negative_step"
+note = "Array/list slice subscript with a negative or expression step (e.g. arr[1:-:2], a[start:stop:step]) is not parsed"
 
 ["47d1d0e6b0779852"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RBRACKET, found COLON"
+category = "array_subscript_slice_with_negative_step"
+note = "Array/list slice subscript with a negative or expression step (e.g. arr[1:-:2], a[start:stop:step]) is not parsed"
 
 ["36d81cb73e5419a1"]
 category = "lambda_or_lateral_syntax"
@@ -591,97 +571,85 @@ note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not y
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
-["c8923c43debfab8b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found FIRST_KW (FIRST used as an ordinary aggregate function name)"
-
 ["31cbbfb11333cb31"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["d80af49b27e90d8d"]
 category = "sqllogictest_template_placeholder"
 note = "Recategorized: the chained-dot column references (s.name.v, s.nested_struct.b) now parse fine; the actual blocker is the DuckDB sqllogictest ${source} substitution placeholder in FROM position (not real SQL, not a smelt gap) causing 'Unexpected character: $'"
 
 ["76e9af57d672e11b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "sqllogictest_template_placeholder"
+note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
 ["7a689f12e5ce1105"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected `]` to close list literal"
+category = "array_slice_bracket_type_literal"
+note = "typeof([...]) with a typed-literal array element list is not parsed"
 
 ["6419ed0b514e1675"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected table reference"
+category = "table_valued_values_no_parens"
+note = "A bare `VALUES (...), (...)` (no enclosing parens) used directly as a FROM table source is not parsed; only `(VALUES ...)` parenthesized form is"
 
 ["8d25f22ec749e9ca"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name (DuckDB's UNION(field type, ...) type constructor is not parsed as a type — the UNION keyword is a type-constructor name here, not a set operator; unrelated to set-operation nesting)"
+category = "union_type_name_cast"
+note = "DuckDB UNION(tag TYPE, ...) used as a cast/type-literal target is not parsed as a type name"
 
 ["10473e2a67b8dceb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name (DuckDB's UNION(field type, ...) type constructor is not parsed as a type — the UNION keyword is a type-constructor name here, not a set operator; unrelated to set-operation nesting)"
+category = "union_type_name_cast"
+note = "DuckDB UNION(tag TYPE, ...) used as a cast/type-literal target is not parsed as a type name"
 
 ["122931512d64deb7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["a98f53701e8018fd"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+category = "duckdb_typed_literal_prefix"
+note = "A DuckDB typed-string-literal prefix outside the recognized keyword set (e.g. blob '...', BITSTRING'...') is not parsed"
 
 ["9c8c8884d1846598"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected frame bound (UNBOUNDED, CURRENT ROW, number, or INTERVAL literal)"
+category = "window_frame_expression_bound"
+note = "A window-frame bound that is a column/expression rather than a literal (e.g. ROWS BETWEEN p PRECEDING AND f FOLLOWING) is not parsed"
 
 ["2eeeab6e1921780c"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
 
 ["a8c6b4e0e85d910f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
+category = "range_keyword_as_identifier_or_function"
+note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["f7fd82844d7f1224"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
-["46de8e0ab57f769f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["b07a853630e2551e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["4e2938497df48afe"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["5a40822826a71b22"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "reserved_word_as_bare_alias"
+note = "A reserved keyword used as an explicit `AS alias` (e.g. AS desc) is not parsed; only IDENT (and, since this pass, a double-quoted STRING) is accepted in alias position, not contextual/reserved keywords"
 
 ["2a12f587a5d6ca35"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["8e1c5448d54b61e2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "reserved_word_as_bare_alias"
+note = "A reserved keyword used as an explicit `AS alias` (e.g. AS desc) is not parsed; only IDENT (and, since this pass, a double-quoted STRING) is accepted in alias position, not contextual/reserved keywords"
 
 ["4fe2ee6cdd0704fd"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["425e2fadb5ea009c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ANY_KW"
+category = "any_all_quantified_comparison"
+note = "The `expr op ANY (...)`/`expr op ALL (...)` quantified-comparison form outside a WHERE/subquery context (e.g. 33 * any (44), 'foo' like all (array[...])) is not parsed"
 
 ["351184b9bb661834"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
+category = "any_all_quantified_comparison"
+note = "The `expr op ANY (...)`/`expr op ALL (...)` quantified-comparison form outside a WHERE/subquery context (e.g. 33 * any (44), 'foo' like all (array[...])) is not parsed"
 
 ["4b1da263d8fc85c9"]
 category = "multidim_array_type_literal"
@@ -696,148 +664,128 @@ category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
 ["fd2fd77ba205e851"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["ea7e4d37079be9fb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found LT"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["948f61eca609d6f7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["368958ab62644062"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["7197d17eb157905c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["4e8b97600a98b622"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["b8783ca07ad8a5f7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected type name"
+category = "quoted_type_name_cast"
+note = "PostgreSQL double-quoted type name in a cast (e.g. ::'char' (double-quoted in the source)) is not parsed as a type name"
 
 ["fad296cb1984b3c2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["b9d4cbdefd1fe8da"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["a09178ce769ac702"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
-
-["40f8ad41bb7f2c7b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["fb901cb9a980d62c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "aggregate_call_order_by_clause"
+note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
 ["778a84897612d89a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "row_value_comparison"
+note = "A row-value constructor compared with a binary operator, ANY/ALL subquery, IN subquery, or OVERLAPS (e.g. (a,b) < (c,d), (a,b) NOT IN (SELECT ...)) is not parsed"
 
 ["3dac5fcbdc081e56"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "collation_for_expression"
+note = "PostgreSQL's COLLATION FOR (expr) introspection function-like syntax is not parsed"
 
 ["edf5f5611a904f27"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["a8fd9c1fc1099b82"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["1ea4e85c5ee0ca1d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["dc2d3f2f09749641"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["eb37ac7ea2d5b1a5"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["9ba1807ec4998afc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_table_inheritance_wildcard"
+note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning include child tables) is not parsed"
 
 ["6af276b398df67ff"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_table_inheritance_wildcard"
+note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning include child tables) is not parsed"
 
 ["1bf158008cd20368"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_table_inheritance_wildcard"
+note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning include child tables) is not parsed"
 
 ["b99ec95b79923245"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["3df03d6993ec82eb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "select_into_clause"
+note = "SELECT ... INTO [TABLE] target (PostgreSQL's SELECT-INTO table-creation form) is not parsed"
 
 ["bd85096b1212237c"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["b6df6d802fb49130"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "not_prefixed_binary_operator"
+note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["87ca4960829e3b9d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "not_prefixed_binary_operator"
+note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["b2ac103355cb7e31"]
 category = "information_schema_roundtrip"
 note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
 
 ["129988e382e13e37"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["7cb60da0790f2809"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["54ea05c755c84417"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["21509863ffaf373a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "group_by_tuple_expression"
+note = "GROUP BY (col1, col2, ...) / ROLLUP((expr), (expr)) grouping-tuple-of-expressions syntax is not parsed"
 
 ["49912a8d8c54c4f9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "group_by_tuple_expression"
+note = "GROUP BY (col1, col2, ...) / ROLLUP((expr), (expr)) grouping-tuple-of-expressions syntax is not parsed"
 
 ["4ae2792a411e7deb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+category = "quoted_type_name_cast"
+note = "PostgreSQL double-quoted type name in a cast (e.g. ::'char' (double-quoted in the source)) is not parsed as a type name"
 
 ["d9f48bb80aed9a47"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["eca4611dbb482693"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["c4ad9c9be37cc4cb"]
 category = "at_time_zone_or_time_tz_type"
@@ -852,92 +800,84 @@ category = "at_time_zone_or_time_tz_type"
 note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["bffe4815fa87b76a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["3dafe942693dbbe0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["2e36739aa763413e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "row_value_comparison"
+note = "A row-value constructor compared with a binary operator, ANY/ALL subquery, IN subquery, or OVERLAPS (e.g. (a,b) < (c,d), (a,b) NOT IN (SELECT ...)) is not parsed"
 
 ["748cb87386c1f0f4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found NUMBER"
+category = "malformed_corpus_statement"
+note = "This corpus line is a truncated/malformed extraction artifact (unbalanced quotes or parens from the upstream test file), not valid SQL in any dialect"
 
 ["02bbae9411867710"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["e4659dff58a92e06"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["dc057a3eb1dc18cc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["488d9923b19c0012"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["3bbd15fcaaa9f9e6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["9446ad94c98a3bf4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found LT"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["59d747665c85c525"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["1cf441456a47a4e5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["58dafb55824fc674"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["9cddba224aa76ae9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["d184d544aec4b1b5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_interval_range_qualifier"
+note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day to minute, ... hour to second(2)) is not parsed"
 
 ["8cebc9fc4b523c10"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_interval_range_qualifier"
+note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day to minute, ... hour to second(2)) is not parsed"
 
 ["03290b92394cab6d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_interval_range_qualifier"
+note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day to minute, ... hour to second(2)) is not parsed"
 
 ["24591a4aec125466"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_interval_range_qualifier"
+note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day to minute, ... hour to second(2)) is not parsed"
 
 ["ca48cd01a3411558"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["8c97c5337c8b86b4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_interval_range_qualifier"
+note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day to minute, ... hour to second(2)) is not parsed"
 
 ["0b571b09988e1c59"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["d7de0c9a7a556220"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected IDENT, found STAR"
+category = "row_constructor_field_star_projection"
+note = "`table.*` used inside a function-call argument or after a nested-record projection (count(t2.*), tststats.priv_test_tbl.* > (1,1)) is not parsed"
 
 ["60a4afc966b46247"]
 category = "lambda_or_lateral_syntax"
@@ -959,13 +899,9 @@ note = "Dollar-quoted string or backslash-escape string literal form is not pars
 category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
 
-["530b215733abf00b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
 ["9d9f1aa06f23fe50"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+category = "postgres_table_function_column_type_alias"
+note = "A table function's alias with explicit per-column type list (e.g. func(...) q (a text, b text)) is not parsed"
 
 ["7ea589a192639dc4"]
 category = "multidim_array_type_literal"
@@ -976,8 +912,8 @@ category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
 ["0b81fafd4d61f092"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["46776f190688a163"]
 category = "json_to_record"
@@ -988,16 +924,16 @@ category = "json_to_record"
 note = "json_to_record/jsonb_to_record table-valued function is not parsed"
 
 ["54048be0439b653c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["476ed4749dd5bfdc"]
 category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
 
 ["856ef694096f70cf"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["fd2e29813b4bad83"]
 category = "json_to_record"
@@ -1012,48 +948,44 @@ category = "json_to_record"
 note = "json_to_record/jsonb_to_record table-valued function is not parsed"
 
 ["be9112ed269e53ae"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "jsonb_operators"
+note = "PostgreSQL jsonb/json operators (?, @?, ->, containment path-query strings) are not parsed"
 
 ["5a792e901bc6a54c"]
 category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
 
 ["6566fd6398c7faff"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "jsonb_operators"
+note = "PostgreSQL jsonb/json operators (?, @?, ->, containment path-query strings) are not parsed"
 
 ["e01262da97c32168"]
 category = "jsonb_operators"
 note = "PostgreSQL jsonb operators (#-, #>, #>>, ?, ?|, ?&) are not parsed"
 
 ["e6a25377d78d0163"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "jsonb_operators"
+note = "PostgreSQL jsonb/json operators (?, @?, ->, containment path-query strings) are not parsed"
 
 ["572b76312eebf0f7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "jsonb_operators"
+note = "PostgreSQL jsonb/json operators (?, @?, ->, containment path-query strings) are not parsed"
 
 ["91c452ca932b2952"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "jsonb_operators"
+note = "PostgreSQL jsonb/json operators (?, @?, ->, containment path-query strings) are not parsed"
 
 ["d0830a7407ca91a3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["441dccca55633b62"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
+category = "jsonb_operators"
+note = "PostgreSQL jsonb/json operators (?, @?, ->, containment path-query strings) are not parsed"
 
 ["68643dd2001a3530"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "select_into_clause"
+note = "SELECT ... INTO [TABLE] target (PostgreSQL's SELECT-INTO table-creation form) is not parsed"
 
 ["a04a59359daf5014"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "from_only_clause"
+note = "PostgreSQL's FROM ONLY table (exclude child tables) is not parsed"
 
 ["31bde0cab7cc702d"]
 category = "postgres_range_types"
@@ -1104,64 +1036,56 @@ category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
 ["83272f10c183f2ac"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["ee6959fa1df17a5f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
-["2729feeaafc6b76b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
+category = "postgres_typed_literal_prefix"
+note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
 
 ["a1dabbd802f301f0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["f8a2c50d020865d6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+category = "numeric_literal_followed_by_ident_no_space"
+note = "A numeric literal immediately followed by an identifier-continuation character with no separating whitespace (e.g. 0.0a, 0b, 1x) is intentionally lexed as a single fail-loud ERROR token rather than silently split (see lexer.rs consume_number's documented rationale, verified against DuckDB); this PostgreSQL corpus sample exercises the same ambiguous shape"
 
 ["72d4d2e7c7830425"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
+category = "numeric_literal_followed_by_ident_no_space"
+note = "A numeric literal immediately followed by an identifier-continuation character with no separating whitespace (e.g. 0.0a, 0b, 1x) is intentionally lexed as a single fail-loud ERROR token rather than silently split (see lexer.rs consume_number's documented rationale, verified against DuckDB); this PostgreSQL corpus sample exercises the same ambiguous shape"
 
 ["72d0e2e7c77f367e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
-
-["6698679897ba3955"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
+category = "numeric_literal_followed_by_ident_no_space"
+note = "A numeric literal immediately followed by an identifier-continuation character with no separating whitespace (e.g. 0.0a, 0b, 1x) is intentionally lexed as a single fail-loud ERROR token rather than silently split (see lexer.rs consume_number's documented rationale, verified against DuckDB); this PostgreSQL corpus sample exercises the same ambiguous shape"
 
 ["9c8fe5f0b0ea90e8"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["3226a1a01d7c5be1"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "not_prefixed_binary_operator"
+note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["4fed97a9b0057d83"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["e55b6152c35d6208"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["cdfce3fe07642069"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["0f783c77304dc0a5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found EOF"
+category = "malformed_corpus_statement"
+note = "This corpus line is a truncated/malformed extraction artifact (unbalanced quotes or parens from the upstream test file), not valid SQL in any dialect"
 
 ["51f76c1db9da623c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ARRAY_KW"
+category = "postgres_variadic_array_argument"
+note = "PostgreSQL VARIADIC argument modifier in a function call (f(VARIADIC array[...])) is not parsed"
 
 ["a009b888921792d4"]
 category = "multidim_array_type_literal"
@@ -1172,8 +1096,8 @@ category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
 
 ["c38be65d41d4fd27"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["761352dd4a45659d"]
 category = "with_ordinality"
@@ -1188,124 +1112,100 @@ category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
 
 ["a1e4b25c020f937c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["9480ec7e9fa51e51"]
 category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
 
 ["1f8daeacf6b69560"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found LE"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["3964b41895688849"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
+category = "row_value_comparison"
+note = "A row-value constructor compared with a binary operator, ANY/ALL subquery, IN subquery, or OVERLAPS (e.g. (a,b) < (c,d), (a,b) NOT IN (SELECT ...)) is not parsed"
 
 ["e6094c0f4f9355a3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found LE"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["c5f6a2e0c67ff76d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found GE"
+category = "postgres_geometric_operators"
+note = "PostgreSQL geometric-type or custom infix operators (&&, &<, &<|, <<|, <<, >>, ##, ~<=~, *<=, *>=, ...) are not parsed as expression operators"
 
 ["534d7081a626d936"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
+category = "postfix_dot_field_access_on_parenthesized_expr"
+note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
 ["e89f5cc9ca4f64d6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "order_by_using_operator_class"
+note = "ORDER BY col USING <operator> (custom operator-class ordering direction) is not parsed"
 
 ["adb984cf2cd20351"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["1fb783f70b614a38"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_table_inheritance_wildcard"
+note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning include child tables) is not parsed"
 
 ["6a9839262562ec1a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["2d9242102c8a8704"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+category = "select_into_clause"
+note = "SELECT ... INTO [TABLE] target (PostgreSQL's SELECT-INTO table-creation form) is not parsed"
 
 ["e6800814a90ebf63"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found HASH"
+category = "postgres_hash_prefix_operator"
+note = "A bare `#` prefix operator/path-reference token (e.g. #1, #thepath) is not parsed as an expression"
 
 ["b4278cee39d455a2"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COLON"
+category = "sql_json_constructor_functions"
+note = "SQL/JSON constructor functions (JSON_OBJECT, JSON_ARRAY) with the standard FORMAT/ON NULL/RETURNING/ENCODING clauses, or a nested SELECT argument, are not parsed"
 
 ["03040bcc83e9d236"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COLON"
+category = "sql_json_constructor_functions"
+note = "SQL/JSON constructor functions (JSON_OBJECT, JSON_ARRAY) with the standard FORMAT/ON NULL/RETURNING/ENCODING clauses, or a nested SELECT argument, are not parsed"
 
 ["3ec5993760c7719d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COLON"
+category = "sql_json_constructor_functions"
+note = "SQL/JSON constructor functions (JSON_OBJECT, JSON_ARRAY) with the standard FORMAT/ON NULL/RETURNING/ENCODING clauses, or a nested SELECT argument, are not parsed"
 
 ["8c15ff6acd16d5be"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
+category = "sql_json_constructor_functions"
+note = "SQL/JSON constructor functions (JSON_OBJECT, JSON_ARRAY) with the standard FORMAT/ON NULL/RETURNING/ENCODING clauses, or a nested SELECT argument, are not parsed"
 
 ["2effb464d1a6c8ef"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found SELECT_KW"
+category = "sql_json_constructor_functions"
+note = "SQL/JSON constructor functions (JSON_OBJECT, JSON_ARRAY) with the standard FORMAT/ON NULL/RETURNING/ENCODING clauses, or a nested SELECT argument, are not parsed"
 
 ["211b433174d29594"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "psql_meta_command"
+note = "A psql meta-command (\gset, ...) embedded in the corpus statement is not SQL and never parses; upstream-test-harness artifact"
 
 ["de88738ea7aa7c95"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found COLON"
+category = "postgres_psql_variable_colon_syntax"
+note = "psql's `:'variable'` interpolation-variable colon syntax is not parsed"
 
 ["b167115761f11f93"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "psql_meta_command"
+note = "A psql meta-command (\gset, ...) embedded in the corpus statement is not SQL and never parses; upstream-test-harness artifact"
 
 ["49b2259ed1162c9d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "row_constructor_field_star_projection"
+note = "`table.*` used inside a function-call argument or after a nested-record projection (count(t2.*), tststats.priv_test_tbl.* > (1,1)) is not parsed"
 
 ["9eab7a815794a2e9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["f773cc38b34f25e4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
-
-["e8b74378d0930930"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "postgres_unicode_escape_string_literal"
+note = "PostgreSQL Unicode-escape string literal (U&'...') is not parsed"
 
 ["161238bb43fb14f3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "like_escape_clause"
+note = "LIKE ... ESCAPE 'char' custom escape-character clause is not parsed"
 
 ["cf201f564ec6d1e3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["ce001f4f76e5f892"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["d2fe2136225d4e8e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["a022324c863cecce"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "like_escape_clause"
+note = "LIKE ... ESCAPE 'char' custom escape-character clause is not parsed"
 
 ["3419183ec6d2f76e"]
 category = "set_operation_nesting"
@@ -1316,40 +1216,32 @@ category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
 ["79cdb2200dc2cadc"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected LPAREN, found IDENT"
+category = "tablesample_custom_method_name"
+note = "TABLESAMPLE with a non-keyword (custom/extension) sampling-method name is not parsed; only the recognized keyword set (BERNOULLI, SYSTEM, ...) is"
 
 ["d63aa08ca702f3ab"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "implicit_cross_join_comma_syntax"
+note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["348bff3f69bc56c0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ARRAY_KW"
+category = "postgres_variadic_array_argument"
+note = "PostgreSQL VARIADIC argument modifier in a function call (f(VARIADIC array[...])) is not parsed"
 
 ["fda6f7054f01a5b7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["b8d2d9b9020d12ee"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found EOF"
+category = "malformed_corpus_statement"
+note = "This corpus line is a truncated/malformed extraction artifact (unbalanced quotes or parens from the upstream test file), not valid SQL in any dialect"
 
 ["012bffb042b14579"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["d5b343bc44fadced"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found WITH_KW"
-
-["a6bacfcecd57fae9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["a15c8aa7d5276764"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
+category = "at_time_zone_or_time_tz_type"
+note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
 
 ["5033d5c660b5c00d"]
 category = "at_time_zone_or_time_tz_type"
@@ -1400,8 +1292,8 @@ category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["191708174fb6c5c1"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found FROM_KW (a SELECT with no select-list, `SELECT FROM …`, is not parsed; unrelated to set-operation nesting)"
+category = "select_with_no_target_list"
+note = "PostgreSQL's `SELECT FROM ...` (empty target list before FROM) is not parsed"
 
 ["bd5f317418980fde"]
 category = "information_schema_roundtrip"
@@ -1450,4 +1342,8 @@ note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not p
 ["1edba1798c2f03f2"]
 category = "xml_functions"
 note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not parsed"
+
+["2729feeaafc6b76b"]
+category = "roundtrip_mismatch"
+note = "smelt parses cleanly but printed SQL is rejected by DuckDB (silent mis-parse); CTE printer drops a VALUES-clause CTE body (Display for TableRef's CTE path only prints select_stmt(), not values_clause()), printing 'AS  SELECT ...' with the VALUES rows dropped entirely"
 

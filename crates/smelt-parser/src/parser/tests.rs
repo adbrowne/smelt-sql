@@ -9643,6 +9643,95 @@ fn power_operator_left_associative_tree_shape() {
 }
 
 #[test]
+fn double_quoted_alias_parses_and_strips_quotes() {
+    // SQL-standard double-quoted identifiers are valid as `AS "alias"`
+    // aliases (SELECT-item and table-ref); smelt's lexer lexes them as
+    // STRING tokens (see `at_quoted_ident_alias` in parser/mod.rs), so
+    // alias parsing must accept STRING as well as IDENT there. External
+    // corpus regression: `SELECT a AS "user"` (reserved-word-shaped quoted
+    // alias) and `SELECT BOOL_OR(b1) AS "t"` previously failed with
+    // "unexpected content after model body".
+    use crate::ast::{File, SelectItem, TableRef};
+
+    let cases = [
+        (r#"SELECT a AS "user" FROM t"#, "user"),
+        (r#"SELECT BOOL_OR(b1) AS "t" FROM bool_test"#, "t"),
+        (
+            r#"SELECT percentile_cont(0.5) AS "median_delay" FROM flights"#,
+            "median_delay",
+        ),
+    ];
+    for (sql, expected_alias) in cases {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+        let file = File::cast(parse.syntax()).expect("root should cast to File");
+        let item = file
+            .syntax()
+            .descendants()
+            .find_map(SelectItem::cast)
+            .expect("should find a SELECT_ITEM");
+        assert_eq!(
+            item.alias().as_deref(),
+            Some(expected_alias),
+            "alias() should strip the surrounding quotes for {sql:?}"
+        );
+    }
+
+    // Table-ref alias: `FROM t AS "alias"`.
+    let sql = r#"SELECT * FROM orders AS "o""#;
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).expect("root should cast to File");
+    let table_ref = file
+        .syntax()
+        .descendants()
+        .find_map(TableRef::cast)
+        .expect("should find a TABLE_REF");
+    assert_eq!(table_ref.alias().as_deref(), Some("o"));
+}
+
+#[test]
+fn first_last_parse_as_aggregate_function_names() {
+    // FIRST/LAST are reserved for `ORDER BY ... NULLS FIRST/LAST` and
+    // `FETCH FIRST`, but DuckDB also ships `first(x)`/`last(x)` aggregate
+    // functions. `at_keyword_as_function_name` in parser/expr.rs must treat
+    // them as function names when directly followed by `(` (LEFT()/RIGHT()
+    // precedent). External corpus regression:
+    // `SELECT LAST(b) FROM tbl WHERE a=1` previously failed with "Expected
+    // expression, found LAST_KW".
+    for sql in [
+        "SELECT LAST(b) FROM tbl WHERE a=1",
+        "SELECT SUM(rowid), MIN(rowid), MAX(rowid), COUNT(rowid), LAST(rowid) FROM a",
+        "select first(struct_pack(i := i, j := i + 2)) from range(10) tbl(i)",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+
+    // Bare `FIRST`/`LAST` (not followed by `(`) must still be usable as
+    // `NULLS FIRST`/`NULLS LAST` — this fix must not regress that.
+    let sql = "SELECT a FROM t ORDER BY a NULLS FIRST, b NULLS LAST";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
 fn null_literal_supports_cast_and_subscript_postfix() {
     for sql in [
         "SELECT NULL::INTEGER",

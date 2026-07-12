@@ -218,7 +218,11 @@ impl Display for SelectItem {
             }
         }
 
-        if let Some(alias) = self.alias() {
+        // Use the raw alias token text (quotes intact for `AS "quoted"`),
+        // not `alias()`'s unquoted semantic name — re-emitting an unquoted
+        // form for an alias that needs quoting (whitespace, matches a
+        // keyword, ...) would print SQL DuckDB/PostgreSQL reject.
+        if let Some(alias) = self.alias_token_text() {
             write!(f, " AS {}", alias)?;
         }
 
@@ -288,7 +292,9 @@ impl Display for TableRef {
             write!(f, " {}", clause.text())?;
         }
 
-        if let Some(alias) = self.alias() {
+        // Raw alias token text (quotes intact for `AS "quoted"`) — see the
+        // matching note on `Display for SelectItem`.
+        if let Some(alias) = self.alias_token_text().or_else(|| self.alias()) {
             write!(f, " AS {}", alias)?;
             if let Some(cols) = self.alias_column_names() {
                 if !cols.is_empty() {

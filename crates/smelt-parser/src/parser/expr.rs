@@ -2012,6 +2012,11 @@ impl<'a> super::Parser<'a> {
             // `(` it is a function name (LEFT()/RIGHT() precedent); otherwise
             // it is the infix operator.
             GLOB_KW,
+            // FIRST/LAST are reserved for `ORDER BY ... NULLS FIRST/LAST` and
+            // `FETCH FIRST`, but DuckDB also ships `first(x)`/`last(x)`
+            // aggregate functions. Same LEFT()/RIGHT() precedent: only a
+            // function name when directly followed by `(`.
+            FIRST_KW, LAST_KW,
         ]) {
             return false;
         }

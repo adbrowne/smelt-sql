@@ -324,15 +324,17 @@ impl<'a> super::Parser<'a> {
         // Parse expression
         self.parse_expression();
 
-        // Optional AS alias
+        // Optional AS alias. Accepts a plain IDENT or a double-quoted
+        // identifier lexed as STRING (`AS "median_delay"`) — see
+        // `at_quoted_ident_alias`.
         self.skip_trivia();
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
-            if self.at(IDENT) {
+            if self.at(IDENT) || self.at_quoted_ident_alias() {
                 self.advance();
             }
-        } else if self.at(IDENT) {
+        } else if self.at(IDENT) || self.at_quoted_ident_alias() {
             // Implicit alias (no AS keyword)
             self.advance();
         }
@@ -584,11 +586,22 @@ impl<'a> super::Parser<'a> {
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
-            self.expect(IDENT);
+            if self.at_quoted_ident_alias() {
+                self.advance();
+            } else {
+                self.expect(IDENT);
+            }
             self.parse_alias_column_list();
         } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
             // Implicit alias (no AS keyword). Only consume if it's not a
-            // keyword that would end the table ref.
+            // keyword that would end the table ref. Deliberately does not
+            // extend to `at_quoted_ident_alias()` — an implicit quoted alias
+            // (`FROM t "alias"`, no `AS`) is not exercised by any corpus
+            // gap this pass closes, and `TableRef::alias()`'s implicit-alias
+            // heuristics (ident_count, function-call/smelt-path-ref
+            // lookahead) would need matching STRING-aware updates to avoid
+            // silently dropping it in the printer — left as follow-up scope
+            // rather than half-wired here.
             self.advance();
             self.parse_alias_column_list();
         }

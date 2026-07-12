@@ -689,6 +689,17 @@ fn leading_ident_text(node: &SyntaxNode) -> Option<String> {
         .map(|t| t.text().to_string())
 }
 
+/// Strip a leading/trailing matching quote (`"` or `'`) from raw token text,
+/// used to turn a double-quoted identifier lexed as `STRING` (e.g.
+/// `"median_delay"`) back into its bare name. Text with no matching quote
+/// pair is returned unchanged.
+fn strip_ident_quotes(raw: &str) -> &str {
+    raw.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(raw)
+}
+
 impl RowRequirement {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         if node.kind() == ROW_REQUIREMENT {
@@ -1403,6 +1414,42 @@ impl SelectItem {
                             // Implicit alias: `expr alias` (IDENT after expression node)
                             return Some(token.text().to_string());
                         }
+                    } else if token.kind() == STRING && (found_as || found_expr) {
+                        // Double-quoted-identifier alias (`AS "median_delay"`
+                        // or implicit `expr "alias"`) — lexed as STRING since
+                        // smelt's lexer does not distinguish quote characters
+                        // at the token-kind level; strip the quotes.
+                        return Some(strip_ident_quotes(token.text()).to_string());
+                    }
+                }
+                rowan::NodeOrToken::Node(_) => {
+                    found_expr = true;
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the alias's raw source text, quotes intact if it was written as
+    /// `AS "quoted alias"`. Used by the printer (`Display for SelectItem`),
+    /// which must re-quote an alias that needs it (contains whitespace,
+    /// matches a keyword, ...) rather than emit `alias()`'s unquoted name —
+    /// re-emitting `AS median_delay` for a quoted `AS "median delay"` would
+    /// silently mis-print into SQL DuckDB/PostgreSQL reject. Every other
+    /// caller wants the unquoted semantic name and should use `alias()`.
+    pub fn alias_token_text(&self) -> Option<String> {
+        let mut found_as = false;
+        let mut found_expr = false;
+
+        for child in self.0.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == AS_KW {
+                        found_as = true;
+                    } else if (token.kind() == IDENT || token.kind() == STRING)
+                        && (found_as || found_expr)
+                    {
+                        return Some(token.text().to_string());
                     }
                 }
                 rowan::NodeOrToken::Node(_) => {
@@ -1423,7 +1470,9 @@ impl SelectItem {
                 rowan::NodeOrToken::Token(token) => {
                     if token.kind() == AS_KW {
                         found_as = true;
-                    } else if token.kind() == IDENT && (found_as || found_expr) {
+                    } else if (token.kind() == IDENT || token.kind() == STRING)
+                        && (found_as || found_expr)
+                    {
                         return Some(token.text_range());
                     }
                 }
@@ -1724,6 +1773,12 @@ impl TableRef {
                     }
                     last_ident = Some(token.text().to_string());
                 }
+                STRING if found_as => {
+                    // Double-quoted-identifier alias (`AS "alias"`), lexed as
+                    // STRING since smelt's lexer does not distinguish quote
+                    // characters at the token-kind level; strip the quotes.
+                    return Some(strip_ident_quotes(token.text()).to_string());
+                }
                 _ => {}
             }
         }
@@ -1797,6 +1852,25 @@ impl TableRef {
             }
         }
 
+        None
+    }
+
+    /// Get the explicit `AS alias`'s raw source text, quotes intact if it
+    /// was written as `AS "quoted alias"`. Used by the printer (`Display
+    /// for TableRef`), which must re-quote an alias that needs it rather
+    /// than emit `alias()`'s unquoted name — see `SelectItem::alias_token_text`
+    /// for the rationale. Only covers the explicit-`AS` form: an implicit
+    /// quoted alias (`FROM t "alias"`, no `AS`) is not accepted by the
+    /// parser (see the comment in `parse_table_ref`'s implicit-alias arm).
+    pub fn alias_token_text(&self) -> Option<String> {
+        let mut found_as = false;
+        for token in self.0.children_with_tokens().filter_map(|e| e.into_token()) {
+            match token.kind() {
+                AS_KW => found_as = true,
+                IDENT | STRING if found_as => return Some(token.text().to_string()),
+                _ => {}
+            }
+        }
         None
     }
 

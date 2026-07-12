@@ -160,6 +160,18 @@ impl<'a> Parser<'a> {
         self.at(IDENT) && self.current_text().eq_ignore_ascii_case(text)
     }
 
+    /// Check if current token is a double-quoted identifier lexed as STRING
+    /// (`"foo"`), usable anywhere an alias IDENT is expected. DuckDB and
+    /// PostgreSQL both treat double-quoted text as a quoted identifier while
+    /// single-quoted text is a string literal, but smelt's lexer does not
+    /// distinguish the two at the token-kind level (`consume_string` returns
+    /// `STRING` for either quote character) — alias sites that want to
+    /// accept `AS "alias"` must check the leading quote character
+    /// themselves via this helper.
+    pub(super) fn at_quoted_ident_alias(&self) -> bool {
+        self.at(STRING) && self.current_text().starts_with('"')
+    }
+
     /// Advance to next token, consuming trivia
     pub(super) fn advance(&mut self) {
         if self.pos < self.tokens.len() {

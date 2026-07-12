@@ -62,6 +62,12 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 COMMA
             }
+            // Leading-dot decimal literal (`.5`, `.000_005`) — DuckDB and
+            // PostgreSQL both accept a numeric literal with no integer part.
+            // Mutually exclusive with the `...`/`..` spread arms below: a
+            // digit next can never also be `.`, so guard order doesn't
+            // matter for correctness, but this is checked first for clarity.
+            '.' if self.peek_char().is_some_and(|c| c.is_ascii_digit()) => self.consume_number(),
             '.' if self.peek_two_chars() == Some(('.', '.')) => {
                 // `...` — list-spread operator (meta-language)
                 self.advance();
@@ -1078,5 +1084,45 @@ mod tests {
         );
         assert_eq!(non_ws[0].kind, ERROR);
         assert_eq!(non_ws[0].len, 1);
+    }
+
+    #[test]
+    fn tokenize_leading_dot_decimal() {
+        // `.5`, `.000_005` — DuckDB and PostgreSQL both accept a decimal
+        // literal with no integer part. External corpus regression:
+        // `SELECT .000_005` and `generate_series((random()*.1)::int,2)`
+        // previously failed with "Expected expression, found DOT".
+        for (src, expected_len) in [(".34", 3), (".000_005", 8)] {
+            let tokens = tokenize(src);
+            let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+            assert_eq!(
+                non_ws.len(),
+                1,
+                "{src:?}: expected one token, got: {non_ws:?}"
+            );
+            assert_eq!(non_ws[0].kind, NUMBER, "{src:?}: expected NUMBER");
+            assert_eq!(
+                non_ws[0].len, expected_len,
+                "{src:?}: unexpected token length"
+            );
+        }
+    }
+
+    #[test]
+    fn tokenize_leading_dot_decimal_does_not_regress_spread_operators() {
+        // `...` (list-spread) and `..` (struct/row spread) both start with
+        // `.` followed by another `.`, never a digit — mutually exclusive
+        // with the new leading-dot-decimal arm, but assert it explicitly.
+        let dots = tokenize("...");
+        let non_ws: Vec<_> = dots.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 1);
+        assert_eq!(non_ws[0].kind, DOT_DOT_DOT);
+
+        let two_dots = tokenize("a..b");
+        let non_ws: Vec<_> = two_dots.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(
+            non_ws.iter().map(|t| t.kind).collect::<Vec<_>>(),
+            vec![IDENT, DOT_DOT, IDENT]
+        );
     }
 }
