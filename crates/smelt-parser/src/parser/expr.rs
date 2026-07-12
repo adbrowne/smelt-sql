@@ -47,6 +47,19 @@ impl<'a> super::Parser<'a> {
     pub(super) fn parse_expression_inner(&mut self) {
         let checkpoint = self.builder.checkpoint();
 
+        // Scope the `in_at_time_zone_operand` guard to the current nesting
+        // level. The guard exists only to keep a *directly chained* `AT TIME
+        // ZONE` out of the tz operand (that chain path runs through
+        // `parse_unary_expr` → `parse_primary_expr` without re-entering this
+        // function). Any delimited sub-context — parenthesized group,
+        // subquery, function-call argument, CASE branch, bracket list —
+        // re-enters expression parsing here, and starts a fresh expression
+        // where `AT TIME ZONE` must parse normally again (e.g.
+        // `ts AT TIME ZONE (b AT TIME ZONE 'UTC')`, whose inner form DuckDB's
+        // parser accepts).
+        let saved_in_at_time_zone_operand = self.in_at_time_zone_operand;
+        self.in_at_time_zone_operand = false;
+
         if self.at(IF_KW) {
             // Ternary expression: `if COND then THEN else ELSE`.
             self.parse_ternary_from_if(checkpoint);
@@ -54,6 +67,8 @@ impl<'a> super::Parser<'a> {
             // Non-ternary expression — pass through to pipe.
             self.parse_pipe_expr();
         }
+
+        self.in_at_time_zone_operand = saved_in_at_time_zone_operand;
     }
 
     /// Parse a full ternary expression starting at the `if` keyword.

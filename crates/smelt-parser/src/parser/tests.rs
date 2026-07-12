@@ -8458,6 +8458,50 @@ fn at_time_zone_binds_tighter_than_addition() {
 }
 
 #[test]
+fn at_time_zone_nested_in_parenthesized_tz_operand() {
+    // The tz operand may be a parenthesized expression or subquery that
+    // itself contains `AT TIME ZONE`. The `in_at_time_zone_operand` guard
+    // must be scoped to the current nesting level — inside `(...)` a fresh
+    // expression context begins, so the inner `AT TIME ZONE` must parse.
+    // DuckDB's PARSER accepts this shape (it only fails later, at bind):
+    //   SELECT ts AT TIME ZONE (SELECT b AT TIME ZONE 'UTC' FROM t2) FROM t
+    let sql = "SELECT ts AT TIME ZONE (SELECT b AT TIME ZONE 'UTC' FROM t2) FROM t";
+    let result = parse(sql);
+    assert!(
+        result.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result.errors
+    );
+
+    // A plain parenthesized inner AT TIME ZONE also parses cleanly.
+    let sql2 = "SELECT ts AT TIME ZONE (b AT TIME ZONE 'UTC') FROM t";
+    let result2 = parse(sql2);
+    assert!(
+        result2.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result2.errors
+    );
+}
+
+#[test]
+fn at_time_zone_parenthesized_left_operand() {
+    // `(ts AT TIME ZONE 'UTC') AT TIME ZONE 'EST'` — explicit parens around
+    // the left operand (verified to execute on DuckDB). The outer node's
+    // operand is the parenthesized expression containing the inner
+    // AT_TIME_ZONE_EXPR.
+    let (_, select) = parse_select("SELECT (ts AT TIME ZONE 'UTC') AT TIME ZONE 'EST' FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let outer = expr.as_at_time_zone().expect("outer AT_TIME_ZONE_EXPR");
+    assert_eq!(
+        outer
+            .timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'EST'".to_string())
+    );
+}
+
+#[test]
 fn bare_at_still_parses_as_implicit_alias() {
     // Guard: `at` is a contextual (unreserved) keyword — only the exact `AT
     // TIME ZONE` sequence triggers AT_TIME_ZONE_EXPR. A bare `at` following
