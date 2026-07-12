@@ -8540,3 +8540,234 @@ fn bare_at_column_reference_still_parses() {
     assert!(expr.as_at_time_zone().is_none());
     assert_eq!(expr.syntax().text().to_string().trim(), "at");
 }
+
+// ===== GROUPING SETS (SQL-standard grouping-set extension of GROUP BY) =====
+//
+// `GROUPING SETS ( <set> [, <set>]* )` — grammar verified against DuckDB
+// (parser-gap-closure task 9). Oracle probes:
+//   - full parenthesized-list form: accepted.
+//   - bare-expr elements (`GROUPING SETS (a, b)`, no inner parens): accepted
+//     (PostgreSQL and DuckDB both allow this).
+//   - the empty set `()` as one element, and as the sole element: accepted.
+//   - `ROLLUP(...)`/`CUBE(...)` nested as a bare element inside GROUPING SETS:
+//     accepted (they parse as ordinary function calls; no dedicated smelt-side
+//     CUBE/ROLLUP grammar is needed).
+//   - `GROUPING`/`SETS` are contextual keywords, not reserved: `grouping` and
+//     `sets` stay usable as ordinary identifiers/aliases/columns.
+//   - case-insensitive, whitespace-tolerant between the two keywords.
+//   - may be mixed with a plain grouping key in the same GROUP BY list:
+//     `GROUP BY a, GROUPING SETS ((b))`.
+
+#[test]
+fn grouping_sets_full_form_parses() {
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+
+    let clause = parsed
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == GROUPING_SETS_CLAUSE)
+        .expect("should have a GROUPING_SETS_CLAUSE node");
+    let sets: Vec<_> = clause
+        .children()
+        .filter(|n| n.kind() == GROUPING_SET)
+        .collect();
+    assert_eq!(sets.len(), 3, "expected 3 grouping sets: {:?}", sets);
+
+    // The whole clause flows through GroupByClause::expressions() as a
+    // single opaque grouping-key expression — mirroring how CUBE/ROLLUP
+    // function calls already flow through as one expression each (there is
+    // no dedicated CUBE/ROLLUP grammar; they fall out of the generic
+    // function-call parse).
+    let (_, select) = parse_select(input);
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(
+        exprs.len(),
+        1,
+        "GROUPING SETS should be a single opaque grouping key: {:?}",
+        exprs.iter().map(|e| e.text()).collect::<Vec<_>>()
+    );
+    assert!(exprs[0].text().to_uppercase().starts_with("GROUPING SETS"));
+}
+
+#[test]
+fn grouping_sets_bare_expr_elements_parse() {
+    // PostgreSQL/DuckDB both accept unparenthesized elements.
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (a, b)";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+    let clause = parsed
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == GROUPING_SETS_CLAUSE)
+        .expect("should have a GROUPING_SETS_CLAUSE node");
+    let sets: Vec<_> = clause
+        .children()
+        .filter(|n| n.kind() == GROUPING_SET)
+        .collect();
+    assert_eq!(sets.len(), 2);
+    // Neither element should have its own LPAREN/RPAREN tokens.
+    for set in &sets {
+        assert!(
+            !set.children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .any(|t| t.kind() == LPAREN),
+            "bare element should not have parens: {}",
+            set.text()
+        );
+    }
+}
+
+#[test]
+fn grouping_sets_empty_set_parses() {
+    // `()` as one element among several.
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())";
+    let parsed = parse(input);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+
+    // `()` as the sole element.
+    let sole_empty = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (())");
+    assert!(
+        sole_empty.errors.is_empty(),
+        "sole empty set should parse: {:?}",
+        sole_empty.errors
+    );
+}
+
+#[test]
+fn grouping_sets_nested_rollup_and_cube_parse() {
+    // ROLLUP/CUBE have no dedicated smelt-side grammar — they parse as
+    // ordinary function calls, so nesting them as a bare GROUPING SETS
+    // element is just the generic function-call path.
+    let rollup = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (ROLLUP(a, b))");
+    assert!(rollup.errors.is_empty(), "{:?}", rollup.errors);
+
+    let cube = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (CUBE(a, b))");
+    assert!(cube.errors.is_empty(), "{:?}", cube.errors);
+
+    let mixed = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (ROLLUP(a), CUBE(b))");
+    assert!(mixed.errors.is_empty(), "{:?}", mixed.errors);
+}
+
+#[test]
+fn grouping_sets_mixes_with_plain_group_by_keys() {
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY a, GROUPING SETS ((b))";
+    let (_, select) = parse_select(input);
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(exprs.len(), 2, "expected `a` and the GROUPING SETS clause");
+    assert_eq!(exprs[0].text().trim(), "a");
+    assert!(exprs[1].text().to_uppercase().starts_with("GROUPING SETS"));
+}
+
+#[test]
+fn grouping_sets_case_insensitive_and_whitespace_tolerant() {
+    let lower = parse("SELECT a, b, SUM(c) FROM t GROUP BY grouping sets ((a), (b))");
+    assert!(lower.errors.is_empty(), "{:?}", lower.errors);
+
+    let extra_ws = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING   SETS ((a), (b))");
+    assert!(extra_ws.errors.is_empty(), "{:?}", extra_ws.errors);
+}
+
+#[test]
+fn grouping_and_sets_remain_usable_as_plain_identifiers() {
+    // `GROUPING`/`SETS` are contextual keywords — only recognised as the
+    // exact `GROUPING SETS (` sequence in a GROUP BY list position. A bare
+    // `grouping` column, and a `sets` alias, must both parse unaffected.
+    let select_grouping = parse("SELECT grouping FROM t");
+    assert!(
+        select_grouping.errors.is_empty(),
+        "{:?}",
+        select_grouping.errors
+    );
+    assert!(select_grouping
+        .syntax()
+        .descendants()
+        .all(|n| n.kind() != GROUPING_SETS_CLAUSE));
+
+    let sets_alias = parse("SELECT a AS sets FROM t");
+    assert!(sets_alias.errors.is_empty(), "{:?}", sets_alias.errors);
+
+    // `GROUP BY grouping, sets` — two plain columns, comma-separated, with
+    // no trailing `(` — must not trigger the GROUPING SETS grammar path.
+    let (_, select) =
+        parse_select("SELECT grouping, sets, COUNT(*) FROM t GROUP BY grouping, sets");
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(exprs.len(), 2);
+    assert_eq!(exprs[0].text().trim(), "grouping");
+    assert_eq!(exprs[1].text().trim(), "sets");
+}
+
+#[test]
+fn plain_group_by_unaffected_by_grouping_sets_grammar() {
+    let (_, select) = parse_select("SELECT a, b, COUNT(*) FROM t GROUP BY a, b");
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    assert!(!group_by.is_all());
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(exprs.len(), 2);
+    assert_eq!(exprs[0].text().trim(), "a");
+    assert_eq!(exprs[1].text().trim(), "b");
+}
+
+#[test]
+fn grouping_sets_round_trips_through_printer() {
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.to_uppercase().contains("GROUPING SETS"),
+        "printed SQL should retain GROUPING SETS: {}",
+        printed
+    );
+    // Re-parsing the printed SQL must still be error-free and produce the
+    // same GROUPING_SET count.
+    let reparsed = parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL failed to reparse: {} -> {:?}",
+        printed,
+        reparsed.errors
+    );
+    let sets = reparsed
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == GROUPING_SET)
+        .count();
+    assert_eq!(sets, 3);
+}
+
+#[test]
+fn grouping_sets_nested_grouping_sets_parses() {
+    // DuckDB accepts arbitrary GROUPING SETS nesting (verified against
+    // DuckDB): a GROUPING SETS element may itself be a bare (unparenthesized)
+    // nested GROUPING SETS clause.
+    let nested = parse(
+        "SELECT SUM(c) FROM t GROUP BY GROUPING SETS (GROUPING SETS (ROLLUP(a), GROUPING SETS (CUBE(a))))",
+    );
+    assert!(nested.errors.is_empty(), "{:?}", nested.errors);
+
+    let mixed_nested =
+        parse("SELECT SUM(c) FROM t GROUP BY GROUPING SETS (a, GROUPING SETS (a, CUBE(a)))");
+    assert!(mixed_nested.errors.is_empty(), "{:?}", mixed_nested.errors);
+
+    let inner_count = nested
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == GROUPING_SETS_CLAUSE)
+        .count();
+    assert_eq!(
+        inner_count, 3,
+        "expected 3 nested GROUPING_SETS_CLAUSE nodes"
+    );
+}

@@ -49,15 +49,9 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // (July 2026): the parser previously swallowed the unparsed tail of these
     // constructs silently, so they appeared "supported" while the trailing
     // clause was dropped. They now fail loudly.
-    KnownGap {
-        id: "grouping_sets",
-        description: "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (CUBE/ROLLUP are)",
-        category: "smelt_fails",
-        dialect: "all",
-        patterns: &[r"(?i)\bGROUPING\s+SETS\s*\("],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // grouping_sets gap removed - GROUP BY GROUPING SETS ((a), (b), ()) now
+    // parses, prints, and analyzes alongside CUBE/ROLLUP (July 2026). This
+    // was the last `planned_fix: true` entry in this registry.
     // at_time_zone gap removed - AT TIME ZONE operator now parses, prints,
     // and infers the tz-conversion type rules (July 2026).
     KnownGap {
@@ -470,11 +464,13 @@ mod tests {
     fn test_gaps_by_category() {
         // smelt_fails gaps: fail-loud trailing-content parsing (July 2026)
         // exposed constructs whose tails were previously swallowed silently
-        // (grouping_sets, for_update). at_time_zone was a third such entry;
-        // AT TIME ZONE now parses, prints, and infers cleanly, so it was
-        // removed and this count shrank accordingly.
+        // (grouping_sets, for_update, at_time_zone). at_time_zone and
+        // grouping_sets now both parse, print, and infer cleanly, so their
+        // entries were removed and this count shrank accordingly; only
+        // for_update remains (no fix planned — row-locking has no meaning in
+        // smelt models).
         let smelt_gaps = get_gaps_by_category("smelt_fails");
-        assert_eq!(smelt_gaps.len(), 2);
+        assert_eq!(smelt_gaps.len(), 1);
         for gap in smelt_gaps {
             assert_eq!(gap.category, "smelt_fails");
         }

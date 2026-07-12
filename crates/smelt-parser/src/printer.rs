@@ -616,7 +616,10 @@ fn extract_group_by_expressions(node: &SyntaxNode) -> String {
 
     let mut expressions = Vec::new();
     for child in node.children() {
-        if child.kind() == EXPRESSION || child.kind() == BINARY_EXPR {
+        if child.kind() == EXPRESSION
+            || child.kind() == BINARY_EXPR
+            || child.kind() == GROUPING_SETS_CLAUSE
+        {
             expressions.push(child.text().to_string());
         }
     }

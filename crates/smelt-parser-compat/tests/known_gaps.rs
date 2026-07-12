@@ -375,10 +375,7 @@ fn test_smelt_supports_intersect_except() {
 #[test]
 fn test_smelt_supports_cube_rollup() {
     // CUBE and ROLLUP are supported by smelt (they parse as function-call
-    // shaped GROUP BY expressions). GROUPING SETS is a documented gap — see
-    // test_gap_grouping_sets. The old claim that GROUPING SETS was supported
-    // was an artifact of the parser silently swallowing the unparsed tail;
-    // fail-loud trailing-content parsing (July 2026) exposed it.
+    // shaped GROUP BY expressions).
     assert_both_succeed("SELECT a, b, SUM(c) FROM t GROUP BY CUBE (a, b)", "CUBE");
     assert_both_succeed(
         "SELECT a, b, SUM(c) FROM t GROUP BY ROLLUP (a, b)",
@@ -387,11 +384,13 @@ fn test_smelt_supports_cube_rollup() {
 }
 
 #[test]
-fn test_gap_grouping_sets() {
-    // GROUPING SETS is not parsed by smelt — documented smelt_fails gap.
-    assert_smelt_fails_pg_succeeds(
+fn test_smelt_supports_grouping_sets() {
+    // GROUPING SETS is now parsed by smelt (closes the former `grouping_sets`
+    // smelt_fails gap — see gaps.rs; this was the last `planned_fix: true`
+    // entry in that registry).
+    assert_both_succeed(
         "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())",
-        "grouping_sets",
+        "GROUPING SETS clause",
     );
 }
 

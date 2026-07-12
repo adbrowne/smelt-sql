@@ -431,6 +431,55 @@ impl<'a> Parser<'a> {
         zone_text.eq_ignore_ascii_case("ZONE")
     }
 
+    /// Look ahead `n` non-trivia tokens from the current position (0 = the
+    /// current token itself) and return its text, without consuming
+    /// anything. Used by stateless contextual-keyword lookaheads (e.g.
+    /// [`peek_grouping_sets_clause`](Self::peek_grouping_sets_clause)) that
+    /// need to inspect a fixed sequence of tokens before committing to a
+    /// grammar path. Companion to [`peek_nth_non_trivia`](Self::peek_nth_non_trivia)
+    /// (`parser/types.rs`), which returns only the token kind.
+    fn peek_nth_non_trivia_text(&self, n: usize) -> Option<&str> {
+        let mut la = 0usize;
+        let mut seen = 0usize;
+        loop {
+            let tok = self.tokens.get(self.pos + la)?;
+            if tok.kind.is_trivia() {
+                la += 1;
+                continue;
+            }
+            if seen == n {
+                let mut offset = self.offset;
+                for i in 0..la {
+                    offset += self.tokens[self.pos + i].len;
+                }
+                return Some(&self.input[offset..offset + tok.len]);
+            }
+            seen += 1;
+            la += 1;
+        }
+    }
+
+    /// Stateless lookahead for `GROUPING SETS (` at a GROUP BY list position.
+    /// `GROUPING` and `SETS` are both contextual keywords (lexed as plain
+    /// `IDENT`); this only recognises the clause when the exact three-token
+    /// sequence `GROUPING SETS (` appears, so `grouping`/`sets` stay usable
+    /// as ordinary identifiers everywhere else (`SELECT grouping FROM t`,
+    /// `GROUP BY grouping, sets`). Pure lookahead — consumes nothing, holds
+    /// no parser-state flag, so it is safe to call from any expression-ladder
+    /// entry point without a reset obligation.
+    pub(super) fn peek_grouping_sets_clause(&self) -> bool {
+        if !self.at_contextual_keyword("GROUPING") {
+            return false;
+        }
+        let Some(sets_text) = self.peek_nth_non_trivia_text(1) else {
+            return false;
+        };
+        if !sets_text.eq_ignore_ascii_case("SETS") {
+            return false;
+        }
+        matches!(self.peek_nth_non_trivia(2), Some(LPAREN))
+    }
+
     // Domain-specific parsing methods live in submodules:
     //   - parser::smelt_ext (smelt.* extensions)
     //   - parser::types     (type refs, records, struct types)

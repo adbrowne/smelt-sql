@@ -1818,7 +1818,7 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | COLLATE_EXPR
-            | AT_TIME_ZONE_EXPR
+            | AT_TIME_ZONE_EXPR | GROUPING_SETS_CLAUSE | GROUPING_SET
             | SUBQUERY | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL
             | SMELT_PATH_REF | SMELT_PATH_CALL
             // Phase B (meta-language): lambdas and pipe expressions are expressions.

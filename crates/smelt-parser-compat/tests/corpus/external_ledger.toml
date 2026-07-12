@@ -63,10 +63,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
 
-["f080296096ea53fc"]
-category = "grouping_sets"
-note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
-
 ["619a820c59747ccb"]
 category = "derived_table_column_alias_list"
 note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
@@ -656,8 +652,8 @@ category = "values_trailing_comma"
 note = "Trailing comma inside a VALUES row is not parsed"
 
 ["59b6e8884651ae90"]
-category = "grouping_sets"
-note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
+category = "grouping_sets_trailing_comma"
+note = "A trailing comma inside a parenthesized GROUPING SETS element, e.g. GROUPING SETS (a, (b, )), is not parsed. DuckDB itself rejects this too (verified via the DuckDB oracle) — it is a PostgreSQL-only extension, not required for DuckDB conformance. No smelt gaps.rs entry (that registry tracks DuckDB-conformance gaps only)."
 
 ["d93932f2d774acbc"]
 category = "pivot_unpivot"
@@ -1255,14 +1251,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["70dda8e02029c155"]
-category = "grouping_sets"
-note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
-
-["4a2d04f0d86ec4ab"]
-category = "grouping_sets"
-note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
-
 ["21509863ffaf373a"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
@@ -1270,10 +1258,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["49912a8d8c54c4f9"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
-
-["0be6b176bfb1a5e9"]
-category = "grouping_sets"
-note = "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (tracked gaps.rs::grouping_sets)"
 
 ["4ae2792a411e7deb"]
 category = "smelt_fails_unclassified"

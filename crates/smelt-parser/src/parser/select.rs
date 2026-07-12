@@ -743,6 +743,10 @@ impl<'a> super::Parser<'a> {
             // List spread in GROUP BY: `GROUP BY ...keys`
             if self.at(DOT_DOT_DOT) {
                 self.parse_list_spread();
+            } else if self.peek_grouping_sets_clause() {
+                // `GROUP BY GROUPING SETS ((a), (b), ())` — may also appear
+                // mixed with plain keys: `GROUP BY a, GROUPING SETS ((b))`.
+                self.parse_grouping_sets_clause();
             } else {
                 self.parse_expression();
             }
@@ -771,6 +775,81 @@ impl<'a> super::Parser<'a> {
         }
 
         self.finish_node();
+    }
+
+    /// `GROUPING SETS ( <set> [, <set>]* )`. Caller has already verified
+    /// [`peek_grouping_sets_clause`](Self::peek_grouping_sets_clause) — the
+    /// exact `GROUPING SETS (` token sequence — so both keywords and the
+    /// opening paren are consumed unconditionally here.
+    pub(super) fn parse_grouping_sets_clause(&mut self) {
+        self.start_node(GROUPING_SETS_CLAUSE);
+        self.advance(); // GROUPING (contextual keyword, lexed as IDENT)
+        self.skip_trivia();
+        self.advance(); // SETS (contextual keyword, lexed as IDENT)
+        self.skip_trivia();
+        self.expect(LPAREN);
+
+        loop {
+            self.skip_trivia();
+            self.parse_grouping_set();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// One element of a `GROUPING SETS` list: a parenthesized (possibly
+    /// empty) comma-separated expression list — `(a, b)`, `()` — or a bare
+    /// expression — `a` (PostgreSQL/DuckDB both accept unparenthesized
+    /// elements; verified against DuckDB). A nested `ROLLUP(...)`/`CUBE(...)`
+    /// call is just a bare expression here — there is no dedicated smelt-side
+    /// CUBE/ROLLUP grammar; they already fall out of the generic
+    /// function-call parse.
+    fn parse_grouping_set(&mut self) {
+        self.start_node(GROUPING_SET);
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.advance();
+            self.skip_trivia();
+            if !self.at(RPAREN) {
+                loop {
+                    self.skip_trivia();
+                    self.parse_grouping_set_element();
+                    self.skip_trivia();
+                    if self.at(COMMA) {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+                self.skip_trivia();
+            }
+            self.expect(RPAREN);
+        } else {
+            self.parse_grouping_set_element();
+        }
+        self.finish_node();
+    }
+
+    /// One element position inside a `GROUPING SETS` list (either the bare
+    /// position or one slot of a parenthesized comma list): a nested
+    /// `GROUPING SETS (...)` (DuckDB accepts arbitrary nesting — verified
+    /// against DuckDB, e.g. `GROUPING SETS (GROUPING SETS ((a)))`), or a
+    /// plain expression (covers bare columns and `ROLLUP(...)`/`CUBE(...)`
+    /// function calls alike).
+    fn parse_grouping_set_element(&mut self) {
+        if self.peek_grouping_sets_clause() {
+            self.parse_grouping_sets_clause();
+        } else {
+            self.parse_expression();
+        }
     }
 
     pub(super) fn parse_having_clause(&mut self) {

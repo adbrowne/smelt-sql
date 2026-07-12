@@ -430,6 +430,25 @@ pub enum SyntaxKind {
     // implicit alias for `ts`).
     AT_TIME_ZONE_EXPR,
 
+    // `GROUP BY GROUPING SETS ( <set> [, <set>]* )` (SQL-standard / DuckDB /
+    // PostgreSQL). `GROUPING` and `SETS` are both contextual keywords (lexed
+    // as IDENT); the parser only recognises this clause when the exact
+    // three-token sequence `GROUPING SETS (` appears at a GROUP BY list
+    // position (see `Parser::peek_grouping_sets_clause`). This keeps
+    // `grouping` and `sets` usable as ordinary identifiers/columns everywhere
+    // else (e.g. `SELECT grouping FROM t`, `SELECT a AS sets FROM t`).
+    //
+    // GROUPING_SETS_CLAUSE wraps the whole `GROUPING SETS (...)` construct
+    // and is itself `Expr`-castable, so it slots into `GroupByClause::expressions()`
+    // as a single opaque grouping-key expression — mirroring how `CUBE(a, b)`
+    // / `ROLLUP(a, b)` already flow through as one function-call expression
+    // (there is no dedicated smelt-side CUBE/ROLLUP grammar; they fall out of
+    // the generic function-call parse). GROUPING_SET wraps one comma-separated
+    // set element: `(expr, expr, ...)`, `()` (the empty set), or a bare `expr`
+    // (PostgreSQL/DuckDB both accept unparenthesized elements).
+    GROUPING_SETS_CLAUSE,
+    GROUPING_SET,
+
     // Special
     EOF, // End of file
 }
