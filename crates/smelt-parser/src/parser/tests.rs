@@ -8058,3 +8058,130 @@ fn dollar_quote_round_trip() {
         printed
     );
 }
+
+// ===== MAP {…} literal tests =====
+
+#[test]
+fn map_literal_parses_clean() {
+    let (_, select) = parse_select("SELECT MAP {'a': 1, 'b': 2} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr
+        .as_map_literal()
+        .expect("expression must contain a MAP_LITERAL");
+    let entries = map_lit.entries();
+    assert_eq!(entries.len(), 2, "MAP literal must have two entries");
+}
+
+#[test]
+fn map_literal_entries_have_key_and_value() {
+    let (_, select) = parse_select("SELECT MAP {'a': 1, 'b': 2} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().unwrap();
+    let entries = map_lit.entries();
+    assert!(entries[0].key().is_some());
+    assert!(entries[0].value().is_some());
+    assert!(entries[1].key().is_some());
+    assert!(entries[1].value().is_some());
+}
+
+#[test]
+fn map_literal_empty_parses_clean() {
+    // Verified against DuckDB: `SELECT MAP {} AS m` parses and executes.
+    let (_, select) = parse_select("SELECT MAP {} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().expect("must parse as MAP_LITERAL");
+    assert!(map_lit.entries().is_empty());
+}
+
+#[test]
+fn map_literal_trailing_comma_allowed() {
+    // Verified against DuckDB: trailing comma before `}` is accepted.
+    let (_, select) = parse_select("SELECT MAP {'a': 1, 'b': 2,} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().unwrap();
+    assert_eq!(map_lit.entries().len(), 2);
+}
+
+#[test]
+fn map_literal_numeric_keys() {
+    // Verified against DuckDB: `MAP {1: 'x', 2: 'y'}` parses and executes.
+    let (_, select) = parse_select("SELECT MAP {1: 'x', 2: 'y'} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().unwrap();
+    assert_eq!(map_lit.entries().len(), 2);
+}
+
+#[test]
+fn map_literal_round_trip() {
+    // Modulo canonical whitespace: the hand-rolled `Display for SelectItem`
+    // prints `expr.text()` (which may include trailing trivia the primary
+    // expression's postfix-lookahead absorbed) followed by its own " AS
+    // alias" — the same pre-existing double-space normalization every other
+    // brace/paren literal (STRUCT(...), record literal, etc.) needs here.
+    let sql = "SELECT MAP {'a': 1, 'b': 2} AS m FROM t";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        normalize(&printed),
+        normalize(sql),
+        "printer should reproduce MAP {{…}} (modulo canonical whitespace)"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn map_function_call_still_parses_as_function_call() {
+    // Guard: `MAP(a, b)` (no brace) must still be an ordinary function call,
+    // never a MAP_LITERAL — DuckDB's key/value-list form of `map()`.
+    let (_, select) = parse_select("SELECT MAP(a, b) AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_map_literal().is_none(),
+        "MAP(a, b) must not parse as a MAP_LITERAL"
+    );
+    assert!(
+        expr.as_function_call().is_some(),
+        "MAP(a, b) must parse as a FUNCTION_CALL"
+    );
+}
+
+#[test]
+fn bare_map_identifier_still_parses_as_column_ref() {
+    // Guard: a bare column named `map` (no following `{`) must parse as a
+    // plain identifier, never a MAP_LITERAL.
+    let (_, select) = parse_select("SELECT map AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_map_literal().is_none(),
+        "bare `map` identifier must not parse as a MAP_LITERAL"
+    );
+}
+
+#[test]
+fn map_literal_lowercase_keyword() {
+    // MAP is contextual and case-insensitive, matching every other SQL keyword.
+    let (_, select) = parse_select("SELECT map {'a': 1} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(expr.as_map_literal().is_some());
+}

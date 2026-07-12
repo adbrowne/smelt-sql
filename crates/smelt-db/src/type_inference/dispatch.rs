@@ -124,6 +124,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_struct_literal_type(&struct_lit, ctx);
     }
 
+    // Try MAP literal (DuckDB `MAP {'a': 1, 'b': 2}`)
+    if let Some(map_lit) = expr.as_map_literal() {
+        return infer_map_literal_type(&map_lit, ctx);
+    }
+
     // Try column reference (includes struct field access for qualified refs like s.field_name)
     if let Some(col_ref) = expr.as_column_ref() {
         // Use `lookup_identifier` so that seeded function parameters (§16 #1)

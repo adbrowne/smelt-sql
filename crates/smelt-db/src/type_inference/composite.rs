@@ -164,3 +164,85 @@ pub fn infer_struct_literal_type(
         nullable: false, // The struct itself is not nullable
     })
 }
+
+/// Infer the type of a MAP literal (DuckDB `MAP {'a': 1, 'b': 2}`) as
+/// `Map(key_type, value_type)`.
+///
+/// Key types are unified across all entries the same way array-literal
+/// elements are unified (first non-NULL entry sets the type; later entries
+/// must match or promote); value types are unified independently. Mixed,
+/// non-promotable key or value types reject inference (`None`), matching
+/// `infer_array_literal_type`. Empty `MAP {}` infers `Map(Unknown, Unknown)`
+/// — DuckDB itself defaults an empty map's key/value types to INTEGER, but
+/// smelt follows the array-literal precedent (`Array(Unknown)` for `[]`)
+/// rather than encoding that engine-specific quirk.
+pub fn infer_map_literal_type(
+    map_lit: &smelt_parser::ast::MapLiteral,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    let entries = map_lit.entries();
+
+    if entries.is_empty() {
+        return Some(TypedColumn {
+            data_type: DataType::Map(
+                Box::new(DataType::unknown_dynamic()),
+                Box::new(DataType::unknown_dynamic()),
+            ),
+            nullable: false,
+        });
+    }
+
+    let mut key_typed: Option<TypedColumn> = None;
+    let mut value_typed: Option<TypedColumn> = None;
+
+    for entry in &entries {
+        let key_expr = entry.key()?;
+        let value_expr = entry.value()?;
+
+        let key_ty = infer_expression_type(&key_expr, ctx)?;
+        let value_ty = infer_expression_type(&value_expr, ctx)?;
+
+        key_typed = unify_entry_type(key_typed, key_ty)?;
+        value_typed = unify_entry_type(value_typed, value_ty)?;
+    }
+
+    let key_type = key_typed.map(|t| t.data_type).unwrap_or(DataType::Null);
+    let value_type = value_typed.map(|t| t.data_type).unwrap_or(DataType::Null);
+
+    Some(TypedColumn {
+        data_type: DataType::Map(Box::new(key_type), Box::new(value_type)),
+        nullable: false, // The map itself is not nullable; keys/values may be
+    })
+}
+
+/// Fold one more entry's typed column into a running unification, mirroring
+/// `infer_array_literal_type`'s element-unification loop: NULL is compatible
+/// with anything, the first non-NULL entry sets the type, and later entries
+/// must match or promote. Returns `None` when types can't be promoted.
+fn unify_entry_type(
+    running: Option<TypedColumn>,
+    next: TypedColumn,
+) -> Option<Option<TypedColumn>> {
+    match running {
+        None => {
+            if next.data_type == DataType::Null {
+                Some(None)
+            } else {
+                Some(Some(next))
+            }
+        }
+        Some(existing) => {
+            if next.data_type == DataType::Null {
+                return Some(Some(existing));
+            }
+            if next.data_type != existing.data_type {
+                let promoted = promote_types(&existing, &next);
+                if promoted.data_type.is_unknown() {
+                    return None;
+                }
+                return Some(Some(promoted));
+            }
+            Some(Some(existing))
+        }
+    }
+}

@@ -431,3 +431,10 @@ These features are parsed in smelt SQL and rewritten to target-specific syntax:
 - **Pattern matching operators** — `LIKE`, `ILIKE` (case-insensitive `LIKE`), and
   `GLOB` (DuckDB glob-style pattern matching, e.g. `name GLOB 'x*'`) each infer
   `Boolean`. `NOT GLOB` is not supported — DuckDB itself rejects that form.
+- **MAP literals** — `MAP {'a': 1, 'b': 2}` (DuckDB's brace map-literal syntax)
+  infers `Map(key_type, value_type)`, unifying key types and value types
+  independently across entries the same way `ARRAY[…]` element types unify.
+  An empty `MAP {}` infers `Map(Unknown, Unknown)`. `MAP` is not a reserved
+  word — `MAP(a, b)`-style function calls and a column literally named `map`
+  both continue to parse as before; only `MAP` immediately followed by `{`
+  is treated as a map literal.

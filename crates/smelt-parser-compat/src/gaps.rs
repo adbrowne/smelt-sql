@@ -150,15 +150,8 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         severity: "low",
         planned_fix: false,
     },
-    KnownGap {
-        id: "duckdb_map_literal",
-        description: "MAP {k: v, …} literals are not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bMAP\s*\{"],
-        severity: "low",
-        planned_fix: false,
-    },
+    // duckdb_map_literal gap removed - MAP {k: v, …} literals are now parsed,
+    // printed, and inferred as Map(key_type, value_type) (July 2026).
     KnownGap {
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",

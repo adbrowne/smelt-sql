@@ -1159,6 +1159,74 @@ fn test_struct_field_access_case_insensitive() {
 }
 
 #[test]
+fn test_map_literal_string_int() {
+    // MAP {'a': 1, 'b': 2} → Map(Text, SmallInt). Verified against the DuckDB
+    // oracle: `typeof(MAP {'a': 1, 'b': 2})` is `MAP(VARCHAR, INTEGER)`; smelt's
+    // key/value width inference (SmallInt for small integer literals) matches
+    // the same convention as ARRAY[1, 2, 3] → Array(SmallInt) above.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 2}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::Text), Box::new(DataType::SmallInt))
+    );
+    assert!(!types[0].nullable, "map literal should be non-nullable");
+}
+
+#[test]
+fn test_map_literal_empty() {
+    // Verified against DuckDB: `MAP {}` parses and executes. smelt infers
+    // Map(Unknown, Unknown) — following the `ARRAY[]` → `Array(Unknown)`
+    // precedent rather than DuckDB's engine-specific INTEGER default.
+    let types = infer_sql("SELECT MAP {}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(
+            Box::new(DataType::unknown_dynamic()),
+            Box::new(DataType::unknown_dynamic())
+        )
+    );
+}
+
+#[test]
+fn test_map_literal_numeric_keys() {
+    // MAP {1: 'x', 2: 'y'} → Map(SmallInt, Text). Verified against DuckDB:
+    // `typeof(MAP {1: 'x', 2: 'y'})` is `MAP(INTEGER, VARCHAR)`.
+    let types = infer_sql("SELECT MAP {1: 'x', 2: 'y'}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::SmallInt), Box::new(DataType::Text))
+    );
+}
+
+#[test]
+fn test_map_literal_trailing_comma() {
+    // Verified against DuckDB: trailing comma before `}` is accepted.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 2,}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::Text), Box::new(DataType::SmallInt))
+    );
+}
+
+#[test]
+fn test_map_literal_mixed_value_types_rejected() {
+    // MAP {'a': 1, 'b': 'x'} — Integer/Text values can't be promoted →
+    // inference rejects, same as the mixed-type array literal case.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 'x'}");
+    assert_eq!(types[0].data_type, DataType::unknown_dynamic());
+}
+
+#[test]
+fn test_map_literal_value_numeric_promotion() {
+    // MAP {'a': 1, 'b': 100000} — SmallInt + Integer values promote to Integer.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 100000}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::Text), Box::new(DataType::Integer))
+    );
+}
+
+#[test]
 fn test_struct_display() {
     let dt = DataType::Struct(vec![
         ("a".to_string(), DataType::Integer),

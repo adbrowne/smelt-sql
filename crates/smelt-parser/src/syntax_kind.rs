@@ -398,6 +398,16 @@ pub enum SyntaxKind {
     // the DuckDB oracle), so — like LIKE — there is no dedicated NOT GLOB form.
     GLOB_KW,
 
+    // MAP {key: value, …} literal (DuckDB): the contextual `MAP` identifier
+    // immediately followed by `{` wrapping the same colon-delimited entry
+    // grammar as RECORD_LITERAL, but with expression keys (string/numeric
+    // literals, not just IDENT). `MAP` is not a reserved keyword — it stays
+    // usable as a plain identifier/function name (`MAP(a, b)`, `SELECT map
+    // FROM t`) everywhere else; only `IDENT("MAP") LBRACE` triggers this node.
+    MAP_LITERAL,
+    // Single `key : value` pair inside a MAP_LITERAL.
+    MAP_ENTRY,
+
     // Special
     EOF, // End of file
 }

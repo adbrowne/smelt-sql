@@ -545,6 +545,12 @@ impl<'a> super::Parser<'a> {
                 self.start_node_at(checkpoint, EXPRESSION);
                 self.finish_node();
             }
+        } else if self.at(IDENT) && self.is_map_literal_start() {
+            // DuckDB MAP {…} literal: contextual `MAP` identifier directly
+            // followed by `{`. `MAP` is otherwise a plain identifier — this
+            // guard only fires on `IDENT("MAP") LBRACE`, so `MAP(a, b)` calls
+            // and a bare column named `map` are unaffected.
+            self.parse_map_literal();
         } else if self.at(IDENT) && self.is_typed_literal() {
             // Typed literal: DATE '2024-01-01', TIMESTAMP '...', etc.
             // Wrap in EXPRESSION so Expr::cast() works
@@ -1831,6 +1837,89 @@ impl<'a> super::Parser<'a> {
             .get(self.pos + lookahead)
             .map(|t| t.kind == LPAREN)
             .unwrap_or(false)
+    }
+
+    /// Check if current IDENT is the contextual `MAP` keyword immediately
+    /// followed by `{` (skipping trivia). DuckDB's `MAP {'a': 1, 'b': 2}`
+    /// literal syntax. `MAP` is not reserved: `MAP(a, b)` function calls and
+    /// a bare identifier `map` still parse as before, since this only
+    /// matches when `{` follows.
+    pub(super) fn is_map_literal_start(&self) -> bool {
+        let token = self.tokens[self.pos];
+        let text = &self.input[self.offset..self.offset + token.len];
+        if !text.eq_ignore_ascii_case("MAP") {
+            return false;
+        }
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                return t.kind == LBRACE;
+            }
+        }
+        false
+    }
+
+    /// Parse a DuckDB MAP literal: `MAP {key: value, …}`.
+    ///
+    /// Items are `MAP_ENTRY` nodes, each wrapping a key `Expr` and a value
+    /// `Expr` separated by `:`. Keys are full expressions (typically string
+    /// or numeric literals), unlike `RECORD_LITERAL`'s bare-IDENT keys.
+    /// Empty `MAP {}` and a trailing comma are both accepted (verified
+    /// against DuckDB).
+    pub(super) fn parse_map_literal(&mut self) {
+        self.start_node(MAP_LITERAL);
+        self.advance(); // consume `MAP` (IDENT)
+        self.skip_trivia();
+        self.expect(LBRACE);
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            self.start_node(MAP_ENTRY);
+            self.parse_expression(); // key
+            self.skip_trivia();
+            if self.at(COLON) {
+                self.advance(); // COLON
+                self.skip_trivia();
+                if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                    self.parse_expression(); // value
+                } else {
+                    self.error(
+                        "Expected expression value after ':' in MAP literal entry".to_string(),
+                    );
+                }
+            } else {
+                self.error("Expected ':' after key in MAP literal entry".to_string());
+                self.sync_to(&[COMMA, RBRACE, EOF]);
+            }
+            self.finish_node(); // MAP_ENTRY
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                // Trailing comma allowed.
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected '}' to close MAP literal".to_string());
+        }
+
+        self.finish_node(); // MAP_LITERAL
     }
 
     /// Check if current IDENT is a type keyword followed by a string literal (e.g., DATE '2024-01-01')

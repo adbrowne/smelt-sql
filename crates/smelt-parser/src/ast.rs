@@ -2085,6 +2085,14 @@ impl Expr {
             .or_else(|| StructLiteral::cast(self.0.clone()))
     }
 
+    /// Check if this is a MAP literal (MAP {'a': 1, 'b': 2})
+    pub fn as_map_literal(&self) -> Option<MapLiteral> {
+        self.0
+            .children()
+            .find_map(MapLiteral::cast)
+            .or_else(|| MapLiteral::cast(self.0.clone()))
+    }
+
     /// Check if this expression has a window specification (OVER clause)
     pub fn window_spec(&self) -> Option<WindowSpec> {
         self.0.children().find_map(WindowSpec::cast)
@@ -2560,6 +2568,51 @@ impl StructLiteral {
             result.push((expr, None));
         }
         result
+    }
+}
+
+/// MAP literal: MAP {'a': 1, 'b': 2}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapLiteral(SyntaxNode);
+
+impl MapLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == MAP_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Get all (key, value) entry expression pairs.
+    pub fn entries(&self) -> Vec<MapEntry> {
+        self.0.children().filter_map(MapEntry::cast).collect()
+    }
+}
+
+/// A single `key : value` entry inside a `MapLiteral`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapEntry(SyntaxNode);
+
+impl MapEntry {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == MAP_ENTRY {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn key(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).next()
+    }
+
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
     }
 }
 
