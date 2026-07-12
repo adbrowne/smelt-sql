@@ -595,6 +595,191 @@ impl MutableEnrichedRecipe {
     }
 }
 
+/// A source's declared `batched.unique_key`/source-YAML rendering, factored
+/// out of [`SourceRecipe`] so [`KeyedRecipe`] (which has no `GrainDecl` —
+/// keyed output declares no `timeseries:`/`unique_key`, `keyed_models.md`
+/// Known Divergences) can render its driving source's YAML the same way
+/// [`crate::render::render_source_yaml`] does for a [`ModelRecipe`], without
+/// requiring a `GrainDecl` to exist.
+impl SourceRecipe {
+    pub fn source_yaml(&self) -> String {
+        match self.posture {
+            SourcePosture::AppendOnly => format!(
+                "description: generative-conformance keyed driving source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+                d = self.clock_column,
+                id = self.key_column,
+                val = self.payload_column,
+            ),
+            SourcePosture::MutableSnapshot => format!(
+                "description: generative-conformance keyed unclocked source.\nmutation_profile: mutable_snapshot\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+                id = self.key_column,
+                val = self.payload_column,
+            ),
+        }
+    }
+}
+
+/// The `grain: key` pool's combiner family
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
+/// `maintenance_plan.md` §"The algebraic maintenance ladder"): both are
+/// direct-monoid, admitted by the built classifier seed
+/// (`crates/smelt-logical/src/rules/cumulative.rs`'s aggregator allowlist —
+/// `keyed_models.md` Known Divergences "the classifier covers only the
+/// direct-monoid families").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyedCombiner {
+    /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
+    /// `Grade::Additive` reconciliation-ledger family: entries record delta
+    /// identities and a repeat fold of an already-processed window is
+    /// refused (`KeyedReprocessedWindow`, `keyed_models.md` §"Reprocessing").
+    Additive,
+    /// `MAX(val)` — an idempotent, non-invertible monoid (ladder rung 1,
+    /// not a group). The `Grade::Idempotent` family: entries record only a
+    /// frontier watermark, so re-folding a window is harmless.
+    Idempotent,
+}
+
+impl KeyedCombiner {
+    pub fn kind_name(self) -> &'static str {
+        match self {
+            KeyedCombiner::Additive => "additive",
+            KeyedCombiner::Idempotent => "idempotent",
+        }
+    }
+
+    /// `(aggregate function, output column alias)` this combiner projects.
+    pub fn agg_and_alias(self) -> (&'static str, &'static str) {
+        match self {
+            KeyedCombiner::Additive => ("SUM", "total"),
+            KeyedCombiner::Idempotent => ("MAX", "max_val"),
+        }
+    }
+}
+
+/// A `Strategy` drawing uniformly from the two [`KeyedCombiner`] families.
+pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
+    prop_oneof![
+        Just(KeyedCombiner::Additive),
+        Just(KeyedCombiner::Idempotent),
+    ]
+}
+
+/// A `grain: key` recipe (Phase 5): `SELECT <key>, <agg>(<val>) AS <alias>
+/// FROM smelt.sources.<name> GROUP BY <key>` over one [`SourceRecipe`].
+/// [`Self::new_window_forward`] uses the clocked append-only `events` shape
+/// (the run-shape derivation's window-forward posture,
+/// `keyed_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
+/// uses the unclocked `mutable_snapshot` dimension shape (selecting the
+/// snapshot-reconcile posture, refused today — `keyed_models.md` Known
+/// Divergences "the snapshot-reconcile executor is unbuilt").
+#[derive(Debug, Clone)]
+pub struct KeyedRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub combiner: KeyedCombiner,
+}
+
+impl KeyedRecipe {
+    pub fn new_window_forward(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!("recipe_keyed_{}", combiner.kind_name()),
+            source: SourceRecipe::events(KeyShape::Single),
+            combiner,
+        }
+    }
+
+    pub fn new_snapshot_reconcile(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!("recipe_keyed_snapshot_{}", combiner.kind_name()),
+            source: SourceRecipe::mutable_dimension("keyed_snapshot_dim"),
+            combiner,
+        }
+    }
+}
+
+/// One `[start, end)` window of a generated keyed schedule, plus the rows
+/// landing in it — the keyed pool's analogue of
+/// [`crate::schedule_gen::ConformanceStep::RunWindow`], with no late-row/
+/// re-run step kinds (redelivery is a dedicated probe, not a generated
+/// schedule shape — plan Phase 5 TDD list
+/// `redelivered_window_refuses_for_additive_keyed`).
+#[derive(Debug, Clone)]
+pub struct KeyedRunWindow {
+    pub start: chrono::NaiveDate,
+    pub end: chrono::NaiveDate,
+    pub rows: Vec<crate::schedule_gen::GenRow>,
+}
+
+/// A generated sequence of [`KeyedRunWindow`]s.
+#[derive(Debug, Clone)]
+pub struct KeyedSchedule(pub Vec<KeyedRunWindow>);
+
+/// The key every generated window deliberately re-touches (design §5
+/// "Key-recurrence control": "keyed recipes generate schedules with
+/// deliberate key re-touch across windows — the interesting case for
+/// merges").
+const KEYED_SHARED_KEY_ID: i64 = 1;
+
+/// Schema-generic keyed-pool schedule generator: 2-3 disjoint one-day
+/// windows; every window contributes one row keyed on
+/// [`KEYED_SHARED_KEY_ID`] (guaranteeing key re-touch across windows) plus
+/// 1-2 rows keyed on fresh ids (variety). Never re-runs a window — a
+/// re-delivered window is the dedicated probe's own hand-built schedule, not
+/// a generated shape here.
+pub fn arb_keyed_schedule() -> impl Strategy<Value = KeyedSchedule> {
+    let base = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid base date");
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        proptest::collection::vec(
+            proptest::collection::vec(arb_payload_value(), 1..=2),
+            n_windows,
+        )
+        .prop_map(move |extra_vals| build_keyed_schedule(base, &extra_vals))
+    })
+}
+
+fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> KeyedSchedule {
+    use crate::schedule_gen::GenRow;
+
+    let mut windows = Vec::new();
+    let mut next_id = 100_i64;
+    for (i, vals) in extra_vals.iter().enumerate() {
+        let start = base + chrono::Duration::days(i as i64);
+        let end = start + chrono::Duration::days(1);
+
+        let mut rows = vec![GenRow {
+            d: start,
+            id: KEYED_SHARED_KEY_ID,
+            val: 1 + i as i64,
+        }];
+        for val in vals {
+            rows.push(GenRow {
+                d: start,
+                id: next_id,
+                val: *val,
+            });
+            next_id += 1;
+        }
+        windows.push(KeyedRunWindow { start, end, rows });
+    }
+    KeyedSchedule(windows)
+}
+
+/// A `Strategy` producing `n` pairwise-distinct `i64` ordering-key values by
+/// construction (design §5 "Key-recurrence control": "where ordering-
+/// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
+/// made unique by construction so the documented ties carve-out cannot fire
+/// spuriously" — `keyed_models.md` §"Ordering ties"). The order-monotone
+/// overwrite combiner family this discipline targets is not yet an admitted
+/// technique (`keyed_models.md` Known Divergences: "the classifier union
+/// (overwrite, once-write, and plain-overwrite families) ... are unbuilt"),
+/// so this generator is not wired into [`KeyedCombiner`] today — but the
+/// discipline it must uphold once that family lands is independently
+/// testable now: a strictly increasing sequence can never collide, by
+/// construction rather than by (unprovable) statistical luck.
+pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
+    (0..1_000_000_i64).prop_map(move |base| (0..n as i64).map(|i| base + i).collect())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -748,5 +933,45 @@ mod tests {
                  model body exactly, with nothing else changed"
             );
         }
+    }
+
+    /// `ordering_keys_are_unique_by_construction` (plan Phase 5 TDD list):
+    /// generator discipline for order-monotone combiners — a sample of
+    /// generated ordering-key vectors of every sampled length is always
+    /// pairwise distinct, so the documented ties carve-out
+    /// (`keyed_models.md` §"Ordering ties") can never fire spuriously
+    /// against generated data.
+    #[test]
+    fn ordering_keys_are_unique_by_construction() {
+        let mut runner = TestRunner::deterministic();
+        for n in 1..=8_usize {
+            let strat = arb_unique_ordering_keys(n);
+            for _ in 0..20 {
+                let keys = strat.new_tree(&mut runner).unwrap().current();
+                assert_eq!(keys.len(), n, "generator must produce exactly n keys");
+                let unique: HashSet<i64> = keys.iter().copied().collect();
+                assert_eq!(
+                    unique.len(),
+                    keys.len(),
+                    "ordering keys must be pairwise distinct by construction, got {keys:?}"
+                );
+            }
+        }
+    }
+
+    /// `keyed_pool_recipes_render_both_combiner_families` — a basic sanity
+    /// check that [`KeyedRecipe::new_window_forward`] produces a distinct
+    /// model per [`KeyedCombiner`] and its body names the expected
+    /// aggregate.
+    #[test]
+    fn keyed_pool_recipes_render_both_combiner_families() {
+        let additive = KeyedRecipe::new_window_forward(KeyedCombiner::Additive);
+        let idempotent = KeyedRecipe::new_window_forward(KeyedCombiner::Idempotent);
+        assert_ne!(additive.model_name, idempotent.model_name);
+
+        let additive_body = render::render_keyed_model_body(&additive);
+        let idempotent_body = render::render_keyed_model_body(&idempotent);
+        assert!(additive_body.contains("SUM("));
+        assert!(idempotent_body.contains("MAX("));
     }
 }

@@ -6,11 +6,15 @@
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
+use smelt_logical::maintenance::Trigger;
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
 use smelt_maintenance_testkit::oracle::multiset_equal;
-use smelt_maintenance_testkit::oracle_modes::OracleMode;
+use smelt_maintenance_testkit::oracle_modes::{
+    keyed_end_state_with_retained_departed_keys, KeyedOracleRow, OracleMode,
+};
 use smelt_maintenance_testkit::recipe::{
-    arb_recipe, ModelRecipe, MutableEnrichedRecipe, RecipePool,
+    arb_keyed_combiner, arb_keyed_schedule, arb_recipe, KeyedCombiner, KeyedRecipe, KeyedSchedule,
+    ModelRecipe, MutableEnrichedRecipe, RecipePool,
 };
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
@@ -529,4 +533,306 @@ fn mutable_pool_settles_to_full_refresh() {
                 panic!("case {i}: mixed schedule {schedule:?} equivalence check failed: {e}")
             });
     }
+}
+
+// ---------------------------------------------------------------------
+// Phase 5: the `grain: key` pool (`KeyedRecipe`).
+// ---------------------------------------------------------------------
+
+/// Default deterministic case count for `keyed_pool_upholds_end_state_equivalence`
+/// — small since each case drives several `execute_project` windows.
+const KEYED_DEFAULT_CASES: usize = 6;
+
+fn keyed_case_count() -> usize {
+    std::env::var("SMELT_CONFORMANCE_KEYED_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(KEYED_DEFAULT_CASES)
+}
+
+/// Stage a [`KeyedRecipe`] into a fresh temp project + DuckDB file.
+pub fn stage_keyed_recipe(
+    recipe: &KeyedRecipe,
+    tmp: &tempfile::TempDir,
+) -> anyhow::Result<LinkCProject> {
+    let project_dir = tmp.path().join("project");
+    let db_path = tmp.path().join("db.duckdb");
+    std::fs::create_dir_all(&project_dir)?;
+    render::stage_keyed(recipe, &project_dir, &db_path)
+}
+
+/// Insert one row into a [`KeyedRecipe`]'s staged driving-source table.
+pub fn insert_row_keyed(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    row: &GenRow,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    conn.execute(
+        &format!(
+            "INSERT INTO main.sources_{} VALUES (DATE '{}', {}, {})",
+            recipe.source.name,
+            row.d.format("%Y-%m-%d"),
+            row.id,
+            row.val,
+        ),
+        [],
+    )?;
+    Ok(())
+}
+
+/// Classify a staged [`KeyedRecipe`] through the real maintenance derivation
+/// — the keyed-pool counterpart of `classify`/`classify_mixed`, kept here
+/// rather than in `verdict.rs` (outside this phase's edit scope, plan
+/// Critical files). Returns the derived plan (possibly with zero cells) plus
+/// every diagnostic on the target model, so a refusal case can name the
+/// diagnostic that backs it.
+pub fn classify_keyed_full(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+) -> anyhow::Result<(
+    Option<smelt_logical::maintenance::MaintenancePlan>,
+    Vec<smelt_db::Diagnostic>,
+)> {
+    let config = smelt_core::config::Config::load(&project.project_dir)?;
+    let discovery =
+        smelt_core::ModelDiscovery::new(project.project_dir.clone(), config.paths.clone());
+    let sql_models = discovery.discover_models()?;
+    let target_path = project
+        .project_dir
+        .join(format!("models/{}.sql", recipe.model_name));
+
+    let mut db = smelt_db::Database::default();
+    let project_input = db.set_project_input(project.project_dir.clone(), String::new());
+    let mut target: Option<smelt_db::SourceFile> = None;
+    let source_files: Vec<_> = sql_models
+        .iter()
+        .map(|m| {
+            let file = db.set_source_file(
+                m.path.clone(),
+                m.content.clone(),
+                project.project_dir.clone(),
+            );
+            if m.path == target_path {
+                target = Some(file);
+            }
+            file
+        })
+        .collect();
+    db.set_workspace(source_files, vec![project_input]);
+    let workspace = db.workspace();
+
+    let target = target.ok_or_else(|| {
+        anyhow::anyhow!(
+            "staged keyed-pool model {:?} (expected at {}) not found among discovered models",
+            recipe.model_name,
+            target_path.display()
+        )
+    })?;
+    let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    Ok((plan_result.map(|r| r.plan), diagnostics))
+}
+
+/// Classify a staged [`KeyedRecipe`], requiring an admitted (non-empty) plan
+/// — the happy-path wrapper around [`classify_keyed_full`] for cases that
+/// expect admission.
+pub fn classify_keyed(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+) -> anyhow::Result<smelt_logical::maintenance::MaintenancePlan> {
+    let (plan, diags) = classify_keyed_full(project, recipe)?;
+    match plan {
+        Some(plan) if !plan.cells.is_empty() => Ok(plan),
+        _ => anyhow::bail!(
+            "keyed recipe {:?} admitted no cells: diagnostics={diags:#?}",
+            recipe.model_name
+        ),
+    }
+}
+
+/// The end-state equivalence assertion for a [`KeyedRecipe`] (design §6
+/// "Keyed-grain carve-outs"; `keyed_models.md` §"End-state equivalence"):
+/// materialize `S_k` (the union, across every run so far, of that run's own
+/// window's rows — exactly [`STracker::s_at`]'s definition, which coincides
+/// with "every delta row a window-forward keyed run has folded so far" since
+/// a keyed run merges every row landing in its own window and no
+/// re-delivery occurs in a generated [`KeyedSchedule`]), then compare the
+/// maintained table's full contents against the recipe's own body evaluated
+/// over `S_k`.
+pub fn assert_keyed_equivalence(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    tracker: &STracker,
+    k: usize,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    tracker.materialize_s(&conn, k)?;
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let oracle_sql =
+        render::render_keyed_oracle_body_over(recipe, &format!("oracle_{}", recipe.source.name));
+    let equal = multiset_equal(&conn, &maintained_sql, &oracle_sql);
+    if !equal {
+        anyhow::bail!(
+            "keyed end-state equivalence violated for model {:?} at run {k}: maintained \
+             ({maintained_sql:?}) != oracle ({oracle_sql:?})",
+            recipe.model_name
+        );
+    }
+    Ok(())
+}
+
+/// Drive `schedule` against `project`/`recipe` (a [`KeyedRecipe`] under the
+/// window-forward posture) through the real `execute_project` pipeline,
+/// asserting end-state equivalence after every window.
+pub async fn drive_keyed_and_assert(
+    project: &LinkCProject,
+    recipe: &KeyedRecipe,
+    schedule: &KeyedSchedule,
+) -> anyhow::Result<()> {
+    let mut tracker = STracker::new(&recipe.source);
+
+    for (i, window) in schedule.0.iter().enumerate() {
+        for row in &window.rows {
+            insert_row_keyed(project, recipe, row)?;
+        }
+
+        let snapshot = {
+            let conn = project.connect()?;
+            read_source_snapshot(&conn, &recipe.source)
+        };
+
+        let mut request = base_request("dev");
+        request.start = Some(window.start.format("%Y-%m-%d").to_string());
+        request.end = Some(window.end.format("%Y-%m-%d").to_string());
+        project
+            .run_quiet(&format!("keyed-run-{i}"), request)
+            .await?;
+
+        let k = tracker.record_run(window.start, window.end, snapshot);
+        assert_keyed_equivalence(project, recipe, &tracker, k)?;
+    }
+    Ok(())
+}
+
+/// `keyed_pool_upholds_end_state_equivalence` (plan Phase 5 TDD list):
+/// keyed recipes (additive + idempotent combiner families, key re-touch
+/// across windows) equal the oracle's end state at settled points.
+#[test]
+fn keyed_pool_upholds_end_state_equivalence() {
+    let n = keyed_case_count();
+    let mut runner = TestRunner::deterministic();
+    let combiner_strat = arb_keyed_combiner();
+    let schedule_strat = arb_keyed_schedule();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let mut admitted_cases = 0;
+    for i in 0..n {
+        let combiner = combiner_strat.new_tree(&mut runner).unwrap().current();
+        let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+        let recipe = KeyedRecipe::new_window_forward(combiner);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project = stage_keyed_recipe(&recipe, &tmp)
+            .unwrap_or_else(|e| panic!("case {i}: keyed recipe {recipe:?} failed to stage: {e}"));
+
+        let plan = classify_keyed(&project, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: keyed recipe {recipe:?} classify failed: {e}"));
+        assert!(
+            !plan.cells.is_empty(),
+            "case {i}: keyed recipe {recipe:?} admitted zero cells — generator/derivation \
+             regression"
+        );
+        admitted_cases += 1;
+
+        rt.block_on(drive_keyed_and_assert(&project, &recipe, &schedule))
+            .unwrap_or_else(|e| {
+                panic!(
+                    "case {i}: keyed recipe {recipe:?} schedule {schedule:?} equivalence check \
+                     failed: {e}"
+                )
+            });
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic keyed sample admitted zero cases — generator/derivation regression"
+    );
+}
+
+/// `retained_departed_keys_adjusts_the_oracle` (plan Phase 5 TDD list):
+/// snapshot-reconcile schedules generating deletes compare against oracle
+/// rows ∪ retained departed keys (`keyed_models.md` §"End-state
+/// equivalence"). Two halves: (1) today's real contract — an unclocked
+/// (zero-clocked-driving-source) keyed model selects the snapshot-reconcile
+/// run shape (`keyed_models.md` §"The two run shapes"), and the *targeted*
+/// keyed-fold cell for it is refused fail-loud
+/// (`Refusal::NoAdmissibleTechnique`/`Refusal::ScanUnbounded`, named on the
+/// plan itself — `maintenance-plan purity`: consumed, not re-derived) rather
+/// than silently treated as window-forward, since the snapshot-reconcile
+/// executor is unbuilt (`keyed_models.md` Known Divergences); the universal
+/// `Trigger::Backfill`/whole-table-recompute cell every model admits
+/// (`maintenance_plan.md` §"Per-cell admission" — "a recompute is the
+/// universal ground-truth reset") stays available as the escape hatch, but
+/// no `Trigger::NewData` cell is ever admitted for this source; (2) the pure
+/// oracle adjustment that refusal defers to is independently pinned as data
+/// (`oracle_modes::keyed_end_state_with_retained_departed_keys`), so the
+/// carve-out itself is verified ahead of the executor landing.
+#[test]
+fn retained_departed_keys_adjusts_the_oracle() {
+    let recipe = KeyedRecipe::new_snapshot_reconcile(KeyedCombiner::Additive);
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project = stage_keyed_recipe(&recipe, &tmp).expect("stage unclocked keyed recipe");
+
+    let (plan, _diags) =
+        classify_keyed_full(&project, &recipe).expect("classify unclocked keyed recipe");
+    let plan = plan.expect(
+        "maintenance_plan_report must still return a plan (the universal \
+         Backfill cell), even when the targeted keyed fold is refused",
+    );
+
+    assert!(
+        !plan.cells.iter().any(
+            |c| matches!(&c.trigger, Trigger::NewData { source } if source == &recipe.source.name)
+        ),
+        "an unclocked (snapshot-reconcile) keyed model must never admit a targeted NewData \
+         fold cell today: {plan:#?}"
+    );
+    assert!(
+        plan.refusals.iter().any(|r| matches!(
+            r,
+            smelt_logical::maintenance::Refusal::NoAdmissibleTechnique { trigger, .. }
+                if trigger.contains(&recipe.source.name)
+        )),
+        "expected a named NoAdmissibleTechnique refusal naming the unclocked driving source, \
+         got: {:#?}",
+        plan.refusals
+    );
+
+    // The pure carve-out formula this refusal defers to.
+    let oracle_rows = vec![
+        KeyedOracleRow { key: 1, value: 10 },
+        KeyedOracleRow { key: 2, value: 20 },
+    ];
+    let stored_before_snapshot = [
+        KeyedOracleRow { key: 1, value: 999 }, // present in both — oracle wins
+        KeyedOracleRow { key: 3, value: 30 },  // departed — retained
+    ];
+    let retained_departed: Vec<KeyedOracleRow> = stored_before_snapshot
+        .iter()
+        .filter(|stored| !oracle_rows.iter().any(|o| o.key == stored.key))
+        .copied()
+        .collect();
+
+    let adjusted = keyed_end_state_with_retained_departed_keys(&oracle_rows, &retained_departed);
+    assert_eq!(
+        adjusted,
+        vec![
+            KeyedOracleRow { key: 1, value: 10 },
+            KeyedOracleRow { key: 2, value: 20 },
+            KeyedOracleRow { key: 3, value: 30 },
+        ],
+        "stored table must equal the oracle's rows plus retained departed keys, exactly \
+         once each"
+    );
 }

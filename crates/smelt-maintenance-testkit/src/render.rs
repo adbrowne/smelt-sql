@@ -17,7 +17,7 @@
 
 use std::path::Path;
 
-use crate::recipe::{BodyConstruct, ModelRecipe};
+use crate::recipe::{BodyConstruct, KeyedRecipe, ModelRecipe, SourcePosture};
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
 /// derives the incremental filter; `model_shapes.rs`'s documented
@@ -193,6 +193,94 @@ pub fn staged_diagnostics(project_dir: &Path) -> anyhow::Result<Vec<smelt_db::Di
         .into_iter()
         .flat_map(|file| smelt_db::file_diagnostics(&db, workspace, file))
         .collect())
+}
+
+/// The `grain: key` model's `SELECT` body (Phase 5;
+/// [`crate::recipe::KeyedRecipe`]): `SELECT <key>, <agg>(<val>) AS <alias>
+/// FROM smelt.sources.<name> GROUP BY <key>`. Kept separate from
+/// [`render_model_body`]'s exhaustive [`BodyConstruct`] match — `KeyedRecipe`
+/// is not a `BodyConstruct` (plan Phase 5 "Implementation shape": "Keyed
+/// rendering per `model_shapes.rs`'s keyed conventions").
+pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
+    let src = format!("smelt.sources.{}", recipe.source.name);
+    let key = &recipe.source.key_column;
+    let val = &recipe.source.payload_column;
+    let (agg, alias) = recipe.combiner.agg_and_alias();
+    format!("SELECT {key}, {agg}({val}) AS {alias} FROM {src} GROUP BY {key}")
+}
+
+/// The full `grain: key` model file: `refresh: incremental` + `grain: key`
+/// frontmatter — deliberately no `timeseries:` block (`keyed_models.md`
+/// Known Divergences: "every `timeseries:` block on a keyed model is refused
+/// unconditionally") and no `batched.unique_key` (keyed output has no
+/// partition column) — followed by [`render_keyed_model_body`].
+pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
+    format!(
+        "---\nrefresh: incremental\ngrain: key\n---\n{body}\n",
+        body = render_keyed_model_body(recipe),
+    )
+}
+
+/// The keyed model's oracle query evaluated over `source_table_ref` instead
+/// of `smelt.sources.<name>` — the same body [`render_keyed_model_body`]
+/// renders once, serving both the model file and the oracle (design §4).
+/// Callers pass either the physical source table (a full-refresh oracle) or
+/// an `STracker`-materialized `oracle_<name>` temp table (the S-restricted
+/// / end-state oracle, `docs/plans/20260712-generative-maintenance-conformance.md`
+/// Phase 5).
+pub fn render_keyed_oracle_body_over(recipe: &KeyedRecipe, source_table_ref: &str) -> String {
+    render_keyed_model_body(recipe).replace(
+        &format!("smelt.sources.{}", recipe.source.name),
+        source_table_ref,
+    )
+}
+
+/// Stage a [`KeyedRecipe`] into a fresh project dir + DuckDB file: writes the
+/// model file, the driving source's YAML
+/// ([`crate::recipe::SourceRecipe::source_yaml`], clocked or unclocked per
+/// its posture), `smelt.yml`, and creates the physical source table matching
+/// the source's column shape — the keyed-pool counterpart of [`stage`].
+pub fn stage_keyed(
+    recipe: &KeyedRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render_keyed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+        recipe.source.source_yaml(),
+    )?;
+    std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
+
+    let conn = duckdb::Connection::open(db_path)?;
+    match recipe.source.posture {
+        SourcePosture::AppendOnly => {
+            conn.execute_batch(&format!(
+                "CREATE SCHEMA IF NOT EXISTS main; \
+                 CREATE TABLE main.sources_{name} ({d} DATE, {id} INTEGER, {val} INTEGER);",
+                name = recipe.source.name,
+                d = recipe.source.clock_column,
+                id = recipe.source.key_column,
+                val = recipe.source.payload_column,
+            ))?;
+        }
+        SourcePosture::MutableSnapshot => {
+            conn.execute_batch(&format!(
+                "CREATE SCHEMA IF NOT EXISTS main; \
+                 CREATE TABLE main.sources_{name} ({id} INTEGER, {val} INTEGER);",
+                name = recipe.source.name,
+                id = recipe.source.key_column,
+                val = recipe.source.payload_column,
+            ))?;
+        }
+    }
+    drop(conn);
+
+    crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
 
 /// Every `DiagnosticCode` variant in the `Maintenance*` family
