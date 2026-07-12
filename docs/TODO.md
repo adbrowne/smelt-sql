@@ -213,6 +213,11 @@ and the resulting scope (any double-quoted table/schema name) is probably underr
 in this bucket's raw count (1) because most instances get preempted by an earlier error in
 the same statement.
 
+Counts below are the entries *this triage pass* moved into each category — categories that
+already had entries before the pass (e.g. `file_glob_or_path_literal_from`,
+`sqllogictest_template_placeholder`) have higher ledger totals; the ledger itself is the
+authoritative count.
+
 | Category | Count | Effort guess | DuckDB-relevant? |
 |---|---|---|---|
 | `implicit_cross_join_comma_syntax` | 25 | Medium (join-topology semantics, see above) | Yes |

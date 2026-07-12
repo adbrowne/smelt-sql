@@ -1345,5 +1345,5 @@ note = "SQL/XML functions (xmlelement, xmlparse, xmlpi, xmltable, ...) are not p
 
 ["2729feeaafc6b76b"]
 category = "roundtrip_mismatch"
-note = "smelt parses cleanly but printed SQL is rejected by DuckDB (silent mis-parse); CTE printer drops a VALUES-clause CTE body (Display for TableRef's CTE path only prints select_stmt(), not values_clause()), printing 'AS  SELECT ...' with the VALUES rows dropped entirely"
+note = "smelt parses cleanly but printed SQL is rejected by DuckDB (silent mis-parse); CTE printer drops a VALUES-clause CTE body (Display for Subquery, reached via Display for Cte's query() call, only prints select_stmt(), not values_clause()), printing 'AS  SELECT ...' with the VALUES rows dropped entirely"
 
