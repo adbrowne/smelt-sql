@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783896728076,
+  "lastUpdate": 1783896730426,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -27893,6 +27893,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.427075528577006,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "4481414e3ffcc802ba802310920e4b7c4d5fb30a",
+          "message": "Merge pull request #158 from adbrowne/parser-gap-closure",
+          "timestamp": "2026-07-13T08:49:32+10:00",
+          "tree_id": "8d7aa92ad1e6f26e0d144ee9e2e6c4c602427648",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4481414e3ffcc802ba802310920e4b7c4d5fb30a"
+        },
+        "date": 1783896729791,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.481200324914244,
             "unit": "MB/s"
           }
         ]
