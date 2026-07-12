@@ -32,8 +32,8 @@
 
 use std::path::Path;
 
+use crate::shapes::{running_balance_self_ref, ModelShape};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
-use smelt_maintenance_testkit::model_shapes::{running_balance_self_ref, ModelShape};
 use smelt_maintenance_testkit::oracle::multiset_equal;
 
 fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {

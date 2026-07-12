@@ -131,6 +131,12 @@
 # PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
 # (unset → DuckDB legs skip green, which is a silent hole for this plan in
 # particular — its entire gate is DuckDB-backed).
+# SOAK SESSION registered (docs/autonomy_loop.md §"Soak sessions", not a
+# phased sub-plan — runs outside this state machine):
+#   SMELT_CONFORMANCE_CASES=200 cargo test -p smelt-cli --test
+#   maintenance_conformance --quiet 2>&1 | tail -40
+# Automated nightly via the `maintenance-conformance-soak` job in
+# .github/workflows/compat.yml; run it locally/ad hoc the same way.
 master_plan: docs/plans/20260704-model-updates.md
 active_subplan: docs/plans/20260712-generative-maintenance-conformance.md
 

@@ -21,12 +21,8 @@
 //!
 //! - [`link_c_harness`] — drives smelt's real run pipeline
 //!   (`smelt_runtime::execute_project`) in-process over a temp DuckDB.
-//! - [`model_shapes`] — the single readable catalogue of model shapes the
-//!   equivalence suite exercises.
 //! - [`oracle`] — the Link-C multiset-equality oracle (`EXCEPT ALL` both
 //!   directions).
-//! - [`run_schedule`] — the run-schedule generator + driver, including
-//!   between-run source mutation (append/update/delete).
 //! - [`recipe`] — `ModelRecipe`, the typed proptest value generating models
 //!   as data over the partition-grain append-only construct pool
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 1).
@@ -38,8 +34,7 @@
 //!   over-refusal ledger
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 2).
 //! - [`schedule_gen`] — schema-generic row/schedule generation over a
-//!   [`recipe::ModelRecipe`]'s own source shape, replacing
-//!   [`run_schedule`]'s fixed `events(d,id,val)` hard-coding
+//!   [`recipe::ModelRecipe`]'s own source shape
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 3).
 //! - [`s_tracker`] — the S-tracker: records `(window, source snapshot)` per
 //!   run and derives `S_k`, the append-only pool's S-restricted oracle
@@ -70,13 +65,11 @@
 pub mod dag;
 pub mod feed;
 pub mod link_c_harness;
-pub mod model_shapes;
 pub mod oracle;
 pub mod oracle_modes;
 pub mod probes;
 pub mod recipe;
 pub mod render;
-pub mod run_schedule;
 pub mod s_tracker;
 pub mod schedule_gen;
 pub mod verdict;

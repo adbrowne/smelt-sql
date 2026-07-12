@@ -17,8 +17,8 @@
 
 use std::path::Path;
 
+use crate::shapes::{cte_cross_partition_distinct, ModelShape};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
-use smelt_maintenance_testkit::model_shapes::{cte_cross_partition_distinct, ModelShape};
 
 fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();

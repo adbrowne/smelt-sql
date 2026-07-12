@@ -155,3 +155,28 @@ survives this conversation, never with a bare backgrounded Bash call.
 > launch it with `setsid`/`nohup`/`&` inside this session — it must outlive
 > this conversation. After starting, show me `tmux ls` and the first few
 > lines of the iteration log to confirm it's iterating.
+
+## Soak sessions
+
+A **soak session** is a deeper, one-off (or periodic) pass of a generative
+regression gate at a much larger sample depth than its default per-`cargo
+test` run — not a phased implementation plan, so it does not go through the
+`pending`/`done` phase state machine above. Register a soak target as a
+short stub entry in `.claude/active-plan`'s comment header (next to the
+`ACTIVE`/`PAUSED` entries) naming the gate's env-scaled depth knob and its
+default; a human (or a `/loop`-style recurring invocation) runs it directly,
+outside the phase loop, and files any shrunk failure it finds as a pinned
+regression test in the owning plan's test suite — the loop itself never
+scaffolds soak sessions on its own.
+
+**Registered soak targets:**
+
+- `cargo test -p smelt-cli --test maintenance_conformance` — the
+  maintenance-conformance equivalence gate
+  (`docs/specs/maintenance_plan.md` §"The equivalence invariant"). Default
+  depth is small (`SMELT_CONFORMANCE_CASES`, unset → 12); a soak pass runs
+  `SMELT_CONFORMANCE_CASES=200 cargo test -p smelt-cli --test
+  maintenance_conformance --quiet 2>&1 | tail -40`. Automated nightly via the
+  `maintenance-conformance-soak` job in `.github/workflows/compat.yml`
+  (schedule-gated, or the `run-extended-tests` PR label); this stub is the
+  same invocation for an ad hoc local/loop-driven pass.

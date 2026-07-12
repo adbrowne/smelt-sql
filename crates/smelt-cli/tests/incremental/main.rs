@@ -1,8 +1,22 @@
 #![cfg(feature = "duckdb")]
-//! Incremental model correctness test infrastructure.
+//! Backend incremental-strategy execution test infrastructure.
 //!
-//! Provides a harness that runs models both as full refresh and incrementally,
-//! then compares results via SQL EXCEPT to detect discrepancies.
+//! This is the **backend layer**: it drives `DuckDbBackend::execute_model_incremental`
+//! directly against a hand-supplied `PartitionRange`/`IncrementalStrategy` — no
+//! `smelt_runtime::execute_project`, no derived scan bound, no maintenance
+//! plan. It proves a given incremental strategy (DELETE+INSERT, MERGE, …)
+//! executes correctly *given* a filter, independent of how that filter was
+//! derived. Provides a harness that runs models both as full refresh and
+//! incrementally over caller-supplied time ranges, then compares results via
+//! SQL `EXCEPT` to detect discrepancies.
+//!
+//! This is deliberately narrower than
+//! `crates/smelt-cli/tests/maintenance_conformance/`'s standing gate, which
+//! drives the real end-to-end pipeline (`execute_project` on a real DuckDB
+//! backend) and asserts the derived plan/filter itself is correct, not just
+//! that a strategy executes correctly once handed one. See
+//! `docs/specs/maintenance_plan.md` §References → Tests for how the two
+//! suites divide the space.
 
 mod backfill;
 mod having_distinct_alignment;
