@@ -1380,6 +1380,92 @@ fn test_map_literal_value_numeric_promotion() {
 }
 
 #[test]
+fn test_brace_struct_literal_string_keyed() {
+    // `{'a': 1, 'b': 'x'}` → DuckDB struct/dict literal, string-literal keys.
+    // Verified against DuckDB: `typeof({'a': 1, 'b': 'x'})` is
+    // `STRUCT(a INTEGER, b VARCHAR)`; smelt's own integer-literal width
+    // convention (SmallInt for small integer literals) applies the same way
+    // it does for MAP {'a': 1} above.
+    let types = infer_sql("SELECT {'a': 1, 'b': 'x'}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Struct(vec![
+            ("a".to_string(), DataType::SmallInt),
+            ("b".to_string(), DataType::Text),
+        ])
+    );
+    assert!(!types[0].nullable, "struct literal should be non-nullable");
+}
+
+#[test]
+fn test_brace_struct_literal_double_quoted_keys() {
+    // Verified against DuckDB: double-quoted keys behave the same as
+    // single-quoted keys inside a struct/dict literal.
+    let types = infer_sql("SELECT {\"CamelCase\": 1, \"lowercase\": 2}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Struct(vec![
+            ("CamelCase".to_string(), DataType::SmallInt),
+            ("lowercase".to_string(), DataType::SmallInt),
+        ])
+    );
+}
+
+#[test]
+fn test_brace_struct_literal_nested() {
+    // `{'x': 1, 'y': {'a': 'duck', 'b': 1.5}}` — nested struct/dict literal
+    // value. Verified against DuckDB: nested struct/dict literals parse and
+    // execute (external corpus statement `48ccbc31d75bae5c`).
+    let types = infer_sql("SELECT {'x': 1, 'y': {'a': 'duck', 'b': 1.5}}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Struct(vec![
+            ("x".to_string(), DataType::SmallInt),
+            (
+                "y".to_string(),
+                DataType::Struct(vec![
+                    ("a".to_string(), DataType::Text),
+                    (
+                        "b".to_string(),
+                        DataType::Decimal {
+                            precision: 2,
+                            scale: 1
+                        }
+                    ),
+                ])
+            ),
+        ])
+    );
+}
+
+#[test]
+fn test_brace_struct_literal_comparison_is_boolean() {
+    // The `duckdb_struct_dict_literal_compare` ledger class: struct/dict
+    // literal comparisons must type as Boolean once the literal itself
+    // parses and infers.
+    let types = infer_sql("SELECT {'x': 1, 'y': 2} > {'x': 1, 'y': 3}");
+    assert_eq!(types[0].data_type, DataType::Boolean);
+}
+
+#[test]
+fn test_identifier_keyed_brace_literal_not_typed_as_struct_here() {
+    // Guard: `{a: 1}` is parsed by the record-literal path (pre-existing
+    // behavior, not a BRACE_STRUCT_LITERAL), so it is NOT expected to infer
+    // via `infer_brace_struct_literal_type`. This test only pins that the
+    // string-keyed fix didn't change this pre-existing dispatch.
+    let types = infer_sql("SELECT {a: 1} AS s FROM (SELECT 1 AS a) t");
+    // Whatever the record-literal path currently infers (Unknown, since it's
+    // not a recognized SQL context for RECORD_LITERAL), it must not be the
+    // DuckDB struct/dict Struct([("a", SmallInt)]) shape — that would mean
+    // both `{a: 1}` and `{'a': 1}` are silently typed differently was NOT
+    // the intent change here.
+    assert_ne!(
+        types[0].data_type,
+        DataType::Struct(vec![("a".to_string(), DataType::SmallInt)])
+    );
+}
+
+#[test]
 fn test_struct_display() {
     let dt = DataType::Struct(vec![
         ("a".to_string(), DataType::Integer),

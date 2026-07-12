@@ -173,6 +173,3 @@ alias-first order and add a seed line; PIVOT/UNPIVOT ordering unprobed, verify w
   parse — likely a parse_expression precedence gap around `::` on NULL/named-arg value
   positions; fails standalone too, pre-existing. 1 ledger entry recategorized under
   `smelt_fails_unclassified` carries the actual error (`Expected expression, found DOUBLE_COLON`).
-- `string_keyed_brace_literal` (4 external-ledger entries, e.g. `columns={'c': 'VARCHAR'}`):
-  string-literal keys in brace struct literals are not parsed; no gaps.rs entry exists yet
-  because no seed line exercises it — add a seed + gaps.rs entry or implement.

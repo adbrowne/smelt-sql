@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
+    BinaryExpr, BraceStructLiteral, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall,
+    RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
@@ -263,6 +263,66 @@ pub fn infer_map_literal_type(
         data_type: DataType::Map(Box::new(key_type), Box::new(value_type)),
         nullable: false, // The map itself is not nullable; keys/values may be
     })
+}
+
+/// Infer the type of a DuckDB struct/dict literal field the SQL way, i.e. the
+/// `{'a': 1, 'b': 2}` / `{a: 1, b: 2}` `key: value` form of a
+/// `BRACE_STRUCT_LITERAL` — as `Struct(fields)`, field name taken from the
+/// key.
+///
+/// A `BRACE_STRUCT_LITERAL` is also the parse of the unrelated meta-language
+/// `{expr AS alias, ..spread}` literal (Phase 35, used in `smelt.define`
+/// bodies): each field there has no key, and the whole literal may contain a
+/// `SPREAD_ITEM`. Neither is DuckDB struct/dict-literal syntax, so this
+/// function returns `None` for both — any `SPREAD_ITEM`, or any field whose
+/// `duckdb_key()` is absent — letting the caller's normal dispatch fall
+/// through instead of mistyping a meta-language construct as a SQL struct.
+///
+/// Key-name extraction mirrors DuckDB's own field-naming: a string-literal
+/// key (single- or double-quoted) contributes its unquoted content; a bare
+/// identifier key contributes its text; anything else falls back to the
+/// same positional `v{i+1}` naming `infer_struct_literal_type` uses for an
+/// unnamed `STRUCT(...)` field.
+pub fn infer_brace_struct_literal_type(
+    brace_lit: &BraceStructLiteral,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    // A DuckDB struct/dict literal never spreads; a SPREAD_ITEM means this
+    // is the meta-language literal instead.
+    if brace_lit.spread_items().next().is_some() {
+        return None;
+    }
+
+    let mut fields = Vec::new();
+    for (i, item) in brace_lit.field_items().enumerate() {
+        let key_expr = item.duckdb_key()?;
+        let value_expr = item.expression()?;
+
+        let field_name =
+            struct_field_name_from_key(&key_expr).unwrap_or_else(|| format!("v{}", i + 1));
+        let typed = infer_expression_type(&value_expr, ctx)?;
+        fields.push((field_name, typed.data_type));
+    }
+
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false, // The struct itself is not nullable
+    })
+}
+
+/// Extract a struct field name from a DuckDB struct/dict literal's key
+/// expression: unquoted string-literal content, or a bare identifier's text.
+/// `None` for any other key expression shape (e.g. a numeric or computed
+/// key), which callers fall back to positional naming for.
+fn struct_field_name_from_key(key_expr: &Expr) -> Option<String> {
+    if let Some(text) = crate::config_vars::extract_string_literal_value(key_expr) {
+        return Some(text);
+    }
+    let col_ref = key_expr.as_column_ref()?;
+    if col_ref.qualifier().is_some() {
+        return None;
+    }
+    Some(col_ref.name().to_string())
 }
 
 /// Fold one more entry's typed column into a running unification, mirroring

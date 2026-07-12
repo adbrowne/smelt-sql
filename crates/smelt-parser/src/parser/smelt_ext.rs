@@ -1269,10 +1269,14 @@ impl<'a> Parser<'a> {
         self.finish_node(); // EXPECT_CLAUSE
     }
 
-    /// Parse a brace-struct literal: `{expr AS name, ..spread}`.
+    /// Parse a brace-struct literal: `{expr AS name, ..spread}` (meta-language
+    /// form) or a DuckDB struct/dict literal `{'key': value, ...}` (SQL form —
+    /// reachable here whenever the first field isn't `IDENT COLON`, e.g. a
+    /// string-literal key, so `is_record_literal_start` routed away from the
+    /// record-literal parser).
     ///
     /// Items are:
-    ///   - `STRUCT_FIELD_ITEM`: `expr AS alias`
+    ///   - `STRUCT_FIELD_ITEM`: `expr AS alias` OR `key : value`
     ///   - `SPREAD_ITEM`: `..ident`
     pub(super) fn parse_brace_struct_literal(&mut self) {
         self.start_node(BRACE_STRUCT_LITERAL);
@@ -1304,11 +1308,33 @@ impl<'a> Parser<'a> {
                 continue;
             }
 
-            // Field item: `expr AS alias`
+            // Field item: `expr AS alias` (meta-language) or DuckDB struct/dict
+            // literal `key: value` (canonical form uses a string-literal key,
+            // e.g. `{'a': 1}`; a bare identifier key, `{a: 1}`, is also
+            // accepted — DuckDB treats both as equivalent struct_pack field
+            // names). Parse a leading expression either way, then
+            // disambiguate on what follows: `:` is the DuckDB key/value
+            // form (the just-parsed expression is the key; parse a second
+            // expression as the value), `AS` is the meta-language alias
+            // form, and anything else is an error.
             self.start_node(STRUCT_FIELD_ITEM);
             self.parse_expression();
             self.skip_trivia();
-            if self.at(AS_KW) {
+            if self.at(COLON) {
+                self.advance(); // COLON
+                self.skip_trivia();
+                // Mirror `parse_map_literal`'s MAP_ENTRY value guard: any
+                // token that isn't a delimiter can start a value expression
+                // (covers array literals `[...]`, NULL, etc., which
+                // `at_expression_start` doesn't enumerate).
+                if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                    self.parse_expression(); // value
+                } else {
+                    self.error(
+                        "Expected value expression after ':' in struct field item".to_string(),
+                    );
+                }
+            } else if self.at(AS_KW) {
                 self.advance(); // AS
                 self.skip_trivia();
                 if self.at(IDENT) {

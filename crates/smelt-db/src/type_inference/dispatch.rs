@@ -3,9 +3,9 @@
 #![allow(unused_imports)]
 use rowan::TextRange;
 use smelt_parser::ast::{
-    AtTimeZoneExpr, BinaryExpr, CaseExpr, CastExpr, CollateExpr, Cte, Expr, ExtractExpr,
-    FunctionCall, RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral,
-    Subquery,
+    AtTimeZoneExpr, BinaryExpr, BraceStructLiteral, CaseExpr, CastExpr, CollateExpr, Cte, Expr,
+    ExtractExpr, FunctionCall, RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall,
+    StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
@@ -142,6 +142,16 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // Try MAP literal (DuckDB `MAP {'a': 1, 'b': 2}`)
     if let Some(map_lit) = expr.as_map_literal() {
         return infer_map_literal_type(&map_lit, ctx);
+    }
+
+    // Try brace-struct literal, DuckDB `key: value` form (`{'a': 1}`).
+    // Returns `None` for the unrelated meta-language `{expr AS alias,
+    // ..spread}` literal (Phase 35), which has no typed SQL meaning here —
+    // dispatch falls through past this arm for that shape.
+    if let Some(brace_lit) = expr.as_brace_struct_literal() {
+        if let Some(typed) = infer_brace_struct_literal_type(&brace_lit, ctx) {
+            return Some(typed);
+        }
     }
 
     // Try column reference (includes struct field access for qualified refs like s.field_name)

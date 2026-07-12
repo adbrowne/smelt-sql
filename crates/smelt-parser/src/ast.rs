@@ -2183,6 +2183,15 @@ impl Expr {
             .or_else(|| MapLiteral::cast(self.0.clone()))
     }
 
+    /// Check if this is a brace-struct literal (`{expr AS name, ..spread}`
+    /// meta-language form, or a DuckDB struct/dict literal `{'a': 1}`).
+    pub fn as_brace_struct_literal(&self) -> Option<BraceStructLiteral> {
+        self.0
+            .children()
+            .find_map(BraceStructLiteral::cast)
+            .or_else(|| BraceStructLiteral::cast(self.0.clone()))
+    }
+
     /// Check if this expression has a window specification (OVER clause)
     pub fn window_spec(&self) -> Option<WindowSpec> {
         self.0.children().find_map(WindowSpec::cast)
@@ -3969,7 +3978,10 @@ impl BraceStructLiteral {
     }
 }
 
-/// A single `expr AS alias` field inside a `BRACE_STRUCT_LITERAL`.
+/// A single field inside a `BRACE_STRUCT_LITERAL`: either the meta-language
+/// `expr AS alias` form, or a DuckDB struct/dict literal `key : value` form
+/// (`{'a': 1}` — the canonical form uses a string-literal key; a bare
+/// identifier key, `{a: 1}`, parses the same way).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructFieldItem(SyntaxNode);
 
@@ -3986,12 +3998,30 @@ impl StructFieldItem {
         &self.0
     }
 
-    /// The value expression (before `AS`).
+    /// The value expression: the operand before `AS` in the meta-language
+    /// form, or the expression after `:` in the DuckDB `key: value` form.
+    /// Both forms have exactly one Expr child in the "value" position; the
+    /// `key: value` form has a second (earlier) Expr child for the key,
+    /// which `duckdb_key()` returns instead.
     pub fn expression(&self) -> Option<Expr> {
-        self.0.children().find_map(Expr::cast)
+        self.0.children().filter_map(Expr::cast).last()
     }
 
-    /// The declared alias (after `AS`).
+    /// The key expression of a DuckDB struct/dict literal `key: value` field.
+    /// `None` for the meta-language `expr AS alias` form, which has no key —
+    /// distinguished structurally by child count (the `key: value` form has
+    /// two Expr children, key then value; the `expr AS alias` form has one).
+    pub fn duckdb_key(&self) -> Option<Expr> {
+        let exprs: Vec<Expr> = self.0.children().filter_map(Expr::cast).collect();
+        if exprs.len() >= 2 {
+            exprs.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// The declared alias (after `AS`) in the meta-language `expr AS alias`
+    /// form. `None` for the DuckDB `key: value` form.
     pub fn alias(&self) -> Option<String> {
         self.0
             .children_with_tokens()

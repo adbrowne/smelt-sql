@@ -159,10 +159,6 @@ note = "Dollar-quoted string or backslash-escape string literal form is not pars
 category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
 
-["269f5470427064a7"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
 ["7af72667f9982b6a"]
 category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
@@ -194,18 +190,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["72346eb01e27547a"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
-["29f60f6deca55932"]
-category = "string_keyed_brace_literal"
-note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
-
-["bf60747d66d2cb39"]
-category = "string_keyed_brace_literal"
-note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
-
-["a6137afa188d4bc7"]
-category = "string_keyed_brace_literal"
-note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
 
 ["315571c158974ea3"]
 category = "smelt_fails_unclassified"
@@ -379,10 +363,6 @@ note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not y
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
-["1351aee33ae710ac"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap (list comprehension itself now parses; residual failure is elsewhere in the statement); first smelt parser error: Expected AS alias in struct field item"
-
 ["d496c79b8fc64a9e"]
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
@@ -406,10 +386,6 @@ note = "unclassified parser gap; corpus artifact: un-substituted DuckDB test-sui
 ["3d2f3a348900dcb0"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found LBRACKET"
-
-["35b62cabb23ff008"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
 
 ["d6b2b42e7fbd5615"]
 category = "smelt_fails_unclassified"
@@ -478,10 +454,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["f1c243266bfc7ecd"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["bff464cbbf158492"]
-category = "string_keyed_brace_literal"
-note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
 
 ["c566463312d1e03f"]
 category = "smelt_fails_unclassified"
@@ -570,10 +542,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["8c0a53f45fa7f6bc"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["6687ca4f8399d92c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
 
 ["dca844a46bc203da"]
 category = "smelt_fails_unclassified"
@@ -679,10 +647,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
 
-["40b096cd22036c6a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
-
 ["f75f39efc83ae601"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
@@ -735,38 +699,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "chained_dot_field_access"
 note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
 
-["f6a9570e0245c383"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
-
-["582aafc5ac0f5a11"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
-
-["6f9067df4a97c47b"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
-["de41b13422c61adf"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
-["48ccbc31d75bae5c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
-
-["ba4c18abc83a0403"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
-["03a3b86c4d3f5478"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
-["991d632a5f8b010a"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
 ["76e9af57d672e11b"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
@@ -802,14 +734,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["d734a6ccabf4ccec"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["7ad4c1e1173c8d68"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
-
-["042d9a65683cf0a4"]
-category = "duckdb_struct_dict_literal_compare"
-note = "DuckDB struct/dict literal `{k: v, ...}` used directly in a comparison expression is not parsed"
 
 ["122931512d64deb7"]
 category = "smelt_fails_unclassified"

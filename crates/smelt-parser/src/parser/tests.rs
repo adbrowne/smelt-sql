@@ -8435,6 +8435,131 @@ fn map_literal_lowercase_keyword() {
     assert!(expr.as_map_literal().is_some());
 }
 
+// ===== `{'key': value}` DuckDB struct/dict literal (string-literal keys) =====
+
+#[test]
+fn string_keyed_brace_struct_literal_parses_clean() {
+    // Verified against DuckDB: `{'k': v}` is the canonical struct_pack
+    // literal form (SELECT {'a': 1} → struct(a integer) {'a': 1}).
+    let (parse, select) = parse_select("SELECT {'c': 'VARCHAR', 'd': 'INTEGER'} AS s FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let brace_lit = expr
+        .as_brace_struct_literal()
+        .expect("expression must contain a BRACE_STRUCT_LITERAL");
+    let field_items: Vec<_> = brace_lit.field_items().collect();
+    assert_eq!(field_items.len(), 2, "struct literal must have two fields");
+    for field in &field_items {
+        assert!(field.duckdb_key().is_some(), "field must have a key expr");
+        assert!(field.expression().is_some(), "field must have a value expr");
+    }
+}
+
+#[test]
+fn string_keyed_brace_struct_literal_as_call_argument() {
+    // The `string_keyed_brace_literal` ledger class: DuckDB `read_csv(...,
+    // columns = {'a': 'INTEGER', 'b': 'INTEGER'}, ...)`.
+    let (parse, _select) = parse_select(
+        "SELECT * FROM read_csv('x.csv', columns = {'a': 'INTEGER', 'b': 'INTEGER'}, header = 1)",
+    );
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn string_keyed_brace_struct_literal_comparison() {
+    // The `duckdb_struct_dict_literal_compare` ledger class: struct/dict
+    // literals used directly as comparison operands.
+    let (parse, _select) =
+        parse_select("SELECT {'x': 1, 'y': 2} > {'x': 1, 'y': 3}, {'x': 'duck'} > NULL FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn string_keyed_brace_struct_literal_round_trip() {
+    let sql = "SELECT {'a': 1, 'b': 2} AS s FROM t";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        normalize(&printed),
+        normalize(sql),
+        "printer should reproduce {{'k': v}} struct literal (modulo canonical whitespace)"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn double_quoted_keyed_brace_struct_literal_parses_clean() {
+    // Verified against DuckDB: double-quoted keys are accepted the same as
+    // single-quoted keys inside a struct/dict literal.
+    let (parse, _select) = parse_select("SELECT {\"CamelCase\": 1, \"lowercase\": 2} AS s FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn identifier_keyed_brace_literal_keeps_existing_behavior() {
+    // Guard: `{a: 1}` (bare identifier key, no string quotes) is dispatched
+    // to the record-literal parser (`is_record_literal_start`), not the
+    // brace-struct-literal parser — this is pre-existing behavior this task
+    // must not change. It must still parse clean.
+    let (parse, select) = parse_select("SELECT {a: 1} AS s FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_brace_struct_literal().is_none(),
+        "identifier-keyed `{{a: 1}}` must still dispatch to the record-literal \
+         parser, not BRACE_STRUCT_LITERAL"
+    );
+}
+
+#[test]
+fn meta_language_brace_struct_literal_alias_form_still_parses() {
+    // Guard: the pre-existing meta-language `{expr AS alias, ..spread}` form
+    // (Phase 35, used in smelt.define bodies) must be unaffected.
+    let input =
+        "smelt.define f(event: Expr<Struct<{ts: Timestamp, ..r}>>) AS ({CAST(event.ts AS TIMESTAMP) AS ts, ..event})";
+    let (parse, _file) = parse_file_text(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
 // ===== AT TIME ZONE =====
 
 #[test]
