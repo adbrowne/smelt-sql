@@ -7994,3 +7994,67 @@ fn position_cast_wrapped_comparison_parses() {
     let call = first_function_call("SELECT position(CAST(a = 1 AS VARCHAR) IN b) FROM t");
     assert_eq!(call.arguments().len(), 2);
 }
+
+// ===== Dollar-quoted string literals =====
+// Closes registered gap `duckdb_dollar_quoted_string`
+// (crates/smelt-parser-compat/src/gaps.rs). Oracle evidence (DuckDB v1.5.4,
+// verified live): `SELECT $$hello$$` -> "hello"; `SELECT $$a'b$$` -> "a'b"
+// (embedded single quote is ordinary content); `SELECT $tag$ x $$ y $tag$`
+// -> " x $$ y " (a bare `$$` inside a tagged body is content, not a
+// closer); `SELECT $$abc` (no closer) -> "Parser Error: unterminated
+// dollar-quoted string".
+
+#[test]
+fn dollar_quote_bare_parses_clean_as_string_literal() {
+    let (_, select) = parse_select("SELECT $$a'b$$ AS s");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item
+        .expression()
+        .expect("select item should have an expression");
+    assert_eq!(
+        expr.text().trim(),
+        "$$a'b$$",
+        "expression text should be the dollar-quoted literal verbatim"
+    );
+}
+
+#[test]
+fn dollar_quote_tagged_with_nested_bare_dollar_parses_clean() {
+    // Inner `$$` is ordinary content: the closer must match the tag exactly.
+    let (_, select) = parse_select("SELECT $tag$ x $$ y $tag$ AS s");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    assert!(item.expression().is_some());
+}
+
+#[test]
+fn dollar_quote_unterminated_is_a_parse_error() {
+    let parse = parse("SELECT $$abc");
+    assert!(
+        !parse.errors.is_empty(),
+        "unterminated dollar-quote must be a parse error, not a silent split"
+    );
+}
+
+#[test]
+fn dollar_quote_round_trip() {
+    let sql = "SELECT $$a'b$$ AS s, $tag$ x $$ y $tag$ AS t FROM u";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert_eq!(
+        printed, sql,
+        "printer should reproduce dollar-quotes verbatim"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}

@@ -297,6 +297,8 @@ A numeric literal immediately followed by letters with no separating space — `
 
 `E'...'` (escape string) and `B'...'` (bit-string-shaped) prefixed string literals lex as ordinary string literals.
 
+Dollar-quoted string literals — `$$...$$` and tagged `$tag$...$tag$` (tag: a letter or underscore followed by letters, digits, or underscores) — also lex as ordinary string literals and infer as Text. The body needs no escaping: embedded single quotes are content, and a `$$` inside a tagged body is content too (only the exact matching closing delimiter ends the string). An unterminated dollar-quote is a parse error rather than being silently split into smaller tokens.
+
 ## Date/time extraction
 
 ```sql

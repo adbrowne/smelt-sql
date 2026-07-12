@@ -139,15 +139,8 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         severity: "low",
         planned_fix: false,
     },
-    KnownGap {
-        id: "duckdb_dollar_quoted_string",
-        description: "Dollar-quoted string literals ($$…$$) are not lexed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"\$\$"],
-        severity: "low",
-        planned_fix: false,
-    },
+    // duckdb_dollar_quoted_string gap removed - dollar-quoted string literals
+    // ($$…$$ and $tag$…$tag$) are now lexed as STRING tokens (July 2026).
     KnownGap {
         id: "duckdb_list_comprehension",
         description: "List comprehensions [expr FOR x IN list] are not parsed",

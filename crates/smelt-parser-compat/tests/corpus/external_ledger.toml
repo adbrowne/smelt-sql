@@ -159,14 +159,6 @@ note = "Dollar-quoted string or backslash-escape string literal form is not pars
 category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
 
-["8a8b1ce9e2814df5"]
-category = "dollar_quoted_or_backslash_literal"
-note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
-
-["749b780f051d8171"]
-category = "dollar_quoted_or_backslash_literal"
-note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
-
 ["8086f41036421b74"]
 category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
@@ -1847,10 +1839,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found FROM_KW"
 
-["86e13ab614b3f2e0"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
-
 ["e8b74378d0930930"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -1944,10 +1932,6 @@ category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
 
 ["d5f2010e01e92764"]
-category = "fulltext_search_operators"
-note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
-
-["9d56750fc24d4bcf"]
 category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
 

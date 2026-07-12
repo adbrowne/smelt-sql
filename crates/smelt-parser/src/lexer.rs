@@ -260,6 +260,23 @@ impl<'a> Lexer<'a> {
                 self.consume_string('\'')
             }
 
+            // Dollar-quoted string literals: `$$...$$` or `$tag$...$tag$`
+            // (PostgreSQL/DuckDB syntax). This arm only fires when `$` actually
+            // opens a valid dollar-quote delimiter (`$$` or `$tag$` where tag is
+            // `[A-Za-z_][A-Za-z0-9_]*`); otherwise it falls through to the
+            // "unknown character" fallback below, preserving prior behaviour for
+            // other `$`-prefixed text (e.g. `$1`, `$name` as prepared-statement
+            // parameter markers — not implemented in smelt today; a bare `$`
+            // there still tokenizes as a single ERROR followed by the trailing
+            // text lexed normally, exactly as before this change).
+            '$' => match self.try_dollar_quote() {
+                Some(kind) => kind,
+                None => {
+                    self.advance();
+                    ERROR
+                }
+            },
+
             // Numbers
             c if c.is_ascii_digit() => self.consume_number(),
 
@@ -389,6 +406,81 @@ impl<'a> Lexer<'a> {
         }
 
         STRING
+    }
+
+    /// Attempt to lex a dollar-quoted string starting at the current `$`.
+    ///
+    /// Returns `Some(STRING)` on a well-formed, terminated dollar-quote (the
+    /// lexer position is advanced past the closing delimiter), `Some(ERROR)`
+    /// if a valid *opening* delimiter is found but no matching closing
+    /// delimiter exists before EOF (position advanced to EOF — the whole
+    /// unterminated tail becomes one ERROR token, never a silent split), or
+    /// `None` if `$` does not open a valid delimiter at all (position left
+    /// unchanged; the caller falls back to prior single-char ERROR
+    /// behaviour).
+    ///
+    /// A delimiter is `$$` (empty tag) or `$tag$` where `tag` matches
+    /// `[A-Za-z_][A-Za-z0-9_]*` — PostgreSQL/DuckDB dollar-quote grammar.
+    /// The closing delimiter is the exact same literal string as the
+    /// opening one, so `$$ ... $$` and `$tag$ ... $tag$` don't interfere:
+    /// a `$$` occurring inside a `$tag$...$tag$` body is ordinary content
+    /// (verified against DuckDB v1.5.4: `$tag$ x $$ y $tag$` yields the
+    /// string ` x $$ y `).
+    fn try_dollar_quote(&mut self) -> Option<SyntaxKind> {
+        let bytes_len = self.input.len();
+        let start = self.pos; // position of the opening '$'
+        let mut i = start + 1;
+        if i >= bytes_len {
+            return None;
+        }
+
+        let tag_start = i;
+        let first_char = self.input[i..].chars().next()?;
+        if first_char == '$' {
+            // Bare `$$` — empty tag; tag_end == tag_start (zero-length tag).
+        } else if first_char.is_alphabetic() || first_char == '_' {
+            i += first_char.len_utf8();
+            loop {
+                if i >= bytes_len {
+                    // Ran off the end of input while still inside the tag —
+                    // never a valid opening delimiter (no closing '$' for
+                    // the tag itself, let alone the string body).
+                    return None;
+                }
+                let ch = self.input[i..].chars().next()?;
+                if ch == '$' {
+                    break;
+                } else if ch.is_alphanumeric() || ch == '_' {
+                    i += ch.len_utf8();
+                } else {
+                    // Non-identifier character before the tag's closing
+                    // '$' — not a valid dollar-quote delimiter (e.g. a
+                    // prepared-statement-style `$name` with no second `$`).
+                    return None;
+                }
+            }
+        } else {
+            return None;
+        }
+
+        let tag_end = i; // index of the '$' that closes the opening tag
+        let tag = &self.input[tag_start..tag_end];
+        let open_delim_end = tag_end + 1; // consume the tag's closing '$'
+        let delimiter = format!("${tag}$");
+
+        match self.input[open_delim_end..].find(delimiter.as_str()) {
+            Some(rel_idx) => {
+                let close_end = open_delim_end + rel_idx + delimiter.len();
+                self.pos = close_end;
+                Some(STRING)
+            }
+            None => {
+                // Unterminated dollar-quote: consume through EOF as a single
+                // ERROR token rather than silently splitting the input.
+                self.pos = bytes_len;
+                Some(ERROR)
+            }
+        }
     }
 
     fn consume_number(&mut self) -> SyntaxKind {
@@ -851,5 +943,119 @@ mod tests {
             non_ws_pipe[0].kind, PIPE_ARROW,
             "|> should lex as PIPE_ARROW"
         );
+    }
+
+    // ===== Dollar-quoted string literals =====
+
+    #[test]
+    fn tokenize_bare_dollar_quote() {
+        // `$$hello$$` lexes as a single STRING token spanning the whole thing.
+        let tokens = tokenize("$$hello$$");
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 1, "expected one token, got: {:?}", non_ws);
+        assert_eq!(non_ws[0].kind, STRING);
+        assert_eq!(non_ws[0].len, "$$hello$$".len());
+    }
+
+    #[test]
+    fn tokenize_dollar_quote_with_single_quote_body() {
+        // `$$a'b$$` — an embedded single quote is ordinary content, no escaping
+        // needed (unlike `'...'` strings).
+        let input = "$$a'b$$";
+        let tokens = tokenize(input);
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 1, "expected one token, got: {:?}", non_ws);
+        assert_eq!(non_ws[0].kind, STRING);
+        assert_eq!(non_ws[0].len, input.len());
+    }
+
+    #[test]
+    fn tokenize_tagged_dollar_quote() {
+        // `$tag$...$tag$` — a tagged delimiter.
+        let input = "$tag$ x $$ y $tag$";
+        let tokens = tokenize(input);
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 1, "expected one token, got: {:?}", non_ws);
+        assert_eq!(non_ws[0].kind, STRING);
+        assert_eq!(non_ws[0].len, input.len());
+    }
+
+    #[test]
+    fn tokenize_tagged_dollar_quote_nested_bare_dollar() {
+        // A bare `$$` inside a `$tag$...$tag$` body is ordinary content — the
+        // closing delimiter must match the *same* tag, not any `$...$` run.
+        // Verified against DuckDB v1.5.4: `$tag$ x $$ y $tag$` -> " x $$ y ".
+        let input = "SELECT $tag$ x $$ y $tag$ AS s";
+        let tokens = tokenize(input);
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        // SELECT, STRING, AS, s
+        assert_eq!(
+            non_ws.len(),
+            4,
+            "expected SELECT STRING AS IDENT, got: {:?}",
+            non_ws
+        );
+        assert_eq!(non_ws[0].kind, SELECT_KW);
+        assert_eq!(non_ws[1].kind, STRING);
+        assert_eq!(non_ws[1].len, "$tag$ x $$ y $tag$".len());
+        assert_eq!(non_ws[2].kind, AS_KW);
+        assert_eq!(non_ws[3].kind, IDENT);
+    }
+
+    #[test]
+    fn tokenize_unterminated_dollar_quote_is_single_error_token() {
+        // `$$abc` with no closing delimiter must become one ERROR token
+        // spanning the rest of the input — never a silent split into
+        // partial tokens.
+        let input = "SELECT $$abc";
+        let tokens = tokenize(input);
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 2, "expected SELECT ERROR, got: {:?}", non_ws);
+        assert_eq!(non_ws[0].kind, SELECT_KW);
+        assert_eq!(non_ws[1].kind, ERROR);
+        assert_eq!(non_ws[1].len, "$$abc".len());
+    }
+
+    #[test]
+    fn tokenize_dollar_not_a_delimiter_keeps_prior_behavior() {
+        // `$notatag` has no closing `$`, so it is not a valid dollar-quote
+        // delimiter at all: `$` lexes as a single ERROR token (unchanged
+        // "unknown character" fallback) and `notatag` lexes separately as an
+        // IDENT, exactly as before this change.
+        let tokens = tokenize("$notatag");
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 2, "expected ERROR IDENT, got: {:?}", non_ws);
+        assert_eq!(non_ws[0].kind, ERROR);
+        assert_eq!(non_ws[0].len, 1);
+        assert_eq!(non_ws[1].kind, IDENT);
+        assert_eq!(non_ws[1].len, "notatag".len());
+    }
+
+    #[test]
+    fn tokenize_dollar_digit_keeps_prior_behavior() {
+        // `$1` — a digit immediately after `$` never forms a valid tag
+        // (tags must start with a letter or underscore), so `$` falls back
+        // to the single-char ERROR token and `1` lexes as NUMBER.
+        let tokens = tokenize("$1");
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(non_ws.len(), 2, "expected ERROR NUMBER, got: {:?}", non_ws);
+        assert_eq!(non_ws[0].kind, ERROR);
+        assert_eq!(non_ws[0].len, 1);
+        assert_eq!(non_ws[1].kind, NUMBER);
+    }
+
+    #[test]
+    fn tokenize_lone_dollar_at_eof_keeps_prior_behavior() {
+        // A single trailing `$` with nothing after it is not a delimiter.
+        let tokens = tokenize("$");
+        let non_ws: Vec<_> = tokens.iter().filter(|t| t.kind != WHITESPACE).collect();
+        assert_eq!(
+            non_ws.len(),
+            1,
+            "expected one ERROR token, got: {:?}",
+            non_ws
+        );
+        assert_eq!(non_ws[0].kind, ERROR);
+        assert_eq!(non_ws[0].len, 1);
     }
 }

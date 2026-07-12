@@ -176,6 +176,19 @@ pub fn infer_literal_type(text: &str) -> Option<TypedColumn> {
         });
     }
 
+    // Dollar-quoted string literals (`$$...$$` or `$tag$...$tag$`). The
+    // lexer (`crates/smelt-parser/src/lexer.rs::try_dollar_quote`) only ever
+    // emits the STRING token kind for a well-formed dollar-quote whose
+    // opening and closing delimiters match exactly, so text starting and
+    // ending with `$` reaching this point is exactly such a literal — same
+    // Text inference as an ordinary quoted string.
+    if text.len() >= 2 && text.starts_with('$') && text.ends_with('$') {
+        return Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: false,
+        });
+    }
+
     // Numeric literals
     if let Some(num_type) = infer_numeric_literal_type(text) {
         return Some(TypedColumn {

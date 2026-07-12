@@ -167,6 +167,21 @@ fn test_literal_type_inference() {
         })
     );
 
+    // Dollar-quoted strings infer exactly the same type as ordinary quoted
+    // strings (DuckDB: `SELECT typeof($$abc$$)` -> VARCHAR, same as 'abc').
+    assert_eq!(
+        infer_literal_type("$$abc$$"),
+        infer_literal_type("'abc'"),
+        "$$abc$$ must infer the same type as 'abc'"
+    );
+    assert_eq!(
+        infer_literal_type("$tag$ x $$ y $tag$"),
+        Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: false,
+        })
+    );
+
     // Boolean
     assert_eq!(
         infer_literal_type("TRUE"),
