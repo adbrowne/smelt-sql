@@ -113,8 +113,26 @@
 #      + fold cells closing G-12, bakeoff, forward/backward propagation)
 # PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
 # (unset → the DuckDB equivalence legs skip green, which is a silent hole).
+#
+# ACTIVE (2026-07-12): the generative-maintenance-conformance programme — the
+# standing generative regression net for maintenance_plan.md §"The equivalence
+# invariant". One registered sub-plan (Phases 1–11):
+#   docs/plans/20260712-generative-maintenance-conformance.md
+#   (ModelRecipe generation over the Link-C harness, admitted/refused verdict
+#   protocol, S-tracked dual-mode full-refresh oracle, plan-claim probes,
+#   simulated change feeds, definition-change steps, generated-DAG propagation
+#   checks, graduation/retirement of the disposable property_discovery probes
+#   into `cargo test -p smelt-cli --test maintenance_conformance`).
+# Design: docs/research/20260711-generative-maintenance-conformance.md.
+# DISCOVERED-BUG POLICY (from the plan's execution prompt): a generated case
+# exposing a real production divergence is a deliverable, not a blocker — pin
+# the shrunk recipe as a failing regression test, register it KnownBug, record
+# it under "Deferred during implementation", continue.
+# PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
+# (unset → DuckDB legs skip green, which is a silent hole for this plan in
+# particular — its entire gate is DuckDB-backed).
 master_plan: docs/plans/20260704-model-updates.md
-active_subplan: docs/plans/20260707-maintenance-plan-spec-alignment.md
+active_subplan: docs/plans/20260712-generative-maintenance-conformance.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.

@@ -401,6 +401,10 @@ You are executing this plan from the start of a new session. Your job is to driv
 
 ---
 
+## Blocked phases
+
+(Append-only. The autonomy loop records blocked phases here — phase id, dated reason, candidate options — and continues to the next `pending` phase.)
+
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
