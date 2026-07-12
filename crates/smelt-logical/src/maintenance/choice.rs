@@ -204,6 +204,11 @@ pub fn resolve_cell_choice(
     // never refuses.
     match overrides.prefer {
         Some(TechniquePreference::Recompute) => Ok(ChosenTechnique::RegionRecompute),
+        // infallible: `live` is computed via `admitted_technique.is_some_and(..)`
+        // above — `Option::is_some_and` only evaluates its closure (and can
+        // only return true) when the receiver is `Some`, so `live == true`
+        // structurally implies `admitted_technique.is_some()` regardless of
+        // what the closure itself decides.
         Some(TechniquePreference::Fold) if live => Ok(ChosenTechnique::Admitted(
             admitted_technique.expect("live implies Some").clone(),
         )),

@@ -828,7 +828,6 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - **Retain-parsed-AST cleanup sweep** — Phase 0 retains the parsed `Expr` on `analyze_select` items; other analyses still re-scan raw text and should retain what's parsed instead: `analysis/mod.rs` clause string-scanning, `source_bounds.rs` textual `INTERVAL`/`RANGE BETWEEN` recognition, `rules/incremental.rs` `Frontmatter::strip`+re-scan, and the `temporal.rs` re-parse sites.
 
 **smelt-logical / smelt-planner extraction**
-- Re-tighten the smelt-logical `expect` hardening baseline (bumped 1→3 for two production `.expect("live implies Some")` in `maintenance/choice.rs` merged as MP13 WIP) — classify as infallible or convert to `Result`, then `hardening-budget.sh --update` (`20260711-parser-type-testing-hardening.md`).
 - **Consolidate the duplicated analysis modules.** `smelt-planner/src/` still carries a parallel copy of nearly every `smelt-logical` module — `analysis/{mod,source_bounds,temporal}.rs`, `rules/{incremental,cumulative,rule_diagnostics,cube_split}.rs`, `logical.rs`, `graph.rs`, `types.rs`, `lowering/as_struct.rs` — from the recent (incomplete) extraction into `smelt-logical`. Finish the extraction so each analysis lives once (in `smelt-logical`, consumed by both `smelt-db` and `smelt-planner`), leaving `smelt-planner` only its planner-only pieces (`logical_plan_rules.rs`, `plan_printer.rs`, `python_bridge.rs`). Prerequisite context for where any future type-aware analysis moves.
 
 **Datagen / incremental**
