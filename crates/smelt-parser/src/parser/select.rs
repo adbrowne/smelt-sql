@@ -726,12 +726,11 @@ impl<'a> super::Parser<'a> {
 
         // Optional NATURAL modifier (contextual keyword): `NATURAL [INNER |
         // LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`. Join columns
-        // are all identically named columns between the two sides; smelt's
-        // schema inference already unions all columns from every table_ref
-        // without deduping by ON/USING (see `process_from_clause_node_pure`
-        // in smelt-db), so NATURAL needs no special-cased column-matching
-        // logic — it is consistent with the existing (non-deduping)
-        // treatment of ON/USING joins.
+        // are all identically named columns between the two sides. Schema
+        // consequences live in smelt-db: `SELECT *` expansion dedupes the
+        // join-shared columns for NATURAL (and USING) joins via
+        // `RowExtensionDedupe` (DuckDB-verified: only ON joins keep both
+        // occurrences); the AST accessor is `JoinClause::is_natural()`.
         if self.at_contextual_keyword("NATURAL") {
             self.advance();
             self.skip_trivia();

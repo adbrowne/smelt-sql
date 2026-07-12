@@ -149,37 +149,37 @@ discriminant = "dynamic"
 
 # ── smelt-db / queries/schema ─────────────────────────────────────────────────
 
-["crates/smelt-db/src/queries/schema.rs:536"]
+["crates/smelt-db/src/queries/schema.rs:581"]
 classification = "legitimate"
 reason = "param type resolution: non-Concrete SmeltType constraints have no SQL DataType; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:599"]
+["crates/smelt-db/src/queries/schema.rs:644"]
 classification = "legitimate"
 reason = "schema column type fallback — col.data_type is optional; Unknown for columns with no inferred type"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:625"]
+["crates/smelt-db/src/queries/schema.rs:670"]
 classification = "legitimate"
 reason = "schema column type fallback — resolved model column type unavailable; Unknown is conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:724"]
+["crates/smelt-db/src/queries/schema.rs:769"]
 classification = "legitimate"
 reason = "recursive CTE column bootstrap — types unknown until recursive reference resolves; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:811"]
+["crates/smelt-db/src/queries/schema.rs:856"]
 classification = "legitimate"
 reason = "sources.yml column with no declared type — Unresolved because user can add a type: field to fix; ColumnTypeUnresolved fires to notify"
 discriminant = "unresolved"
 
-["crates/smelt-db/src/queries/schema.rs:846"]
+["crates/smelt-db/src/queries/schema.rs:891"]
 classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1139"]
+["crates/smelt-db/src/queries/schema.rs:1184"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"

@@ -27,6 +27,7 @@ mod function_body_check;
 mod function_registry;
 mod function_return_type;
 mod join_alias_visibility;
+mod join_star_schema;
 mod legacy_sources_yaml_diag;
 mod meta_list_scalar;
 mod model_frontmatter_diagnostics;

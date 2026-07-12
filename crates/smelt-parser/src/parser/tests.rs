@@ -9401,3 +9401,57 @@ fn implicit_alias_named_natural_still_works() {
         parse.errors
     );
 }
+
+#[test]
+fn materialized_remains_usable_as_plain_identifier() {
+    // `MATERIALIZED` is a contextual keyword, consumed only immediately
+    // after `AS` (or `AS NOT`) in a CTE header. Everywhere else it must
+    // stay an ordinary identifier: an alias, a column reference, even a
+    // CTE named `materialized`.
+    for sql in [
+        "SELECT 1 AS materialized",
+        "SELECT materialized FROM t",
+        "WITH materialized AS (SELECT 1) SELECT * FROM materialized",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn name_remains_usable_as_plain_identifier_near_by() {
+    // `NAME` is only special as the second token of the exact `BY NAME`
+    // sequence directly after a set operator. `ORDER BY name` contains the
+    // very same BY_KW + `name` IDENT pair and must be untouched — including
+    // right after a UNION operand where the set-op matcher just ran.
+    for sql in [
+        "SELECT name FROM t ORDER BY name",
+        "SELECT x FROM t GROUP BY name",
+        "SELECT 1 UNION SELECT name FROM t ORDER BY name",
+        "SELECT 1 AS name",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn bare_by_identifier_still_rejected_reserved_keyword() {
+    // `BY` was a reserved keyword (BY_KW, for GROUP BY / ORDER BY) long
+    // before the BY NAME work, so a bare column named `by` is a parse error
+    // — pinned here so the BY NAME matcher never accidentally *loosens*
+    // BY's reserved status (DuckDB also rejects an unquoted bare `by`).
+    let parse = crate::parse("SELECT by FROM t");
+    assert!(
+        !parse.errors.is_empty(),
+        "bare unquoted `by` as a column should remain a parse error"
+    );
+}

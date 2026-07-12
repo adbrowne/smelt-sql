@@ -139,6 +139,19 @@ sub-plans: `docs/plans/20260707-maintenance-plan-spec-alignment.md` (SA1–SA5) 
 (keyed-collapse K3–K6, keyed-time-partitioned, L4 batched/versioned/mv) superseded — see the
 master's 2026-07-07 note.
 
+## 2026-07-12 — ON-join `SELECT *` schema expansion drops the right side
+
+Found while fixing NATURAL/USING join-star dedupe (parser-gap-closure). `model_schema`'s
+wildcard expansion (`row_extensions` in `crates/smelt-db/src/queries/schema.rs`) now covers
+NATURAL and USING joined refs with join-shared columns deduped (DuckDB-verified [x, y, z]),
+but ON-joined refs are still not expanded at all: `SELECT * FROM smelt.models.a JOIN
+smelt.models.b ON a.x = b.x` infers only a's columns, where DuckDB yields all four
+[x, y, x, z] with the shared name duplicated. Expanding ON joins means admitting duplicate
+column names into inferred schemas (find-by-name consumers, LSP completion, input-constraint
+keying all assume unique names today), so it needs its own pass. Current behavior is pinned
+by `on_join_star_current_behavior_left_side_only` in
+`crates/smelt-db/tests/integration/join_star_schema.rs` — update that test when fixing.
+
 ## 2026-07-12 — TABLESAMPLE/PIVOT/UNPIVOT vs alias ordering (parser + printer)
 
 Found during the parser-gap-closure review (PR #158, derived-table alias fix f68ebd86).
