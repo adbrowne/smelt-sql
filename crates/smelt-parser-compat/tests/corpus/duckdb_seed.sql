@@ -19,6 +19,7 @@ SELECT last_value(a IGNORE NULLS) OVER (ORDER BY a) AS x FROM t
 SELECT trim(BOTH ' ' FROM b) AS x FROM t
 SELECT substring(b FROM 1 FOR 2) AS x FROM t
 SELECT position('x' IN b) AS x FROM t
+SELECT position(CAST(a = 1 AS VARCHAR) IN b) AS x FROM t
 SELECT overlay(b PLACING 'x' FROM 1 FOR 2) AS x FROM t
 SELECT a FROM t WHERE b LIKE ANY (['a%', 'b%'])
 SELECT $$hello$$ AS x

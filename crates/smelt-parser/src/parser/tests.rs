@@ -7967,3 +7967,30 @@ fn position_in_with_expressions_parses() {
     let call = first_function_call("SELECT position(a || 'x' IN b) FROM t");
     assert_eq!(call.arguments().len(), 2);
 }
+
+#[test]
+fn position_comparison_left_operand_is_a_parse_error() {
+    // Registered divergence `duckdb_position_comparison_left_operand`
+    // (crates/smelt-parser-compat/src/gaps.rs): DuckDB *parses*
+    // `position(a = 1 IN b)` but every such form fails at its binder
+    // (comparison yields BOOLEAN; position's only candidate is
+    // (VARCHAR, VARCHAR) with no implicit BOOLEAN→VARCHAR cast), so no
+    // executable SQL can reach the divergence. smelt rejects it at parse
+    // time — this test pins that behavior so a grammar change here is a
+    // deliberate decision, not drift.
+    let parse = parse("SELECT position(a = 1 IN b) FROM t");
+    assert!(
+        !parse.errors.is_empty(),
+        "position(a = 1 IN b) is expected to fail at parse time (registered \
+         gap duckdb_position_comparison_left_operand); if this now parses, \
+         close the gap entry and add round-trip coverage"
+    );
+}
+
+#[test]
+fn position_cast_wrapped_comparison_parses() {
+    // The executable spelling of the same intent — CAST-wrapped comparison —
+    // parses and executes on both engines.
+    let call = first_function_call("SELECT position(CAST(a = 1 AS VARCHAR) IN b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}

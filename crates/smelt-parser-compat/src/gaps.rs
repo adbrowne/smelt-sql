@@ -102,6 +102,44 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // via the existing registry-backed function-call typing), so their entries
     // were removed and the ratchet baseline shrank accordingly.
     KnownGap {
+        // Parse-level-only divergence, unreachable by executable SQL.
+        //
+        // DuckDB (v1.5.4) *parses* a bare comparison operator in POSITION's
+        // left operand — `position(a = 1 IN b)` fails only at bind time —
+        // whereas smelt parses the left operand at concatenation precedence
+        // (`parse_position_arg_list` in crates/smelt-parser/src/parser/expr.rs)
+        // and rejects the comparison at parse time.
+        //
+        // Oracle evidence (probed against a real DuckDB v1.5.4):
+        // - Every bare comparison form DuckDB parses there (`=`, `<`, `>`,
+        //   `<>`, `<=`, `>=`, `!=`) yields BOOLEAN, and DuckDB's only
+        //   candidate is position(VARCHAR, VARCHAR) with NO implicit
+        //   BOOLEAN→VARCHAR cast (verified with literal, column, and
+        //   BOOLEAN-column operands) — every such statement is a Binder
+        //   Error; none binds or executes.
+        // - `LIKE`, `AND`, `NOT`, `BETWEEN`, and `IS` on the left fail at
+        //   DuckDB's own parser, as does a bare `IN` — smelt matches DuckDB
+        //   on all of those.
+        // - Parenthesized or CAST-wrapped forms (`position(CAST(a = 1 AS
+        //   VARCHAR) IN b)`) parse and execute on both engines; only the
+        //   unparenthesized comparison diverges.
+        //
+        // Because `duckdb_accepts` PREPAREs (parse + bind) and every such
+        // form fails at bind, no seed-corpus line can exert accept-direction
+        // pressure for this construct — the entry is registered purely so the
+        // divergence is visible (fail-loud discipline) rather than silent.
+        // The ratchet baseline is unchanged by this entry.
+        id: "duckdb_position_comparison_left_operand",
+        description: "Bare comparison operator in POSITION's left operand \
+                      (position(a = 1 IN b)) parses in DuckDB but fails at \
+                      its binder; smelt rejects it at parse time",
+        category: "duckdb_fails_to_parse",
+        dialect: "duckdb",
+        patterns: &[r"(?i)\bposition\s*\([^()]*[=<>][^()]*\bIN\b"],
+        severity: "low",
+        planned_fix: false,
+    },
+    KnownGap {
         id: "duckdb_dollar_quoted_string",
         description: "Dollar-quoted string literals ($$…$$) are not lexed",
         category: "duckdb_fails_to_parse",
