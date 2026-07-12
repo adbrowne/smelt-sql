@@ -78,7 +78,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 8 — Simulated change feed | done | 7d3f3195 | 2026-07-13 |
 | 9 — Definition-change steps | done | 697aa4c7 | 2026-07-13 |
 | 10 — Generated DAGs | done | 10220b86 | 2026-07-13 |
-| 11 — Graduation & consolidation | done | PENDING_SHA | 2026-07-13 |
+| 11 — Graduation & consolidation | done | ca269c84 | 2026-07-13 |
 
 ---
 
