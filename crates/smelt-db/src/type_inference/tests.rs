@@ -6679,3 +6679,59 @@ fn try_cast_infers_nullable_target() {
         "plain CAST over a non-nullable input should stay non-nullable"
     );
 }
+
+/// Build a `TypeContext` for a top-level SQL body the same way the
+/// production `type_context()` Salsa query does (via `build_type_context`),
+/// but Salsa-free — no upstream models/seeds/sources are provided. Exercises
+/// the FROM-clause/derived-table resolution that `infer_sql`/`infer_sql_with_ctx`
+/// (which call `infer_select_column_types` directly with a hand-populated
+/// context) deliberately skip.
+fn infer_sql_via_from_resolution(sql: &str) -> Vec<TypedColumn> {
+    use crate::queries::schema::{build_type_context, StaticRefSchemaProvider};
+    use smelt_core::sources::SourcesConfig;
+    use smelt_parser::ast::File;
+    use std::collections::HashMap;
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt in parsed SQL");
+
+    let models = HashMap::new();
+    let seeds = HashMap::new();
+    let provider = StaticRefSchemaProvider {
+        models: &models,
+        seeds: &seeds,
+    };
+    let ctx = build_type_context(&file, &SourcesConfig::default(), &provider);
+
+    infer_select_column_types(&select_stmt, &ctx)
+}
+
+#[test]
+fn derived_table_values_alias_col_list_renames_columns() {
+    // `(VALUES (1, 2)) AS t(a, b)` — selecting the aliased column name `a`
+    // should resolve to the first VALUES column (INTEGER), not error.
+    let types = infer_sql_via_from_resolution("SELECT a FROM (VALUES (1, 2)) AS t(a, b)");
+    assert_eq!(types.len(), 1);
+    assert_ne!(
+        types[0].data_type,
+        DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        "column `a` renamed via alias column list should resolve to a concrete type, got {:?}",
+        types[0].data_type
+    );
+}
+
+#[test]
+fn derived_table_select_alias_col_list_renames_columns() {
+    // `(SELECT 1, 2) AS t(a, b)` — same renaming behavior for a SELECT-body
+    // derived table.
+    let types = infer_sql_via_from_resolution("SELECT a FROM (SELECT 1, 2) AS t(a, b)");
+    assert_eq!(types.len(), 1);
+    assert_ne!(
+        types[0].data_type,
+        DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        "column `a` renamed via alias column list should resolve to a concrete type, got {:?}",
+        types[0].data_type
+    );
+}

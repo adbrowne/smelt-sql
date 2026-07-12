@@ -1110,8 +1110,20 @@ fn process_table_ref_pure(
 
                     let column_types = infer_select_column_types(&select_stmt, &subquery_ctx);
 
+                    // Column names: an explicit alias column list on the
+                    // derived table (`(SELECT …) AS t(c1, c2, …)`) renames
+                    // the subquery's own output columns positionally, taking
+                    // precedence over the subquery's own item aliases /
+                    // column-ref names (mirrors the VALUES-clause branch
+                    // below and DuckDB/PostgreSQL derived-table semantics).
+                    let alias_names = table_ref.alias_column_names();
+
                     for (i, item) in select_list.items().enumerate() {
-                        let col_name = if let Some(item_alias) = item.alias() {
+                        let col_name = if let Some(renamed) =
+                            alias_names.as_ref().and_then(|names| names.get(i))
+                        {
+                            renamed.clone()
+                        } else if let Some(item_alias) = item.alias() {
                             item_alias
                         } else if let Some(expr) = item.expression() {
                             if let Some(col_ref) = expr.as_column_ref() {

@@ -234,14 +234,47 @@ impl Display for FromClause {
 
 impl Display for TableRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_lateral() {
+            write!(f, "LATERAL ")?;
+        }
+
         if let Some(func_call) = self.function_call() {
             write!(f, "{}", func_call.text())?;
+        } else if let Some(subquery) = self.subquery() {
+            // Print the parenthesised body via raw source text rather than
+            // `Subquery`'s Display impl: that impl only knows how to print a
+            // SELECT body (`select_stmt()`) and silently drops VALUES rows
+            // (`values_clause()` has no pretty-printer). Raw text is a
+            // faithful, lossless rendering of either form and matches the
+            // rest of this printer's approach of falling back to source text
+            // for constructs without a dedicated Display impl.
+            write!(f, "{}", subquery.syntax().text())?;
         } else if let Some(ident) = self.identifier() {
             write!(f, "{}", ident)?;
         } else {
-            // Subquery in FROM
             write!(f, "{}", self.syntax().text())?;
         }
+
+        // TABLESAMPLE / PIVOT / UNPIVOT clauses sit between the base
+        // reference and the alias; print them verbatim (no dedicated
+        // pretty-printer exists for these yet).
+        for clause in self
+            .syntax()
+            .children()
+            .filter(|n| matches!(n.kind(), TABLESAMPLE_CLAUSE | PIVOT_CLAUSE | UNPIVOT_CLAUSE))
+        {
+            write!(f, " {}", clause.text())?;
+        }
+
+        if let Some(alias) = self.alias() {
+            write!(f, " AS {}", alias)?;
+            if let Some(cols) = self.alias_column_names() {
+                if !cols.is_empty() {
+                    write!(f, "({})", cols.join(", "))?;
+                }
+            }
+        }
+
         Ok(())
     }
 }

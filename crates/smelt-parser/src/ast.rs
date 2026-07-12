@@ -3145,6 +3145,10 @@ impl Subquery {
     pub fn values_clause(&self) -> Option<ValuesClause> {
         self.0.children().find_map(ValuesClause::cast)
     }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
 }
 
 /// BETWEEN expression (expr BETWEEN low AND high)

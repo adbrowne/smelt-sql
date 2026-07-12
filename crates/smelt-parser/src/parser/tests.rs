@@ -8771,3 +8771,70 @@ fn grouping_sets_nested_grouping_sets_parses() {
         "expected 3 nested GROUPING_SETS_CLAUSE nodes"
     );
 }
+
+// ===== Derived-table alias column list round-trip (printer fidelity) =====
+//
+// smelt's printer previously dropped the derived-table body (subquery/
+// VALUES) — or the alias/alias-column-list on a plain table — when printing
+// a TABLE_REF, because `TableRef::identifier()` matched the alias IDENT
+// token for a derived table (there being no other direct-child IDENT to
+// find), and none of the printer's branches printed `alias()` /
+// `alias_column_names()` at all. See external corpus ledger category
+// `derived_table_column_alias_list`.
+
+fn assert_table_ref_round_trips(input: &str, must_contain: &[&str]) {
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    for needle in must_contain {
+        assert!(
+            printed.contains(needle),
+            "printed SQL should contain {:?}: got {:?}",
+            needle,
+            printed
+        );
+    }
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {:?} (from {:?}) failed to reparse: {:?}",
+        printed,
+        input,
+        reparsed.errors
+    );
+}
+
+#[test]
+fn derived_table_values_alias_col_list_round_trips() {
+    assert_table_ref_round_trips(
+        "SELECT * FROM (VALUES (1, 2)) AS t(a, b)",
+        &["VALUES", "(1, 2)", "AS t(a, b)"],
+    );
+}
+
+#[test]
+fn derived_table_select_alias_col_list_round_trips() {
+    assert_table_ref_round_trips(
+        "SELECT * FROM (SELECT 1, 2) AS t(a, b)",
+        &["SELECT 1, 2", "AS t(a, b)"],
+    );
+}
+
+#[test]
+fn plain_table_alias_col_list_round_trips() {
+    // DuckDB accepts a column-renaming alias list on a plain base table too:
+    // `FROM t1 AS c1(x)` renames t1's first column to `x` under alias `c1`.
+    assert_table_ref_round_trips("SELECT * FROM t1 AS c1(x)", &["t1", "AS c1(x)"]);
+}
+
+#[test]
+fn plain_table_alias_without_col_list_round_trips() {
+    assert_table_ref_round_trips("SELECT * FROM t1 AS c1", &["t1", "AS c1"]);
+}
+
+#[test]
+fn derived_table_values_alias_col_list_no_as_round_trips() {
+    assert_table_ref_round_trips(
+        "SELECT * FROM (VALUES (1, 2)) t(a, b)",
+        &["VALUES", "(1, 2)", "AS t(a, b)"],
+    );
+}

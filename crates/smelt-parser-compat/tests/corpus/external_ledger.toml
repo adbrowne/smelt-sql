@@ -31,17 +31,9 @@
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
 
-["5990e392c1ba486e"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["b4424d249fbc1310"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found LAST_KW"
-
-["b43911a50a9c1946"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["60f4625d09268f8f"]
 category = "smelt_fails_unclassified"
@@ -51,10 +43,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["464931d9fd9c6fc8"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["430fadb76ce45e99"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
@@ -62,10 +50,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["d16194276459eb33"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
-
-["619a820c59747ccb"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["a0c862cd03f7795f"]
 category = "smelt_fails_unclassified"
@@ -102,10 +86,6 @@ note = "unclassified parser gap; first smelt parser error: Expected table refere
 ["85371fba64bede9c"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["a0545b1cb8b55e28"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["47dcd69c1a6af374"]
 category = "smelt_fails_unclassified"
@@ -363,10 +343,6 @@ note = "unclassified parser gap; first smelt parser error: Expected type name"
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
 
-["d97613440546afab"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["f4780243e43996c6"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
@@ -410,10 +386,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["232928ca73dc0ee1"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
-
-["5e56cbfa24420e99"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["0a525a0e6cb3124d"]
 category = "smelt_fails_unclassified"
@@ -507,14 +479,6 @@ note = "unclassified parser gap; first smelt parser error: Expected type name"
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
 
-["1a3ec219bdab77ac"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
-["a678a370075206ec"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["846e3d125c8e02a9"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -534,10 +498,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 ["165601706514a57b"]
 category = "at_time_zone_or_time_tz_type"
 note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
-
-["4fb7bac86850ba1d"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["bf4f9acc846503da"]
 category = "smelt_fails_unclassified"
@@ -627,10 +587,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
 
-["159c243eec2324af"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["8fb37406c9ff66c2"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
@@ -644,8 +600,8 @@ category = "smelt_fails_unclassified"
 note = "unclassified parser gap (list comprehension itself now parses; residual failure is the COLUMNS(* EXCLUDE (...)) source-list expression); first smelt parser error: Expected RPAREN, found IDENT"
 
 ["9f1dab2702dd484e"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
+category = "bare_top_level_values_not_printed"
+note = "a bare top-level `VALUES (...)` model body (no wrapping SELECT) parses onto a VALUES_CLAUSE child directly under FILE; File::select_stmt() only looks for a SELECT_STMT child, so it returns None and the printer emits an empty string — a distinct silent-mis-parse root cause from the derived-table-alias-list printer bug this statement was previously (mis-)filed under"
 
 ["3cb23549de01fe86"]
 category = "values_trailing_comma"
@@ -743,10 +699,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 category = "set_operation_nesting"
 note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
 
-["b298140e797d7cdd"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["a2a0218136085c71"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected SELECT after EXISTS ("
@@ -763,10 +715,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["ac13e479ff7001b3"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["909102b28165f9f6"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -782,10 +730,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["98685dc6055e7793"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["176a64de634e996b"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["4444edd7851561d6"]
 category = "smelt_fails_unclassified"
@@ -1011,10 +955,6 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected frame bound (UNBOUNDED, CURRENT ROW, number, or INTERVAL literal)"
 
-["e78ccfa8ae60ac0d"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["b51d6e336c50e974"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
@@ -1026,10 +966,6 @@ note = "unclassified parser gap; first smelt parser error: Expected table refere
 ["2eeeab6e1921780c"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
-
-["d4711b65e8ff9019"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["a8c6b4e0e85d910f"]
 category = "smelt_fails_unclassified"
@@ -1058,10 +994,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["4e2938497df48afe"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ORDER_KW"
-
-["19ea620a10ec6a7f"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["5a40822826a71b22"]
 category = "smelt_fails_unclassified"
@@ -1199,10 +1131,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["97288fa89f1ca8c3"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["0fa97b457f73c89b"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -1307,10 +1235,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found NUMBER"
 
-["89b6cc23eac6da92"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["02bbae9411867710"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -1394,10 +1318,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 ["d7de0c9a7a556220"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected IDENT, found STAR"
-
-["6d90282c09c259fb"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["60a4afc966b46247"]
 category = "lambda_or_lateral_syntax"
@@ -1643,10 +1563,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found DOT"
 
-["cb74bdb27c086021"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["9c8fe5f0b0ea90e8"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
@@ -1694,10 +1610,6 @@ note = "Function call with a DuckDB `name := value` or bare `name = value` argum
 ["c38be65d41d4fd27"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["dc1c49b07dcb0148"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["761352dd4a45659d"]
 category = "with_ordinality"
@@ -1927,14 +1839,6 @@ note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) 
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
-["9a6f33a1626fafe7"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
-["10c6e832b34a19fa"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
 ["87fac7f5b45ef952"]
 category = "set_operation_nesting"
 note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
@@ -1962,18 +1866,6 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 ["29049631557d1e26"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
-
-["098552ef77c91f82"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
-["7b267bd36cb16322"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
-
-["017a8fa8a1361a13"]
-category = "derived_table_column_alias_list"
-note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
 ["f9722cb8182767ea"]
 category = "set_operation_nesting"
