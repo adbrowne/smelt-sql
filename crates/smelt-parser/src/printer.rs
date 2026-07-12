@@ -77,6 +77,12 @@ impl Display for File {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         if let Some(stmt) = self.select_stmt() {
             write!(f, "{}", stmt)?;
+        } else if let Some(values) = self.values_clause() {
+            // No dedicated pretty-printer for a bare top-level VALUES body
+            // (same rationale as `TableRef`'s subquery-VALUES fallback):
+            // raw text is a faithful, lossless rendering, and it correctly
+            // preserves a trailing comma after the last row.
+            write!(f, "{}", values.syntax().text())?;
         }
         Ok(())
     }
@@ -154,8 +160,13 @@ impl Display for SelectStmt {
             if set_op.all {
                 write!(f, " ALL")?;
             }
-            if let Some(select) = set_op.select {
-                write!(f, " {}", select)?;
+            if set_op.by_name {
+                write!(f, " BY NAME")?;
+            }
+            match set_op.operand {
+                SetOperand::Select(select) => write!(f, " {}", select)?,
+                SetOperand::Paren(subquery) => write!(f, " {}", subquery)?,
+                SetOperand::None => {}
             }
         }
 
@@ -207,7 +218,11 @@ impl Display for SelectItem {
             }
         }
 
-        if let Some(alias) = self.alias() {
+        // Use the raw alias token text (quotes intact for `AS "quoted"`),
+        // not `alias()`'s unquoted semantic name — re-emitting an unquoted
+        // form for an alias that needs quoting (whitespace, matches a
+        // keyword, ...) would print SQL DuckDB/PostgreSQL reject.
+        if let Some(alias) = self.alias_token_text() {
             write!(f, " AS {}", alias)?;
         }
 
@@ -234,20 +249,70 @@ impl Display for FromClause {
 
 impl Display for TableRef {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_lateral() {
+            write!(f, "LATERAL ")?;
+        }
+
         if let Some(func_call) = self.function_call() {
             write!(f, "{}", func_call.text())?;
+        } else if let Some(subquery) = self.subquery() {
+            // Print the parenthesised body via raw source text rather than
+            // `Subquery`'s Display impl: that impl only knows how to print a
+            // SELECT body (`select_stmt()`) and silently drops VALUES rows
+            // (`values_clause()` has no pretty-printer). Raw text is a
+            // faithful, lossless rendering of either form and matches the
+            // rest of this printer's approach of falling back to source text
+            // for constructs without a dedicated Display impl.
+            write!(f, "{}", subquery.syntax().text())?;
         } else if let Some(ident) = self.identifier() {
             write!(f, "{}", ident)?;
+        } else if let Some(inner) = self.syntax().children().find_map(TableRef::cast) {
+            // Parenthesized table reference or joined-table sequence:
+            // `(t1)`, `(t1 NATURAL JOIN t2)`. Printed structurally (rather
+            // than via the raw-text fallback below) so a trailing alias on
+            // the outer TABLE_REF — printed separately further down — isn't
+            // double-printed.
+            write!(f, "({}", inner)?;
+            for join in self.syntax().children().filter_map(JoinClause::cast) {
+                write!(f, " {}", join)?;
+            }
+            write!(f, ")")?;
         } else {
-            // Subquery in FROM
             write!(f, "{}", self.syntax().text())?;
         }
+
+        // TABLESAMPLE / PIVOT / UNPIVOT clauses sit between the base
+        // reference and the alias; print them verbatim (no dedicated
+        // pretty-printer exists for these yet).
+        for clause in self
+            .syntax()
+            .children()
+            .filter(|n| matches!(n.kind(), TABLESAMPLE_CLAUSE | PIVOT_CLAUSE | UNPIVOT_CLAUSE))
+        {
+            write!(f, " {}", clause.text())?;
+        }
+
+        // Raw alias token text (quotes intact for `AS "quoted"`) — see the
+        // matching note on `Display for SelectItem`.
+        if let Some(alias) = self.alias_token_text().or_else(|| self.alias()) {
+            write!(f, " AS {}", alias)?;
+            if let Some(cols) = self.alias_column_names() {
+                if !cols.is_empty() {
+                    write!(f, "({})", cols.join(", "))?;
+                }
+            }
+        }
+
         Ok(())
     }
 }
 
 impl Display for JoinClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_natural() {
+            write!(f, "NATURAL ")?;
+        }
+
         // Join type
         match self.join_type() {
             Some(JoinType::Inner) => write!(f, "INNER JOIN")?,
@@ -556,6 +621,12 @@ impl Display for Cte {
 
         write!(f, " AS ")?;
 
+        if self.is_materialized() {
+            write!(f, "MATERIALIZED ")?;
+        } else if self.is_not_materialized() {
+            write!(f, "NOT MATERIALIZED ")?;
+        }
+
         if let Some(query) = self.query() {
             write!(f, "{}", query)?;
         }
@@ -616,7 +687,10 @@ fn extract_group_by_expressions(node: &SyntaxNode) -> String {
 
     let mut expressions = Vec::new();
     for child in node.children() {
-        if child.kind() == EXPRESSION || child.kind() == BINARY_EXPR {
+        if child.kind() == EXPRESSION
+            || child.kind() == BINARY_EXPR
+            || child.kind() == GROUPING_SETS_CLAUSE
+        {
             expressions.push(child.text().to_string());
         }
     }
@@ -627,7 +701,17 @@ fn extract_group_by_expressions(node: &SyntaxNode) -> String {
 struct SetOperation {
     keyword: &'static str,
     all: bool,
-    select: Option<SelectStmt>,
+    by_name: bool,
+    operand: SetOperand,
+}
+
+/// The right-hand operand of a set operation: a bare `SELECT_STMT`
+/// (`A UNION B`), or a parenthesized `SUBQUERY` (`A UNION (B)`) — printed
+/// via `Subquery`'s own Display so the parens round-trip.
+enum SetOperand {
+    None,
+    Select(SelectStmt),
+    Paren(Subquery),
 }
 
 /// Detect and extract set operation (UNION/INTERSECT/EXCEPT) from a SELECT_STMT node
@@ -642,19 +726,30 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
     // Find the set operation keyword
     let mut op_kind = None;
     let mut has_all = false;
+    let mut has_by_name = false;
 
     for (i, token) in tokens.iter().enumerate() {
         if set_op_kinds.contains(&token.kind()) {
             op_kind = Some(token.kind());
-            // Check for ALL after the keyword
-            for next_token in &tokens[i + 1..] {
-                match next_token.kind() {
-                    WHITESPACE | COMMENT => continue,
-                    ALL_KW => {
-                        has_all = true;
-                        break;
-                    }
-                    _ => break,
+            // Check for ALL after the keyword.
+            let non_trivia: Vec<_> = tokens[i + 1..]
+                .iter()
+                .filter(|t| !matches!(t.kind(), WHITESPACE | COMMENT))
+                .collect();
+            let mut idx = 0;
+            if non_trivia.first().is_some_and(|t| t.kind() == ALL_KW) {
+                has_all = true;
+                idx = 1;
+            }
+            // Check for BY NAME (DuckDB): `BY_KW` followed by the
+            // contextual `NAME` keyword (plain IDENT), matched only as
+            // this exact sequence.
+            if let (Some(by_tok), Some(name_tok)) = (non_trivia.get(idx), non_trivia.get(idx + 1)) {
+                if by_tok.kind() == BY_KW
+                    && name_tok.kind() == IDENT
+                    && name_tok.text().eq_ignore_ascii_case("NAME")
+                {
+                    has_by_name = true;
                 }
             }
             break;
@@ -670,9 +765,10 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
         _ => unreachable!(),
     };
 
-    // Find the SELECT statement after the set operation
+    // Find the operand after the set operation: either a bare SELECT_STMT
+    // or a parenthesized SUBQUERY.
     let mut found_op = false;
-    let mut select = None;
+    let mut operand = SetOperand::None;
     for child in node.children_with_tokens() {
         if let Some(token) = child.as_token() {
             if token.kind() == op_kind {
@@ -681,7 +777,15 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
         } else if found_op {
             if let Some(n) = child.as_node() {
                 if n.kind() == SELECT_STMT {
-                    select = SelectStmt::cast(n.clone());
+                    if let Some(select) = SelectStmt::cast(n.clone()) {
+                        operand = SetOperand::Select(select);
+                    }
+                    break;
+                }
+                if n.kind() == SUBQUERY {
+                    if let Some(subquery) = Subquery::cast(n.clone()) {
+                        operand = SetOperand::Paren(subquery);
+                    }
                     break;
                 }
             }
@@ -691,7 +795,8 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
     Some(SetOperation {
         keyword,
         all: has_all,
-        select,
+        by_name: has_by_name,
+        operand,
     })
 }
 

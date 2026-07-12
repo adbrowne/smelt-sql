@@ -141,9 +141,29 @@ impl<'a> super::Parser<'a> {
                 self.advance();
             }
             self.skip_trivia();
-            // Parse next SELECT
-            if self.at(SELECT_KW) || self.at(WITH_KW) {
-                self.parse_select_stmt();
+            // Optional BY NAME (DuckDB): unify operands by column name
+            // rather than position. `BY` is the reserved `BY_KW` (shared
+            // with `GROUP BY`/`ORDER BY`); `NAME` is a contextual keyword
+            // (lexed as plain IDENT), matched only in this exact sequence
+            // so it stays an ordinary identifier everywhere else
+            // (`SELECT name FROM t`).
+            if self.at(BY_KW)
+                && self
+                    .peek_nth_non_trivia_text(1)
+                    .is_some_and(|t| t.eq_ignore_ascii_case("NAME"))
+            {
+                self.advance(); // BY
+                self.skip_trivia();
+                self.advance(); // NAME
+                self.skip_trivia();
+            }
+            // Parse next operand: a plain SELECT/WITH statement, or a
+            // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
+            // arbitrarily nested. The parenthesized form recurses through
+            // `parse_query_expr`, so it carries its own set-op tail and
+            // ORDER BY/LIMIT inside the parens.
+            if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(LPAREN) {
+                self.parse_query_expr();
             } else {
                 self.error("Expected SELECT after set operation".to_string());
             }
@@ -151,6 +171,61 @@ impl<'a> super::Parser<'a> {
 
         self.depth -= 1;
         self.finish_node();
+    }
+
+    /// Parses a full query expression: either a plain `SELECT`/`WITH`
+    /// statement (`parse_select_stmt`, which already handles its own
+    /// UNION/INTERSECT/EXCEPT tail and ORDER BY/LIMIT), or a parenthesized
+    /// query (`parse_parenthesized_query`). Used wherever a complete query
+    /// is expected as a unit: set-operation operands, and (via
+    /// `parse_parenthesized_query`) nested parenthesized queries at any
+    /// depth.
+    pub(super) fn parse_query_expr(&mut self) {
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_parenthesized_query();
+        } else {
+            self.parse_select_stmt();
+        }
+    }
+
+    /// Parses `( <query> )`, wrapping the whole thing (including the
+    /// parens) in a `SUBQUERY` node. The inner query is parsed via
+    /// `parse_query_expr`, so `((( SELECT … )))`-style redundant nesting
+    /// and a parenthesized query with its own trailing ORDER BY/LIMIT or
+    /// set-op tail both work.
+    pub(super) fn parse_parenthesized_query(&mut self) {
+        self.start_node(SUBQUERY);
+        self.advance(); // consume LPAREN
+        self.skip_trivia();
+        self.parse_query_expr();
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Lookahead-only: true if, starting at the current position, the
+    /// token stream is zero or more `LPAREN`s (skipping trivia) followed
+    /// directly by `SELECT_KW` or `WITH_KW`.
+    ///
+    /// Distinguishes a (possibly redundantly parenthesized) query —
+    /// `(SELECT …)`, `((SELECT …))`, … — from a plain grouped expression
+    /// that merely happens to start with nested parens, e.g. `((1))` or
+    /// `((a + b))`. Callers that already know the current token opens a
+    /// query context (e.g. the operand slot right after UNION/EXCEPT/
+    /// INTERSECT, where nothing but a query can legally appear) don't need
+    /// this guard; it exists for positions — a general expression primary,
+    /// a FROM-clause table reference — where a bare `(` is ambiguous
+    /// between "grouped expression" and "parenthesized query".
+    pub(super) fn at_parenthesized_query_start(&self) -> bool {
+        let mut n = 0usize;
+        loop {
+            match self.peek_nth_non_trivia(n) {
+                Some(LPAREN) => n += 1,
+                Some(SELECT_KW) | Some(WITH_KW) => return true,
+                _ => return false,
+            }
+        }
     }
 
     pub(super) fn parse_select_list(&mut self) {
@@ -249,15 +324,17 @@ impl<'a> super::Parser<'a> {
         // Parse expression
         self.parse_expression();
 
-        // Optional AS alias
+        // Optional AS alias. Accepts a plain IDENT or a double-quoted
+        // identifier lexed as STRING (`AS "median_delay"`) — see
+        // `at_quoted_ident_alias`.
         self.skip_trivia();
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
-            if self.at(IDENT) {
+            if self.at(IDENT) || self.at_quoted_ident_alias() {
                 self.advance();
             }
-        } else if self.at(IDENT) {
+        } else if self.at(IDENT) || self.at_quoted_ident_alias() {
             // Implicit alias (no AS keyword)
             self.advance();
         }
@@ -276,7 +353,9 @@ impl<'a> super::Parser<'a> {
         // Parse zero or more JOIN clauses
         loop {
             self.skip_trivia();
-            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW]) {
+            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
+                || self.at_contextual_keyword("NATURAL")
+            {
                 self.parse_join_clause();
             } else {
                 break;
@@ -339,10 +418,15 @@ impl<'a> super::Parser<'a> {
             self.advance(); // consume LPAREN
             self.skip_trivia();
 
-            // Check if it's a subquery (starts with SELECT or WITH) or VALUES
-            if self.at(SELECT_KW) || self.at(WITH_KW) {
+            // Check if it's a subquery (starts with SELECT or WITH, or is
+            // itself a nested parenthesized query, e.g. a derived table
+            // whose body is `(SELECT …) UNION SELECT …`) or VALUES
+            if self.at(SELECT_KW)
+                || self.at(WITH_KW)
+                || (self.at(LPAREN) && self.at_parenthesized_query_start())
+            {
                 self.start_node_at(checkpoint, SUBQUERY);
-                self.parse_select_stmt();
+                self.parse_query_expr();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node(); // Close SUBQUERY
@@ -362,11 +446,56 @@ impl<'a> super::Parser<'a> {
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();
+            } else if self.at(IDENT) || self.at(LATERAL_KW) || self.at(LPAREN) {
+                // Parenthesized table reference or joined-table sequence:
+                // `(t1)`, `(t1 JOIN t2 ON …)`, `(t1 NATURAL JOIN t2 NATURAL
+                // JOIN t3)` — a table primary DuckDB/PostgreSQL both accept.
+                // The nested `parse_table_ref` call recurses through this
+                // same LPAREN branch, so arbitrarily nested parenthesized
+                // join chains (`(a JOIN b) JOIN (c JOIN d)`) fall out for
+                // free. No dedicated node kind: the printer's `TableRef`
+                // Display detects a nested `TABLE_REF` child and renders it
+                // structurally (see `printer.rs`).
+                self.parse_table_ref();
+                loop {
+                    self.skip_trivia();
+                    if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
+                        || self.at_contextual_keyword("NATURAL")
+                    {
+                        self.parse_join_clause();
+                    } else {
+                        break;
+                    }
+                }
+                self.skip_trivia();
+                self.expect(RPAREN);
             } else {
                 // Not a subquery, error
                 self.error("Expected SELECT in subquery".to_string());
                 self.expect(RPAREN);
             }
+        } else if self.at(GLOB_KW) && self.is_keyword_followed_by_lparen() {
+            // DuckDB's glob(pattern) file-listing table function. GLOB is an
+            // operator keyword, but when directly followed by `(` it is a
+            // function name (LEFT()/RIGHT() keyword-as-function-name precedent).
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // Consume GLOB_KW
+            self.skip_trivia();
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            self.parse_arg_list();
+            self.finish_node(); // Close FUNCTION_CALL
+        } else if self.at(RANGE_KW) && self.is_keyword_followed_by_lparen() {
+            // DuckDB's range(start, stop[, step]) table-generating
+            // function. RANGE is also the window-frame unit keyword
+            // (`RANGE BETWEEN …`), but when directly followed by `(` in
+            // table-ref position it is unambiguously the table function
+            // (GLOB()/LEFT()/RIGHT() keyword-as-function-name precedent).
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // Consume RANGE_KW
+            self.skip_trivia();
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            self.parse_arg_list();
+            self.finish_node(); // Close FUNCTION_CALL
         } else if self.at(IDENT) {
             // Use builder checkpoint for proper lookahead
             let checkpoint = self.builder.checkpoint();
@@ -379,11 +508,18 @@ impl<'a> super::Parser<'a> {
                 self.parse_arg_list();
                 self.finish_node(); // Close FUNCTION_CALL
             } else if self.at(DOT) {
-                // Could be schema.table or namespace.func()
-                self.advance(); // Consume DOT
-                self.skip_trivia();
-                self.expect(IDENT); // Consume second IDENT
-                self.skip_trivia();
+                // Could be schema.table, db.schema.table (arbitrary-depth
+                // qualification), or namespace.func(). Consume DOT + IDENT
+                // pairs in a loop so any qualification depth is accepted.
+                while self.at(DOT) {
+                    self.advance(); // Consume DOT
+                    self.skip_trivia();
+                    self.expect(IDENT); // Consume next segment IDENT
+                    self.skip_trivia();
+                    if self.at(LPAREN) || !self.at(DOT) {
+                        break;
+                    }
+                }
 
                 if self.at(LPAREN) {
                     // Namespaced function call: smelt.ref()
@@ -391,7 +527,7 @@ impl<'a> super::Parser<'a> {
                     self.parse_arg_list();
                     self.finish_node(); // Close FUNCTION_CALL
                 }
-                // else: just a qualified table name (schema.table), already consumed
+                // else: just a qualified table name (schema.table…), already consumed
             }
             // else: simple identifier, already consumed
         } else {
@@ -450,11 +586,22 @@ impl<'a> super::Parser<'a> {
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
-            self.expect(IDENT);
+            if self.at_quoted_ident_alias() {
+                self.advance();
+            } else {
+                self.expect(IDENT);
+            }
             self.parse_alias_column_list();
         } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
             // Implicit alias (no AS keyword). Only consume if it's not a
-            // keyword that would end the table ref.
+            // keyword that would end the table ref. Deliberately does not
+            // extend to `at_quoted_ident_alias()` — an implicit quoted alias
+            // (`FROM t "alias"`, no `AS`) is not exercised by any corpus
+            // gap this pass closes, and `TableRef::alias()`'s implicit-alias
+            // heuristics (ident_count, function-call/smelt-path-ref
+            // lookahead) would need matching STRING-aware updates to avoid
+            // silently dropping it in the printer — left as follow-up scope
+            // rather than half-wired here.
             self.advance();
             self.parse_alias_column_list();
         }
@@ -597,6 +744,18 @@ impl<'a> super::Parser<'a> {
     pub(super) fn parse_join_clause(&mut self) {
         self.start_node(JOIN_CLAUSE);
 
+        // Optional NATURAL modifier (contextual keyword): `NATURAL [INNER |
+        // LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`. Join columns
+        // are all identically named columns between the two sides. Schema
+        // consequences live in smelt-db: `SELECT *` expansion dedupes the
+        // join-shared columns for NATURAL (and USING) joins via
+        // `RowExtensionDedupe` (DuckDB-verified: only ON joins keep both
+        // occurrences); the AST accessor is `JoinClause::is_natural()`.
+        if self.at_contextual_keyword("NATURAL") {
+            self.advance();
+            self.skip_trivia();
+        }
+
         // Parse JOIN type modifiers (INNER, LEFT, RIGHT, FULL OUTER, CROSS)
         // Note: The if-else blocks are intentionally similar for clarity
         if self.at(INNER_KW) {
@@ -733,6 +892,10 @@ impl<'a> super::Parser<'a> {
             // List spread in GROUP BY: `GROUP BY ...keys`
             if self.at(DOT_DOT_DOT) {
                 self.parse_list_spread();
+            } else if self.peek_grouping_sets_clause() {
+                // `GROUP BY GROUPING SETS ((a), (b), ())` — may also appear
+                // mixed with plain keys: `GROUP BY a, GROUPING SETS ((b))`.
+                self.parse_grouping_sets_clause();
             } else {
                 self.parse_expression();
             }
@@ -761,6 +924,81 @@ impl<'a> super::Parser<'a> {
         }
 
         self.finish_node();
+    }
+
+    /// `GROUPING SETS ( <set> [, <set>]* )`. Caller has already verified
+    /// [`peek_grouping_sets_clause`](Self::peek_grouping_sets_clause) — the
+    /// exact `GROUPING SETS (` token sequence — so both keywords and the
+    /// opening paren are consumed unconditionally here.
+    pub(super) fn parse_grouping_sets_clause(&mut self) {
+        self.start_node(GROUPING_SETS_CLAUSE);
+        self.advance(); // GROUPING (contextual keyword, lexed as IDENT)
+        self.skip_trivia();
+        self.advance(); // SETS (contextual keyword, lexed as IDENT)
+        self.skip_trivia();
+        self.expect(LPAREN);
+
+        loop {
+            self.skip_trivia();
+            self.parse_grouping_set();
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                continue;
+            }
+            break;
+        }
+
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// One element of a `GROUPING SETS` list: a parenthesized (possibly
+    /// empty) comma-separated expression list — `(a, b)`, `()` — or a bare
+    /// expression — `a` (PostgreSQL/DuckDB both accept unparenthesized
+    /// elements; verified against DuckDB). A nested `ROLLUP(...)`/`CUBE(...)`
+    /// call is just a bare expression here — there is no dedicated smelt-side
+    /// CUBE/ROLLUP grammar; they already fall out of the generic
+    /// function-call parse.
+    fn parse_grouping_set(&mut self) {
+        self.start_node(GROUPING_SET);
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.advance();
+            self.skip_trivia();
+            if !self.at(RPAREN) {
+                loop {
+                    self.skip_trivia();
+                    self.parse_grouping_set_element();
+                    self.skip_trivia();
+                    if self.at(COMMA) {
+                        self.advance();
+                        continue;
+                    }
+                    break;
+                }
+                self.skip_trivia();
+            }
+            self.expect(RPAREN);
+        } else {
+            self.parse_grouping_set_element();
+        }
+        self.finish_node();
+    }
+
+    /// One element position inside a `GROUPING SETS` list (either the bare
+    /// position or one slot of a parenthesized comma list): a nested
+    /// `GROUPING SETS (...)` (DuckDB accepts arbitrary nesting — verified
+    /// against DuckDB, e.g. `GROUPING SETS (GROUPING SETS ((a)))`), or a
+    /// plain expression (covers bare columns and `ROLLUP(...)`/`CUBE(...)`
+    /// function calls alike).
+    fn parse_grouping_set_element(&mut self) {
+        if self.peek_grouping_sets_clause() {
+            self.parse_grouping_sets_clause();
+        } else {
+            self.parse_expression();
+        }
     }
 
     pub(super) fn parse_having_clause(&mut self) {
@@ -1023,6 +1261,29 @@ impl<'a> super::Parser<'a> {
             self.error("Expected AS in CTE".to_string());
             self.finish_node();
             return;
+        }
+
+        // Optional [NOT] MATERIALIZED hint (DuckDB/PostgreSQL): a purely
+        // informational CTE-materialization directive that does not change
+        // the CTE's schema or logic, so it needs no dedicated inference
+        // support — only round-trip parse/print fidelity. `MATERIALIZED` is
+        // a contextual keyword (lexed as a plain IDENT); `NOT` is only
+        // consumed here when directly followed by `MATERIALIZED`, so a
+        // (syntactically impossible in this position, but defensive) bare
+        // `NOT` doesn't get silently swallowed.
+        self.skip_trivia();
+        if self.at_contextual_keyword("MATERIALIZED") {
+            self.advance();
+            self.skip_trivia();
+        } else if self.at(NOT_KW)
+            && self
+                .peek_nth_non_trivia_text(1)
+                .is_some_and(|t| t.eq_ignore_ascii_case("MATERIALIZED"))
+        {
+            self.advance(); // NOT
+            self.skip_trivia();
+            self.advance(); // MATERIALIZED
+            self.skip_trivia();
         }
 
         self.skip_trivia();

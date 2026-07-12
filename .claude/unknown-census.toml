@@ -149,54 +149,61 @@ discriminant = "dynamic"
 
 # ── smelt-db / queries/schema ─────────────────────────────────────────────────
 
-["crates/smelt-db/src/queries/schema.rs:536"]
+["crates/smelt-db/src/queries/schema.rs:581"]
 classification = "legitimate"
 reason = "param type resolution: non-Concrete SmeltType constraints have no SQL DataType; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:599"]
+["crates/smelt-db/src/queries/schema.rs:644"]
 classification = "legitimate"
 reason = "schema column type fallback — col.data_type is optional; Unknown for columns with no inferred type"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:625"]
+["crates/smelt-db/src/queries/schema.rs:670"]
 classification = "legitimate"
 reason = "schema column type fallback — resolved model column type unavailable; Unknown is conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:724"]
+["crates/smelt-db/src/queries/schema.rs:769"]
 classification = "legitimate"
 reason = "recursive CTE column bootstrap — types unknown until recursive reference resolves; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:811"]
+["crates/smelt-db/src/queries/schema.rs:856"]
 classification = "legitimate"
 reason = "sources.yml column with no declared type — Unresolved because user can add a type: field to fix; ColumnTypeUnresolved fires to notify"
 discriminant = "unresolved"
 
-["crates/smelt-db/src/queries/schema.rs:846"]
+["crates/smelt-db/src/queries/schema.rs:891"]
 classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1127"]
+["crates/smelt-db/src/queries/schema.rs:1184"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"
 
+# ── smelt-db / type_inference/at_time_zone ─────────────────────────────────────
+
+["crates/smelt-db/src/type_inference/at_time_zone.rs:41"]
+classification = "legitimate"
+reason = "AT TIME ZONE operand is not a Timestamp (e.g. Date, Time, or an unresolved/other type) — only the Timestamp{with_timezone} round-trip is implemented; Unknown(Unresolved) is the conservative recovery type"
+discriminant = "unresolved"
+
 # ── smelt-db / type_inference/binary ──────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/binary.rs:77"]
+["crates/smelt-db/src/type_inference/binary.rs:134"]
 classification = "legitimate"
 reason = "non-numeric binary expression (e.g. text+int before BUG-017 fix path) — Unknown per type-system rules"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/binary.rs:104"]
+["crates/smelt-db/src/type_inference/binary.rs:161"]
 classification = "legitimate"
 reason = "decimal division early-return: Decimal / T or Integer / Decimal → Unknown; TypeMismatch diagnostic emitted separately by check_decimal_division_diagnostics"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/binary.rs:404"]
+["crates/smelt-db/src/type_inference/binary.rs:496"]
 classification = "error"
 reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown(Unresolved); TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
 discriminant = "unresolved"
@@ -210,35 +217,40 @@ discriminant = "unresolved"
 
 # ── smelt-db / type_inference/dispatch ────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/dispatch.rs:509"]
+["crates/smelt-db/src/type_inference/dispatch.rs:539"]
 classification = "legitimate"
 reason = "SELECT item expression type inference fallback — infer_expression_type returns None; conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:514"]
+["crates/smelt-db/src/type_inference/dispatch.rs:544"]
 classification = "legitimate"
 reason = "SELECT item has no expression (star-expand or syntax error) — Unknown placeholder for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:744"]
+["crates/smelt-db/src/type_inference/dispatch.rs:774"]
 classification = "legitimate"
 reason = "type promotion wildcard — incompatible temporal sub-types produce Unknown; conservative conservatism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:748"]
+["crates/smelt-db/src/type_inference/dispatch.rs:778"]
 classification = "legitimate"
 reason = "type promotion wildcard — top-level incompatible families; Unknown is deliberate conservatism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:769"]
+["crates/smelt-db/src/type_inference/dispatch.rs:799"]
 classification = "legitimate"
 reason = "UNION branch SELECT item fallback — expression type unknown; conservative Unknown for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:774"]
+["crates/smelt-db/src/type_inference/dispatch.rs:804"]
 classification = "legitimate"
 reason = "UNION branch SELECT item (no expression) fallback — Unknown placeholder"
 discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/dispatch.rs:827"]
+classification = "legitimate"
+reason = "UNION/EXCEPT/INTERSECT ... BY NAME (DuckDB): column unification is by name and widens to the union of names across operands, not smelt's positional promotion — that algorithm isn't implemented, so every column is marked Unknown(Unresolved) rather than reusing positional promotion, which would be silently wrong whenever branches don't already align 1:1 by position. cannot_infer_type_for_schema surfaces ColumnTypeUnresolved to the user."
+discriminant = "unresolved"
 
 # ── smelt-db / type_inference/function_call ───────────────────────────────────
 
@@ -494,22 +506,22 @@ classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3166"]
+["crates/smelt-types/src/signatures.rs:3187"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3168"]
+["crates/smelt-types/src/signatures.rs:3189"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4047"]
+["crates/smelt-types/src/signatures.rs:4100"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4715"]
+["crates/smelt-types/src/signatures.rs:4796"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"

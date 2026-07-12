@@ -2105,6 +2105,7 @@ pub(crate) fn synthesise_emission_schema(
                 row_extensions.push(crate::schema::RowExtension {
                     ref_name: ref_name.clone(),
                     excluded_columns: vec![],
+                    dedupe: crate::schema::RowExtensionDedupe::None,
                     range: item.range(),
                 });
             }

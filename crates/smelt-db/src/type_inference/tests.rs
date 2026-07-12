@@ -126,6 +126,29 @@ fn test_literal_type_inference() {
     assert!(matches!(decimal_type.data_type, DataType::Decimal { .. }));
     assert!(!decimal_type.nullable);
 
+    // Underscore digit separators: DuckDB types `1_000_000` as INTEGER
+    // (`duckdb -c "SELECT typeof(1_000_000);"` -> INTEGER) and
+    // `1_000.000_1` as DECIMAL(8,4) (`duckdb -c "SELECT typeof(1_000.000_1);"`
+    // -> DECIMAL(8,4)) — separators must be stripped before value-parsing,
+    // not treated as part of the digit count or cause an Unknown inference.
+    assert_eq!(
+        infer_literal_type("1_000_000"),
+        Some(TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        })
+    );
+    assert_eq!(
+        infer_literal_type("1_000.000_1"),
+        Some(TypedColumn {
+            data_type: DataType::Decimal {
+                precision: 8,
+                scale: 4,
+            },
+            nullable: false,
+        })
+    );
+
     // Double (scientific notation)
     assert_eq!(
         infer_literal_type("1.5e10"),
@@ -138,6 +161,21 @@ fn test_literal_type_inference() {
     // String
     assert_eq!(
         infer_literal_type("'hello'"),
+        Some(TypedColumn {
+            data_type: DataType::Text,
+            nullable: false,
+        })
+    );
+
+    // Dollar-quoted strings infer exactly the same type as ordinary quoted
+    // strings (DuckDB: `SELECT typeof($$abc$$)` -> VARCHAR, same as 'abc').
+    assert_eq!(
+        infer_literal_type("$$abc$$"),
+        infer_literal_type("'abc'"),
+        "$$abc$$ must infer the same type as 'abc'"
+    );
+    assert_eq!(
+        infer_literal_type("$tag$ x $$ y $tag$"),
         Some(TypedColumn {
             data_type: DataType::Text,
             nullable: false,
@@ -747,6 +785,110 @@ fn test_temporal_arithmetic_with_columns() {
 }
 
 #[test]
+fn test_at_time_zone_naive_to_aware() {
+    // TIMESTAMP AT TIME ZONE tz → TIMESTAMP WITH TIME ZONE (verified against
+    // the DuckDB oracle: `typeof(ts AT TIME ZONE 'UTC')` on a naive TIMESTAMP
+    // column returns `TIMESTAMP WITH TIME ZONE`).
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::not_null(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Timestamp {
+            with_timezone: true
+        }
+    );
+    assert!(
+        !types[0].nullable,
+        "nullability propagates from the operand"
+    );
+}
+
+#[test]
+fn test_at_time_zone_aware_to_naive() {
+    // TIMESTAMP WITH TIME ZONE AT TIME ZONE tz → TIMESTAMP (plain) — verified
+    // against the DuckDB oracle: `typeof((ts AT TIME ZONE 'UTC') AT TIME ZONE
+    // 'America/New_York')` on a naive TIMESTAMP returns `TIMESTAMP` (the
+    // second AT TIME ZONE strips the tz-awareness added by the first).
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::not_null(DataType::Timestamp {
+            with_timezone: true,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Timestamp {
+            with_timezone: false
+        }
+    );
+    assert!(
+        !types[0].nullable,
+        "nullability propagates from the operand"
+    );
+}
+
+#[test]
+fn test_at_time_zone_chained_round_trip() {
+    // ts AT TIME ZONE 'UTC' AT TIME ZONE 'EST' on a naive TIMESTAMP: first
+    // conversion → TIMESTAMP WITH TIME ZONE, second conversion strips it back
+    // to plain TIMESTAMP (verified against the DuckDB oracle).
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::not_null(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' AT TIME ZONE 'EST' FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Timestamp {
+            with_timezone: false
+        }
+    );
+}
+
+#[test]
+fn test_at_time_zone_nullable_operand_propagates() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::nullable(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' FROM t",
+        &ctx,
+    );
+    assert!(
+        types[0].nullable,
+        "nullable operand should propagate nullability"
+    );
+}
+
+#[test]
 fn test_promote_types_numeric_hierarchy() {
     let mk = |dt: DataType| TypedColumn {
         data_type: dt,
@@ -1005,6 +1147,55 @@ fn test_array_literal_mixed_types_rejected() {
     assert_eq!(types[0].data_type, DataType::unknown_dynamic());
 }
 
+// ===== List comprehensions: [expr FOR x IN list (IF cond)?] (DuckDB) =====
+
+#[test]
+fn test_list_comprehension_bare_var_element_types_from_source() {
+    // `[x FOR x IN [1, 2, 3]]` — element expr is exactly the loop variable,
+    // so the result element type is the source list's element type.
+    let types = infer_sql("SELECT [x FOR x IN [1, 2, 3]]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::SmallInt))
+    );
+    assert!(
+        !types[0].nullable,
+        "list comprehension result should be non-nullable"
+    );
+}
+
+#[test]
+fn test_list_comprehension_bare_var_with_filter_types_from_source() {
+    // `[x FOR x IN [1, 2, 3] IF x > 1]` — filter present, still a bare-var
+    // element, so still typed from the source list's element type.
+    let types = infer_sql("SELECT [x FOR x IN [1, 2, 3] IF x > 1]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::SmallInt))
+    );
+}
+
+#[test]
+fn test_list_comprehension_non_trivial_element_is_classified_unknown() {
+    // `[x + 1 FOR x IN [1, 2, 3]]` — element expr is not the bare loop
+    // variable, so the element type is the classified-Unknown fallback
+    // (TypeContext has no scoped-binding machinery for the loop variable).
+    let types = infer_sql("SELECT [x + 1 FOR x IN [1, 2, 3]]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::unknown_dynamic()))
+    );
+}
+
+#[test]
+fn test_list_comprehension_string_source() {
+    let types = infer_sql("SELECT [s FOR s IN ['a', 'b']]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::Text))
+    );
+}
+
 #[test]
 fn test_array_subscript_from_column() {
     // With a column of Array(Integer) type, subscript should return Integer
@@ -1118,6 +1309,160 @@ fn test_struct_field_access_case_insensitive() {
     );
     let types = infer_sql_with_ctx("SELECT s.name", &ctx);
     assert_eq!(types[0].data_type, DataType::Text);
+}
+
+#[test]
+fn test_map_literal_string_int() {
+    // MAP {'a': 1, 'b': 2} → Map(Text, SmallInt). Verified against the DuckDB
+    // oracle: `typeof(MAP {'a': 1, 'b': 2})` is `MAP(VARCHAR, INTEGER)`; smelt's
+    // key/value width inference (SmallInt for small integer literals) matches
+    // the same convention as ARRAY[1, 2, 3] → Array(SmallInt) above.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 2}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::Text), Box::new(DataType::SmallInt))
+    );
+    assert!(!types[0].nullable, "map literal should be non-nullable");
+}
+
+#[test]
+fn test_map_literal_empty() {
+    // Verified against DuckDB: `MAP {}` parses and executes. smelt infers
+    // Map(Unknown, Unknown) — following the `ARRAY[]` → `Array(Unknown)`
+    // precedent rather than DuckDB's engine-specific INTEGER default.
+    let types = infer_sql("SELECT MAP {}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(
+            Box::new(DataType::unknown_dynamic()),
+            Box::new(DataType::unknown_dynamic())
+        )
+    );
+}
+
+#[test]
+fn test_map_literal_numeric_keys() {
+    // MAP {1: 'x', 2: 'y'} → Map(SmallInt, Text). Verified against DuckDB:
+    // `typeof(MAP {1: 'x', 2: 'y'})` is `MAP(INTEGER, VARCHAR)`.
+    let types = infer_sql("SELECT MAP {1: 'x', 2: 'y'}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::SmallInt), Box::new(DataType::Text))
+    );
+}
+
+#[test]
+fn test_map_literal_trailing_comma() {
+    // Verified against DuckDB: trailing comma before `}` is accepted.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 2,}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::Text), Box::new(DataType::SmallInt))
+    );
+}
+
+#[test]
+fn test_map_literal_mixed_value_types_rejected() {
+    // MAP {'a': 1, 'b': 'x'} — Integer/Text values can't be promoted →
+    // inference rejects, same as the mixed-type array literal case.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 'x'}");
+    assert_eq!(types[0].data_type, DataType::unknown_dynamic());
+}
+
+#[test]
+fn test_map_literal_value_numeric_promotion() {
+    // MAP {'a': 1, 'b': 100000} — SmallInt + Integer values promote to Integer.
+    let types = infer_sql("SELECT MAP {'a': 1, 'b': 100000}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Map(Box::new(DataType::Text), Box::new(DataType::Integer))
+    );
+}
+
+#[test]
+fn test_brace_struct_literal_string_keyed() {
+    // `{'a': 1, 'b': 'x'}` → DuckDB struct/dict literal, string-literal keys.
+    // Verified against DuckDB: `typeof({'a': 1, 'b': 'x'})` is
+    // `STRUCT(a INTEGER, b VARCHAR)`; smelt's own integer-literal width
+    // convention (SmallInt for small integer literals) applies the same way
+    // it does for MAP {'a': 1} above.
+    let types = infer_sql("SELECT {'a': 1, 'b': 'x'}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Struct(vec![
+            ("a".to_string(), DataType::SmallInt),
+            ("b".to_string(), DataType::Text),
+        ])
+    );
+    assert!(!types[0].nullable, "struct literal should be non-nullable");
+}
+
+#[test]
+fn test_brace_struct_literal_double_quoted_keys() {
+    // Verified against DuckDB: double-quoted keys behave the same as
+    // single-quoted keys inside a struct/dict literal.
+    let types = infer_sql("SELECT {\"CamelCase\": 1, \"lowercase\": 2}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Struct(vec![
+            ("CamelCase".to_string(), DataType::SmallInt),
+            ("lowercase".to_string(), DataType::SmallInt),
+        ])
+    );
+}
+
+#[test]
+fn test_brace_struct_literal_nested() {
+    // `{'x': 1, 'y': {'a': 'duck', 'b': 1.5}}` — nested struct/dict literal
+    // value. Verified against DuckDB: nested struct/dict literals parse and
+    // execute (external corpus statement `48ccbc31d75bae5c`).
+    let types = infer_sql("SELECT {'x': 1, 'y': {'a': 'duck', 'b': 1.5}}");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Struct(vec![
+            ("x".to_string(), DataType::SmallInt),
+            (
+                "y".to_string(),
+                DataType::Struct(vec![
+                    ("a".to_string(), DataType::Text),
+                    (
+                        "b".to_string(),
+                        DataType::Decimal {
+                            precision: 2,
+                            scale: 1
+                        }
+                    ),
+                ])
+            ),
+        ])
+    );
+}
+
+#[test]
+fn test_brace_struct_literal_comparison_is_boolean() {
+    // The `duckdb_struct_dict_literal_compare` ledger class: struct/dict
+    // literal comparisons must type as Boolean once the literal itself
+    // parses and infers.
+    let types = infer_sql("SELECT {'x': 1, 'y': 2} > {'x': 1, 'y': 3}");
+    assert_eq!(types[0].data_type, DataType::Boolean);
+}
+
+#[test]
+fn test_identifier_keyed_brace_literal_not_typed_as_struct_here() {
+    // Guard: `{a: 1}` is parsed by the record-literal path (pre-existing
+    // behavior, not a BRACE_STRUCT_LITERAL), so it is NOT expected to infer
+    // via `infer_brace_struct_literal_type`. This test only pins that the
+    // string-keyed fix didn't change this pre-existing dispatch.
+    let types = infer_sql("SELECT {a: 1} AS s FROM (SELECT 1 AS a) t");
+    // Whatever the record-literal path currently infers (Unknown, since it's
+    // not a recognized SQL context for RECORD_LITERAL), it must not be the
+    // DuckDB struct/dict Struct([("a", SmallInt)]) shape — that would mean
+    // both `{a: 1}` and `{'a': 1}` are silently typed differently was NOT
+    // the intent change here.
+    assert_ne!(
+        types[0].data_type,
+        DataType::Struct(vec![("a".to_string(), DataType::SmallInt)])
+    );
 }
 
 #[test]
@@ -6418,5 +6763,61 @@ fn try_cast_infers_nullable_target() {
     assert!(
         !plain[0].nullable,
         "plain CAST over a non-nullable input should stay non-nullable"
+    );
+}
+
+/// Build a `TypeContext` for a top-level SQL body the same way the
+/// production `type_context()` Salsa query does (via `build_type_context`),
+/// but Salsa-free — no upstream models/seeds/sources are provided. Exercises
+/// the FROM-clause/derived-table resolution that `infer_sql`/`infer_sql_with_ctx`
+/// (which call `infer_select_column_types` directly with a hand-populated
+/// context) deliberately skip.
+fn infer_sql_via_from_resolution(sql: &str) -> Vec<TypedColumn> {
+    use crate::queries::schema::{build_type_context, StaticRefSchemaProvider};
+    use smelt_core::sources::SourcesConfig;
+    use smelt_parser::ast::File;
+    use std::collections::HashMap;
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt in parsed SQL");
+
+    let models = HashMap::new();
+    let seeds = HashMap::new();
+    let provider = StaticRefSchemaProvider {
+        models: &models,
+        seeds: &seeds,
+    };
+    let ctx = build_type_context(&file, &SourcesConfig::default(), &provider);
+
+    infer_select_column_types(&select_stmt, &ctx)
+}
+
+#[test]
+fn derived_table_values_alias_col_list_renames_columns() {
+    // `(VALUES (1, 2)) AS t(a, b)` — selecting the aliased column name `a`
+    // should resolve to the first VALUES column (INTEGER), not error.
+    let types = infer_sql_via_from_resolution("SELECT a FROM (VALUES (1, 2)) AS t(a, b)");
+    assert_eq!(types.len(), 1);
+    assert_ne!(
+        types[0].data_type,
+        DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        "column `a` renamed via alias column list should resolve to a concrete type, got {:?}",
+        types[0].data_type
+    );
+}
+
+#[test]
+fn derived_table_select_alias_col_list_renames_columns() {
+    // `(SELECT 1, 2) AS t(a, b)` — same renaming behavior for a SELECT-body
+    // derived table.
+    let types = infer_sql_via_from_resolution("SELECT a FROM (SELECT 1, 2) AS t(a, b)");
+    assert_eq!(types.len(), 1);
+    assert_ne!(
+        types[0].data_type,
+        DataType::Unknown(smelt_types::UnknownReason::Dynamic),
+        "column `a` renamed via alias column list should resolve to a concrete type, got {:?}",
+        types[0].data_type
     );
 }

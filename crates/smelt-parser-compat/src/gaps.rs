@@ -49,24 +49,11 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // (July 2026): the parser previously swallowed the unparsed tail of these
     // constructs silently, so they appeared "supported" while the trailing
     // clause was dropped. They now fail loudly.
-    KnownGap {
-        id: "grouping_sets",
-        description: "GROUP BY GROUPING SETS ((a), (b), ()) is not parsed (CUBE/ROLLUP are)",
-        category: "smelt_fails",
-        dialect: "all",
-        patterns: &[r"(?i)\bGROUPING\s+SETS\s*\("],
-        severity: "medium",
-        planned_fix: true,
-    },
-    KnownGap {
-        id: "at_time_zone",
-        description: "AT TIME ZONE operator is not parsed",
-        category: "smelt_fails",
-        dialect: "all",
-        patterns: &[r"(?i)\bAT\s+TIME\s+ZONE\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // grouping_sets gap removed - GROUP BY GROUPING SETS ((a), (b), ()) now
+    // parses, prints, and analyzes alongside CUBE/ROLLUP (July 2026). This
+    // was the last `planned_fix: true` entry in this registry.
+    // at_time_zone gap removed - AT TIME ZONE operator now parses, prints,
+    // and infers the tz-conversion type rules (July 2026).
     KnownGap {
         id: "for_update",
         description: "FOR UPDATE / FOR SHARE row-locking clauses are not parsed",
@@ -89,84 +76,63 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // Category `roundtrip_mismatch`: smelt parses cleanly but the printed SQL is
     // rejected/mis-evaluated by DuckDB (the silent-mis-parse class). No seed
     // statement currently falls in this category — Phase 1/2 fail-loud parsing
-    // converted the former silent mis-parses (`GLOB`, dollar-quoted, `MAP {…}`)
-    // into loud parse failures, so they register as `duckdb_fails_to_parse`.
-    // TRY_CAST, GROUP BY ALL, ORDER BY ALL, and IGNORE/RESPECT NULLS were
-    // formerly registered here; smelt now parses, prints, and (for TRY_CAST)
-    // infers them, so their entries were removed and the ratchet baseline
-    // shrank accordingly.
+    // converted the former silent mis-parses (dollar-quoted, `MAP {…}`) into
+    // loud parse failures, so they register as `duckdb_fails_to_parse`.
+    // TRY_CAST, GROUP BY ALL, ORDER BY ALL, IGNORE/RESPECT NULLS, and GLOB were
+    // formerly registered here; smelt now parses, prints, and infers them
+    // (GLOB infers Boolean), so their entries were removed and the ratchet
+    // baseline shrank accordingly.
+    // TRIM(BOTH|LEADING|TRAILING … FROM …), SUBSTRING(x FROM i FOR n), and
+    // POSITION(sub IN str) were formerly registered here (`duckdb_trim_modifier`,
+    // `duckdb_substring_from_for`, `duckdb_position_in`); smelt now parses,
+    // prints, and infers all three (TRIM/SUBSTRING → Text, POSITION → BigInt
+    // via the existing registry-backed function-call typing), so their entries
+    // were removed and the ratchet baseline shrank accordingly.
     KnownGap {
-        id: "duckdb_trim_modifier",
-        description: "SQL-standard trim(BOTH|LEADING|TRAILING … FROM …) form is not parsed",
+        // Parse-level-only divergence, unreachable by executable SQL.
+        //
+        // DuckDB (v1.5.4) *parses* a bare comparison operator in POSITION's
+        // left operand — `position(a = 1 IN b)` fails only at bind time —
+        // whereas smelt parses the left operand at concatenation precedence
+        // (`parse_position_arg_list` in crates/smelt-parser/src/parser/expr.rs)
+        // and rejects the comparison at parse time.
+        //
+        // Oracle evidence (probed against a real DuckDB v1.5.4):
+        // - Every bare comparison form DuckDB parses there (`=`, `<`, `>`,
+        //   `<>`, `<=`, `>=`, `!=`) yields BOOLEAN, and DuckDB's only
+        //   candidate is position(VARCHAR, VARCHAR) with NO implicit
+        //   BOOLEAN→VARCHAR cast (verified with literal, column, and
+        //   BOOLEAN-column operands) — every such statement is a Binder
+        //   Error; none binds or executes.
+        // - `LIKE`, `AND`, `NOT`, `BETWEEN`, and `IS` on the left fail at
+        //   DuckDB's own parser, as does a bare `IN` — smelt matches DuckDB
+        //   on all of those.
+        // - Parenthesized or CAST-wrapped forms (`position(CAST(a = 1 AS
+        //   VARCHAR) IN b)`) parse and execute on both engines; only the
+        //   unparenthesized comparison diverges.
+        //
+        // Because `duckdb_accepts` PREPAREs (parse + bind) and every such
+        // form fails at bind, no seed-corpus line can exert accept-direction
+        // pressure for this construct — the entry is registered purely so the
+        // divergence is visible (fail-loud discipline) rather than silent.
+        // The ratchet baseline is unchanged by this entry.
+        id: "duckdb_position_comparison_left_operand",
+        description: "Bare comparison operator in POSITION's left operand \
+                      (position(a = 1 IN b)) parses in DuckDB but fails at \
+                      its binder; smelt rejects it at parse time",
         category: "duckdb_fails_to_parse",
         dialect: "duckdb",
-        patterns: &[r"(?i)\btrim\s*\(\s*(BOTH|LEADING|TRAILING)\b"],
+        patterns: &[r"(?i)\bposition\s*\([^()]*[=<>][^()]*\bIN\b"],
         severity: "low",
         planned_fix: false,
     },
-    KnownGap {
-        id: "duckdb_substring_from_for",
-        description: "SQL-standard substring(x FROM i FOR n) form is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bsubstring\s*\([^)]*\bFROM\b"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_position_in",
-        description: "SQL-standard position(sub IN str) form is not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bposition\s*\([^)]*\bIN\b"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_dollar_quoted_string",
-        description: "Dollar-quoted string literals ($$…$$) are not lexed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"\$\$"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_list_comprehension",
-        description: "List comprehensions [expr FOR x IN list] are not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bFOR\s+\w+\s+IN\s+\["],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_map_literal",
-        description: "MAP {k: v, …} literals are not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bMAP\s*\{"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_glob_operator",
-        description: "GLOB pattern-match operator is not parsed (formerly silently mis-parsed)",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bGLOB\b"],
-        severity: "medium",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_underscore_digit_separator",
-        description: "Underscore digit separators (1_000_000) are not lexed as one numeric literal",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"\b\d+_\d"],
-        severity: "low",
-        planned_fix: false,
-    },
+    // duckdb_dollar_quoted_string gap removed - dollar-quoted string literals
+    // ($$…$$ and $tag$…$tag$) are now lexed as STRING tokens (July 2026).
+    // duckdb_list_comprehension gap removed - list comprehensions
+    // `[expr FOR x IN list (IF cond)?]` are now parsed, printed, and
+    // inferred (July 2026).
+    // duckdb_map_literal gap removed - MAP {k: v, …} literals are now parsed,
+    // printed, and inferred as Map(key_type, value_type) (July 2026).
     KnownGap {
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",
@@ -498,9 +464,13 @@ mod tests {
     fn test_gaps_by_category() {
         // smelt_fails gaps: fail-loud trailing-content parsing (July 2026)
         // exposed constructs whose tails were previously swallowed silently
-        // (grouping_sets, at_time_zone, for_update).
+        // (grouping_sets, for_update, at_time_zone). at_time_zone and
+        // grouping_sets now both parse, print, and infer cleanly, so their
+        // entries were removed and this count shrank accordingly; only
+        // for_update remains (no fix planned — row-locking has no meaning in
+        // smelt models).
         let smelt_gaps = get_gaps_by_category("smelt_fails");
-        assert_eq!(smelt_gaps.len(), 3);
+        assert_eq!(smelt_gaps.len(), 1);
         for gap in smelt_gaps {
             assert_eq!(gap.category, "smelt_fails");
         }

@@ -3,8 +3,9 @@
 #![allow(unused_imports)]
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, CollateExpr, Cte, Expr, ExtractExpr, FunctionCall,
-    RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
+    AtTimeZoneExpr, BinaryExpr, BraceStructLiteral, CaseExpr, CastExpr, CollateExpr, Cte, Expr,
+    ExtractExpr, FunctionCall, RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall,
+    StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
@@ -26,6 +27,12 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // `check_collation_diagnostics` in `lib.rs::check_file_diagnostics`.
     if let Some(collate_expr) = expr.as_collate() {
         return super::collation::infer_collate_expr_type(&collate_expr, ctx);
+    }
+
+    // Try AT TIME ZONE expression (timezone conversion): toggles
+    // Timestamp{with_timezone}; nullability propagates from the operand.
+    if let Some(at_tz) = expr.as_at_time_zone() {
+        return super::at_time_zone::infer_at_time_zone_type(&at_tz, ctx);
     }
 
     // Try CAST expression first
@@ -99,6 +106,14 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         });
     }
 
+    // Try list comprehension (must precede array literal: a comprehension's
+    // outer node also satisfies as_array_literal via its nested source list,
+    // but LIST_COMPREHENSION is a distinct top-level node kind — checking it
+    // first keeps the dispatch on the actually-matching node).
+    if let Some(comp) = expr.as_list_comprehension() {
+        return infer_list_comprehension_type(&comp, ctx);
+    }
+
     // Try array literal
     if let Some(array_lit) = expr.as_array_literal() {
         return infer_array_literal_type(&array_lit, ctx);
@@ -122,6 +137,21 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // Try struct literal
     if let Some(struct_lit) = expr.as_struct_literal() {
         return infer_struct_literal_type(&struct_lit, ctx);
+    }
+
+    // Try MAP literal (DuckDB `MAP {'a': 1, 'b': 2}`)
+    if let Some(map_lit) = expr.as_map_literal() {
+        return infer_map_literal_type(&map_lit, ctx);
+    }
+
+    // Try brace-struct literal, DuckDB `key: value` form (`{'a': 1}`).
+    // Returns `None` for the unrelated meta-language `{expr AS alias,
+    // ..spread}` literal (Phase 35), which has no typed SQL meaning here —
+    // dispatch falls through past this arm for that shape.
+    if let Some(brace_lit) = expr.as_brace_struct_literal() {
+        if let Some(typed) = infer_brace_struct_literal_type(&brace_lit, ctx) {
+            return Some(typed);
+        }
     }
 
     // Try column reference (includes struct field access for qualified refs like s.field_name)
@@ -781,7 +811,23 @@ pub fn infer_select_column_types(select_stmt: &SelectStmt, ctx: &TypeContext) ->
 
     // If there's a set operation (UNION/INTERSECT/EXCEPT), recursively get types and combine
     if select_stmt.has_set_operation() {
-        if let Some(next_select) = select_stmt.set_operation_select() {
+        if select_stmt.is_set_operation_by_name() {
+            // `UNION/EXCEPT/INTERSECT ... BY NAME` (DuckDB) unifies operands
+            // by column NAME, not position, and widens the result to the
+            // union of column names across every operand — a fundamentally
+            // different algorithm from the positional, column-count-
+            // preserving combination below. That widening isn't implemented;
+            // silently reusing the positional promotion would produce a
+            // confidently wrong type whenever the branches don't already
+            // align 1:1 by position (the common case — the whole point of
+            // BY NAME is reordering/differently-named columns). Mark every
+            // column Unknown so `cannot_infer_type_for_schema` surfaces an
+            // honest `ColumnTypeUnresolved` instead.
+            for col in &mut column_types {
+                col.data_type = DataType::Unknown(smelt_types::UnknownReason::Unresolved);
+                col.nullable = true;
+            }
+        } else if let Some(next_select) = select_stmt.set_operation_select() {
             let next_types = infer_select_column_types(&next_select, ctx);
 
             // Combine types - use the wider type for each column position
@@ -980,4 +1026,86 @@ pub fn check_mixed_tz_case_diagnostics(
     }
 
     diags
+}
+
+#[cfg(test)]
+mod set_operation_tests {
+    use super::*;
+    use crate::type_inference::TypeContext;
+    use smelt_parser::ast::File;
+
+    fn parse_select(sql: &str) -> SelectStmt {
+        let parse = smelt_parser::parse(sql);
+        let root = parse.syntax();
+        let file = File::cast(root).expect("failed to cast to File");
+        file.select_stmt().expect("no SelectStmt in parsed SQL")
+    }
+
+    #[test]
+    fn plain_union_promotes_types_positionally() {
+        // Guard: BY NAME handling must not affect the plain positional path.
+        let select = parse_select("SELECT 1 UNION ALL SELECT 2");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 1);
+        assert!(
+            !matches!(types[0].data_type, DataType::Unknown(_)),
+            "plain positional UNION should infer a concrete type, got {:?}",
+            types[0].data_type
+        );
+    }
+
+    #[test]
+    fn union_by_name_is_conservatively_unknown() {
+        // UNION BY NAME unifies by column name (and widens to the union of
+        // names across operands), not by position — smelt doesn't implement
+        // that algorithm, so every column must come back Unknown(Unresolved)
+        // rather than a silently-wrong positionally-promoted type.
+        let select = parse_select("SELECT 1 AS x UNION BY NAME SELECT 2 AS x");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 1);
+        assert!(
+            matches!(
+                types[0].data_type,
+                DataType::Unknown(smelt_types::UnknownReason::Unresolved)
+            ),
+            "UNION BY NAME must infer Unknown(Unresolved), got {:?}",
+            types[0].data_type
+        );
+    }
+
+    #[test]
+    fn union_all_by_name_is_conservatively_unknown() {
+        let select = parse_select("SELECT 1 AS x UNION ALL BY NAME SELECT 2 AS x");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 1);
+        assert!(
+            matches!(
+                types[0].data_type,
+                DataType::Unknown(smelt_types::UnknownReason::Unresolved)
+            ),
+            "UNION ALL BY NAME must infer Unknown(Unresolved), got {:?}",
+            types[0].data_type
+        );
+    }
+
+    #[test]
+    fn union_by_name_with_multiple_columns_marks_all_unknown() {
+        let select = parse_select("SELECT 1 AS x, 'a' AS y UNION BY NAME SELECT 2 AS x, 'b' AS y");
+        let ctx = TypeContext::new();
+        let types = infer_select_column_types(&select, &ctx);
+        assert_eq!(types.len(), 2);
+        for t in &types {
+            assert!(
+                matches!(
+                    t.data_type,
+                    DataType::Unknown(smelt_types::UnknownReason::Unresolved)
+                ),
+                "every column of a BY NAME union must be Unknown(Unresolved), got {:?}",
+                t.data_type
+            );
+        }
+    }
 }

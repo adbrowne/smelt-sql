@@ -146,3 +146,139 @@ sub-plans: `docs/plans/20260707-maintenance-plan-spec-alignment.md` (SA1–SA5) 
 `docs/plans/20260707-maintenance-plan-impl.md` (MP1–MP16). Pre-framework registry rows
 (keyed-collapse K3–K6, keyed-time-partitioned, L4 batched/versioned/mv) superseded — see the
 master's 2026-07-07 note.
+
+## 2026-07-12 — ON-join `SELECT *` schema expansion drops the right side
+
+Found while fixing NATURAL/USING join-star dedupe (parser-gap-closure). `model_schema`'s
+wildcard expansion (`row_extensions` in `crates/smelt-db/src/queries/schema.rs`) now covers
+NATURAL and USING joined refs with join-shared columns deduped (DuckDB-verified [x, y, z]),
+but ON-joined refs are still not expanded at all: `SELECT * FROM smelt.models.a JOIN
+smelt.models.b ON a.x = b.x` infers only a's columns, where DuckDB yields all four
+[x, y, x, z] with the shared name duplicated. Expanding ON joins means admitting duplicate
+column names into inferred schemas (find-by-name consumers, LSP completion, input-constraint
+keying all assume unique names today), so it needs its own pass. Current behavior is pinned
+by `on_join_star_current_behavior_left_side_only` in
+`crates/smelt-db/tests/integration/join_star_schema.rs` — update that test when fixing.
+Related limitation to fix in the same pass: `SharedWithPrior` (NATURAL) dedupes against ALL
+prior refs' names, but DuckDB's NATURAL binds only to the adjacent join operand — in
+`FROM a, b NATURAL JOIN c`, a column shared between a and c (but not b) is wrongly dropped
+where DuckDB would carry the duplicate.
+
+## 2026-07-12 — TABLESAMPLE/PIVOT/UNPIVOT vs alias ordering (parser + printer)
+
+Found during the parser-gap-closure review (PR #158, derived-table alias fix f68ebd86).
+smelt's parser accepts only `base TABLESAMPLE(...) AS alias` and the printer emits that
+same order — but real DuckDB v1.5.4 REJECTS it and requires `base AS alias TABLESAMPLE(...)`
+(oracle-verified). Pre-existing parser grammar bug (`parser/select.rs` parses TABLESAMPLE
+before alias); previously masked because the old printer dropped both clauses, now live:
+the printer emits DuckDB-invalid SQL whenever TABLESAMPLE/PIVOT/UNPIVOT co-occurs with an
+alias. Not exercised by the current corpus/seed gates. Fix: swap grammar+printer to
+alias-first order and add a seed line; PIVOT/UNPIVOT ordering unprobed, verify while there.
+
+## 2026-07-12 — External-ledger `smelt_fails_unclassified` triage (236 → root-caused)
+
+Triaged all `smelt_fails_unclassified` entries (236 measured via re-parse against the live
+ledger; the task brief that kicked this off estimated 237, likely a stale count from before
+an unrelated prior commit) in
+`crates/smelt-parser-compat/tests/corpus/external_ledger.toml` by re-parsing each corpus
+statement and bucketing by first-error signature + syntactic pattern (script discarded,
+see `docs/plans/` for methodology if resurrected). Three genuinely small parser/lexer gaps
+were fixed with red-green tests (26 ledger entries closed); the remaining 209 entries were
+reclassified into 56 named root-cause categories (`gaps.rs`-style vocabulary) with an
+honest note per category — no fabricated root causes, each was independently confirmed by
+direct parse inspection.
+
+**Fixed this pass:**
+1. Double-quoted-identifier aliases (`AS "median_delay"`) — `parse_select_item` and
+   `parse_table_ref`'s explicit-`AS` branch only accepted `IDENT`, not the `STRING` token
+   smelt's lexer produces for double-quoted text (`consume_string` doesn't distinguish `'`
+   from `"`). Fixed in `parser/select.rs` + `parser/mod.rs` (`at_quoted_ident_alias`) +
+   `ast.rs` (`alias()`/`alias_token_text()`) + `printer.rs` (re-quote on print — the
+   printer must not silently drop the quotes DuckDB/PostgreSQL require for aliases that
+   need them). Closed 21 entries. Surfaced a second, unrelated printer bug in the same
+   pass (`Display for Subquery` drops a VALUES-clause CTE body) — reclassified as
+   `roundtrip_mismatch`, not fixed (see below).
+2. `FIRST(x)`/`LAST(x)` as aggregate function names — `FIRST_KW`/`LAST_KW` weren't in
+   `at_keyword_as_function_name`'s allowlist (unlike `LEFT`/`RIGHT`). One-line addition.
+   Closed 3 entries (a 4th, `FIRST(i ORDER BY i)`, still needs `aggregate_call_order_by_clause`).
+3. Leading-dot decimal literals (`.5`, `.000_005`) — the lexer's digit dispatch never
+   tried `consume_number` when the current char was `.`; added a guarded match arm before
+   the `...`/`..` spread-operator arms. Closed 3 entries.
+
+**Not fixed — explicitly out of scope this pass** (real, would need `smelt-db` nullability/
+join-topology work, not just parser grammar): `FROM t "quoted"`-style comma-joins
+(`implicit_cross_join_comma_syntax`) would need a "no explicit modifier ⇒ inner join"
+default in `JoinClause::join_type()` to special-case comma-joins as cross joins, which is
+inference-semantics territory, not a grammar-only change.
+
+**Top of the follow-up list** (full 56-category table below; effort is a rough guess, not
+sized): `NOT IN` / `NOT ILIKE` (`not_prefixed_binary_operator`, 6 entries) is surprisingly
+broken — `SELECT 2 NOT IN (2, 3)` alone fails — and is likely a very small fix (binary
+operator precedence/lookahead in `expr.rs`), probably the single highest-leverage item here.
+`quoted_table_name_in_from` (`FROM "flights"`) is the same root cause as fix #1 above but in
+`parse_table_ref`'s primary-identifier path rather than the alias path — also likely small,
+and the resulting scope (any double-quoted table/schema name) is probably underrepresented
+in this bucket's raw count (1) because most instances get preempted by an earlier error in
+the same statement.
+
+Counts below are the entries *this triage pass* moved into each category — categories that
+already had entries before the pass (e.g. `file_glob_or_path_literal_from`,
+`sqllogictest_template_placeholder`) have higher ledger totals; the ledger itself is the
+authoritative count.
+
+| Category | Count | Effort guess | DuckDB-relevant? |
+|---|---|---|---|
+| `implicit_cross_join_comma_syntax` | 25 | Medium (join-topology semantics, see above) | Yes |
+| `sqllogictest_template_placeholder` | 23 | N/A (not real SQL, test-harness artifact) | No |
+| `postgres_typed_literal_prefix` | 14 | Medium (extend typed-literal-prefix keyword set) | No |
+| `postgres_geometric_operators` | 11 | Medium (new operator tokens + geometry types) | No |
+| `file_glob_or_path_literal_from` | 10 | Medium (string-literal-as-table-source grammar) | Yes |
+| `aggregate_call_order_by_clause` | 8 | Medium (WITHIN GROUP / agg ORDER BY grammar) | Yes |
+| `at_time_zone_or_time_tz_type` | 7 | Small–Medium | Partial |
+| `postfix_dot_field_access_on_parenthesized_expr` | 7 | Medium | Partial |
+| `not_prefixed_binary_operator` | 6 | **Small** (see above — top pick) | Yes |
+| `jsonb_operators` | 6 | Medium | No |
+| `sql_json_constructor_functions` | 6 | Medium | Partial |
+| `postgres_interval_range_qualifier` | 5 | Small–Medium | No |
+| `range_keyword_as_identifier_or_function` | 5 | Small (same shape as the FIRST/LAST fix) | Yes |
+| `row_value_comparison` | 5 | Medium (row-constructor comparison grammar) | Yes |
+| `postgres_table_inheritance_wildcard` | 4 | Small (grammar) but pg-only, low value | No |
+| `star_exclude_or_rename_clause` | 4 | Medium (nested contexts + trailing comma) | Yes |
+| `select_into_clause` | 3 | Medium | Partial |
+| `double_equals_operator` | 3 | **Small** (lexer: `==` as EQ alias) | Yes |
+| `group_by_tuple_expression` | 3 | Medium | Yes |
+| `numeric_literal_followed_by_ident_no_space` | 3 | N/A (intentional fail-loud, see lexer.rs) | No |
+| `malformed_corpus_statement` | 3 | N/A (extraction artifact, not real SQL) | No |
+| `quoted_table_name_in_from` | 1 (undercounted, see above) | **Small** (same fix shape as #1) | Yes |
+| everything else (33 categories, ≤2 entries each) | 41 | Mixed | Mixed |
+
+Ledger delta this pass: 236 `smelt_fails_unclassified` → 0 (26 entries closed outright — the
+27th fix, a leading-dot-decimal CTE, surfaced the unrelated printer bug above and was
+reclassified rather than closed; 209 entries redistributed across the other 55 named
+categories in the table above, which together with `roundtrip_mismatch` account for all
+236). `cargo test -p smelt-parser-compat --test external_corpus` stays green throughout
+(`ledger_has_no_stale_entries` re-validated after every batch of edits).
+
+## 2026-07-12 — Residue from walrus named-arg work (PR #158, 47e74c1c)
+
+- `NULL::VARCHAR` (top-level cast of NULL, and casts inside named-arg values) fails to
+  parse — likely a parse_expression precedence gap around `::` on NULL/named-arg value
+  positions; fails standalone too, pre-existing. 1 ledger entry recategorized under
+  `smelt_fails_unclassified` carries the actual error (`Expected expression, found DOUBLE_COLON`).
+
+## 2026-07-12 — Final whole-branch review residue (PR #158)
+
+- `SELECT a FROM t UNION (SELECT a FROM t) ORDER BY a` fails to parse (DuckDB accepts;
+  trailing ORDER BY/LIMIT after a parenthesized set-op operand is unhandled in
+  `parse_select_stmt`'s set-op tail). Fail-loud, but the parenthesized form exists precisely
+  to attach a trailing ORDER BY to the whole union — likely the most user-visible hole in
+  the new set-op surface. Same family as the ledgered `((A) UNION B)` scalar-subquery residual.
+- `SELECT {'a': 1}.a` (dot-access on a brace-literal receiver) fails to parse — same class
+  as the ledgered `postfix_dot_field_access_on_parenthesized_expr` (7 entries); fold in.
+- `printer.rs` `Display for TableRef` final raw-text `else` fallback: believed unreachable
+  now that subquery/nested/identifier branches are explicit, but if ever reached the
+  TABLESAMPLE loop + alias printing after it could double-print — add a defensive early
+  return when touching this next.
+- `ast.rs` `strip_ident_quotes` handles `"…"`/`'…'` but not `$$…$$` dollar-quoted STRING
+  tokens (e.g. `CollateExpr::collation_name`) — delimiters silently kept if one ever reaches
+  such a call site.

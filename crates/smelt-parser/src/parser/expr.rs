@@ -134,6 +134,28 @@ impl<'a> super::Parser<'a> {
     /// in Data-World positions.  The parser does not gate — it produces the CST
     /// node unconditionally.
     pub(super) fn parse_pipe_expr(&mut self) {
+        // Scope the `in_at_time_zone_operand` guard to the current nesting
+        // level. The guard exists only to keep a *directly chained* `AT TIME
+        // ZONE` out of the tz operand — that chain path runs through
+        // `parse_unary_expr` → `parse_primary_expr` and never enters this
+        // function, so clearing here cannot break left-associative chaining.
+        // Every nested sub-context — parenthesized group, subquery select
+        // item, function-call argument, CASE WHEN/THEN/ELSE arm, ternary
+        // slot, list spread, bracket list element — funnels through
+        // `parse_pipe_expr` (directly or via `parse_expression`), and each
+        // starts a fresh expression where `AT TIME ZONE` must parse normally
+        // again (e.g. `ts AT TIME ZONE (b AT TIME ZONE 'UTC')` or
+        // `ts AT TIME ZONE CASE WHEN p THEN b AT TIME ZONE 'UTC' ELSE c END`,
+        // both of which DuckDB's parser accepts).
+        let saved_in_at_time_zone_operand = self.in_at_time_zone_operand;
+        self.in_at_time_zone_operand = false;
+
+        self.parse_pipe_expr_impl();
+
+        self.in_at_time_zone_operand = saved_in_at_time_zone_operand;
+    }
+
+    fn parse_pipe_expr_impl(&mut self) {
         // Use a checkpoint so we can wrap the already-parsed LHS inside
         // a PIPE_EXPR node when we encounter `|>`.
         let checkpoint = self.builder.checkpoint();
@@ -272,10 +294,12 @@ impl<'a> super::Parser<'a> {
                 self.start_node_at(checkpoint, IN_EXPR);
                 self.parse_in_body();
                 self.finish_node();
-            } else if self.at(LIKE_KW) || self.at(ILIKE_KW) {
-                // LIKE / ILIKE pattern
+            } else if self.at(LIKE_KW) || self.at(ILIKE_KW) || self.at(GLOB_KW) {
+                // LIKE / ILIKE / GLOB pattern. DuckDB rejects `NOT GLOB` (verified
+                // via the oracle), matching the existing NOT LIKE limitation, so
+                // there is no dedicated NOT-prefixed form here.
                 self.start_node_at(checkpoint, BINARY_EXPR);
-                self.advance(); // consume LIKE/ILIKE
+                self.advance(); // consume LIKE/ILIKE/GLOB
                 self.skip_trivia();
                 self.parse_collate_expr();
                 self.finish_node();
@@ -423,10 +447,32 @@ impl<'a> super::Parser<'a> {
 
     pub(super) fn parse_multiplicative_expr(&mut self) {
         let checkpoint = self.builder.checkpoint();
+        self.parse_power_expr();
+
+        self.skip_trivia();
+        while self.at_any(&[STAR, DIVIDE, PERCENT, FLOOR_DIVIDE]) {
+            self.start_node_at(checkpoint, BINARY_EXPR);
+            self.advance();
+            self.skip_trivia();
+            self.parse_power_expr();
+            self.skip_trivia();
+            self.finish_node();
+        }
+    }
+
+    /// DuckDB power operator: `**` and `^` (synonyms). Binds tighter than
+    /// `*`/`/`/`%`/`//` but looser than unary `-`/`NOT` (verified against a
+    /// real DuckDB: `-2 ** 2` is `4`, not `-4` — unary minus applies to `2`
+    /// before exponentiation, so the base operand is parsed via
+    /// `parse_unary_expr`, not `parse_primary_expr` directly). Left-
+    /// associative (verified: `2 ** 3 ** 2` is `64` == `(2**3)**2`, not the
+    /// mathematically-conventional right-associative `512`).
+    pub(super) fn parse_power_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_unary_expr();
 
         self.skip_trivia();
-        while self.at_any(&[STAR, DIVIDE, PERCENT]) {
+        while self.at_any(&[DOUBLE_STAR, CARET]) {
             self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
@@ -458,19 +504,17 @@ impl<'a> super::Parser<'a> {
         // MAP_METHOD_CALL loop below can retroactively wrap the entire primary
         // (SMELT_PATH_CALL, FUNCTION_CALL, etc.) inside a MAP_METHOD_CALL node
         // when the primary is followed by `.method()` with a known Map API name.
-        // This is safe for NULL_KW (which returns early) because NULL cannot be
-        // a Map receiver.
         let primary_checkpoint = self.builder.checkpoint();
 
         if self.at(NULL_KW) {
-            // NULL literal — wrap in EXPRESSION so Expr::cast() works
+            // NULL literal — wrap in EXPRESSION so Expr::cast() works. Falls
+            // through (no early `return`) to the postfix loops below so
+            // `NULL::TYPE` casts parse (DuckDB accepts `NULL::UHUGEINT`
+            // etc. — verified against a real DuckDB).
             self.start_node(EXPRESSION);
             self.advance();
             self.finish_node();
-            return;
-        }
-
-        if self.at(ARRAY_KW) && self.is_keyword_followed_by_lbracket() {
+        } else if self.at(ARRAY_KW) && self.is_keyword_followed_by_lbracket() {
             self.parse_array_literal();
         } else if self.at(ARRAY_KW) && self.is_keyword_followed_by_lparen() {
             // ARRAY(expr) function-call style
@@ -508,10 +552,19 @@ impl<'a> super::Parser<'a> {
             self.advance(); // consume LPAREN
             self.skip_trivia();
 
-            // Check if it's a subquery (starts with SELECT)
-            if self.at(SELECT_KW) {
+            // Check if it's a subquery (starts with SELECT, or WITH for a
+            // CTE-scoped subquery, or is itself a nested parenthesized
+            // query — e.g. `((SELECT 2) UNION SELECT 2)`, whose set-op
+            // left operand is parenthesized).
+            if self.at(SELECT_KW) || self.at(WITH_KW) {
                 self.start_node_at(checkpoint, SUBQUERY);
                 self.parse_select_stmt();
+                self.skip_trivia();
+                self.expect(RPAREN);
+                self.finish_node();
+            } else if self.at(LPAREN) && self.at_parenthesized_query_start() {
+                self.start_node_at(checkpoint, SUBQUERY);
+                self.parse_query_expr();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();
@@ -543,6 +596,12 @@ impl<'a> super::Parser<'a> {
                 self.start_node_at(checkpoint, EXPRESSION);
                 self.finish_node();
             }
+        } else if self.at(IDENT) && self.is_map_literal_start() {
+            // DuckDB MAP {…} literal: contextual `MAP` identifier directly
+            // followed by `{`. `MAP` is otherwise a plain identifier — this
+            // guard only fires on `IDENT("MAP") LBRACE`, so `MAP(a, b)` calls
+            // and a bare column named `map` are unaffected.
+            self.parse_map_literal();
         } else if self.at(IDENT) && self.is_typed_literal() {
             // Typed literal: DATE '2024-01-01', TIMESTAMP '...', etc.
             // Wrap in EXPRESSION so Expr::cast() works
@@ -673,7 +732,20 @@ impl<'a> super::Parser<'a> {
                 } else {
                     // Simple function call: func()
                     self.start_node_at(checkpoint, FUNCTION_CALL);
-                    self.parse_arg_list();
+                    // TRIM/SUBSTRING/POSITION additionally accept SQL-standard
+                    // keyword-argument forms (`TRIM(BOTH … FROM …)`,
+                    // `SUBSTRING(x FROM i FOR n)`, `POSITION(sub IN str)`);
+                    // dispatch to their dedicated arg-list parsers, which also
+                    // handle the regular comma-separated call forms.
+                    if ident_text.eq_ignore_ascii_case("trim") {
+                        self.parse_trim_arg_list();
+                    } else if ident_text.eq_ignore_ascii_case("substring") {
+                        self.parse_substring_arg_list();
+                    } else if ident_text.eq_ignore_ascii_case("position") {
+                        self.parse_position_arg_list();
+                    } else {
+                        self.parse_arg_list();
+                    }
                     self.parse_within_group_if_present();
                     self.parse_filter_clause_if_present();
                     self.finish_node();
@@ -685,18 +757,32 @@ impl<'a> super::Parser<'a> {
                     }
                 }
             } else if self.at(DOT) {
-                // Could be table.column, namespace.func(), or map.method()
-                self.advance(); // consume DOT
-                self.skip_trivia();
-                // Peek at the method name before consuming, so we can decide
-                // whether to emit MAP_METHOD_CALL vs FUNCTION_CALL.
-                let method_name = if self.at(IDENT) {
-                    Some(self.current_text().to_string())
-                } else {
-                    None
-                };
-                self.expect(IDENT); // consume second IDENT
-                self.skip_trivia();
+                // Could be table.column, a chained dotted path (a.b.c…, e.g.
+                // a nested-struct field-access chain or a schema-qualified
+                // column: db.schema.table.col), namespace.func(), or
+                // map.method(). Consume DOT + IDENT pairs in a loop so any
+                // chain depth is accepted; only the *last* segment before a
+                // trailing `(` is examined to decide FUNCTION_CALL vs
+                // MAP_METHOD_CALL, matching the previous two-segment-only
+                // behaviour for that decision.
+                let mut method_name: Option<String> = None;
+                while self.at(DOT) {
+                    self.advance(); // consume DOT
+                    self.skip_trivia();
+                    // Peek at this segment's name before consuming, so we can
+                    // decide whether to emit MAP_METHOD_CALL vs FUNCTION_CALL
+                    // once the chain ends.
+                    method_name = if self.at(IDENT) {
+                        Some(self.current_text().to_string())
+                    } else {
+                        None
+                    };
+                    self.expect(IDENT); // consume next segment IDENT
+                    self.skip_trivia();
+                    if self.at(LPAREN) || !self.at(DOT) {
+                        break;
+                    }
+                }
 
                 if self.at(LPAREN) {
                     // Determine whether to emit MAP_METHOD_CALL or FUNCTION_CALL.
@@ -726,7 +812,9 @@ impl<'a> super::Parser<'a> {
                         }
                     }
                 } else {
-                    // Qualified name (table.column) — wrap in EXPRESSION
+                    // Qualified name / chained dot field-access path
+                    // (table.column, db.schema.table.col, a.b.c…) — wrap in
+                    // EXPRESSION regardless of chain depth.
                     self.start_node_at(checkpoint, EXPRESSION);
                     self.finish_node();
                 }
@@ -827,6 +915,40 @@ impl<'a> super::Parser<'a> {
             self.finish_node(); // CAST_EXPR
             self.skip_trivia();
         }
+
+        // Postfix: `expr AT TIME ZONE tz_expr` (PostgreSQL/DuckDB timezone
+        // conversion). `AT`, `TIME`, `ZONE` are contextual keywords (lexed as
+        // IDENT) — `peek_at_time_zone` verifies the full three-token sequence
+        // before committing, so a bare `AT` (e.g. an implicit select-item
+        // alias, `SELECT ts at FROM t`) is left untouched. Binds tighter than
+        // arithmetic/comparison (verified via the DuckDB oracle: `ts AT TIME
+        // ZONE 'UTC' + INTERVAL 1 HOUR` groups as `(ts AT TIME ZONE 'UTC') +
+        // INTERVAL 1 HOUR`) and left-associates so it chains: `ts AT TIME
+        // ZONE 'UTC' AT TIME ZONE 'EST'` groups as `(ts AT TIME ZONE 'UTC')
+        // AT TIME ZONE 'EST'` (also verified via the oracle). The right-hand
+        // timezone operand parses at `parse_unary_expr` level (a bare
+        // string/identifier/parenthesized expr, per the oracle), so a
+        // trailing lower-precedence operator (`+`, comparison, …) is left for
+        // the outer expression rather than swallowed into the tz operand.
+        self.skip_trivia();
+        while !self.in_at_time_zone_operand && self.peek_at_time_zone() {
+            self.start_node_at(primary_checkpoint, AT_TIME_ZONE_EXPR);
+            self.advance(); // consume AT
+            self.skip_trivia();
+            self.advance(); // consume TIME
+            self.skip_trivia();
+            self.advance(); // consume ZONE
+            self.skip_trivia();
+            // Parse the timezone operand with the guard set so a chained `AT
+            // TIME ZONE` is left for *this* loop (left-associative), not
+            // swallowed into the operand (see `in_at_time_zone_operand` doc).
+            let was_in_operand = self.in_at_time_zone_operand;
+            self.in_at_time_zone_operand = true;
+            self.parse_unary_expr();
+            self.in_at_time_zone_operand = was_in_operand;
+            self.finish_node(); // AT_TIME_ZONE_EXPR
+            self.skip_trivia();
+        }
     }
 
     pub(super) fn parse_array_subscript(&mut self) {
@@ -922,6 +1044,12 @@ impl<'a> super::Parser<'a> {
             self.skip_trivia();
             if self.at(COMMA) {
                 self.advance();
+                self.skip_trivia();
+                if !self.at(LPAREN) {
+                    // Trailing comma after the last row — DuckDB accepts
+                    // `VALUES (1, 2),` with nothing following the comma.
+                    break;
+                }
             } else {
                 break;
             }
@@ -953,10 +1081,13 @@ impl<'a> super::Parser<'a> {
         self.finish_node();
     }
 
-    /// Parse a bracket-only list literal: `[a, b, c]` (Phase 1 meta-language).
+    /// Parse a bracket-only list literal: `[a, b, c]` (Phase 1 meta-language),
+    /// or a DuckDB list comprehension: `[expr FOR ident IN list (IF cond)?]`.
     ///
-    /// Reuses the `ARRAY_LITERAL` CST kind — the type checker distinguishes
-    /// meta `List<T>` from Data-World `Array<U>` in a later phase.
+    /// Reuses the `ARRAY_LITERAL` CST kind for the plain-list form — the type
+    /// checker distinguishes meta `List<T>` from Data-World `Array<U>` in a
+    /// later phase. The comprehension form is a dedicated `LIST_COMPREHENSION`
+    /// node (see its doc comment in `syntax_kind.rs`).
     ///
     /// Features:
     /// - Trailing comma allowed: `[a, b, c,]`
@@ -965,35 +1096,64 @@ impl<'a> super::Parser<'a> {
     /// - Nested: `[[1, 2], [3, 4]]`
     /// - Spread elements: `[...xs, a]`
     /// - Error recovery: unterminated `[a, b` does not crash the parser.
+    /// - List comprehension: `[x + 1 FOR x IN [1, 2, 3]]`, optionally filtered
+    ///   with `[x FOR x IN [1, 2, 3] IF x > 1]`. `FOR` is only recognized
+    ///   immediately after the first (and only) element expression — a
+    ///   comma-separated list never switches into comprehension form, matching
+    ///   DuckDB (`[1, 2 FOR x IN y]` is a syntax error there too).
     pub(super) fn parse_bracket_list_literal(&mut self) {
-        self.start_node(ARRAY_LITERAL);
+        let checkpoint = self.builder.checkpoint();
         self.advance(); // consume `[`
+        self.skip_trivia();
 
-        loop {
-            self.skip_trivia();
-            if self.at(RBRACKET) || self.at(EOF) {
-                break;
-            }
-            // Spread inside list literal: `...xs`
-            if self.at(DOT_DOT_DOT) {
-                self.parse_list_spread();
+        if self.at(RBRACKET) || self.at(EOF) {
+            // Empty list literal: `[]`.
+            self.start_node_at(checkpoint, ARRAY_LITERAL);
+            if self.at(RBRACKET) {
+                self.advance();
             } else {
-                self.parse_expression();
+                self.error("Expected `]` to close list literal".to_string());
             }
-            self.skip_trivia();
+            self.finish_node(); // ARRAY_LITERAL
+            return;
+        }
+
+        // Parse the first element (spread or expression) before deciding
+        // whether this is a plain list literal or a comprehension.
+        if self.at(DOT_DOT_DOT) {
+            self.parse_list_spread();
+        } else {
+            self.parse_expression();
+        }
+        self.skip_trivia();
+
+        if self.is_comprehension_for_start() {
+            self.start_node_at(checkpoint, LIST_COMPREHENSION);
+            self.parse_list_comprehension_tail();
+            self.finish_node(); // LIST_COMPREHENSION
+            return;
+        }
+
+        self.start_node_at(checkpoint, ARRAY_LITERAL);
+        loop {
             if self.at(COMMA) {
                 self.advance();
                 self.skip_trivia();
                 // Allow trailing comma — stop if the next token closes the list.
-                if self.at(RBRACKET) {
+                if self.at(RBRACKET) || self.at(EOF) {
                     break;
                 }
+                if self.at(DOT_DOT_DOT) {
+                    self.parse_list_spread();
+                } else {
+                    self.parse_expression();
+                }
+                self.skip_trivia();
             } else {
                 break;
             }
         }
 
-        self.skip_trivia();
         if self.at(RBRACKET) {
             self.advance(); // consume `]`
         } else {
@@ -1001,6 +1161,58 @@ impl<'a> super::Parser<'a> {
         }
 
         self.finish_node(); // ARRAY_LITERAL
+    }
+
+    /// Check whether the current token is the contextual `FOR` keyword that
+    /// starts a list comprehension tail. `FOR` is not a reserved keyword —
+    /// it is lexed as a plain `IDENT` and only recognized here, immediately
+    /// after a bracket list literal's first element expression.
+    pub(super) fn is_comprehension_for_start(&self) -> bool {
+        self.at(IDENT) && self.current_text().eq_ignore_ascii_case("FOR")
+    }
+
+    /// Parse the tail of a list comprehension after the element expression
+    /// has already been parsed: `FOR ident IN list (IF cond)? ]`.
+    ///
+    /// Verified against DuckDB: exactly one `FOR … IN …` clause is accepted
+    /// (chained `FOR x IN a FOR y IN b` is a syntax error there), and `IF`
+    /// may only appear after the IN-list expression.
+    fn parse_list_comprehension_tail(&mut self) {
+        self.advance(); // consume `FOR` (contextual IDENT)
+        self.skip_trivia();
+
+        self.start_node(LIST_COMPREHENSION_VAR);
+        if self.at(IDENT) {
+            self.advance();
+        } else {
+            self.error(
+                "Expected loop variable identifier after FOR in list comprehension".to_string(),
+            );
+        }
+        self.finish_node(); // LIST_COMPREHENSION_VAR
+        self.skip_trivia();
+
+        if self.at(IN_KW) {
+            self.advance();
+        } else {
+            self.error("Expected IN after loop variable in list comprehension".to_string());
+        }
+        self.skip_trivia();
+        self.parse_expression(); // source list expression
+        self.skip_trivia();
+
+        if self.at(IF_KW) {
+            self.advance();
+            self.skip_trivia();
+            self.parse_expression(); // filter condition
+            self.skip_trivia();
+        }
+
+        if self.at(RBRACKET) {
+            self.advance();
+        } else {
+            self.error("Expected `]` to close list comprehension".to_string());
+        }
     }
 
     /// Parse a list spread: `...expr`.
@@ -1315,6 +1527,180 @@ impl<'a> super::Parser<'a> {
         self.finish_node();
     }
 
+    /// Look ahead from the current position (which must be immediately after
+    /// the `(` of a call's argument list) for a top-level `FROM` keyword
+    /// before the matching `)`, without consuming any tokens. Depth tracks
+    /// nested parens so a `FROM` inside a nested call/subquery doesn't count.
+    ///
+    /// Used only to disambiguate the SQL-standard `TRIM([BOTH|LEADING|TRAILING]
+    /// … FROM …)` form from a plain call whose sole/first argument happens to
+    /// be a bare identifier that reads like a trim-modifier keyword (`BOTH`,
+    /// `LEADING`, `TRAILING` are contextual, not reserved, keywords).
+    fn peek_top_level_from_before_close_paren(&self) -> bool {
+        let mut depth: i32 = 0;
+        let mut idx = self.pos;
+        while let Some(tok) = self.tokens.get(idx) {
+            match tok.kind {
+                LPAREN => depth += 1,
+                RPAREN => {
+                    if depth == 0 {
+                        return false;
+                    }
+                    depth -= 1;
+                }
+                FROM_KW if depth == 0 => return true,
+                _ => {}
+            }
+            idx += 1;
+        }
+        false
+    }
+
+    /// Parse the argument list of a `TRIM(...)` call.
+    ///
+    /// Handles both the regular comma-separated form (`TRIM(x)`,
+    /// `TRIM(x, chars)`) and the SQL-standard keyword form
+    /// `TRIM([BOTH|LEADING|TRAILING] [chars] FROM string)` / `TRIM(FROM
+    /// string)`, which DuckDB also accepts (closes the `duckdb_trim_modifier`
+    /// gap in `crates/smelt-parser-compat/src/gaps.rs`). The value
+    /// sub-expressions are parsed as ordinary `EXPRESSION` nodes (via
+    /// `parse_expression`), in source order, so `FunctionCall::arguments()`
+    /// sees them exactly as it would for a plain call — the modifier/`FROM`
+    /// keyword tokens are plain children of `ARG_LIST`, not wrapped in an
+    /// argument node, so type inference (which reuses the existing
+    /// TRIM/SUBSTRING/POSITION function-call typing) is unaffected.
+    pub(super) fn parse_trim_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        let at_modifier_kw = self.at_contextual_keyword("BOTH")
+            || self.at_contextual_keyword("LEADING")
+            || self.at_contextual_keyword("TRAILING");
+        let is_std_form =
+            self.at(FROM_KW) || (at_modifier_kw && self.peek_top_level_from_before_close_paren());
+
+        if is_std_form {
+            if at_modifier_kw {
+                self.advance(); // consume BOTH / LEADING / TRAILING
+                self.skip_trivia();
+            }
+            if !self.at(FROM_KW) {
+                self.parse_expression(); // optional trim characters
+                self.skip_trivia();
+            }
+            if !self.expect(FROM_KW) {
+                self.error("Expected FROM in TRIM expression".to_string());
+            }
+            self.skip_trivia();
+            self.parse_expression(); // string to trim
+            self.skip_trivia();
+        } else if !self.at(RPAREN) {
+            loop {
+                self.parse_argument();
+
+                self.skip_trivia();
+                if self.at(COMMA) {
+                    self.advance();
+                    self.skip_trivia();
+                } else {
+                    break;
+                }
+            }
+        }
+
+        self.parse_null_treatment_if_present();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Parse the argument list of a `SUBSTRING(...)` call.
+    ///
+    /// Handles the regular comma-separated form (`SUBSTRING(x)`,
+    /// `SUBSTRING(x, start[, len])`) and the SQL-standard keyword form
+    /// `SUBSTRING(x FROM start [FOR len])` (also `SUBSTRING(x FOR len)`,
+    /// which DuckDB accepts with an implied start of 1) — closes the
+    /// `duckdb_substring_from_for` gap. `FROM`/`FOR` are unambiguous once the
+    /// first argument has been parsed: no other grammar construct expects a
+    /// bare `FROM` or contextual `FOR` immediately after a call argument, so
+    /// no lookahead is needed (unlike TRIM's modifier keywords).
+    pub(super) fn parse_substring_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        if !self.at(RPAREN) {
+            self.parse_argument(); // string expression
+            self.skip_trivia();
+
+            if self.at(FROM_KW) {
+                self.advance();
+                self.skip_trivia();
+                self.parse_expression(); // start position
+                self.skip_trivia();
+                if self.at_contextual_keyword("FOR") {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_expression(); // length
+                    self.skip_trivia();
+                }
+            } else if self.at_contextual_keyword("FOR") {
+                self.advance();
+                self.skip_trivia();
+                self.parse_expression(); // length (implied start of 1)
+                self.skip_trivia();
+            } else {
+                while self.at(COMMA) {
+                    self.advance();
+                    self.skip_trivia();
+                    self.parse_argument();
+                    self.skip_trivia();
+                }
+            }
+        }
+
+        self.parse_null_treatment_if_present();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Parse the argument list of a `POSITION(...)` call.
+    ///
+    /// Handles the SQL-standard keyword form `POSITION(sub IN string)` —
+    /// closes the `duckdb_position_in` gap. DuckDB does not accept a
+    /// comma-separated `POSITION(sub, string)` form (use `STRPOS` for that),
+    /// so no comma fallback is provided here; a plain `IDENT(...)` call with
+    /// commas still reaches this function but will error on the unexpected
+    /// `,`/trailing tokens the same way it would for any other malformed
+    /// call, which is acceptable since DuckDB itself rejects that form.
+    ///
+    /// The left operand is parsed at `parse_concat_expr` precedence (below
+    /// the comparison-operator level that owns `IN`) — parsing it via the
+    /// full `parse_expression` would let the comparison-expression loop
+    /// greedily consume the `IN` as the start of an `IN (values…)` clause
+    /// and then fail expecting `(`. This mirrors how `BETWEEN`'s bounds are
+    /// parsed at `parse_additive_expr` to avoid `AND` ambiguity.
+    pub(super) fn parse_position_arg_list(&mut self) {
+        self.start_node(ARG_LIST);
+        self.expect(LPAREN);
+        self.skip_trivia();
+
+        if !self.at(RPAREN) {
+            self.parse_concat_expr(); // substring to search for
+            self.skip_trivia();
+            if !self.expect(IN_KW) {
+                self.error("Expected IN in POSITION expression".to_string());
+            }
+            self.skip_trivia();
+            self.parse_expression(); // string to search within
+            self.skip_trivia();
+        }
+
+        self.parse_null_treatment_if_present();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
     /// Parse an optional `IGNORE NULLS` / `RESPECT NULLS` null-treatment clause.
     ///
     /// `IGNORE` / `RESPECT` are contextual keywords (lexed as `IDENT`), so this
@@ -1621,6 +2007,16 @@ impl<'a> super::Parser<'a> {
             // Phase B: FN_KW — `fn(args)` where `fn` is used as a SQL function name.
             // is_fn_lambda_start() excludes LPAREN already, so fn(args) reaches here.
             FN_KW,
+            // GLOB is a comparison operator keyword, but DuckDB also ships a
+            // glob(pattern) file-listing function. When directly followed by
+            // `(` it is a function name (LEFT()/RIGHT() precedent); otherwise
+            // it is the infix operator.
+            GLOB_KW,
+            // FIRST/LAST are reserved for `ORDER BY ... NULLS FIRST/LAST` and
+            // `FETCH FIRST`, but DuckDB also ships `first(x)`/`last(x)`
+            // aggregate functions. Same LEFT()/RIGHT() precedent: only a
+            // function name when directly followed by `(`.
+            FIRST_KW, LAST_KW,
         ]) {
             return false;
         }
@@ -1639,6 +2035,89 @@ impl<'a> super::Parser<'a> {
             .unwrap_or(false)
     }
 
+    /// Check if current IDENT is the contextual `MAP` keyword immediately
+    /// followed by `{` (skipping trivia). DuckDB's `MAP {'a': 1, 'b': 2}`
+    /// literal syntax. `MAP` is not reserved: `MAP(a, b)` function calls and
+    /// a bare identifier `map` still parse as before, since this only
+    /// matches when `{` follows.
+    pub(super) fn is_map_literal_start(&self) -> bool {
+        let token = self.tokens[self.pos];
+        let text = &self.input[self.offset..self.offset + token.len];
+        if !text.eq_ignore_ascii_case("MAP") {
+            return false;
+        }
+        let mut lookahead = 1;
+        while let Some(t) = self.tokens.get(self.pos + lookahead) {
+            if t.kind.is_trivia() {
+                lookahead += 1;
+            } else {
+                return t.kind == LBRACE;
+            }
+        }
+        false
+    }
+
+    /// Parse a DuckDB MAP literal: `MAP {key: value, …}`.
+    ///
+    /// Items are `MAP_ENTRY` nodes, each wrapping a key `Expr` and a value
+    /// `Expr` separated by `:`. Keys are full expressions (typically string
+    /// or numeric literals), unlike `RECORD_LITERAL`'s bare-IDENT keys.
+    /// Empty `MAP {}` and a trailing comma are both accepted (verified
+    /// against DuckDB).
+    pub(super) fn parse_map_literal(&mut self) {
+        self.start_node(MAP_LITERAL);
+        self.advance(); // consume `MAP` (IDENT)
+        self.skip_trivia();
+        self.expect(LBRACE);
+
+        loop {
+            self.skip_trivia();
+            if self.at(RBRACE) || self.at(EOF) {
+                break;
+            }
+
+            self.start_node(MAP_ENTRY);
+            self.parse_expression(); // key
+            self.skip_trivia();
+            if self.at(COLON) {
+                self.advance(); // COLON
+                self.skip_trivia();
+                if !self.at_any(&[COMMA, RBRACE, EOF]) {
+                    self.parse_expression(); // value
+                } else {
+                    self.error(
+                        "Expected expression value after ':' in MAP literal entry".to_string(),
+                    );
+                }
+            } else {
+                self.error("Expected ':' after key in MAP literal entry".to_string());
+                self.sync_to(&[COMMA, RBRACE, EOF]);
+            }
+            self.finish_node(); // MAP_ENTRY
+
+            self.skip_trivia();
+            if self.at(COMMA) {
+                self.advance();
+                self.skip_trivia();
+                // Trailing comma allowed.
+                if self.at(RBRACE) {
+                    break;
+                }
+            } else {
+                break;
+            }
+        }
+
+        self.skip_trivia();
+        if self.at(RBRACE) {
+            self.advance(); // `}`
+        } else {
+            self.error("Expected '}' to close MAP literal".to_string());
+        }
+
+        self.finish_node(); // MAP_LITERAL
+    }
+
     /// Check if current IDENT is a type keyword followed by a string literal (e.g., DATE '2024-01-01')
     pub(super) fn is_typed_literal(&self) -> bool {
         // Check if current IDENT is a type keyword
@@ -1648,6 +2127,11 @@ impl<'a> super::Parser<'a> {
         if !matches!(
             upper.as_str(),
             "DATE" | "TIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "INTERVAL"
+                // PostgreSQL/DuckDB typed-literal form for the DOUBLE
+                // alias: `float8 '-0.1'` (verified against a real DuckDB:
+                // FLOAT8 is a DOUBLE alias, `float8 '-0.1'` evaluates to
+                // -0.1::DOUBLE).
+                | "FLOAT8"
         ) {
             return false;
         }

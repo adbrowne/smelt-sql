@@ -3,8 +3,8 @@
 #![allow(unused_imports)]
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall, RowConstructor,
-    SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
+    BinaryExpr, BraceStructLiteral, CaseExpr, CastExpr, Cte, Expr, ExtractExpr, FunctionCall,
+    RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
@@ -69,6 +69,56 @@ pub fn infer_array_literal_type(
     Some(TypedColumn {
         data_type: DataType::Array(Box::new(elem_type)),
         nullable: false, // The array itself is not nullable; elements may be
+    })
+}
+
+/// Infer the type of a list comprehension (`[expr FOR x IN list (IF cond)?]`,
+/// DuckDB). The result is always `Array<T>`, matching DuckDB's typing.
+///
+/// Typing strategy: the loop variable `x` binds inside `expr` (and the
+/// optional `IF` filter), but smelt's `TypeContext` has no mechanism to bind
+/// a scoped scalar name for the duration of a sub-expression's inference —
+/// that's meta-language lambda-parameter machinery this expression form
+/// doesn't otherwise need. Rather than build that machinery for one
+/// construct, we special-case the common, staticaly-resolvable shape:
+///
+/// - **Bare-variable element** (`[x FOR x IN list]`, filter present or not):
+///   the result element type is exactly the source list's element type — no
+///   binding is needed because the "expression" IS the loop variable.
+/// - **Any other element expression** (`[x + 1 FOR x IN list]`,
+///   `[f(x) FOR x IN list]`, …): the element type depends on `x`'s bound
+///   type inside a scope this function cannot construct, so the element type
+///   is classified `Unknown` (`unknown_dynamic` — legitimately unknowable
+///   here, not a diagnosable gap; see `.claude/unknown-census.toml` census
+///   discipline, which this call is exempt from since it never spells
+///   `DataType::Unknown` directly, matching the empty-array-literal
+///   precedent above).
+pub fn infer_list_comprehension_type(
+    comp: &smelt_parser::ast::ListComprehension,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    let source = comp.source()?;
+    let source_typed = infer_expression_type(&source, ctx)?;
+    let source_elem_type = match &source_typed.data_type {
+        DataType::Array(inner) => (**inner).clone(),
+        _ => DataType::unknown_dynamic(),
+    };
+
+    let element = comp.element()?;
+    let is_bare_loop_var = comp
+        .var_name()
+        .zip(element.as_column_ref())
+        .is_some_and(|(var, col)| col.qualifier().is_none() && col.name() == var);
+
+    let result_elem_type = if is_bare_loop_var {
+        source_elem_type
+    } else {
+        DataType::unknown_dynamic()
+    };
+
+    Some(TypedColumn {
+        data_type: DataType::Array(Box::new(result_elem_type)),
+        nullable: false,
     })
 }
 
@@ -163,4 +213,146 @@ pub fn infer_struct_literal_type(
         data_type: DataType::Struct(fields),
         nullable: false, // The struct itself is not nullable
     })
+}
+
+/// Infer the type of a MAP literal (DuckDB `MAP {'a': 1, 'b': 2}`) as
+/// `Map(key_type, value_type)`.
+///
+/// Key types are unified across all entries the same way array-literal
+/// elements are unified (first non-NULL entry sets the type; later entries
+/// must match or promote); value types are unified independently. Mixed,
+/// non-promotable key or value types reject inference (`None`), matching
+/// `infer_array_literal_type`. Empty `MAP {}` infers `Map(Unknown, Unknown)`
+/// — DuckDB itself defaults an empty map's key/value types to INTEGER, but
+/// smelt follows the array-literal precedent (`Array(Unknown)` for `[]`)
+/// rather than encoding that engine-specific quirk.
+pub fn infer_map_literal_type(
+    map_lit: &smelt_parser::ast::MapLiteral,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    let entries = map_lit.entries();
+
+    if entries.is_empty() {
+        return Some(TypedColumn {
+            data_type: DataType::Map(
+                Box::new(DataType::unknown_dynamic()),
+                Box::new(DataType::unknown_dynamic()),
+            ),
+            nullable: false,
+        });
+    }
+
+    let mut key_typed: Option<TypedColumn> = None;
+    let mut value_typed: Option<TypedColumn> = None;
+
+    for entry in &entries {
+        let key_expr = entry.key()?;
+        let value_expr = entry.value()?;
+
+        let key_ty = infer_expression_type(&key_expr, ctx)?;
+        let value_ty = infer_expression_type(&value_expr, ctx)?;
+
+        key_typed = unify_entry_type(key_typed, key_ty)?;
+        value_typed = unify_entry_type(value_typed, value_ty)?;
+    }
+
+    let key_type = key_typed.map(|t| t.data_type).unwrap_or(DataType::Null);
+    let value_type = value_typed.map(|t| t.data_type).unwrap_or(DataType::Null);
+
+    Some(TypedColumn {
+        data_type: DataType::Map(Box::new(key_type), Box::new(value_type)),
+        nullable: false, // The map itself is not nullable; keys/values may be
+    })
+}
+
+/// Infer the type of a DuckDB struct/dict literal field the SQL way, i.e. the
+/// `{'a': 1, 'b': 2}` / `{a: 1, b: 2}` `key: value` form of a
+/// `BRACE_STRUCT_LITERAL` — as `Struct(fields)`, field name taken from the
+/// key.
+///
+/// A `BRACE_STRUCT_LITERAL` is also the parse of the unrelated meta-language
+/// `{expr AS alias, ..spread}` literal (Phase 35, used in `smelt.define`
+/// bodies): each field there has no key, and the whole literal may contain a
+/// `SPREAD_ITEM`. Neither is DuckDB struct/dict-literal syntax, so this
+/// function returns `None` for both — any `SPREAD_ITEM`, or any field whose
+/// `duckdb_key()` is absent — letting the caller's normal dispatch fall
+/// through instead of mistyping a meta-language construct as a SQL struct.
+///
+/// Key-name extraction mirrors DuckDB's own field-naming: a string-literal
+/// key (single- or double-quoted) contributes its unquoted content; a bare
+/// identifier key contributes its text; anything else falls back to the
+/// same positional `v{i+1}` naming `infer_struct_literal_type` uses for an
+/// unnamed `STRUCT(...)` field.
+pub fn infer_brace_struct_literal_type(
+    brace_lit: &BraceStructLiteral,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    // A DuckDB struct/dict literal never spreads; a SPREAD_ITEM means this
+    // is the meta-language literal instead.
+    if brace_lit.spread_items().next().is_some() {
+        return None;
+    }
+
+    let mut fields = Vec::new();
+    for (i, item) in brace_lit.field_items().enumerate() {
+        let key_expr = item.duckdb_key()?;
+        let value_expr = item.expression()?;
+
+        let field_name =
+            struct_field_name_from_key(&key_expr).unwrap_or_else(|| format!("v{}", i + 1));
+        let typed = infer_expression_type(&value_expr, ctx)?;
+        fields.push((field_name, typed.data_type));
+    }
+
+    Some(TypedColumn {
+        data_type: DataType::Struct(fields),
+        nullable: false, // The struct itself is not nullable
+    })
+}
+
+/// Extract a struct field name from a DuckDB struct/dict literal's key
+/// expression: unquoted string-literal content, or a bare identifier's text.
+/// `None` for any other key expression shape (e.g. a numeric or computed
+/// key), which callers fall back to positional naming for.
+fn struct_field_name_from_key(key_expr: &Expr) -> Option<String> {
+    if let Some(text) = crate::config_vars::extract_string_literal_value(key_expr) {
+        return Some(text);
+    }
+    let col_ref = key_expr.as_column_ref()?;
+    if col_ref.qualifier().is_some() {
+        return None;
+    }
+    Some(col_ref.name().to_string())
+}
+
+/// Fold one more entry's typed column into a running unification, mirroring
+/// `infer_array_literal_type`'s element-unification loop: NULL is compatible
+/// with anything, the first non-NULL entry sets the type, and later entries
+/// must match or promote. Returns `None` when types can't be promoted.
+fn unify_entry_type(
+    running: Option<TypedColumn>,
+    next: TypedColumn,
+) -> Option<Option<TypedColumn>> {
+    match running {
+        None => {
+            if next.data_type == DataType::Null {
+                Some(None)
+            } else {
+                Some(Some(next))
+            }
+        }
+        Some(existing) => {
+            if next.data_type == DataType::Null {
+                return Some(Some(existing));
+            }
+            if next.data_type != existing.data_type {
+                let promoted = promote_types(&existing, &next);
+                if promoted.data_type.is_unknown() {
+                    return None;
+                }
+                return Some(Some(promoted));
+            }
+            Some(Some(existing))
+        }
+    }
 }

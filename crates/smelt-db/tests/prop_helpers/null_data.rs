@@ -56,12 +56,17 @@ fn non_null_literal(dt: &DataType, row_idx: usize) -> String {
             let day = (row_idx % 28) as i32 + 1;
             format!("CAST('{year:04}-{month:02}-{day:02}' AS DATE)")
         }
-        DataType::Timestamp { .. } => {
+        DataType::Timestamp { with_timezone } => {
             let year = 2000 + (row_idx % 24) as i32;
             let month = (row_idx % 12) as i32 + 1;
             let day = (row_idx % 28) as i32 + 1;
             let hour = row_idx % 24;
-            format!("CAST('{year:04}-{month:02}-{day:02} {hour:02}:00:00' AS TIMESTAMP)")
+            let type_str = if *with_timezone {
+                "TIMESTAMPTZ"
+            } else {
+                "TIMESTAMP"
+            };
+            format!("CAST('{year:04}-{month:02}-{day:02} {hour:02}:00:00' AS {type_str})")
         }
         DataType::Time => {
             let hour = row_idx % 24;
@@ -88,7 +93,16 @@ fn sql_type_name(dt: &DataType) -> &'static str {
         DataType::Decimal { .. } => "DECIMAL(10,2)",
         DataType::Varchar { .. } | DataType::Text | DataType::Char { .. } => "VARCHAR",
         DataType::Date => "DATE",
-        DataType::Timestamp { .. } => "TIMESTAMP",
+        // `with_timezone: true` sources must be stored as TIMESTAMPTZ in the real
+        // table — collapsing both variants to plain TIMESTAMP (as before this fix)
+        // silently dropped the tz-aware storage semantics the column pool's
+        // tz-mixing weight (see `column_pool_strategy`) is meant to exercise.
+        DataType::Timestamp {
+            with_timezone: true,
+        } => "TIMESTAMPTZ",
+        DataType::Timestamp {
+            with_timezone: false,
+        } => "TIMESTAMP",
         DataType::Time => "TIME",
         DataType::Interval => "INTERVAL",
         DataType::Blob => "BLOB",

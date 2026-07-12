@@ -164,7 +164,7 @@ pub fn resolve_cell_choice(
 ) -> Result<ChosenTechnique, ChoiceRefusal> {
     let cell = plan.cell_for(trigger);
     let admitted_technique = cell.map(|c| &c.technique);
-    let live = admitted_technique.is_some_and(|t| match t {
+    let live_technique = admitted_technique.filter(|t| match t {
         Technique::ColumnScopedMerge => backend_supports_column_scoped_merge,
         _ => true,
     });
@@ -204,13 +204,10 @@ pub fn resolve_cell_choice(
     // never refuses.
     match overrides.prefer {
         Some(TechniquePreference::Recompute) => Ok(ChosenTechnique::RegionRecompute),
-        Some(TechniquePreference::Fold) if live => Ok(ChosenTechnique::Admitted(
-            admitted_technique.expect("live implies Some").clone(),
-        )),
-        _ if live => Ok(ChosenTechnique::Admitted(
-            admitted_technique.expect("live implies Some").clone(),
-        )),
-        _ => Ok(ChosenTechnique::RegionRecompute),
+        _ => match live_technique {
+            Some(t) => Ok(ChosenTechnique::Admitted(t.clone())),
+            None => Ok(ChosenTechnique::RegionRecompute),
+        },
     }
 }
 

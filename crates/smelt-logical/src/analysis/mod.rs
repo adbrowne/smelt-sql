@@ -110,6 +110,21 @@ pub fn classify_select_items(
             }
         }
 
+        // Window-function projections (`ROW_NUMBER() OVER (...)`, etc.) are
+        // neither an aggregate nor a plain grouping expression: DuckDB never
+        // treats a window item as a `GROUP BY ALL` key. Route it to the
+        // non-key `OtherAggregate` kind so every consumer of grouping keys
+        // (`group_by_all_keys` and friends) excludes it, the same way it
+        // already excludes real aggregates.
+        if expr.window_spec().is_some() {
+            items.push(SelectItemKind::OtherAggregate {
+                text: expr_text,
+                alias,
+                expr: expr.clone(),
+            });
+            continue;
+        }
+
         items.push(SelectItemKind::GroupByKey {
             text: expr_text,
             alias,
@@ -816,6 +831,65 @@ mod tests {
     fn test_scope_group_by_alignment_no_group_by_fails_closed() {
         let select = parse_select("SELECT a, b FROM t");
         assert!(!scope_group_by_alignment(&select, "a").is_aligned());
+    }
+
+    #[test]
+    fn test_grouping_sets_grain_verdict_mirrors_cube_verdict() {
+        // Neither `CUBE(...)` nor `GROUPING SETS (...)` has dedicated
+        // smelt-side grammar for grain/FD purposes — both flow through
+        // `resolve_scope_group_by` as one opaque grouping-key expression
+        // whose text is the whole construct (e.g. "CUBE(event_date, user_id)"
+        // / "GROUPING SETS ((event_date), (user_id))"). That text never
+        // matches a plain projected column name, so both are conservatively
+        // judged `NotAligned` — never a phantom `Aligned` claim that
+        // `event_date` (or any other column) is a genuine grouping key of
+        // this scope. This is the "same verdict class" the GROUPING SETS
+        // implementation is required to mirror from the CUBE/ROLLUP
+        // precedent (there being no richer precedent to match, since neither
+        // gets special-cased grain treatment today).
+        let cube_select = parse_select(
+            "SELECT event_date, user_id, COUNT(*) as cnt FROM events \
+             GROUP BY CUBE(event_date, user_id) HAVING COUNT(*) > 1",
+        );
+        let cube_verdict = scope_group_by_alignment(&cube_select, "event_date");
+        assert!(
+            !cube_verdict.is_aligned(),
+            "CUBE grouping key text never matches a plain column name: {cube_verdict:?}"
+        );
+
+        let grouping_sets_select = parse_select(
+            "SELECT event_date, user_id, COUNT(*) as cnt FROM events \
+             GROUP BY GROUPING SETS ((event_date), (user_id)) HAVING COUNT(*) > 1",
+        );
+        let grouping_sets_verdict = scope_group_by_alignment(&grouping_sets_select, "event_date");
+        assert!(
+            !grouping_sets_verdict.is_aligned(),
+            "GROUPING SETS must mirror CUBE's conservative verdict: {grouping_sets_verdict:?}"
+        );
+
+        // Both land in the same verdict variant (`NotAligned`), not merely
+        // both "not Aligned" by coincidence of different enum shapes.
+        assert!(matches!(
+            cube_verdict,
+            PartitionAlignment::NotAligned { .. }
+        ));
+        assert!(matches!(
+            grouping_sets_verdict,
+            PartitionAlignment::NotAligned { .. }
+        ));
+
+        // Sanity: resolve_scope_group_by sees exactly one opaque key for
+        // each — the whole construct's own text — confirming there is no
+        // phantom expansion into ["event_date", "user_id"].
+        let items = select_stmt_items(&cube_select).unwrap_or_default();
+        let cube_keys = resolve_scope_group_by(&cube_select, &items);
+        assert_eq!(cube_keys.len(), 1);
+        assert!(cube_keys[0].to_uppercase().starts_with("CUBE"));
+
+        let gs_items = select_stmt_items(&grouping_sets_select).unwrap_or_default();
+        let gs_keys = resolve_scope_group_by(&grouping_sets_select, &gs_items);
+        assert_eq!(gs_keys.len(), 1);
+        assert!(gs_keys[0].to_uppercase().starts_with("GROUPING SETS"));
     }
 
     #[test]

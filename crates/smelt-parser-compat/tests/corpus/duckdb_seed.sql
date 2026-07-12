@@ -19,6 +19,7 @@ SELECT last_value(a IGNORE NULLS) OVER (ORDER BY a) AS x FROM t
 SELECT trim(BOTH ' ' FROM b) AS x FROM t
 SELECT substring(b FROM 1 FOR 2) AS x FROM t
 SELECT position('x' IN b) AS x FROM t
+SELECT position(CAST(a = 1 AS VARCHAR) IN b) AS x FROM t
 SELECT overlay(b PLACING 'x' FROM 1 FOR 2) AS x FROM t
 SELECT a FROM t WHERE b LIKE ANY (['a%', 'b%'])
 SELECT $$hello$$ AS x
@@ -30,3 +31,11 @@ SELECT 1_000_000 AS x
 SELECT E'\n' AS x
 SELECT B'0101' AS x
 SELECT INTERVAL 3 MONTH AS x
+SELECT ts AT TIME ZONE 'UTC' AS x FROM t
+SELECT CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC' AS x FROM t
+SELECT x FROM (VALUES (1, 2)) AS s(x, y)
+SELECT x FROM (SELECT a, c FROM t) AS s(x, y)
+SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())
+SELECT struct_pack(x := a, y := b) AS s FROM t
+SELECT struct_pack(x => a, y => b) AS s FROM t
+SELECT UNNEST([[1, 2, 3]], recursive := true) AS u
