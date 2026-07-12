@@ -1,7 +1,7 @@
 ---
 feature: batched_models
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-12
 owners: [andrew]
 ---
 
