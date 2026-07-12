@@ -14,6 +14,7 @@
 //! small default case count (`SMELT_CONFORMANCE_CASES` env override — see
 //! `gate.rs`).
 
+mod dags;
 mod gate;
 mod harness_self_check;
 mod probes;

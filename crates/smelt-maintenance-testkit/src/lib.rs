@@ -55,6 +55,11 @@
 //!   write-window containment, technique interchangeability), plus the
 //!   skip-accounting `ReachabilityReport` fold
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 7).
+//! - [`dag`] — generated 2-3 node DAGs (chain, diamond, payload-leak pair)
+//!   wiring [`recipe::ModelRecipe`]-style nodes together via `smelt.ref()`,
+//!   for the propagation-sufficiency/backward-resolution suite in
+//!   `smelt-cli`'s `tests/maintenance_conformance/dags.rs`
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 10).
 //! - [`feed`] — the `SimulatedChangeFeed` step family for `change_feed`-
 //!   declared sources: base-table mutation + staged `(op, key, payload,
 //!   seq)` feed-table bookkeeping, gated retraction/tombstone steps, and the
@@ -62,6 +67,7 @@
 //!   against (`docs/plans/20260712-generative-maintenance-conformance.md`
 //!   Phase 8).
 
+pub mod dag;
 pub mod feed;
 pub mod link_c_harness;
 pub mod model_shapes;
