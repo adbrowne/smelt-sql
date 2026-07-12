@@ -9580,3 +9580,80 @@ fn bare_by_identifier_still_rejected_reserved_keyword() {
         "bare unquoted `by` as a column should remain a parse error"
     );
 }
+
+#[test]
+fn chained_dot_field_access_arbitrary_depth() {
+    for sql in [
+        "SELECT database.schema.table.col FROM database.schema.table",
+        "SELECT * FROM nested_structs WHERE s.a.b < 2",
+        "SELECT t.t.t.t.t.t.t.t FROM t.t",
+        "SELECT s.name.v FROM src WHERE s.nested_struct.b",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn power_and_floor_divide_operators() {
+    for sql in [
+        "SELECT 2 ** 3",
+        "SELECT 2 ^ 3",
+        "SELECT 7 // 2",
+        "SELECT -2 ** 2",
+        "SELECT 2 ** -1",
+        "SELECT 2 * 3 ** 2",
+        "SELECT 2 ** 3 ** 2",
+        "SELECT 7 // 2 * 3",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn power_operator_left_associative_tree_shape() {
+    use crate::ast::BinaryExpr;
+    // `2 ** 3 ** 2` must parse as `(2 ** 3) ** 2` (left-associative), i.e.
+    // the LEFT operand of the outer BINARY_EXPR wraps a nested BINARY_EXPR,
+    // not the right operand. `descendants()` is pre-order, so the first
+    // `**` BINARY_EXPR found is the outermost (widest span).
+    let parse = crate::parse("SELECT 2 ** 3 ** 2");
+    let root = parse.syntax();
+    let outer = root
+        .descendants()
+        .filter(|n| n.kind() == crate::SyntaxKind::BINARY_EXPR)
+        .find(|n| BinaryExpr::cast(n.clone()).and_then(|b| b.operator()) == Some("**".to_string()))
+        .expect("should find a ** BINARY_EXPR");
+    let outer = BinaryExpr::cast(outer).unwrap();
+    let left = outer.left().expect("left operand");
+    let left_is_binary = left.syntax().kind() == crate::SyntaxKind::BINARY_EXPR;
+    assert!(
+        left_is_binary,
+        "left-associative: left operand of outer ** should wrap a nested BINARY_EXPR"
+    );
+}
+
+#[test]
+fn null_literal_supports_cast_and_subscript_postfix() {
+    for sql in [
+        "SELECT NULL::INTEGER",
+        "SELECT NULL::UHUGEINT",
+        "SELECT NULL::UHUGEINT AS x",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}

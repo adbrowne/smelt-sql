@@ -251,6 +251,14 @@ pub fn infer_literal_type(text: &str) -> Option<TypedColumn> {
             nullable: false,
         });
     }
+    // `float8 '-0.1'` — PostgreSQL/DuckDB typed-literal form of the DOUBLE
+    // alias FLOAT8 (verified: FLOAT8 is a DuckDB DOUBLE alias).
+    if upper.starts_with("FLOAT8 ") || upper.starts_with("FLOAT8'") {
+        return Some(TypedColumn {
+            data_type: DataType::Double,
+            nullable: false,
+        });
+    }
 
     None
 }

@@ -59,23 +59,11 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
 
-["24916b695e5f2e68"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["dcfad1c21ca2871b"]
-category = "chained_dot_field_access"
-note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+category = "star_exclude_clause"
+note = "SELECT * EXCLUDE (col_list) is not parsed at all (recategorized: the chained-dot column reference inside the EXCLUDE list now parses fine on its own; the blocker is the missing star-exclude clause grammar, which is out of scope for this pass since it also needs wildcard-expansion semantics in smelt-db)"
 
 ["d4664bad27b9ae0f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["11f5625b7d0ac8bf"]
-category = "chained_dot_field_access"
-note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
-
-["277dc70fd72c7682"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
@@ -83,19 +71,11 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["85371fba64bede9c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["47dcd69c1a6af374"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
 ["f6ebc1f04febf925"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["d1a67e1b971e6254"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
@@ -271,10 +251,6 @@ note = "WITH RECURSIVE ... USING KEY cycle-detection clause is not parsed"
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["31561fe3e3e7cbe0"]
-category = "chained_dot_field_access"
-note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
-
 ["0287efd3e8516d74"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
@@ -287,45 +263,9 @@ note = "unclassified parser gap; first smelt parser error: Expected type name"
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
 
-["f4780243e43996c6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
 ["9821e4e6dd8018e7"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
-
-["ca5bfc72ba6777ff"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["a168a931c2c358b6"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["ccec0ffa95edaeac"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["9da73ad517a9c303"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["f1f9bd8c939a3d17"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["e7a85642ccb299c9"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["efd9c638408d8275"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["ee76fabcb0eaaef8"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
 
 ["232928ca73dc0ee1"]
 category = "smelt_fails_unclassified"
@@ -390,10 +330,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["d6b2b42e7fbd5615"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
-
-["34c41fe5c5680ccb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON (a `NULL::TYPE` cast as a named-arg value)"
 
 ["42fc08aa5a971e67"]
 category = "smelt_fails_unclassified"
@@ -479,10 +415,6 @@ note = "unclassified parser gap; first smelt parser error: Expected table refere
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
 
-["0b921d7047bdc030"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
-
 ["32f26decb2020f32"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
@@ -498,10 +430,6 @@ note = "WITH ORDINALITY table-function modifier is not parsed"
 ["8fb37406c9ff66c2"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
-["ee469a1707cb353b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
 
 ["340d518ead2e82d9"]
 category = "smelt_fails_unclassified"
@@ -531,15 +459,7 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["8b0afee4dbfd83cf"]
-category = "chained_dot_field_access"
-note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
-
 ["fbe13b47bb1dacaf"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["8c0a53f45fa7f6bc"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
@@ -607,10 +527,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found EQ"
 
-["0ee0644cb314ecf7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
 ["adbd9123def3a1ae"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOT"
@@ -638,10 +554,6 @@ note = "unclassified parser gap; first smelt parser error: Expected type name"
 ["0a0802d2ce42c4bb"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found ERROR"
-
-["5babdd6804121655"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
 
 ["d019f39e7d6696a6"]
 category = "smelt_fails_unclassified"
@@ -679,25 +591,17 @@ note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not y
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
-["ca16bec873c914f3"]
-category = "map_type_or_literal"
-note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
-
 ["c8923c43debfab8b"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found FIRST_KW (FIRST used as an ordinary aggregate function name)"
-
-["5e169df3949c71bb"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE (DuckDB `//` floor-division operator)"
 
 ["31cbbfb11333cb31"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
 ["d80af49b27e90d8d"]
-category = "chained_dot_field_access"
-note = "Chained dot field-access on a nested struct/schema-qualified column (a.b.c...) is not parsed in this position"
+category = "sqllogictest_template_placeholder"
+note = "Recategorized: the chained-dot column references (s.name.v, s.nested_struct.b) now parse fine; the actual blocker is the DuckDB sqllogictest ${source} substitution placeholder in FROM position (not real SQL, not a smelt gap) causing 'Unexpected character: $'"
 
 ["76e9af57d672e11b"]
 category = "smelt_fails_unclassified"
@@ -711,14 +615,6 @@ note = "unclassified parser gap; first smelt parser error: Expected `]` to close
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["a3fbcd23e56eea5e"]
-category = "power_operator_or_cast_target_literal"
-note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
-
-["89f3eb42ca6001a7"]
-category = "power_operator_or_cast_target_literal"
-note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
-
 ["8d25f22ec749e9ca"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name (DuckDB's UNION(field type, ...) type constructor is not parsed as a type — the UNION keyword is a type-constructor name here, not a set operator; unrelated to set-operation nesting)"
@@ -727,14 +623,6 @@ note = "unclassified parser gap; first smelt parser error: Expected type name (D
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name (DuckDB's UNION(field type, ...) type constructor is not parsed as a type — the UNION keyword is a type-constructor name here, not a set operator; unrelated to set-operation nesting)"
 
-["d5ffbcb21a05ca9d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["d734a6ccabf4ccec"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["122931512d64deb7"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
@@ -742,10 +630,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["a98f53701e8018fd"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
-["ceaf850b24169c8a"]
-category = "window_frame_non_integer_bound"
-note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
 
 ["9c8c8884d1846598"]
 category = "smelt_fails_unclassified"
@@ -758,14 +642,6 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 ["a8c6b4e0e85d910f"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
-
-["edb92382ea809a3f"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["8ec78958096fc4a5"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
 
 ["f7fd82844d7f1224"]
 category = "multidim_array_type_literal"
@@ -806,10 +682,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 ["351184b9bb661834"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found ALL_KW"
-
-["cf206987a81ed8f4"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
 
 ["4b1da263d8fc85c9"]
 category = "multidim_array_type_literal"
@@ -919,10 +791,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["0fa97b457f73c89b"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["bd85096b1212237c"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
@@ -930,22 +798,6 @@ note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast synta
 ["b6df6d802fb49130"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["491fc0d5bd0be6ca"]
-category = "power_operator_or_cast_target_literal"
-note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
-
-["80f741d04184b782"]
-category = "power_operator_or_cast_target_literal"
-note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
-
-["73437b4febc9bf64"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["143e9cc01d97c091"]
-category = "power_operator_or_cast_target_literal"
-note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
 
 ["87ca4960829e3b9d"]
 category = "smelt_fails_unclassified"
@@ -978,14 +830,6 @@ note = "unclassified parser gap; first smelt parser error: Expected RPAREN, foun
 ["4ae2792a411e7deb"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["3e860460ae603de7"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["5d919f7a3f708c51"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["d9f48bb80aed9a47"]
 category = "smelt_fails_unclassified"
@@ -1119,22 +963,6 @@ note = "Dollar-quoted string or backslash-escape string literal form is not pars
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
 
-["a44b3f3934964ec3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["23bb729f96e4c852"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["721c5d4638313542"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["5209c5465479b74d"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
 ["9d9f1aa06f23fe50"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found IDENT"
@@ -1167,29 +995,9 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "dollar_quoted_or_backslash_literal"
 note = "Dollar-quoted string or backslash-escape string literal form is not parsed (tracked gaps.rs::duckdb_dollar_quoted_string)"
 
-["da76db23a4b9f764"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["856ef694096f70cf"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
-["327e92f2ca0ddf80"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["c284a380f1b2790c"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["5bb0dadc66e62120"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
-
-["4179343766f9c447"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON"
 
 ["fd2e29813b4bad83"]
 category = "json_to_record"
@@ -1299,21 +1107,9 @@ note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VA
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["9ddf04c31c1b9e6c"]
-category = "power_operator_or_cast_target_literal"
-note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
-
-["b5643f516376ffc3"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["ee6959fa1df17a5f"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
-
-["ee7d8489258d1343"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found ERROR"
 
 ["2729feeaafc6b76b"]
 category = "smelt_fails_unclassified"
@@ -1626,7 +1422,6 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 ["29049631557d1e26"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
-
 
 ["0513478606d4f13d"]
 category = "xml_functions"

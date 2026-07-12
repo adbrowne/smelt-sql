@@ -193,17 +193,17 @@ discriminant = "unresolved"
 
 # ── smelt-db / type_inference/binary ──────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/binary.rs:77"]
+["crates/smelt-db/src/type_inference/binary.rs:134"]
 classification = "legitimate"
 reason = "non-numeric binary expression (e.g. text+int before BUG-017 fix path) — Unknown per type-system rules"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/binary.rs:104"]
+["crates/smelt-db/src/type_inference/binary.rs:161"]
 classification = "legitimate"
 reason = "decimal division early-return: Decimal / T or Integer / Decimal → Unknown; TypeMismatch diagnostic emitted separately by check_decimal_division_diagnostics"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/binary.rs:404"]
+["crates/smelt-db/src/type_inference/binary.rs:496"]
 classification = "error"
 reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown(Unresolved); TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
 discriminant = "unresolved"

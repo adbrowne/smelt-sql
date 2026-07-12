@@ -447,10 +447,32 @@ impl<'a> super::Parser<'a> {
 
     pub(super) fn parse_multiplicative_expr(&mut self) {
         let checkpoint = self.builder.checkpoint();
+        self.parse_power_expr();
+
+        self.skip_trivia();
+        while self.at_any(&[STAR, DIVIDE, PERCENT, FLOOR_DIVIDE]) {
+            self.start_node_at(checkpoint, BINARY_EXPR);
+            self.advance();
+            self.skip_trivia();
+            self.parse_power_expr();
+            self.skip_trivia();
+            self.finish_node();
+        }
+    }
+
+    /// DuckDB power operator: `**` and `^` (synonyms). Binds tighter than
+    /// `*`/`/`/`%`/`//` but looser than unary `-`/`NOT` (verified against a
+    /// real DuckDB: `-2 ** 2` is `4`, not `-4` — unary minus applies to `2`
+    /// before exponentiation, so the base operand is parsed via
+    /// `parse_unary_expr`, not `parse_primary_expr` directly). Left-
+    /// associative (verified: `2 ** 3 ** 2` is `64` == `(2**3)**2`, not the
+    /// mathematically-conventional right-associative `512`).
+    pub(super) fn parse_power_expr(&mut self) {
+        let checkpoint = self.builder.checkpoint();
         self.parse_unary_expr();
 
         self.skip_trivia();
-        while self.at_any(&[STAR, DIVIDE, PERCENT]) {
+        while self.at_any(&[DOUBLE_STAR, CARET]) {
             self.start_node_at(checkpoint, BINARY_EXPR);
             self.advance();
             self.skip_trivia();
@@ -482,19 +504,17 @@ impl<'a> super::Parser<'a> {
         // MAP_METHOD_CALL loop below can retroactively wrap the entire primary
         // (SMELT_PATH_CALL, FUNCTION_CALL, etc.) inside a MAP_METHOD_CALL node
         // when the primary is followed by `.method()` with a known Map API name.
-        // This is safe for NULL_KW (which returns early) because NULL cannot be
-        // a Map receiver.
         let primary_checkpoint = self.builder.checkpoint();
 
         if self.at(NULL_KW) {
-            // NULL literal — wrap in EXPRESSION so Expr::cast() works
+            // NULL literal — wrap in EXPRESSION so Expr::cast() works. Falls
+            // through (no early `return`) to the postfix loops below so
+            // `NULL::TYPE` casts parse (DuckDB accepts `NULL::UHUGEINT`
+            // etc. — verified against a real DuckDB).
             self.start_node(EXPRESSION);
             self.advance();
             self.finish_node();
-            return;
-        }
-
-        if self.at(ARRAY_KW) && self.is_keyword_followed_by_lbracket() {
+        } else if self.at(ARRAY_KW) && self.is_keyword_followed_by_lbracket() {
             self.parse_array_literal();
         } else if self.at(ARRAY_KW) && self.is_keyword_followed_by_lparen() {
             // ARRAY(expr) function-call style
@@ -737,18 +757,32 @@ impl<'a> super::Parser<'a> {
                     }
                 }
             } else if self.at(DOT) {
-                // Could be table.column, namespace.func(), or map.method()
-                self.advance(); // consume DOT
-                self.skip_trivia();
-                // Peek at the method name before consuming, so we can decide
-                // whether to emit MAP_METHOD_CALL vs FUNCTION_CALL.
-                let method_name = if self.at(IDENT) {
-                    Some(self.current_text().to_string())
-                } else {
-                    None
-                };
-                self.expect(IDENT); // consume second IDENT
-                self.skip_trivia();
+                // Could be table.column, a chained dotted path (a.b.c…, e.g.
+                // a nested-struct field-access chain or a schema-qualified
+                // column: db.schema.table.col), namespace.func(), or
+                // map.method(). Consume DOT + IDENT pairs in a loop so any
+                // chain depth is accepted; only the *last* segment before a
+                // trailing `(` is examined to decide FUNCTION_CALL vs
+                // MAP_METHOD_CALL, matching the previous two-segment-only
+                // behaviour for that decision.
+                let mut method_name: Option<String> = None;
+                while self.at(DOT) {
+                    self.advance(); // consume DOT
+                    self.skip_trivia();
+                    // Peek at this segment's name before consuming, so we can
+                    // decide whether to emit MAP_METHOD_CALL vs FUNCTION_CALL
+                    // once the chain ends.
+                    method_name = if self.at(IDENT) {
+                        Some(self.current_text().to_string())
+                    } else {
+                        None
+                    };
+                    self.expect(IDENT); // consume next segment IDENT
+                    self.skip_trivia();
+                    if self.at(LPAREN) || !self.at(DOT) {
+                        break;
+                    }
+                }
 
                 if self.at(LPAREN) {
                     // Determine whether to emit MAP_METHOD_CALL or FUNCTION_CALL.
@@ -778,7 +812,9 @@ impl<'a> super::Parser<'a> {
                         }
                     }
                 } else {
-                    // Qualified name (table.column) — wrap in EXPRESSION
+                    // Qualified name / chained dot field-access path
+                    // (table.column, db.schema.table.col, a.b.c…) — wrap in
+                    // EXPRESSION regardless of chain depth.
                     self.start_node_at(checkpoint, EXPRESSION);
                     self.finish_node();
                 }
@@ -2086,6 +2122,11 @@ impl<'a> super::Parser<'a> {
         if !matches!(
             upper.as_str(),
             "DATE" | "TIME" | "TIMESTAMP" | "TIMESTAMPTZ" | "INTERVAL"
+                // PostgreSQL/DuckDB typed-literal form for the DOUBLE
+                // alias: `float8 '-0.1'` (verified against a real DuckDB:
+                // FLOAT8 is a DOUBLE alias, `float8 '-0.1'` evaluates to
+                // -0.1::DOUBLE).
+                | "FLOAT8"
         ) {
             return false;
         }

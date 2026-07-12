@@ -145,6 +145,9 @@ fn parse_simple_type(upper: &str) -> Result<DataType, TypeParseError> {
         "INT" | "INTEGER" | "INT4" => Ok(DataType::Integer),
         "BIGINT" | "INT8" | "LONG" => Ok(DataType::BigInt),
         "HUGEINT" | "INT16" => Ok(DataType::BigInt),
+        // Unsigned 128-bit integer (DuckDB). No true 128-bit smelt type
+        // exists (same lossy stand-in precedent as HUGEINT above).
+        "UHUGEINT" => Ok(DataType::BigInt),
 
         // Floating point
         "REAL" | "FLOAT4" | "FLOAT" => Ok(DataType::Float),

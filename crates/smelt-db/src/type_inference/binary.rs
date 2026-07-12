@@ -64,6 +64,63 @@ fn decimal_arithmetic_result(p1: u8, s1: u8, p2: u8, s2: u8, op: &str) -> (u32, 
     }
 }
 
+/// Result type of DuckDB's floor-division operator (`//`).
+///
+/// `//` does not follow either of the two existing numeric-promotion shapes:
+/// unlike `/` it does not force Double for plain-integer operands (verified:
+/// `typeof(5::BIGINT // 2::INTEGER)` is `BIGINT`, not `DOUBLE`), but unlike
+/// `+`/`-`/`*`/`%` it does not apply the Decimal growth formula — a Decimal
+/// or Float/Double operand promotes the whole expression to Double, exactly
+/// like plain `/` (verified: `typeof(5.0::DECIMAL(10,2) // 2)` is `DOUBLE`).
+fn floor_divide_result_type(
+    left: Option<DataType>,
+    right: Option<DataType>,
+) -> Option<TypedColumn> {
+    if let (Some(l), Some(r)) = (&left, &right) {
+        if !l.is_numeric() || !r.is_numeric() {
+            return Some(TypedColumn {
+                data_type: DataType::unknown_dynamic(),
+                nullable: true,
+            });
+        }
+        if matches!(
+            l,
+            DataType::Decimal { .. } | DataType::Float | DataType::Double
+        ) || matches!(
+            r,
+            DataType::Decimal { .. } | DataType::Float | DataType::Double
+        ) {
+            return Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            });
+        }
+    }
+
+    // Both plain integer-family (or one side unresolved) — widen using the
+    // same integer-family precedence as the tail of
+    // `promote_numeric_operands_for_op` (BigInt > Integer > SmallInt).
+    match (left, right) {
+        (Some(DataType::BigInt), _) | (_, Some(DataType::BigInt)) => Some(TypedColumn {
+            data_type: DataType::BigInt,
+            nullable: true,
+        }),
+        (Some(DataType::Integer), _) | (_, Some(DataType::Integer)) => Some(TypedColumn {
+            data_type: DataType::Integer,
+            nullable: true,
+        }),
+        (Some(DataType::SmallInt), _) | (_, Some(DataType::SmallInt)) => Some(TypedColumn {
+            data_type: DataType::SmallInt,
+            nullable: true,
+        }),
+        (Some(l), _) => Some(TypedColumn {
+            data_type: l,
+            nullable: true,
+        }),
+        _ => None,
+    }
+}
+
 /// Operator-aware numeric promotion — used by `infer_binary_expr_type` callers
 /// that need to pass the actual operator to the decimal growth formula.
 fn promote_numeric_operands_for_op(
@@ -340,6 +397,41 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             )?)
         }
 
+        // Power/exponentiation (`^`/`**`, DuckDB synonyms). DuckDB always
+        // promotes the result to Double regardless of operand types —
+        // verified against a real DuckDB: `typeof(2 ** 3)` is `DOUBLE`, and
+        // even `typeof(2::UHUGEINT ** 3)` is `DOUBLE` (unlike `//` below,
+        // which preserves integer width).
+        "^" | "**" => {
+            let left = infer_binary_operand(binary, 0, ctx);
+            let right = infer_binary_operand(binary, 1, ctx);
+            let numeric_ok = match (left.as_ref(), right.as_ref()) {
+                (Some(l), Some(r)) => l.data_type.is_numeric() && r.data_type.is_numeric(),
+                _ => true,
+            };
+            if !numeric_ok {
+                return Some(TypedColumn {
+                    data_type: DataType::unknown_dynamic(),
+                    nullable: true,
+                });
+            }
+            Some(TypedColumn {
+                data_type: DataType::Double,
+                nullable: true,
+            })
+        }
+
+        // Floor division (`//`). Unlike `/` (always Double) and unlike the
+        // decimal-growth-formula ops above, `//` mirrors `/`'s Decimal/
+        // Float/Double promotion to Double (verified: `typeof(5.0::DECIMAL
+        // // 2)` is `DOUBLE`) but preserves integer-family width when both
+        // operands are plain integers (verified: `typeof(5::BIGINT //
+        // 2::INTEGER)` is `BIGINT`).
+        "//" => Some(floor_divide_result_type(
+            infer_binary_operand(binary, 0, ctx).map(|t| t.data_type),
+            infer_binary_operand(binary, 1, ctx).map(|t| t.data_type),
+        )?),
+
         // Minus can be binary (a - b) or unary (-a)
         "-" => {
             if binary.is_unary() {
@@ -516,7 +608,7 @@ pub fn check_crossfamily_arithmetic_diagnostics(
             None => continue,
         };
 
-        if !matches!(op.as_str(), "+" | "-" | "*" | "/" | "%") {
+        if !matches!(op.as_str(), "+" | "-" | "*" | "/" | "%" | "^" | "**" | "//") {
             continue;
         }
 

@@ -460,6 +460,17 @@ pub enum SyntaxKind {
     // building a NAMED_PARAM node.
     WALRUS, // := (named parameter, DuckDB spelling)
 
+    // DuckDB power/floor-division operators. `**` and `^` are synonyms for
+    // exponentiation (both left-associative, higher precedence than `*`/`/`,
+    // lower than unary `-`/`NOT` — verified against a real DuckDB:
+    // `-2 ** 2` is `4` (unary minus binds first), `2 ** 3 ** 2` is `64`
+    // (left-associative: `(2**3)**2`), `2 * 3 ** 2` is `18` (`**` binds
+    // tighter than `*`)). `//` is integer-preserving floor division, same
+    // precedence tier as `*`/`/`/`%` (verified: `7 // 2 * 3` is `9`).
+    DOUBLE_STAR,  // ** (power)
+    CARET,        // ^ (power, synonym for **)
+    FLOOR_DIVIDE, // // (floor division)
+
     // Special
     EOF, // End of file
 }

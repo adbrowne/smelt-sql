@@ -79,9 +79,18 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 DOT
             }
+            '*' if self.peek_char() == Some('*') => {
+                self.advance();
+                self.advance();
+                DOUBLE_STAR // ** (power)
+            }
             '*' => {
                 self.advance();
                 STAR
+            }
+            '^' => {
+                self.advance();
+                CARET // ^ (power, synonym for **)
             }
             '+' => {
                 self.advance();
@@ -106,6 +115,11 @@ impl<'a> Lexer<'a> {
                 PERCENT
             }
             '/' if self.peek_char() == Some('*') => self.consume_block_comment(),
+            '/' if self.peek_char() == Some('/') => {
+                self.advance();
+                self.advance();
+                FLOOR_DIVIDE // // (floor division)
+            }
             '/' => {
                 self.advance();
                 DIVIDE

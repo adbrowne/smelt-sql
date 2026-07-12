@@ -506,11 +506,18 @@ impl<'a> super::Parser<'a> {
                 self.parse_arg_list();
                 self.finish_node(); // Close FUNCTION_CALL
             } else if self.at(DOT) {
-                // Could be schema.table or namespace.func()
-                self.advance(); // Consume DOT
-                self.skip_trivia();
-                self.expect(IDENT); // Consume second IDENT
-                self.skip_trivia();
+                // Could be schema.table, db.schema.table (arbitrary-depth
+                // qualification), or namespace.func(). Consume DOT + IDENT
+                // pairs in a loop so any qualification depth is accepted.
+                while self.at(DOT) {
+                    self.advance(); // Consume DOT
+                    self.skip_trivia();
+                    self.expect(IDENT); // Consume next segment IDENT
+                    self.skip_trivia();
+                    if self.at(LPAREN) || !self.at(DOT) {
+                        break;
+                    }
+                }
 
                 if self.at(LPAREN) {
                     // Namespaced function call: smelt.ref()
@@ -518,7 +525,7 @@ impl<'a> super::Parser<'a> {
                     self.parse_arg_list();
                     self.finish_node(); // Close FUNCTION_CALL
                 }
-                // else: just a qualified table name (schema.table), already consumed
+                // else: just a qualified table name (schema.table…), already consumed
             }
             // else: simple identifier, already consumed
         } else {

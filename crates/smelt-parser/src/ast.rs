@@ -2304,6 +2304,9 @@ impl BinaryExpr {
                     STAR | MULTIPLY => return Some("*".to_string()),
                     DIVIDE => return Some("/".to_string()),
                     PERCENT => return Some("%".to_string()),
+                    DOUBLE_STAR => return Some("**".to_string()),
+                    CARET => return Some("^".to_string()),
+                    FLOOR_DIVIDE => return Some("//".to_string()),
                     EQ => return Some("=".to_string()),
                     NE => return Some("<>".to_string()),
                     LT => return Some("<".to_string()),
@@ -2342,7 +2345,8 @@ impl BinaryExpr {
         for child in self.0.children_with_tokens() {
             if let Some(token) = child.as_token() {
                 match token.kind() {
-                    PLUS | MINUS | STAR | MULTIPLY | DIVIDE | PERCENT => {
+                    PLUS | MINUS | STAR | MULTIPLY | DIVIDE | PERCENT | DOUBLE_STAR | CARET
+                    | FLOOR_DIVIDE => {
                         return Some(token.text_range());
                     }
                     _ => {}
