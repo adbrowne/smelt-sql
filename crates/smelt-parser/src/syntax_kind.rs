@@ -408,6 +408,18 @@ pub enum SyntaxKind {
     // Single `key : value` pair inside a MAP_LITERAL.
     MAP_ENTRY,
 
+    // List comprehension (DuckDB): `[expr FOR ident IN list (IF cond)?]`.
+    // `FOR` is a contextual keyword (lexed as IDENT, recognized by the parser
+    // only immediately after the leading element expression inside a bracket
+    // list literal — see `is_comprehension_for_start`); it stays usable as a
+    // plain identifier everywhere else. Verified against DuckDB: exactly one
+    // FOR clause is accepted (no chained `FOR … FOR …`), and IF may only
+    // follow the IN-list expression, never precede it.
+    LIST_COMPREHENSION,
+    // Wraps the single loop-variable IDENT bound by a LIST_COMPREHENSION,
+    // mirroring LAMBDA_PARAM's wrap-single-ident convention.
+    LIST_COMPREHENSION_VAR,
+
     // Special
     EOF, // End of file
 }

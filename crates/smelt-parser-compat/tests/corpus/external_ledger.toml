@@ -192,8 +192,8 @@ category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
 
 ["e7f8101e8ebcb4aa"]
-category = "list_comprehension"
-note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs::duckdb_list_comprehension)"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap (list comprehension itself now parses; residual failure is elsewhere in the statement); first smelt parser error: Expected RPAREN, found LPAREN"
 
 ["aa4b6f5c0bbe1d9a"]
 category = "natural_join_chain"
@@ -452,8 +452,8 @@ category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
 ["1351aee33ae710ac"]
-category = "list_comprehension"
-note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs::duckdb_list_comprehension)"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap (list comprehension itself now parses; residual failure is elsewhere in the statement); first smelt parser error: Expected AS alias in struct field item"
 
 ["d496c79b8fc64a9e"]
 category = "lambda_or_lateral_syntax"
@@ -644,8 +644,8 @@ category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE"
 
 ["340d518ead2e82d9"]
-category = "list_comprehension"
-note = "List comprehension `[expr for x in list]` is not parsed (tracked gaps.rs::duckdb_list_comprehension)"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap (list comprehension itself now parses; residual failure is the COLUMNS(* EXCLUDE (...)) source-list expression); first smelt parser error: Expected RPAREN, found IDENT"
 
 ["9f1dab2702dd484e"]
 category = "derived_table_column_alias_list"

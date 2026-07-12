@@ -4103,6 +4103,170 @@ fn parse_list_literal_error_recovery_unterminated() {
     );
 }
 
+// ===== List comprehensions: [expr FOR ident IN list (IF cond)?] (DuckDB) =====
+
+#[test]
+fn parse_list_comprehension_basic() {
+    // `[x + 1 FOR x IN [1, 2, 3]]` parses clean to a LIST_COMPREHENSION node
+    // and round-trips through the printer.
+    let sql = "SELECT [x + 1 FOR x IN [1, 2, 3]] AS l";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let comp = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LIST_COMPREHENSION)
+        .expect("must have a LIST_COMPREHENSION node");
+    assert!(
+        comp.children().any(|n| n.kind() == LIST_COMPREHENSION_VAR),
+        "LIST_COMPREHENSION must have a LIST_COMPREHENSION_VAR child"
+    );
+    assert!(
+        comp.descendants().any(|n| n.kind() == ARRAY_LITERAL),
+        "LIST_COMPREHENSION's source list must be an ARRAY_LITERAL"
+    );
+
+    assert_eq!(
+        parse.syntax().text().to_string(),
+        sql,
+        "list comprehension must round-trip losslessly"
+    );
+}
+
+#[test]
+fn parse_list_comprehension_with_filter() {
+    // `[x FOR x IN [1, 2, 3] IF x > 1]` — IF filter clause after the IN-list.
+    let sql = "SELECT [x FOR x IN [1, 2, 3] IF x > 1] AS l";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let comp = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LIST_COMPREHENSION)
+        .expect("must have a LIST_COMPREHENSION node");
+    // element expr + source expr + filter expr = 3 Expr-castable children,
+    // counted here as EXPRESSION/BINARY_EXPR/ARRAY_LITERAL direct children.
+    let expr_child_count = comp
+        .children()
+        .filter(|n| matches!(n.kind(), EXPRESSION | BINARY_EXPR | ARRAY_LITERAL))
+        .count();
+    assert_eq!(
+        expr_child_count, 3,
+        "expected element + source + filter expressions, got {}",
+        expr_child_count
+    );
+}
+
+#[test]
+fn parse_list_comprehension_ast_accessors() {
+    let sql = "SELECT [x FOR x IN [1, 2, 3] IF x > 1] AS l FROM t";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let file = File::cast(parse.syntax()).expect("must cast to File");
+    let select = file.select_stmt().expect("must have a SELECT statement");
+    let expr = select
+        .select_list()
+        .expect("must have select list")
+        .items()
+        .next()
+        .and_then(|item| item.expression())
+        .expect("must have select item expression");
+
+    let comp = Expr::as_list_comprehension(&expr)
+        .expect("select item expression must be a list comprehension");
+    assert_eq!(comp.var_name().as_deref(), Some("x"));
+    assert!(comp.element().is_some(), "must have element expr");
+    assert!(comp.source().is_some(), "must have source expr");
+    assert!(comp.filter().is_some(), "must have filter expr");
+}
+
+#[test]
+fn parse_list_comprehension_nested() {
+    // `[[y FOR y IN x] FOR x IN [[1, 2], [3, 4]]]` — a comprehension whose
+    // element expression is itself a comprehension. Verified against DuckDB.
+    let sql = "SELECT [[y FOR y IN x] FOR x IN [[1, 2], [3, 4]]] AS l";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let comps: Vec<_> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == LIST_COMPREHENSION)
+        .collect();
+    assert_eq!(comps.len(), 2, "expected outer + inner LIST_COMPREHENSION");
+
+    assert_eq!(
+        parse.syntax().text().to_string(),
+        sql,
+        "nested list comprehension must round-trip losslessly"
+    );
+}
+
+#[test]
+fn parse_list_comprehension_multiple_for_clauses_is_error() {
+    // DuckDB verified: chained `FOR x IN a FOR y IN b` is a syntax error
+    // there (`Parser Error: syntax error at or near "FOR"`) — smelt matches.
+    let sql = "SELECT [x FOR x IN [1, 2, 3] FOR y IN [4, 5]] AS l";
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "multiple FOR clauses in one comprehension must be a parse error, matching DuckDB"
+    );
+}
+
+#[test]
+fn parse_list_comprehension_for_after_comma_is_error() {
+    // DuckDB verified: `[1, 2 FOR x IN [1,2,3]]` is a syntax error there
+    // (`FOR` is only recognized right after the sole element expression).
+    let sql = "SELECT [1, 2 FOR x IN [1, 2, 3]] AS l";
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "FOR after a comma-separated element list must be a parse error, matching DuckDB"
+    );
+}
+
+#[test]
+fn parse_list_literal_guards_still_hold_alongside_comprehension() {
+    // Plain array/list literals — including empty `[]` — must be unaffected
+    // by the comprehension grammar addition.
+    let empty = parse("SELECT [] AS l");
+    assert!(empty.errors.is_empty(), "empty list: {:?}", empty.errors);
+    assert!(empty
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == ARRAY_LITERAL));
+
+    let plain = parse("SELECT [1, 2, 3] AS l");
+    assert!(plain.errors.is_empty(), "plain list: {:?}", plain.errors);
+    assert!(
+        !plain
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == LIST_COMPREHENSION),
+        "plain list literal must not produce a LIST_COMPREHENSION node"
+    );
+}
+
 #[test]
 fn parse_spread_in_group_by() {
     // `SELECT x FROM t GROUP BY ...keys` — LIST_SPREAD inside the GROUP BY

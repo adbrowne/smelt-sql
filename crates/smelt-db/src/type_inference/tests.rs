@@ -1043,6 +1043,55 @@ fn test_array_literal_mixed_types_rejected() {
     assert_eq!(types[0].data_type, DataType::unknown_dynamic());
 }
 
+// ===== List comprehensions: [expr FOR x IN list (IF cond)?] (DuckDB) =====
+
+#[test]
+fn test_list_comprehension_bare_var_element_types_from_source() {
+    // `[x FOR x IN [1, 2, 3]]` — element expr is exactly the loop variable,
+    // so the result element type is the source list's element type.
+    let types = infer_sql("SELECT [x FOR x IN [1, 2, 3]]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::SmallInt))
+    );
+    assert!(
+        !types[0].nullable,
+        "list comprehension result should be non-nullable"
+    );
+}
+
+#[test]
+fn test_list_comprehension_bare_var_with_filter_types_from_source() {
+    // `[x FOR x IN [1, 2, 3] IF x > 1]` — filter present, still a bare-var
+    // element, so still typed from the source list's element type.
+    let types = infer_sql("SELECT [x FOR x IN [1, 2, 3] IF x > 1]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::SmallInt))
+    );
+}
+
+#[test]
+fn test_list_comprehension_non_trivial_element_is_classified_unknown() {
+    // `[x + 1 FOR x IN [1, 2, 3]]` — element expr is not the bare loop
+    // variable, so the element type is the classified-Unknown fallback
+    // (TypeContext has no scoped-binding machinery for the loop variable).
+    let types = infer_sql("SELECT [x + 1 FOR x IN [1, 2, 3]]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::unknown_dynamic()))
+    );
+}
+
+#[test]
+fn test_list_comprehension_string_source() {
+    let types = infer_sql("SELECT [s FOR s IN ['a', 'b']]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::Text))
+    );
+}
+
 #[test]
 fn test_array_subscript_from_column() {
     // With a column of Array(Integer) type, subscript should return Integer

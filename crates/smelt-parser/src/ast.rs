@@ -1838,7 +1838,11 @@ impl Expr {
             // (parsed at pipe level, no EXPRESSION wrapper) can be cast when the
             // operand is an inline list — including the empty-list case `...[]`
             // whose ARRAY_LITERAL has no child nodes.
-            | ARRAY_LITERAL => Some(Self(node)),
+            | ARRAY_LITERAL
+            // List comprehensions are directly Expr-castable for the same reason
+            // (and so a comprehension nested as an outer comprehension's source
+            // list expression, e.g. `[y FOR y IN x FOR-outer...]`, casts cleanly).
+            | LIST_COMPREHENSION => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -2051,6 +2055,14 @@ impl Expr {
             .children()
             .find_map(ArrayLiteral::cast)
             .or_else(|| ArrayLiteral::cast(self.0.clone()))
+    }
+
+    /// Check if this is a list comprehension (`[expr FOR x IN list]`)
+    pub fn as_list_comprehension(&self) -> Option<ListComprehension> {
+        self.0
+            .children()
+            .find_map(ListComprehension::cast)
+            .or_else(|| ListComprehension::cast(self.0.clone()))
     }
 
     /// Check if this contains an array subscript (expr[index])
@@ -2451,6 +2463,49 @@ impl ArrayLiteral {
     /// Get all element expressions in the array literal
     pub fn elements(&self) -> Vec<Expr> {
         self.0.children().filter_map(Expr::cast).collect()
+    }
+}
+
+/// List comprehension: `[expr FOR ident IN list (IF cond)?]` (DuckDB).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ListComprehension(SyntaxNode);
+
+impl ListComprehension {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LIST_COMPREHENSION {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// The result-element expression, e.g. `x + 1` in `[x + 1 FOR x IN l]`.
+    pub fn element(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The loop variable name, e.g. `x` in `[x FOR x IN l]`.
+    pub fn var_name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == LIST_COMPREHENSION_VAR)
+            .and_then(|n| {
+                n.children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .find(|t| t.kind() == IDENT)
+            })
+            .map(|t| t.text().to_string())
+    }
+
+    /// The source list expression, e.g. `l` in `[x FOR x IN l]`.
+    pub fn source(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+
+    /// The optional `IF` filter condition, e.g. `x > 1` in
+    /// `[x FOR x IN l IF x > 1]`.
+    pub fn filter(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(2)
     }
 }
 

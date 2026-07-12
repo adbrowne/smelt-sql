@@ -1,5 +1,5 @@
 # DuckDB differential parser-gap ratchet baseline
-# Updated: 2026-07-12 (MAP {…} literal gap closed)
+# Updated: 2026-07-12 (list comprehension gap closed)
 #
 # Format: <metric> <count>
 #
@@ -16,4 +16,4 @@
 #     and a new registry entry — never a silent skip.
 # The `gap_count_ratchet` test in `tests/duckdb_differential.rs` enforces exact
 # match (a decrease is a "stale baseline" failure prompting you to tighten here).
-duckdb_seed_gaps 1
+duckdb_seed_gaps 0

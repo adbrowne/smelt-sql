@@ -141,15 +141,9 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     },
     // duckdb_dollar_quoted_string gap removed - dollar-quoted string literals
     // ($$…$$ and $tag$…$tag$) are now lexed as STRING tokens (July 2026).
-    KnownGap {
-        id: "duckdb_list_comprehension",
-        description: "List comprehensions [expr FOR x IN list] are not parsed",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bFOR\s+\w+\s+IN\s+\["],
-        severity: "low",
-        planned_fix: false,
-    },
+    // duckdb_list_comprehension gap removed - list comprehensions
+    // `[expr FOR x IN list (IF cond)?]` are now parsed, printed, and
+    // inferred (July 2026).
     // duckdb_map_literal gap removed - MAP {k: v, …} literals are now parsed,
     // printed, and inferred as Map(key_type, value_type) (July 2026).
     KnownGap {

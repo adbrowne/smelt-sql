@@ -99,6 +99,14 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         });
     }
 
+    // Try list comprehension (must precede array literal: a comprehension's
+    // outer node also satisfies as_array_literal via its nested source list,
+    // but LIST_COMPREHENSION is a distinct top-level node kind — checking it
+    // first keeps the dispatch on the actually-matching node).
+    if let Some(comp) = expr.as_list_comprehension() {
+        return infer_list_comprehension_type(&comp, ctx);
+    }
+
     // Try array literal
     if let Some(array_lit) = expr.as_array_literal() {
         return infer_array_literal_type(&array_lit, ctx);

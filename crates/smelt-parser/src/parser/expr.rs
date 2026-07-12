@@ -974,10 +974,13 @@ impl<'a> super::Parser<'a> {
         self.finish_node();
     }
 
-    /// Parse a bracket-only list literal: `[a, b, c]` (Phase 1 meta-language).
+    /// Parse a bracket-only list literal: `[a, b, c]` (Phase 1 meta-language),
+    /// or a DuckDB list comprehension: `[expr FOR ident IN list (IF cond)?]`.
     ///
-    /// Reuses the `ARRAY_LITERAL` CST kind — the type checker distinguishes
-    /// meta `List<T>` from Data-World `Array<U>` in a later phase.
+    /// Reuses the `ARRAY_LITERAL` CST kind for the plain-list form — the type
+    /// checker distinguishes meta `List<T>` from Data-World `Array<U>` in a
+    /// later phase. The comprehension form is a dedicated `LIST_COMPREHENSION`
+    /// node (see its doc comment in `syntax_kind.rs`).
     ///
     /// Features:
     /// - Trailing comma allowed: `[a, b, c,]`
@@ -986,35 +989,64 @@ impl<'a> super::Parser<'a> {
     /// - Nested: `[[1, 2], [3, 4]]`
     /// - Spread elements: `[...xs, a]`
     /// - Error recovery: unterminated `[a, b` does not crash the parser.
+    /// - List comprehension: `[x + 1 FOR x IN [1, 2, 3]]`, optionally filtered
+    ///   with `[x FOR x IN [1, 2, 3] IF x > 1]`. `FOR` is only recognized
+    ///   immediately after the first (and only) element expression — a
+    ///   comma-separated list never switches into comprehension form, matching
+    ///   DuckDB (`[1, 2 FOR x IN y]` is a syntax error there too).
     pub(super) fn parse_bracket_list_literal(&mut self) {
-        self.start_node(ARRAY_LITERAL);
+        let checkpoint = self.builder.checkpoint();
         self.advance(); // consume `[`
+        self.skip_trivia();
 
-        loop {
-            self.skip_trivia();
-            if self.at(RBRACKET) || self.at(EOF) {
-                break;
-            }
-            // Spread inside list literal: `...xs`
-            if self.at(DOT_DOT_DOT) {
-                self.parse_list_spread();
+        if self.at(RBRACKET) || self.at(EOF) {
+            // Empty list literal: `[]`.
+            self.start_node_at(checkpoint, ARRAY_LITERAL);
+            if self.at(RBRACKET) {
+                self.advance();
             } else {
-                self.parse_expression();
+                self.error("Expected `]` to close list literal".to_string());
             }
-            self.skip_trivia();
+            self.finish_node(); // ARRAY_LITERAL
+            return;
+        }
+
+        // Parse the first element (spread or expression) before deciding
+        // whether this is a plain list literal or a comprehension.
+        if self.at(DOT_DOT_DOT) {
+            self.parse_list_spread();
+        } else {
+            self.parse_expression();
+        }
+        self.skip_trivia();
+
+        if self.is_comprehension_for_start() {
+            self.start_node_at(checkpoint, LIST_COMPREHENSION);
+            self.parse_list_comprehension_tail();
+            self.finish_node(); // LIST_COMPREHENSION
+            return;
+        }
+
+        self.start_node_at(checkpoint, ARRAY_LITERAL);
+        loop {
             if self.at(COMMA) {
                 self.advance();
                 self.skip_trivia();
                 // Allow trailing comma — stop if the next token closes the list.
-                if self.at(RBRACKET) {
+                if self.at(RBRACKET) || self.at(EOF) {
                     break;
                 }
+                if self.at(DOT_DOT_DOT) {
+                    self.parse_list_spread();
+                } else {
+                    self.parse_expression();
+                }
+                self.skip_trivia();
             } else {
                 break;
             }
         }
 
-        self.skip_trivia();
         if self.at(RBRACKET) {
             self.advance(); // consume `]`
         } else {
@@ -1022,6 +1054,58 @@ impl<'a> super::Parser<'a> {
         }
 
         self.finish_node(); // ARRAY_LITERAL
+    }
+
+    /// Check whether the current token is the contextual `FOR` keyword that
+    /// starts a list comprehension tail. `FOR` is not a reserved keyword —
+    /// it is lexed as a plain `IDENT` and only recognized here, immediately
+    /// after a bracket list literal's first element expression.
+    pub(super) fn is_comprehension_for_start(&self) -> bool {
+        self.at(IDENT) && self.current_text().eq_ignore_ascii_case("FOR")
+    }
+
+    /// Parse the tail of a list comprehension after the element expression
+    /// has already been parsed: `FOR ident IN list (IF cond)? ]`.
+    ///
+    /// Verified against DuckDB: exactly one `FOR … IN …` clause is accepted
+    /// (chained `FOR x IN a FOR y IN b` is a syntax error there), and `IF`
+    /// may only appear after the IN-list expression.
+    fn parse_list_comprehension_tail(&mut self) {
+        self.advance(); // consume `FOR` (contextual IDENT)
+        self.skip_trivia();
+
+        self.start_node(LIST_COMPREHENSION_VAR);
+        if self.at(IDENT) {
+            self.advance();
+        } else {
+            self.error(
+                "Expected loop variable identifier after FOR in list comprehension".to_string(),
+            );
+        }
+        self.finish_node(); // LIST_COMPREHENSION_VAR
+        self.skip_trivia();
+
+        if self.at(IN_KW) {
+            self.advance();
+        } else {
+            self.error("Expected IN after loop variable in list comprehension".to_string());
+        }
+        self.skip_trivia();
+        self.parse_expression(); // source list expression
+        self.skip_trivia();
+
+        if self.at(IF_KW) {
+            self.advance();
+            self.skip_trivia();
+            self.parse_expression(); // filter condition
+            self.skip_trivia();
+        }
+
+        if self.at(RBRACKET) {
+            self.advance();
+        } else {
+            self.error("Expected `]` to close list comprehension".to_string());
+        }
     }
 
     /// Parse a list spread: `...expr`.

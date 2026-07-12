@@ -438,3 +438,13 @@ These features are parsed in smelt SQL and rewritten to target-specific syntax:
   word — `MAP(a, b)`-style function calls and a column literally named `map`
   both continue to parse as before; only `MAP` immediately followed by `{`
   is treated as a map literal.
+- **List comprehensions** — `[expr FOR x IN list]`, optionally filtered with
+  `[expr FOR x IN list IF cond]` (DuckDB syntax), builds a new list by
+  evaluating `expr` once per element of `list`, keeping only the elements
+  that satisfy `IF cond` when present. Comprehensions can nest (the source
+  list, or the element expression, may itself be a comprehension). Exactly
+  one `FOR` clause is accepted per `[...]` — chained `FOR x IN a FOR y IN b`
+  is a syntax error, matching DuckDB. The result always infers as
+  `Array<T>`: when `expr` is exactly the loop variable (`[x FOR x IN list]`),
+  `T` is the source list's element type; for any other `expr`, `T` infers as
+  `Unknown`.

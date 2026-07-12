@@ -72,6 +72,56 @@ pub fn infer_array_literal_type(
     })
 }
 
+/// Infer the type of a list comprehension (`[expr FOR x IN list (IF cond)?]`,
+/// DuckDB). The result is always `Array<T>`, matching DuckDB's typing.
+///
+/// Typing strategy: the loop variable `x` binds inside `expr` (and the
+/// optional `IF` filter), but smelt's `TypeContext` has no mechanism to bind
+/// a scoped scalar name for the duration of a sub-expression's inference —
+/// that's meta-language lambda-parameter machinery this expression form
+/// doesn't otherwise need. Rather than build that machinery for one
+/// construct, we special-case the common, staticaly-resolvable shape:
+///
+/// - **Bare-variable element** (`[x FOR x IN list]`, filter present or not):
+///   the result element type is exactly the source list's element type — no
+///   binding is needed because the "expression" IS the loop variable.
+/// - **Any other element expression** (`[x + 1 FOR x IN list]`,
+///   `[f(x) FOR x IN list]`, …): the element type depends on `x`'s bound
+///   type inside a scope this function cannot construct, so the element type
+///   is classified `Unknown` (`unknown_dynamic` — legitimately unknowable
+///   here, not a diagnosable gap; see `.claude/unknown-census.toml` census
+///   discipline, which this call is exempt from since it never spells
+///   `DataType::Unknown` directly, matching the empty-array-literal
+///   precedent above).
+pub fn infer_list_comprehension_type(
+    comp: &smelt_parser::ast::ListComprehension,
+    ctx: &TypeContext,
+) -> Option<TypedColumn> {
+    let source = comp.source()?;
+    let source_typed = infer_expression_type(&source, ctx)?;
+    let source_elem_type = match &source_typed.data_type {
+        DataType::Array(inner) => (**inner).clone(),
+        _ => DataType::unknown_dynamic(),
+    };
+
+    let element = comp.element()?;
+    let is_bare_loop_var = comp
+        .var_name()
+        .zip(element.as_column_ref())
+        .is_some_and(|(var, col)| col.qualifier().is_none() && col.name() == var);
+
+    let result_elem_type = if is_bare_loop_var {
+        source_elem_type
+    } else {
+        DataType::unknown_dynamic()
+    };
+
+    Some(TypedColumn {
+        data_type: DataType::Array(Box::new(result_elem_type)),
+        nullable: false,
+    })
+}
+
 /// Infer the type of an array subscript (arr[i]).
 /// Returns the element type of the array.
 pub fn infer_array_subscript_type(
