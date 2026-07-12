@@ -2747,6 +2747,15 @@ pub struct Signature {
     /// with an attached `OVER (…)` clause is treated as `Window` regardless
     /// of the seeded kind (the canonical SQL dual-mode behaviour).
     pub kind: ExprKind,
+    /// Dialect-specific alternate names that resolve to this same entry
+    /// (e.g. `IFNULL`'s `aliases` includes `NVL`; `JSON_OBJECT`'s includes
+    /// `JSON_BUILD_OBJECT`). Empty for entries with no dialect alias.
+    ///
+    /// This is the single authoritative row per canonical function: an
+    /// alias is a name, not a duplicated signature. [`BuiltinRegistry::resolve`]
+    /// and [`BuiltinRegistry::canonical_name`] check this table (via the
+    /// derived alias index) after a direct canonical-name match fails.
+    pub aliases: &'static [&'static str],
 }
 
 impl Signature {
@@ -2808,6 +2817,7 @@ impl Signature {
             canonical_return: None,
             engine_native: HashMap::new(),
             kind: ExprKind::Scalar,
+            aliases: &[],
         })
     }
 
@@ -2817,6 +2827,17 @@ impl Signature {
     /// window functions. Defaults to [`ExprKind::Scalar`] if never called.
     pub fn with_kind(mut self, kind: ExprKind) -> Self {
         self.kind = kind;
+        self
+    }
+
+    /// Attach dialect-specific alias names to this signature (Function-registry
+    /// single ownership, architecture.md §Constraints #14).
+    ///
+    /// Builder-style — used by the registry seed to register alternate
+    /// spellings (e.g. `NVL` for `IFNULL`) that resolve to this same entry
+    /// without duplicating its signature.
+    pub fn with_aliases(mut self, aliases: &'static [&'static str]) -> Self {
+        self.aliases = aliases;
         self
     }
 
@@ -3313,15 +3334,43 @@ pub struct BuiltinRegistry;
 impl BuiltinRegistry {
     /// Resolve a built-in by name, case-insensitively (ASCII folding).
     ///
-    /// Returns `Some(&'static Signature)` when the name matches a registered
-    /// entry, `None` otherwise.
+    /// Checks the canonical name table first, then dialect aliases (e.g.
+    /// `NVL` → `IFNULL`'s entry, `GET_JSON_OBJECT` → `JSON_EXTRACT_TEXT`'s
+    /// entry). Returns `Some(&'static Signature)` when the name matches a
+    /// registered entry or a registered alias of one, `None` otherwise.
     pub fn resolve(name: &str) -> Option<&'static Signature> {
-        REGISTRY.get(&name.to_ascii_uppercase())
+        let upper = name.to_ascii_uppercase();
+        if let Some(sig) = REGISTRY.get(&upper) {
+            return Some(sig);
+        }
+        let canonical = ALIAS_MAP.get(&upper)?;
+        REGISTRY.get(canonical)
+    }
+
+    /// Resolve a name (canonical or dialect alias) to its canonical
+    /// (upper-cased) registry name, case-insensitively.
+    ///
+    /// This is the single alias-resolution entry point other crates use to
+    /// map a dialect spelling back to the name `SqlFunction` recognises —
+    /// keeping alias recognition registry-owned per architecture.md
+    /// §Constraints #14.
+    pub fn canonical_name(name: &str) -> Option<&'static str> {
+        Self::resolve(name).map(|sig| sig.name.as_str())
     }
 
     /// Iterator over all canonical (upper-cased) names in the registry.
     pub fn names() -> impl Iterator<Item = &'static str> {
         REGISTRY.keys().map(|s| s.as_str())
+    }
+
+    /// Iterator over every registered `(alias, canonical_name)` pair,
+    /// upper-cased. Used by the registry-consistency gate to assert every
+    /// alias is recognized and classified consistently with its canonical
+    /// entry.
+    pub fn aliases() -> impl Iterator<Item = (&'static str, &'static str)> {
+        ALIAS_MAP
+            .iter()
+            .map(|(alias, canonical)| (alias.as_str(), canonical.as_str()))
     }
 
     /// Look up a smelt meta-builtin by its dotted path name (case-insensitive).
@@ -3860,12 +3909,16 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         vec![var("T"), var("T")],
         TypeExpr::Var("T".into()),
     ));
-    insert(Signature::new(
-        "IFNULL",
-        vec![tp("T", TypeConstraint::Any)],
-        vec![var("T"), var("T")],
-        TypeExpr::Var("T".into()),
-    ));
+    insert(
+        Signature::new(
+            "IFNULL",
+            vec![tp("T", TypeConstraint::Any)],
+            vec![var("T"), var("T")],
+            TypeExpr::Var("T".into()),
+        )
+        // Null-handling alias (Oracle/Snowflake/DuckDB dialect).
+        .with_aliases(&["NVL"]),
+    );
 
     // ─── Arithmetic / numeric scalars.
     insert(Signature::new(
@@ -4624,20 +4677,38 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             with_timezone: true,
         })),
     ));
-    // JSON built-ins.
-    for name in [
-        "JSON_OBJECT",
-        "JSON_ARRAY",
-        "TO_JSON",
-        "JSON_EXTRACT",
-        "JSON_EXTRACT_TEXT",
-    ] {
-        insert(Signature::new(
-            name,
-            vec![],
-            any_args(),
-            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
-        ));
+    // JSON built-ins. Aliases per canonical name (dialect side-channel
+    // consolidated into the registry per architecture.md §Constraints #14):
+    // JSON_BUILD_OBJECT (Postgres) → JSON_OBJECT, JSON_BUILD_ARRAY (Postgres)
+    // → JSON_ARRAY, TO_JSONB/ROW_TO_JSON (Postgres) → TO_JSON,
+    // JSON_EXTRACT_PATH (Postgres) → JSON_EXTRACT, JSON_EXTRACT_STRING
+    // (DuckDB) / JSON_EXTRACT_PATH_TEXT (Postgres) / GET_JSON_OBJECT (Spark
+    // Hive) / JSON_VALUE (SQL-standard/Snowflake) → JSON_EXTRACT_TEXT.
+    let json_text_aliases: &[(&str, &[&str])] = &[
+        ("JSON_OBJECT", &["JSON_BUILD_OBJECT"]),
+        ("JSON_ARRAY", &["JSON_BUILD_ARRAY"]),
+        ("TO_JSON", &["TO_JSONB", "ROW_TO_JSON"]),
+        ("JSON_EXTRACT", &["JSON_EXTRACT_PATH"]),
+        (
+            "JSON_EXTRACT_TEXT",
+            &[
+                "JSON_EXTRACT_STRING",
+                "JSON_EXTRACT_PATH_TEXT",
+                "GET_JSON_OBJECT",
+                "JSON_VALUE",
+            ],
+        ),
+    ];
+    for (name, aliases) in json_text_aliases {
+        insert(
+            Signature::new(
+                name,
+                vec![],
+                any_args(),
+                TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+            )
+            .with_aliases(aliases),
+        );
     }
     insert(Signature::new(
         "JSON_ARRAY_LENGTH",
@@ -4645,14 +4716,18 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         any_args(),
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::BigInt)),
     ));
-    insert(Signature::new(
-        "JSON_OBJECT_KEYS",
-        vec![],
-        any_args(),
-        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Array(Box::new(
-            DataType::Text,
-        )))),
-    ));
+    insert(
+        Signature::new(
+            "JSON_OBJECT_KEYS",
+            vec![],
+            any_args(),
+            TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Array(Box::new(
+                DataType::Text,
+            )))),
+        )
+        // DuckDB alias.
+        .with_aliases(&["JSON_KEYS"]),
+    );
     insert(Signature::new(
         "JSON_CONTAINS",
         vec![],
@@ -4723,6 +4798,20 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         ))),
     ));
 
+    m
+});
+
+/// Alias index derived from [`REGISTRY`]: maps every dialect alias
+/// (upper-cased) to its canonical (upper-cased) entry name. Built once from
+/// each [`Signature::aliases`] table — the single authoritative source per
+/// architecture.md §Constraints #14 — never populated by hand.
+static ALIAS_MAP: LazyLock<HashMap<String, String>> = LazyLock::new(|| {
+    let mut m = HashMap::new();
+    for sig in REGISTRY.values() {
+        for alias in sig.aliases {
+            m.insert(alias.to_ascii_uppercase(), sig.name.clone());
+        }
+    }
     m
 });
 

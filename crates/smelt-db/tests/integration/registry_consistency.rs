@@ -99,6 +99,71 @@ fn every_recognized_function_is_registry_backed() {
 }
 
 #[test]
+fn every_alias_is_registry_backed() {
+    // Function-registry single ownership (architecture.md §Constraints #14):
+    // dialect aliases (NVL, GET_JSON_OBJECT, ...) must be recognized,
+    // classified, and typed entirely through `BuiltinRegistry` — never a
+    // second alias-only mapping living outside it. This is the direction
+    // `every_recognized_function_is_registry_backed` cannot see: that test
+    // only walks canonical `SqlFunction` names, so an alias resolved solely
+    // by a hand-written match in `SqlFunction::from_name` (with no
+    // registry-side `aliases` entry) would pass it silently.
+    let mut alias_missing_from_sqlfunction: Vec<String> = Vec::new();
+    let mut alias_kind_mismatch: Vec<String> = Vec::new();
+    let mut alias_resolves_to_wrong_canonical: Vec<String> = Vec::new();
+
+    for (alias, canonical) in BuiltinRegistry::aliases() {
+        let Some(canonical_sig) = BuiltinRegistry::resolve(canonical) else {
+            // Structural invariant of the registry itself; not expected to
+            // fire, but names it rather than panicking obscurely.
+            alias_missing_from_sqlfunction.push(format!(
+                "{alias}: registry alias points at unregistered canonical name {canonical}"
+            ));
+            continue;
+        };
+
+        match SqlFunction::from_name(alias) {
+            None => alias_missing_from_sqlfunction.push(alias.to_string()),
+            Some(f) => {
+                if f.name() != canonical {
+                    alias_resolves_to_wrong_canonical.push(format!(
+                        "{alias}: SqlFunction::from_name resolves to {}, registry says {canonical}",
+                        f.name()
+                    ));
+                }
+                let want = expected_kind(f);
+                if canonical_sig.kind != want {
+                    alias_kind_mismatch.push(format!(
+                        "{alias} (-> {canonical}): enum says {:?}, registry says {:?}",
+                        want, canonical_sig.kind
+                    ));
+                }
+            }
+        }
+    }
+
+    alias_missing_from_sqlfunction.sort();
+    alias_kind_mismatch.sort();
+    alias_resolves_to_wrong_canonical.sort();
+
+    assert!(
+        alias_missing_from_sqlfunction.is_empty()
+            && alias_kind_mismatch.is_empty()
+            && alias_resolves_to_wrong_canonical.is_empty(),
+        "alias-registry drift detected:\n\
+         - registry alias NOT recognized by SqlFunction::from_name ({}): {:?}\n\
+         - alias resolves to the wrong canonical function ({}): {:?}\n\
+         - classification (kind) mismatches ({}): {:?}",
+        alias_missing_from_sqlfunction.len(),
+        alias_missing_from_sqlfunction,
+        alias_resolves_to_wrong_canonical.len(),
+        alias_resolves_to_wrong_canonical,
+        alias_kind_mismatch.len(),
+        alias_kind_mismatch,
+    );
+}
+
+#[test]
 fn legacy_match_ratchet() {
     // The number of recognised functions whose primary typing path is still
     // the hand-written `match` in `function_call.rs` (i.e. NOT registry-first

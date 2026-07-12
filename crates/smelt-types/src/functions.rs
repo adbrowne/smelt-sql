@@ -328,39 +328,18 @@ impl SqlFunction {
     ///
     /// Accepts both canonical smelt names and dialect-specific aliases
     /// (e.g., `JSON_BUILD_OBJECT` → `JsonObject`, `GET_JSON_OBJECT` → `JsonExtractText`).
+    ///
+    /// Alias resolution is owned by [`crate::signatures::BuiltinRegistry`]
+    /// (architecture.md §Constraints #14, "Function-registry single
+    /// ownership"): a dialect spelling is recognized, classified, and typed
+    /// from exactly one row — the registry's canonical entry plus its
+    /// `aliases` table — never a second alias-only mapping here.
     pub fn from_name(name: &str) -> Option<Self> {
-        let upper = name.to_uppercase();
-
-        // Check dialect aliases first
-        if let Some(canonical) = Self::resolve_alias(&upper) {
-            return Some(canonical);
-        }
-
-        // Linear scan for canonical names; fine for ~100 variants.
-        ALL_FUNCTIONS.iter().find(|f| f.name() == upper).copied()
-    }
-
-    /// Resolve dialect-specific function name aliases to canonical smelt functions.
-    fn resolve_alias(upper_name: &str) -> Option<Self> {
-        match upper_name {
-            // JSON object construction
-            "JSON_BUILD_OBJECT" => Some(Self::JsonObject),
-            // JSON array construction
-            "JSON_BUILD_ARRAY" => Some(Self::JsonArray),
-            // JSON conversion aliases
-            "TO_JSONB" | "ROW_TO_JSON" => Some(Self::ToJson),
-            // JSON extraction aliases
-            "JSON_EXTRACT_PATH" => Some(Self::JsonExtract),
-            // JSON text extraction aliases
-            "JSON_EXTRACT_STRING" | "JSON_EXTRACT_PATH_TEXT" | "GET_JSON_OBJECT" | "JSON_VALUE" => {
-                Some(Self::JsonExtractText)
-            }
-            // JSON keys alias (DuckDB)
-            "JSON_KEYS" => Some(Self::JsonObjectKeys),
-            // Null handling aliases
-            "NVL" => Some(Self::Ifnull),
-            _ => None,
-        }
+        let canonical = crate::signatures::BuiltinRegistry::canonical_name(name)?;
+        ALL_FUNCTIONS
+            .iter()
+            .find(|f| f.name() == canonical)
+            .copied()
     }
 
     /// Canonical uppercase SQL name.
