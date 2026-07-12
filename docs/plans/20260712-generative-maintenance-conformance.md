@@ -69,7 +69,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1 — Recipe substrate + rendering | done | 82e3f620 | 2026-07-12 |
-| 2 — Verdict protocol (admitted/refused) | done | PENDING_SHA | 2026-07-12 |
+| 2 — Verdict protocol (admitted/refused) | done | 2661883d | 2026-07-12 |
 | 3 — S-tracked oracle + standing gate (append-only, partition grain) | pending | | |
 | 4 — Mutable sources + settled-point oracle + sensitivity probe | pending | | |
 | 5 — Keyed grain + ledger probes + carve-outs | pending | | |
