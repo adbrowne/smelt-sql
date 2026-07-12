@@ -74,6 +74,18 @@ impl STracker {
         self.runs.len() - 1
     }
 
+    /// Record a `full_refresh` run (Phase 6; design §5 "full_refresh
+    /// interleave"): the run reads and reflects the ENTIRE current source
+    /// snapshot, not a bounded window, so it is recorded as if its own
+    /// window covered every possible date — every row in `snapshot` enters
+    /// `S` from this point on, regardless of which window it lands in. This
+    /// is exactly what a real `full_refresh` run does: recompute the whole
+    /// model over everything currently in the source, resetting the ledger's
+    /// coverage for every region the refresh touched.
+    pub fn record_full_refresh(&mut self, snapshot: Vec<GenRow>) -> usize {
+        self.record_run(NaiveDate::MIN, NaiveDate::MAX, snapshot)
+    }
+
     /// Mark `window` as having an outstanding mutable-dimension mutation
     /// (Phase 4; design §6 "Mixed models"): full equivalence assertion for
     /// this window defers to the next run of THAT SAME window (the catch-up
@@ -334,6 +346,54 @@ mod tests {
             OracleMode::SRestricted,
             "re-running the mutation's own window must settle it back to \
              S-restricted mode"
+        );
+    }
+
+    /// `full_refresh_run_reflects_the_whole_current_snapshot` (Phase 6):
+    /// [`STracker::record_full_refresh`] treats its recorded run as if its
+    /// own window covered every date — every row in the snapshot it was
+    /// given enters `S`, regardless of which day it lands on, and a later
+    /// windowed run still composes correctly on top of it.
+    #[test]
+    fn full_refresh_run_reflects_the_whole_current_snapshot() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+        let w2 = (date(2024, 1, 2), date(2024, 1, 3));
+
+        let a = GenRow {
+            d: w1.0,
+            id: 1,
+            val: 10,
+        };
+        let b = GenRow {
+            d: w2.0,
+            id: 2,
+            val: 20,
+        };
+
+        // A full refresh at this point sees both rows already in the
+        // source, even though only w1 has ever been "run" as a window.
+        let k0 = tracker.record_full_refresh(vec![a.clone(), b.clone()]);
+        assert_eq!(
+            sorted(tracker.s_at(k0)),
+            sorted(vec![a.clone(), b.clone()]),
+            "a full-refresh run must reflect the ENTIRE current snapshot, not just \
+             previously-run windows"
+        );
+
+        // A subsequent normal windowed run still composes on top of it.
+        let c = GenRow {
+            d: w2.0,
+            id: 3,
+            val: 30,
+        };
+        let k1 = tracker.record_run(w2.0, w2.1, vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(
+            sorted(tracker.s_at(k1)),
+            sorted(vec![a, b, c]),
+            "a windowed run after a full refresh must still union correctly"
         );
     }
 }

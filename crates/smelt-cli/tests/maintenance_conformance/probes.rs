@@ -15,13 +15,15 @@ use smelt_maintenance_testkit::link_c_harness::base_request;
 use smelt_maintenance_testkit::recipe::{
     arb_recipe, ConstructKind, KeyedCombiner, KeyedRecipe, MutableEnrichedRecipe, RecipePool,
 };
-use smelt_maintenance_testkit::schedule_gen::GenRow;
+use smelt_maintenance_testkit::schedule_gen::{
+    arb_schedule_for, is_permutable, reorder_windows, GenRow,
+};
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
 use smelt_state::reconciliation::Region;
 
 use crate::gate::{
-    classify_keyed, classify_mixed, insert_fact_row, insert_row_keyed, stage_keyed_recipe,
-    stage_mixed_recipe, stage_recipe,
+    classify_keyed, classify_mixed, drive_and_assert, insert_fact_row, insert_row_keyed,
+    stage_keyed_recipe, stage_mixed_recipe, stage_recipe,
 };
 
 /// Read back `SELECT d, id, val, attr FROM main.<model_name> ORDER BY id` —
@@ -278,5 +280,135 @@ async fn persisted_reconciliation_store_reflects_recompute_reset() {
         2,
         "expected exactly the two recomputed regions' entries, got {:#?}",
         ledger.records
+    );
+}
+
+/// Read every column of `main.<model_name>` back as text, one row per output
+/// row, columns cast to `VARCHAR` and rows sorted by every column — a
+/// construct-agnostic full-state snapshot for direct final-state comparison
+/// (plan Phase 6 review checklist: "Permutation probe compares full final
+/// states, not summaries"). Column names/order are read off
+/// `information_schema.columns` since different `BodyConstruct`s project
+/// different schemas.
+fn read_full_output_as_text(
+    project: &smelt_maintenance_testkit::link_c_harness::LinkCProject,
+    model_name: &str,
+) -> Vec<Vec<Option<String>>> {
+    let conn = project.connect().expect("connect for full-state read-back");
+    let columns: Vec<String> = {
+        let mut stmt = conn
+            .prepare(&format!(
+                "SELECT column_name FROM information_schema.columns \
+                 WHERE table_schema = 'main' AND table_name = '{model_name}' \
+                 ORDER BY ordinal_position",
+            ))
+            .expect("prepare column listing");
+        stmt.query_map([], |row| row.get::<_, String>(0))
+            .expect("query column listing")
+            .collect::<Result<Vec<_>, _>>()
+            .expect("collect column listing")
+    };
+    assert!(
+        !columns.is_empty(),
+        "model {model_name:?} reported zero columns via information_schema — staging bug"
+    );
+
+    let select_list = columns
+        .iter()
+        .map(|c| format!("CAST({c} AS VARCHAR)"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let order_list = columns.join(", ");
+    let sql = format!("SELECT {select_list} FROM main.{model_name} ORDER BY {order_list}");
+    let ncols = columns.len();
+
+    let mut stmt = conn.prepare(&sql).expect("prepare full-state read-back");
+    stmt.query_map([], |row| {
+        (0..ncols)
+            .map(|i| row.get::<_, Option<String>>(i))
+            .collect::<Result<Vec<_>, _>>()
+    })
+    .expect("query full-state rows")
+    .collect::<Result<Vec<_>, _>>()
+    .expect("collect full-state rows")
+}
+
+/// `window_order_permutations_converge` (plan Phase 6 TDD list): two valid
+/// orderings of the same generated append-only schedule (same recipe, same
+/// windows/rows, only the running ORDER differs) converge to identical final
+/// maintained-table states — the order/set-determinacy corollary
+/// (`maintenance_plan.md` §"The equivalence invariant": "the right-hand side
+/// depends only on the SET S, never the order it was processed"). Restricted
+/// to schedules with no `AppendLateRow` step
+/// (`schedule_gen::is_permutable`) — a late row's catch-up rerun has a
+/// genuine ordering dependency on its own prior insert.
+#[test]
+fn window_order_permutations_converge() {
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let mut checked = 0;
+    for i in 0..10 {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+
+        // Draw schedules until a permutable one turns up — a bounded
+        // retry loop, never unbounded (design §7 "skipped explicitly, never
+        // silently vacuous").
+        let mut schedule = None;
+        for _ in 0..20 {
+            let candidate = arb_schedule_for(&recipe)
+                .new_tree(&mut runner)
+                .unwrap()
+                .current();
+            if is_permutable(&candidate) {
+                schedule = Some(candidate);
+                break;
+            }
+        }
+        let Some(schedule) = schedule else {
+            eprintln!(
+                "SKIP case {i}: no permutable schedule drawn in 20 attempts for recipe \
+                 {recipe:?} — probe structurally does not apply this case"
+            );
+            continue;
+        };
+
+        let tmp_a = tempfile::TempDir::new().expect("tempdir a");
+        let project_a = stage_recipe(&recipe, &tmp_a)
+            .unwrap_or_else(|e| panic!("case {i}: failed to stage project A: {e}"));
+        let verdict = classify(&project_a, &recipe)
+            .unwrap_or_else(|e| panic!("case {i}: classify failed: {e}"));
+        if !matches!(verdict, Verdict::Admitted(_)) {
+            continue;
+        }
+
+        // Reverse the window order — still a permutation of the same steps.
+        let order: Vec<usize> = (0..schedule.0.len()).rev().collect();
+        let permuted = reorder_windows(&schedule, &order);
+
+        rt.block_on(drive_and_assert(&project_a, &recipe, &schedule))
+            .unwrap_or_else(|e| panic!("case {i}: original-order schedule failed: {e}"));
+
+        let tmp_b = tempfile::TempDir::new().expect("tempdir b");
+        let project_b = stage_recipe(&recipe, &tmp_b)
+            .unwrap_or_else(|e| panic!("case {i}: failed to stage project B: {e}"));
+        rt.block_on(drive_and_assert(&project_b, &recipe, &permuted))
+            .unwrap_or_else(|e| panic!("case {i}: reversed-order schedule failed: {e}"));
+
+        let rows_a = read_full_output_as_text(&project_a, &recipe.model_name);
+        let rows_b = read_full_output_as_text(&project_b, &recipe.model_name);
+        assert_eq!(
+            rows_a, rows_b,
+            "case {i}: recipe {recipe:?} — original-order schedule {schedule:?} vs \
+             reversed-order {permuted:?} diverged in final maintained state"
+        );
+        checked += 1;
+    }
+
+    assert!(
+        checked > 0,
+        "no permutable + admitted case reached across the deterministic sample — \
+         generator/derivation regression"
     );
 }

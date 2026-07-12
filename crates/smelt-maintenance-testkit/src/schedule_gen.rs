@@ -44,6 +44,15 @@ impl GenRow {
 /// existing `run_schedule::ScheduleStep` kinds apply to the append-only pool
 /// (Phase 3 scope, per the plan's Critical files: no mutable-source
 /// machinery this phase) — `InPlaceUpdate`/`InPlaceDelete` are Phase 4 scope.
+///
+/// Phase 6 (`docs/plans/20260712-generative-maintenance-conformance.md`;
+/// design §5 "Schedule enrichment") adds three adversarial step kinds:
+/// [`ConformanceStep::RerunWindow`] (redelivery), [`ConformanceStep::FullRefreshRun`]
+/// (a `full_refresh` interleave), and [`ConformanceStep::BackfillRegion`] (an
+/// explicit operator-directed backfill) — used directly by
+/// `gate.rs`'s hand-written hazard cases; not yet folded into
+/// [`arb_schedule_for`]'s own generator (that is future scope once these
+/// hazards grow their own proptest shrinkers).
 #[derive(Debug, Clone)]
 pub enum ConformanceStep {
     /// Insert `rows` into the source (each landing inside `[start, end)`, or
@@ -61,6 +70,62 @@ pub enum ConformanceStep {
     /// it (design §6: "a genuinely late row is outside S until its window is
     /// re-run").
     AppendLateRow(GenRow),
+    /// Re-deliver an ALREADY-PROCESSED window with no new rows (Phase 6):
+    /// the partition-grain DELETE+INSERT full-replace technique must stay
+    /// idempotent under redelivery — never double-count
+    /// (`maintenance_plan.md` §"The reconciliation ledger": "never fold a
+    /// delta already reflected in the state").
+    RerunWindow { start: NaiveDate, end: NaiveDate },
+    /// Run with no time window at all — `execute_project`'s unwindowed
+    /// full-refresh arm, which drops and rebuilds the maintained table from
+    /// the CURRENT full source contents (Phase 6; design §5 "full_refresh
+    /// interleave"). Resets coverage: everything the run reads is, by
+    /// construction, reflected in the rebuilt table.
+    FullRefreshRun,
+    /// An explicit backfill run over `[start, end)` with no accompanying
+    /// insert (Phase 6) — the operator-directed counterpart of `RunWindow`:
+    /// same execution shape, but the design intent is catching up a region
+    /// rather than processing newly-landed data or a late-row catch-up.
+    BackfillRegion { start: NaiveDate, end: NaiveDate },
+}
+
+/// Whether every window in `schedule` is mutually independent under
+/// reordering (Phase 6; design §5 "window order permutations" — the
+/// order/set-determinacy corollary, `maintenance_plan.md` §"The equivalence
+/// invariant": "the right-hand side depends only on the SET S, never the
+/// order it was processed"). A schedule containing an [`ConformanceStep::AppendLateRow`]
+/// step is NOT eligible: a late row's catch-up rerun has a genuine ordering
+/// dependency on its own prior insert, so arbitrarily reordering steps could
+/// run the catch-up before the row even lands.
+pub fn is_permutable(schedule: &ConformanceSchedule) -> bool {
+    !schedule
+        .0
+        .iter()
+        .any(|s| matches!(s, ConformanceStep::AppendLateRow(_)))
+}
+
+/// Reorder a [`is_permutable`] schedule's steps according to `order` (a
+/// permutation of `0..schedule.0.len()`) — every step still executes with
+/// its own original `start`/`end`/`rows`, just in a different sequence.
+/// Panics on an internal contract violation (not a user-facing error): `order`
+/// must be a permutation of the schedule's own index set, and the schedule
+/// must be [`is_permutable`].
+pub fn reorder_windows(schedule: &ConformanceSchedule, order: &[usize]) -> ConformanceSchedule {
+    assert!(
+        is_permutable(schedule),
+        "reorder_windows requires a permutable schedule (no AppendLateRow steps): {schedule:?}"
+    );
+    let mut sorted_order = order.to_vec();
+    sorted_order.sort_unstable();
+    let expected: Vec<usize> = (0..schedule.0.len()).collect();
+    assert_eq!(
+        sorted_order,
+        expected,
+        "order {order:?} must be a permutation of the schedule's own step indices \
+         0..{}",
+        schedule.0.len()
+    );
+    ConformanceSchedule(order.iter().map(|&i| schedule.0[i].clone()).collect())
 }
 
 /// A generated sequence of [`ConformanceStep`]s over one [`SourceRecipe`].
@@ -348,6 +413,92 @@ pub fn read_source_snapshot(conn: &Connection, source: &SourceRecipe) -> Vec<Gen
     .collect()
 }
 
+/// Three rows placed relative to one source's derived [`smelt_logical::maintenance::ScanClamp`]
+/// (Phase 6; design §5 "Boundary-value data placement") — never a hand-coded
+/// margin:
+/// - `just_inside`: `d = start − before_days`, the earliest day the run's
+///   scan will actually read; must be reflected in the maintained output
+///   after the run that covers `window`.
+/// - `at_edge`: `d = end + after_days − 1 day`, the latest day the run's scan
+///   will read (inclusive) — the reach's other edge.
+/// - `just_outside`: `d = start − before_days − 1 day`, one calendar day
+///   before the scan's lower bound; must NEVER be reflected by a run over
+///   `window` (it is outside the derived reach, by construction).
+#[derive(Debug, Clone)]
+pub struct BoundaryRows {
+    pub just_inside: GenRow,
+    pub at_edge: GenRow,
+    pub just_outside: GenRow,
+}
+
+/// Ceil a [`smelt_logical::analysis::source_bounds::Seconds`] margin to whole
+/// days — mirrors `smelt_logical::maintenance::propagate`'s private
+/// `clamp_days` (kept as a separate copy here since that module is outside
+/// this phase's edit scope — see the plan's Critical files list).
+fn clamp_days(seconds: smelt_logical::analysis::source_bounds::Seconds) -> i64 {
+    const DAY_SECONDS: u64 = 86_400;
+    seconds.0.div_ceil(DAY_SECONDS) as i64
+}
+
+/// Derive [`BoundaryRows`] for `window` from `clamp` — the admitted plan's OWN
+/// derived scan reach, read via [`scan_clamp_for`], never a hand-computed
+/// margin (plan Phase 6 Implementation shape: "Boundary placement is
+/// plan-aware: `classify` runs before data generation"). `next_id` is
+/// threaded through so a caller stamping multiple boundary triples never
+/// collides row ids.
+pub fn boundary_rows_for(
+    clamp: &smelt_logical::maintenance::ScanClamp,
+    window: (NaiveDate, NaiveDate),
+    next_id: &mut i64,
+) -> BoundaryRows {
+    let before_days = clamp_days(clamp.before);
+    let after_days = clamp_days(clamp.after);
+    let (start, end) = window;
+
+    let mut make = |d: NaiveDate, val: i64| {
+        let row = GenRow {
+            d,
+            id: *next_id,
+            val,
+        };
+        *next_id += 1;
+        row
+    };
+
+    let just_inside = make(start - chrono::Duration::days(before_days), 11);
+    let at_edge = make(
+        end + chrono::Duration::days(after_days) - chrono::Duration::days(1),
+        13,
+    );
+    let just_outside = make(
+        start - chrono::Duration::days(before_days) - chrono::Duration::days(1),
+        17,
+    );
+
+    BoundaryRows {
+        just_inside,
+        at_edge,
+        just_outside,
+    }
+}
+
+/// Read the derived [`smelt_logical::maintenance::ScanClamp`] for `source_name`
+/// off an ALREADY-DERIVED [`smelt_logical::maintenance::MaintenancePlan`]'s
+/// `Trigger::NewData` cell — consumed, never re-derived (root `CLAUDE.md`
+/// §"Maintenance-plan purity"). `None` when no `NewData` cell is admitted for
+/// `source_name`, or its scan could not be bounded (`PartitionLocal::No`) —
+/// both legitimate "this recipe has nothing to place boundary rows against"
+/// outcomes, not errors.
+pub fn scan_clamp_for<'a>(
+    plan: &'a smelt_logical::maintenance::MaintenancePlan,
+    source_name: &str,
+) -> Option<&'a smelt_logical::maintenance::ScanClamp> {
+    plan.cell_for(&smelt_logical::maintenance::Trigger::NewData {
+        source: source_name.to_string(),
+    })
+    .and_then(|cell| cell.scans.iter().find(|c| c.source == source_name))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -378,6 +529,13 @@ mod tests {
                         run_windows.push((*start, *end))
                     }
                     ConformanceStep::AppendLateRow(row) => late_windows.push(row.d),
+                    // Phase 6 hazard steps never appear in `arb_schedule_for`'s
+                    // own generated output (see that fn's doc comment) — this
+                    // self-check is scoped to the generator, not hand-written
+                    // schedules.
+                    ConformanceStep::RerunWindow { .. }
+                    | ConformanceStep::FullRefreshRun
+                    | ConformanceStep::BackfillRegion { .. } => {}
                 }
             }
             assert!(
@@ -433,6 +591,112 @@ mod tests {
             check_profile(&corrupted).is_err(),
             "removing the catch-up RunWindow must be caught by check_profile, got Ok for \
              {corrupted:?}"
+        );
+    }
+
+    /// `boundary_placement_targets_derived_clamp_edges` (plan Phase 6 TDD
+    /// list): [`boundary_rows_for`] places rows relative to the ACTUAL
+    /// derived `ScanClamp`, never a hand-coded margin. Part 1 exercises the
+    /// placement arithmetic against a synthetic non-zero clamp directly;
+    /// part 2 classifies every admitted append-only-pool recipe through the
+    /// real derivation (`crate::verdict::classify`) and checks the same
+    /// arithmetic against WHATEVER clamp that recipe's own admission
+    /// actually derives (today: every pool construct is partition-local with
+    /// no lookback, so `before = after = 0` — the placement function must
+    /// still read those zero margins from the plan rather than assuming
+    /// them).
+    #[test]
+    fn boundary_placement_targets_derived_clamp_edges() {
+        // Part 1: synthetic non-zero clamp — the placement math itself.
+        let clamp = smelt_logical::maintenance::ScanClamp {
+            source: "events".to_string(),
+            column: "d".to_string(),
+            before: smelt_logical::analysis::source_bounds::Seconds(2 * 86_400),
+            after: smelt_logical::analysis::source_bounds::Seconds(86_400),
+        };
+        let window = (
+            NaiveDate::from_ymd_opt(2024, 1, 5).expect("valid date"),
+            NaiveDate::from_ymd_opt(2024, 1, 6).expect("valid date"),
+        );
+        let mut next_id = 1_i64;
+        let rows = boundary_rows_for(&clamp, window, &mut next_id);
+        assert_eq!(
+            rows.just_inside.d,
+            NaiveDate::from_ymd_opt(2024, 1, 3).expect("valid date"),
+            "just_inside must land at start - before_days (2 days), not a hand-coded margin"
+        );
+        assert_eq!(
+            rows.at_edge.d,
+            NaiveDate::from_ymd_opt(2024, 1, 6).expect("valid date"),
+            "at_edge must land at end + after_days (1 day) - 1 day"
+        );
+        assert_eq!(
+            rows.just_outside.d,
+            NaiveDate::from_ymd_opt(2024, 1, 2).expect("valid date"),
+            "just_outside must land one day before just_inside"
+        );
+        assert_eq!(next_id, 4, "next_id must advance once per generated row");
+
+        // Part 2: read the clamp off a REAL classified plan (never
+        // re-derived).
+        let mut runner = TestRunner::deterministic();
+        let recipe_strat = arb_recipe(RecipePool::partition_append_only());
+        let mut checked = 0;
+        for i in 0..20 {
+            let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+            let tmp = tempfile::TempDir::new().expect("tempdir");
+            let project_dir = tmp.path().join("project");
+            let db_path = tmp.path().join("db.duckdb");
+            std::fs::create_dir_all(&project_dir).expect("create project dir");
+            let project = crate::render::stage(&recipe, &project_dir, &db_path)
+                .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} failed to stage: {e}"));
+
+            let verdict = crate::verdict::classify(&project, &recipe)
+                .unwrap_or_else(|e| panic!("case {i}: recipe {recipe:?} classify failed: {e}"));
+            let plan = match verdict {
+                crate::verdict::Verdict::Admitted(plan) => plan,
+                crate::verdict::Verdict::Refused(_) => continue,
+            };
+
+            let clamp = match scan_clamp_for(&plan, &recipe.source.name) {
+                Some(clamp) => clamp,
+                None => continue,
+            };
+
+            let before_days = clamp_days(clamp.before);
+            let after_days = clamp_days(clamp.after);
+            let window = (
+                NaiveDate::from_ymd_opt(2024, 6, 10).expect("valid date"),
+                NaiveDate::from_ymd_opt(2024, 6, 11).expect("valid date"),
+            );
+            let mut next_id = 100_i64;
+            let rows = boundary_rows_for(clamp, window, &mut next_id);
+
+            assert_eq!(
+                rows.just_inside.d,
+                window.0 - chrono::Duration::days(before_days),
+                "case {i}: just_inside must read the recipe's OWN derived before-margin"
+            );
+            assert_eq!(
+                rows.at_edge.d,
+                window.1 + chrono::Duration::days(after_days) - chrono::Duration::days(1),
+                "case {i}: at_edge must read the recipe's OWN derived after-margin"
+            );
+            assert_eq!(
+                rows.just_outside.d,
+                window.0 - chrono::Duration::days(before_days) - chrono::Duration::days(1),
+                "case {i}: just_outside must fall strictly outside the derived reach"
+            );
+            assert!(
+                rows.just_outside.d < rows.just_inside.d,
+                "case {i}: just_outside must strictly precede just_inside"
+            );
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "no admitted recipe with a bounded scan was reached across the deterministic \
+             sample — generator/derivation regression"
         );
     }
 }
