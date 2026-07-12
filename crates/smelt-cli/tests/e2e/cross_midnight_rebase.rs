@@ -1363,6 +1363,8 @@ async fn chained_run_is_refused_or_ordered_never_parallel() {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     };
 
     let reporter = SqlCapturingReporter::new();
