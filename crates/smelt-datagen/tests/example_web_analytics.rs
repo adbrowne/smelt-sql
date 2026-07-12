@@ -2818,3 +2818,66 @@ fn test_identity_method_comparison_materializes() {
          {bad_sum} row(s) violate this invariant"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 21: session_boundary_chained_invariants inline .test.sql passes
+// ---------------------------------------------------------------------------
+
+/// Inline test gate: run `smelt test --select silver.sessions_chained` against
+/// the web_analytics project cloned into a temp dir, and assert exit 0 (all
+/// matched tests pass).
+///
+/// The test file `tests/session_boundary_chained_invariants.test.sql`
+/// exercises the real `silver/sessions_chained` model (root-anchored,
+/// self-referential — `docs/research/20260711-clock-vs-root-anchored-sessions.md`
+/// §"silver.sessions_chained — root-anchored cut"): the same gap/platform
+/// boundary rules as `silver.sessions` on four mirrored base fixtures, plus a
+/// fifth fixture (device 8) pinning the divergence — an already-open session
+/// (mocked via `PASSING silver.sessions_chained`, the self-reference) is
+/// force-cut mid-chain purely by the root-anchored 2-day cutoff, even though
+/// no gap/platform boundary fires at that point.
+#[test]
+fn test_sessions_chained_invariants_inline_pass() {
+    let tmp = TempDir::new().expect("tempdir");
+    let tmp_path = tmp.path();
+
+    // Clone the web_analytics project tree into tmp_path so the build artefacts
+    // (DuckDB file, .smelt/ schema cache) never land in the checked-in source.
+    let project_src = repo_root().join("examples/web_analytics");
+    copy_dir_all(&project_src, tmp_path);
+
+    let smelt = smelt_bin();
+    assert!(
+        smelt.exists(),
+        "smelt binary not found at {smelt:?}; run `cargo build -p smelt-cli` first"
+    );
+
+    // Run `smelt test --select silver.sessions_chained` from the cloned project dir.
+    let test_out = Command::new(&smelt)
+        .args([
+            "test",
+            "--project-dir",
+            tmp_path.to_str().expect("tmp_path is valid UTF-8"),
+            "--select",
+            "silver.sessions_chained",
+        ])
+        .env("RUST_LOG", "warn")
+        .output()
+        .unwrap_or_else(|e| panic!("failed to spawn `smelt test`: {e}"));
+
+    let stdout = String::from_utf8_lossy(&test_out.stdout);
+    let stderr = String::from_utf8_lossy(&test_out.stderr);
+    let combined = format!("{stdout}{stderr}");
+
+    assert!(
+        test_out.status.success(),
+        "`smelt test --select silver.sessions_chained` exited {:?}\nstdout:\n{stdout}\nstderr:\n{stderr}",
+        test_out.status,
+    );
+
+    // Verify the named test reported PASS in the output.
+    assert!(
+        combined.contains("PASS") || combined.contains("passed"),
+        "expected 'PASS' or 'passed' in smelt test output, got:\n{combined}"
+    );
+}

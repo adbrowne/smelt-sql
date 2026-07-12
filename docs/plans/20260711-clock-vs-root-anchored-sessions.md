@@ -64,7 +64,7 @@ The current `silver.sessions` enforces its length cap in `sessionize`'s window f
 | 1     | done     | (see date) | 2026-07-11 |
 | 2     | done     | (see date) | 2026-07-12 |
 | 3a    | done     | (see date) | 2026-07-12 |
-| 3     | pending  |        |      |
+| 3     | done     | (see date) | 2026-07-12 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 
