@@ -367,6 +367,16 @@ impl<'a> super::Parser<'a> {
                 self.error("Expected SELECT in subquery".to_string());
                 self.expect(RPAREN);
             }
+        } else if self.at(GLOB_KW) && self.is_keyword_followed_by_lparen() {
+            // DuckDB's glob(pattern) file-listing table function. GLOB is an
+            // operator keyword, but when directly followed by `(` it is a
+            // function name (LEFT()/RIGHT() keyword-as-function-name precedent).
+            let checkpoint = self.builder.checkpoint();
+            self.advance(); // Consume GLOB_KW
+            self.skip_trivia();
+            self.start_node_at(checkpoint, FUNCTION_CALL);
+            self.parse_arg_list();
+            self.finish_node(); // Close FUNCTION_CALL
         } else if self.at(IDENT) {
             // Use builder checkpoint for proper lookahead
             let checkpoint = self.builder.checkpoint();

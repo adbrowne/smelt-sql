@@ -393,6 +393,11 @@ pub enum SyntaxKind {
     SMELT_CHECK,
     CHECK_NAME,
 
+    // GLOB pattern-match comparison operator (DuckDB): `expr GLOB pattern`.
+    // Mirrors LIKE_KW/ILIKE_KW; DuckDB itself rejects `NOT GLOB` (verified via
+    // the DuckDB oracle), so — like LIKE — there is no dedicated NOT GLOB form.
+    GLOB_KW,
+
     // Special
     EOF, // End of file
 }
@@ -478,6 +483,7 @@ impl SyntaxKind {
                 | UNPIVOT_KW
                 | LIKE_KW
                 | ILIKE_KW
+                | GLOB_KW
                 | EXTRACT_KW
                 | COLLATE_KW
         )

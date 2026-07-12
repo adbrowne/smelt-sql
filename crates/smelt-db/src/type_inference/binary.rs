@@ -241,7 +241,7 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
         }
 
         // Pattern matching operators - always return Boolean
-        "LIKE" | "ILIKE" | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
+        "LIKE" | "ILIKE" | "GLOB" | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
             data_type: DataType::Boolean,
             nullable: true,
         }),

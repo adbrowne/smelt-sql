@@ -4679,6 +4679,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
     ));
     insert(Signature::new(
+        "GLOB",
+        vec![],
+        vec![concrete(DataType::Text), concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Boolean)),
+    ));
+    insert(Signature::new(
         "IS_NULL",
         vec![tp("T", TypeConstraint::Any)],
         vec![var("T")],

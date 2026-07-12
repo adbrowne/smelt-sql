@@ -527,14 +527,6 @@ note = "smelt's printer drops the derived-table body (subquery/VALUES) when the 
 category = "derived_table_column_alias_list"
 note = "smelt's printer drops the derived-table body (subquery/VALUES) when the table alias has a column list, e.g. `(VALUES ...) t(a,b)` or `t1 AS c1`, printing only the bare alias name (silent mis-parse)"
 
-["0603cc9aee102b86"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["5a81c9d59a8f801e"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
 ["846e3d125c8e02a9"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"

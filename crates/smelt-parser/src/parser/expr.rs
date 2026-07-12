@@ -272,10 +272,12 @@ impl<'a> super::Parser<'a> {
                 self.start_node_at(checkpoint, IN_EXPR);
                 self.parse_in_body();
                 self.finish_node();
-            } else if self.at(LIKE_KW) || self.at(ILIKE_KW) {
-                // LIKE / ILIKE pattern
+            } else if self.at(LIKE_KW) || self.at(ILIKE_KW) || self.at(GLOB_KW) {
+                // LIKE / ILIKE / GLOB pattern. DuckDB rejects `NOT GLOB` (verified
+                // via the oracle), matching the existing NOT LIKE limitation, so
+                // there is no dedicated NOT-prefixed form here.
                 self.start_node_at(checkpoint, BINARY_EXPR);
-                self.advance(); // consume LIKE/ILIKE
+                self.advance(); // consume LIKE/ILIKE/GLOB
                 self.skip_trivia();
                 self.parse_collate_expr();
                 self.finish_node();
@@ -1621,6 +1623,11 @@ impl<'a> super::Parser<'a> {
             // Phase B: FN_KW — `fn(args)` where `fn` is used as a SQL function name.
             // is_fn_lambda_start() excludes LPAREN already, so fn(args) reaches here.
             FN_KW,
+            // GLOB is a comparison operator keyword, but DuckDB also ships a
+            // glob(pattern) file-listing function. When directly followed by
+            // `(` it is a function name (LEFT()/RIGHT() precedent); otherwise
+            // it is the infix operator.
+            GLOB_KW,
         ]) {
             return false;
         }

@@ -2210,6 +2210,7 @@ impl BinaryExpr {
                     NOT_KW => return Some("NOT".to_string()),
                     LIKE_KW => return Some("LIKE".to_string()),
                     ILIKE_KW => return Some("ILIKE".to_string()),
+                    GLOB_KW => return Some("GLOB".to_string()),
                     TILDE => return Some("~".to_string()),
                     TILDE_STAR => return Some("~*".to_string()),
                     NOT_TILDE => return Some("!~".to_string()),
@@ -2351,6 +2352,7 @@ impl FunctionCall {
                     || k == UNPIVOT_KW
                     || k == VALUES_KW
                     || k == FN_KW
+                    || k == GLOB_KW
             })
             .map(|t| t.text().to_string())
     }

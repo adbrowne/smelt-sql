@@ -571,6 +571,7 @@ fn keyword_or_ident(text: &str) -> SyntaxKind {
         "UNPIVOT" => UNPIVOT_KW,
         "LIKE" => LIKE_KW,
         "ILIKE" => ILIKE_KW,
+        "GLOB" => GLOB_KW,
         "COLLATE" => COLLATE_KW,
         // Phase B (meta-language): `fn` is a reserved keyword; any SQL that
         // previously used `fn` as a column, table, or alias name must now quote it

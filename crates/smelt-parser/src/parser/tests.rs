@@ -7702,3 +7702,120 @@ fn check_keyword_contextual() {
         "smelt_check (single IDENT) must NOT produce a SMELT_CHECK node"
     );
 }
+
+// ===== GLOB comparison operator (DuckDB) =====
+
+#[test]
+fn parse_glob_operator() {
+    // `a GLOB 'x*'` parses clean as a BINARY_EXPR (mirrors LIKE/ILIKE), not the
+    // former silent mis-parse where `GLOB` was consumed as a column alias
+    // (`SELECT a GLOB 'x*'` used to become `SELECT a AS GLOB`, dropping the
+    // string literal as a dangling error).
+    let sql = "SELECT a FROM t WHERE b GLOB 'x*'";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+    let binary = parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for the GLOB comparison");
+    assert_eq!(binary.operator().as_deref(), Some("GLOB"));
+}
+
+#[test]
+fn glob_operator_round_trip() {
+    // parse → print → re-parse must have no errors (same convention as the
+    // other round-trip tests in this file — see test_named_window_clause_round_trip).
+    let sql = "SELECT a FROM t WHERE b GLOB 'x*'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("GLOB"),
+        "printed SQL must retain GLOB: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn glob_matches_ilike_identifier_precedent() {
+    // GLOB is lexed unconditionally as a keyword token (GLOB_KW), exactly like
+    // LIKE_KW/ILIKE_KW — there is no contextual identifier fallback for any of
+    // the three in this grammar, so `AS glob` fails to parse just as `AS ilike`
+    // does. This intentionally matches the ILIKE precedent rather than
+    // DuckDB's own (more lenient) soft-keyword treatment of GLOB.
+    let glob_errors = !parse("SELECT 1 AS glob FROM t").errors.is_empty();
+    let ilike_errors = !parse("SELECT 1 AS ilike FROM t").errors.is_empty();
+    assert_eq!(
+        glob_errors, ilike_errors,
+        "GLOB-as-alias must fail identically to ILIKE-as-alias"
+    );
+    assert!(glob_errors, "expected AS glob to be a parse error");
+}
+
+#[test]
+fn not_glob_not_supported() {
+    // DuckDB itself rejects `NOT GLOB` (verified against a live DuckDB via the
+    // CLI oracle: `SELECT 'abc' NOT GLOB 'z*'` => Parser Error). This mirrors
+    // the pre-existing `NOT LIKE` limitation (also unsupported by this
+    // grammar), so smelt intentionally does not special-case NOT GLOB either.
+    let sql = "SELECT a FROM t WHERE b NOT GLOB 'x*'";
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "NOT GLOB is expected to fail loud, matching DuckDB's own rejection \
+         and the pre-existing NOT LIKE limitation"
+    );
+}
+
+#[test]
+fn glob_as_table_function_name() {
+    // DuckDB's glob(pattern) file-listing table function: GLOB followed by `(`
+    // is a function name (LEFT()/RIGHT() keyword-as-function-name precedent),
+    // not the comparison operator — `FROM glob('*.csv')` must parse cleanly.
+    let sql = "SELECT * FROM glob('*.csv')";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let call = parse
+        .syntax()
+        .descendants()
+        .find_map(FunctionCall::cast)
+        .expect("must have a FUNCTION_CALL node for glob('*.csv')");
+    assert_eq!(call.name().as_deref(), Some("glob"));
+}
+
+#[test]
+fn glob_as_scalar_function_name() {
+    // Same keyword-as-function-name treatment in expression position.
+    let sql = "SELECT count(*) FROM (SELECT 1) t WHERE glob('*.csv') IS NOT NULL";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn glob_operator_still_wins_after_expression() {
+    // After a complete left operand, GLOB is always the infix operator — even
+    // when the right operand is parenthesized. Function-name treatment applies
+    // only where a *new* primary expression is expected.
+    let sql = "SELECT a FROM t WHERE b GLOB ('x*')";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let binary = parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for the GLOB comparison");
+    assert_eq!(binary.operator().as_deref(), Some("GLOB"));
+}

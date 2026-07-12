@@ -398,3 +398,6 @@ These features are parsed in smelt SQL and rewritten to target-specific syntax:
 - **PIVOT / UNPIVOT** — table rotation
 - **Array subscript** — `arr[1]` notation
 - **DATE literals** — `DATE '2024-01-01'` normalization
+- **Pattern matching operators** — `LIKE`, `ILIKE` (case-insensitive `LIKE`), and
+  `GLOB` (DuckDB glob-style pattern matching, e.g. `name GLOB 'x*'`) each infer
+  `Boolean`. `NOT GLOB` is not supported — DuckDB itself rejects that form.

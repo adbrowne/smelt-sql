@@ -89,12 +89,12 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
     // Category `roundtrip_mismatch`: smelt parses cleanly but the printed SQL is
     // rejected/mis-evaluated by DuckDB (the silent-mis-parse class). No seed
     // statement currently falls in this category — Phase 1/2 fail-loud parsing
-    // converted the former silent mis-parses (`GLOB`, dollar-quoted, `MAP {…}`)
-    // into loud parse failures, so they register as `duckdb_fails_to_parse`.
-    // TRY_CAST, GROUP BY ALL, ORDER BY ALL, and IGNORE/RESPECT NULLS were
-    // formerly registered here; smelt now parses, prints, and (for TRY_CAST)
-    // infers them, so their entries were removed and the ratchet baseline
-    // shrank accordingly.
+    // converted the former silent mis-parses (dollar-quoted, `MAP {…}`) into
+    // loud parse failures, so they register as `duckdb_fails_to_parse`.
+    // TRY_CAST, GROUP BY ALL, ORDER BY ALL, IGNORE/RESPECT NULLS, and GLOB were
+    // formerly registered here; smelt now parses, prints, and infers them
+    // (GLOB infers Boolean), so their entries were removed and the ratchet
+    // baseline shrank accordingly.
     KnownGap {
         id: "duckdb_trim_modifier",
         description: "SQL-standard trim(BOTH|LEADING|TRAILING … FROM …) form is not parsed",
@@ -147,15 +147,6 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         dialect: "duckdb",
         patterns: &[r"(?i)\bMAP\s*\{"],
         severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
-        id: "duckdb_glob_operator",
-        description: "GLOB pattern-match operator is not parsed (formerly silently mis-parsed)",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"(?i)\bGLOB\b"],
-        severity: "medium",
         planned_fix: false,
     },
     KnownGap {

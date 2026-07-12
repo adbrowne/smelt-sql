@@ -21,6 +21,14 @@ fn operator_ilike_registered() {
 }
 
 #[test]
+fn operator_glob_registered() {
+    assert!(
+        BuiltinRegistry::resolve("GLOB").is_some(),
+        "GLOB not in registry"
+    );
+}
+
+#[test]
 fn operator_is_null_registered() {
     assert!(
         BuiltinRegistry::resolve("IS_NULL").is_some(),

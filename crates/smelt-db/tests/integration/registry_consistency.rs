@@ -22,6 +22,7 @@ const OPERATOR_REGISTRY_ENTRIES: &[&str] = &[
     "DATE_ADD",
     "DATE_SUB",
     "EXISTS",
+    "GLOB",
     "ILIKE",
     "IN",
     "IS_NULL",
