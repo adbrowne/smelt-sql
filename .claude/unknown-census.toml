@@ -179,7 +179,7 @@ classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1127"]
+["crates/smelt-db/src/queries/schema.rs:1139"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"
