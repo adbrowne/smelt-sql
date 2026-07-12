@@ -12,6 +12,12 @@ use proptest::test_runner::TestRunner;
 
 use smelt_logical::maintenance::{Technique, Trigger};
 use smelt_maintenance_testkit::link_c_harness::base_request;
+use smelt_maintenance_testkit::probes::{
+    compiled_sql_matches_derived_clamp,
+    rows_outside_write_window_are_byte_unchanged as probe_write_window_containment,
+    technique_pins_agree_at_fixed_s as probe_technique_interchangeability, CaseContext,
+    ReachabilityReport,
+};
 use smelt_maintenance_testkit::recipe::{
     arb_recipe, ConstructKind, KeyedCombiner, KeyedRecipe, MutableEnrichedRecipe, RecipePool,
 };
@@ -411,4 +417,153 @@ fn window_order_permutations_converge() {
         "no permutable + admitted case reached across the deterministic sample — \
          generator/derivation regression"
     );
+}
+
+/// `compiled_sql_filter_matches_derived_clamp` (plan Phase 7 TDD list;
+/// design §7 row 1): the filter in `SqlCapturingReporter`'s captured SQL
+/// matches the admitted cell's derived `ScanClamp` — plan-vs-execution
+/// consistency, checked at the SQL-text level (never re-derived; see
+/// `smelt_maintenance_testkit::probes::compiled_sql_matches_derived_clamp`'s
+/// doc comment).
+#[tokio::test]
+async fn compiled_sql_filter_matches_derived_clamp() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+
+    let ctx = CaseContext::stage_partition(recipe)
+        .expect("stage + classify the additive-agg append-only recipe")
+        .expect("expected the additive-agg append-only recipe to admit a NewData cell");
+
+    compiled_sql_matches_derived_clamp(&ctx)
+        .await
+        .expect_checked_ok("compiled_sql_matches_derived_clamp");
+}
+
+/// `rows_outside_write_window_are_byte_unchanged` (plan Phase 7 TDD list;
+/// design §7 row 2): output rows outside a run's write window are
+/// byte-unchanged across that run — `maintenance_plan.md` §Constraints
+/// "Write window = output window".
+#[tokio::test]
+async fn rows_outside_write_window_are_byte_unchanged() {
+    let mut runner = TestRunner::deterministic();
+    let pool = RecipePool {
+        constructs: vec![ConstructKind::AdditiveAgg],
+    };
+    let recipe = arb_recipe(pool).new_tree(&mut runner).unwrap().current();
+
+    let ctx = CaseContext::stage_partition(recipe)
+        .expect("stage + classify the additive-agg append-only recipe")
+        .expect("expected the additive-agg append-only recipe to admit a NewData cell");
+
+    probe_write_window_containment(&ctx)
+        .await
+        .expect_checked_ok("rows_outside_write_window_are_byte_unchanged");
+}
+
+/// `technique_pins_agree_at_fixed_s` (plan Phase 7 TDD list; design §7
+/// "Technique interchangeability"): for the `grain: key` additive-combiner
+/// recipe, the fold family (windowed `KeyedFold` runs) and the recompute
+/// family (a no-window full-table rebuild) reach identical final states over
+/// the SAME seed data — `maintenance_plan.md` §"Per-cell admission"
+/// "Interchangeability and choice". Also asserts a pin naming an unadmitted
+/// technique for this cell refuses rather than silently resolving (review
+/// checklist). See `smelt_maintenance_testkit::probes`'s module doc comment
+/// for why this probe compares the two real execution paths rather than the
+/// `maintenance.cells[].technique` frontmatter pin, which this phase's
+/// implementation work confirmed is not wired into execution anywhere
+/// today.
+#[tokio::test]
+async fn technique_pins_agree_at_fixed_s() {
+    let recipe = KeyedRecipe::new_window_forward(KeyedCombiner::Additive);
+
+    let ctx = CaseContext::stage_keyed(recipe)
+        .expect("stage + classify the additive keyed recipe")
+        .expect("expected the additive keyed recipe to admit a NewData KeyedFold cell");
+
+    probe_technique_interchangeability(&ctx)
+        .await
+        .expect_checked_ok("technique_pins_agree_at_fixed_s");
+}
+
+/// `probe_skips_are_counted_never_silent` (plan Phase 7 TDD list; design §7
+/// "Probes are per-case opt-in... skipped explicitly"/§8 "generator
+/// health"): every probe that structurally can't apply to a case increments
+/// a per-probe skip counter surfaced in the reachability report; a probe at
+/// 100% skip across the sample fails the report. The sample deliberately
+/// mixes partition-grain and `grain: key` cases so every probe (each scoped
+/// to exactly one of those pools — see `smelt_maintenance_testkit::probes`)
+/// fires at least once.
+#[test]
+fn probe_skips_are_counted_never_silent() {
+    let mut runner = TestRunner::deterministic();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    let mut report = ReachabilityReport::default();
+
+    let partition_pool = RecipePool {
+        constructs: vec![
+            ConstructKind::AdditiveAgg,
+            ConstructKind::PassThrough,
+            ConstructKind::Filter,
+        ],
+    };
+    for _ in 0..3 {
+        let recipe = arb_recipe(partition_pool.clone())
+            .new_tree(&mut runner)
+            .unwrap()
+            .current();
+        let Some(ctx) = CaseContext::stage_partition(recipe)
+            .expect("stage + classify a partition-grain sample case")
+        else {
+            continue;
+        };
+        let clamp_outcome = rt.block_on(compiled_sql_matches_derived_clamp(&ctx));
+        report.record("compiled_sql_matches_derived_clamp", &clamp_outcome);
+        let window_outcome = rt.block_on(probe_write_window_containment(&ctx));
+        report.record(
+            "rows_outside_write_window_are_byte_unchanged",
+            &window_outcome,
+        );
+        let technique_outcome = rt.block_on(probe_technique_interchangeability(&ctx));
+        report.record("technique_pins_agree_at_fixed_s", &technique_outcome);
+    }
+
+    for combiner in [KeyedCombiner::Additive, KeyedCombiner::Idempotent] {
+        let recipe = KeyedRecipe::new_window_forward(combiner);
+        let Some(ctx) =
+            CaseContext::stage_keyed(recipe).expect("stage + classify a keyed sample case")
+        else {
+            continue;
+        };
+        let clamp_outcome = rt.block_on(compiled_sql_matches_derived_clamp(&ctx));
+        report.record("compiled_sql_matches_derived_clamp", &clamp_outcome);
+        let window_outcome = rt.block_on(probe_write_window_containment(&ctx));
+        report.record(
+            "rows_outside_write_window_are_byte_unchanged",
+            &window_outcome,
+        );
+        let technique_outcome = rt.block_on(probe_technique_interchangeability(&ctx));
+        report.record("technique_pins_agree_at_fixed_s", &technique_outcome);
+    }
+
+    // Every probe recorded at least one Checked outcome (not just skips) —
+    // the vacuity check itself.
+    report.assert_no_probe_fully_skipped();
+
+    // And, over this sample, every probe was actually exercised at least
+    // once (belt-and-suspenders on the sample's own construction: if this
+    // ever fails without `assert_no_probe_fully_skipped` also failing, the
+    // report's own accounting has a gap).
+    for probe in [
+        "compiled_sql_matches_derived_clamp",
+        "rows_outside_write_window_are_byte_unchanged",
+        "technique_pins_agree_at_fixed_s",
+    ] {
+        assert!(
+            report.checked(probe) > 0,
+            "probe {probe:?} never recorded a Checked outcome across the sample: {report:#?}"
+        );
+    }
 }

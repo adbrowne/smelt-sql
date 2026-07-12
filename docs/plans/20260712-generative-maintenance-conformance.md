@@ -74,7 +74,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 4 — Mutable sources + settled-point oracle + sensitivity probe | done | 34440187 | 2026-07-12 |
 | 5 — Keyed grain + ledger probes + carve-outs | done | 0ebe6e02 | 2026-07-12 |
 | 6 — Schedule enrichment | done | 3ffa9ffd | 2026-07-12 |
-| 7 — Plan-claim probes | pending | | |
+| 7 — Plan-claim probes | done | | 2026-07-13 |
 | 8 — Simulated change feed | pending | | |
 | 9 — Definition-change steps | pending | | |
 | 10 — Generated DAGs | pending | | |
@@ -408,6 +408,24 @@ You are executing this plan from the start of a new session. Your job is to driv
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 7**: `maintenance.cells[].technique` (the hard-pin frontmatter surface documented in
+  `maintenance_plan.md` §"Per-cell admission" and modelled by `smelt_core::config::CellTechnique`)
+  is parsed and validated, and its resolver logic exists and is unit-tested in two places
+  (`smelt_logical::maintenance::choice::resolve_cell_choice`,
+  `smelt_runtime::maintenance_driver::resolve_cell_technique`) — but neither resolver is ever
+  invoked with a real pin value anywhere in the execute path. `resolve_cell_technique`'s one
+  production call site (`resolve_live_column_scoped_cell`) hardcodes `pin: None`, and
+  `derive_model_maintenance_plan` never even takes a `MaintenanceConfig` as an argument. A pin set
+  in a model's frontmatter today has zero effect on which technique executes, confirmed by
+  exhaustive `rg` across `smelt-db`, `smelt-logical`, and `smelt-runtime`. Phase 7's
+  `technique_pins_agree_at_fixed_s` probe therefore exercises the two real, wired execution paths
+  that stand in for the same spec claim (a `grain: key` model's windowed `KeyedFold` runs vs its
+  no-window full-table recompute) instead of the inert pin — see
+  `crates/smelt-maintenance-testkit/src/probes.rs`'s module doc comment for the full writeup.
+  Wiring the pin into `derive_model_maintenance_plan`'s callers (and into keyed-grain dispatch,
+  which has no technique-choice hook at all today) is real, scoped follow-up work outside this
+  plan's Critical files.
 
 ## Verification
 

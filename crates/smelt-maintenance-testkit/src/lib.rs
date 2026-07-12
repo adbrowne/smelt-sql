@@ -49,11 +49,18 @@
 //! - [`oracle_modes`] — the `OracleMode` enum a mixed model selects between
 //!   (S-restricted vs settled-point,
 //!   `docs/plans/20260712-generative-maintenance-conformance.md` Phase 4).
+//! - [`probes`] — plan-claim probes: `CaseContext`/`ProbeOutcome`, the
+//!   direct runtime checks that a derived plan claim actually holds beyond
+//!   end-state equivalence alone (scan-clamp/compiled-SQL consistency,
+//!   write-window containment, technique interchangeability), plus the
+//!   skip-accounting `ReachabilityReport` fold
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 7).
 
 pub mod link_c_harness;
 pub mod model_shapes;
 pub mod oracle;
 pub mod oracle_modes;
+pub mod probes;
 pub mod recipe;
 pub mod render;
 pub mod run_schedule;

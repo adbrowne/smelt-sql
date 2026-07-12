@@ -160,6 +160,20 @@ pub fn classify_adversarial(
     classify_model(project, &recipe.model_name)
 }
 
+/// Classify a staged [`crate::recipe::KeyedRecipe`] — the `grain: key` pool's
+/// counterpart of [`classify`] (`docs/plans/20260712-generative-maintenance-conformance.md`
+/// Phase 7). `crate::gate`'s own `classify_keyed` (`smelt-cli`'s test binary)
+/// cannot be imported back into this crate, and Phase 7's probes need a keyed
+/// verdict from inside the testkit itself, so this is a second thin wrapper
+/// around the same [`classify_model`] this module already uses for
+/// [`classify`]/[`classify_adversarial`] — no admission logic is re-derived.
+pub fn classify_keyed(
+    project: &LinkCProject,
+    recipe: &crate::recipe::KeyedRecipe,
+) -> anyhow::Result<Verdict> {
+    classify_model(project, &recipe.model_name)
+}
+
 /// Stage an [`AdversarialLeafRecipe`] to disk + create its empty source
 /// table, mirroring [`render::stage`]'s contract for [`ModelRecipe`]
 /// (kept here rather than in `render.rs` for the same reason

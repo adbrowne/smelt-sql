@@ -43,7 +43,7 @@ smelt-logical unwrap 1
 smelt-lsp expect 1
 smelt-lsp println 0
 smelt-lsp unwrap 3
-smelt-maintenance-testkit expect 26
+smelt-maintenance-testkit expect 35
 smelt-maintenance-testkit println 0
 smelt-maintenance-testkit unwrap 2
 smelt-parser-compat expect 0
