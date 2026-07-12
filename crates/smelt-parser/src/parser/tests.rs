@@ -939,6 +939,91 @@ fn test_union_all() {
 }
 
 #[test]
+fn test_union_parenthesized_right_operand() {
+    // `A UNION (B)` — the right-hand operand of a set operation may be
+    // parenthesized. `union_select()` must unwrap the SUBQUERY wrapper to
+    // reach the inner SelectStmt so downstream schema unification still
+    // sees it.
+    let input = "SELECT id FROM users UNION (SELECT id FROM customers)";
+    let (_, select) = parse_select(input);
+
+    assert!(select.has_union(), "should have UNION");
+    assert!(
+        select.union_select().is_some(),
+        "should unwrap the parenthesized right operand"
+    );
+    assert!(select.union_select().unwrap().select_list().is_some());
+}
+
+#[test]
+fn test_union_deeply_nested_parenthesized_operand() {
+    // Redundant nesting `(((...)))` and a set-op tail inside the parens
+    // (EXCEPT + ORDER BY) both round-trip through the same
+    // parse_query_expr/parse_parenthesized_query recursion.
+    let input =
+        "SELECT q1 FROM t UNION ALL (((SELECT q2 FROM t EXCEPT SELECT q1 FROM t ORDER BY 1)))";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let select = file.select_stmt().unwrap();
+    assert!(select.has_union(), "should have UNION");
+    assert!(select.is_union_all(), "should be UNION ALL");
+    let right = select
+        .union_select()
+        .expect("should unwrap triple-nested parens to reach the inner SelectStmt");
+    assert!(
+        right.has_set_operation(),
+        "the parenthesized right operand's own EXCEPT tail should still be reachable"
+    );
+}
+
+#[test]
+fn test_union_parenthesized_operand_in_from_subquery() {
+    // Parenthesized set-op nesting inside a FROM-clause derived table:
+    // `FROM (A UNION (B UNION C)) alias`.
+    let input = "SELECT * FROM (SELECT 1 UNION (SELECT 1 UNION SELECT 1)) t";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_union_chain_still_parses_without_parens() {
+    // Regression guard: a plain (unparenthesized) UNION ALL chain with a
+    // trailing LIMIT must still parse exactly as before.
+    let input = "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 LIMIT 5";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_subquery_in_from_still_parses() {
+    // Regression guard: a plain (non-set-op) derived-table subquery in FROM
+    // must still parse; the FROM-clause LPAREN branch now dispatches
+    // through parse_query_expr instead of parse_select_stmt directly.
+    let input = "SELECT * FROM (SELECT id FROM users) u";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_scalar_subquery_still_parses() {
+    // Regression guard: a plain scalar subquery expression must still
+    // parse; the expr.rs LPAREN branch now also accepts WITH_KW and a
+    // nested LPAREN alongside the original SELECT_KW check.
+    let input = "SELECT (SELECT COUNT(*) FROM orders) AS n";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_scalar_subquery_with_internal_union_still_parses() {
+    let input = "SELECT (SELECT 2 UNION SELECT 2)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
 fn test_smelt_ref_with_cte() {
     // Phase 4: smelt.ref() is removed; updated to use smelt.<path> form.
     let input = r#"
@@ -4103,6 +4188,170 @@ fn parse_list_literal_error_recovery_unterminated() {
     );
 }
 
+// ===== List comprehensions: [expr FOR ident IN list (IF cond)?] (DuckDB) =====
+
+#[test]
+fn parse_list_comprehension_basic() {
+    // `[x + 1 FOR x IN [1, 2, 3]]` parses clean to a LIST_COMPREHENSION node
+    // and round-trips through the printer.
+    let sql = "SELECT [x + 1 FOR x IN [1, 2, 3]] AS l";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let comp = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LIST_COMPREHENSION)
+        .expect("must have a LIST_COMPREHENSION node");
+    assert!(
+        comp.children().any(|n| n.kind() == LIST_COMPREHENSION_VAR),
+        "LIST_COMPREHENSION must have a LIST_COMPREHENSION_VAR child"
+    );
+    assert!(
+        comp.descendants().any(|n| n.kind() == ARRAY_LITERAL),
+        "LIST_COMPREHENSION's source list must be an ARRAY_LITERAL"
+    );
+
+    assert_eq!(
+        parse.syntax().text().to_string().trim().to_string(),
+        sql,
+        "list comprehension must round-trip losslessly"
+    );
+}
+
+#[test]
+fn parse_list_comprehension_with_filter() {
+    // `[x FOR x IN [1, 2, 3] IF x > 1]` — IF filter clause after the IN-list.
+    let sql = "SELECT [x FOR x IN [1, 2, 3] IF x > 1] AS l";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let comp = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == LIST_COMPREHENSION)
+        .expect("must have a LIST_COMPREHENSION node");
+    // element expr + source expr + filter expr = 3 Expr-castable children,
+    // counted here as EXPRESSION/BINARY_EXPR/ARRAY_LITERAL direct children.
+    let expr_child_count = comp
+        .children()
+        .filter(|n| matches!(n.kind(), EXPRESSION | BINARY_EXPR | ARRAY_LITERAL))
+        .count();
+    assert_eq!(
+        expr_child_count, 3,
+        "expected element + source + filter expressions, got {}",
+        expr_child_count
+    );
+}
+
+#[test]
+fn parse_list_comprehension_ast_accessors() {
+    let sql = "SELECT [x FOR x IN [1, 2, 3] IF x > 1] AS l FROM t";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let file = File::cast(parse.syntax()).expect("must cast to File");
+    let select = file.select_stmt().expect("must have a SELECT statement");
+    let expr = select
+        .select_list()
+        .expect("must have select list")
+        .items()
+        .next()
+        .and_then(|item| item.expression())
+        .expect("must have select item expression");
+
+    let comp = Expr::as_list_comprehension(&expr)
+        .expect("select item expression must be a list comprehension");
+    assert_eq!(comp.var_name().as_deref(), Some("x"));
+    assert!(comp.element().is_some(), "must have element expr");
+    assert!(comp.source().is_some(), "must have source expr");
+    assert!(comp.filter().is_some(), "must have filter expr");
+}
+
+#[test]
+fn parse_list_comprehension_nested() {
+    // `[[y FOR y IN x] FOR x IN [[1, 2], [3, 4]]]` — a comprehension whose
+    // element expression is itself a comprehension. Verified against DuckDB.
+    let sql = "SELECT [[y FOR y IN x] FOR x IN [[1, 2], [3, 4]]] AS l";
+    let parse = parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+
+    let comps: Vec<_> = parse
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == LIST_COMPREHENSION)
+        .collect();
+    assert_eq!(comps.len(), 2, "expected outer + inner LIST_COMPREHENSION");
+
+    assert_eq!(
+        parse.syntax().text().to_string().trim().to_string(),
+        sql,
+        "nested list comprehension must round-trip losslessly"
+    );
+}
+
+#[test]
+fn parse_list_comprehension_multiple_for_clauses_is_error() {
+    // DuckDB verified: chained `FOR x IN a FOR y IN b` is a syntax error
+    // there (`Parser Error: syntax error at or near "FOR"`) — smelt matches.
+    let sql = "SELECT [x FOR x IN [1, 2, 3] FOR y IN [4, 5]] AS l";
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "multiple FOR clauses in one comprehension must be a parse error, matching DuckDB"
+    );
+}
+
+#[test]
+fn parse_list_comprehension_for_after_comma_is_error() {
+    // DuckDB verified: `[1, 2 FOR x IN [1,2,3]]` is a syntax error there
+    // (`FOR` is only recognized right after the sole element expression).
+    let sql = "SELECT [1, 2 FOR x IN [1, 2, 3]] AS l";
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "FOR after a comma-separated element list must be a parse error, matching DuckDB"
+    );
+}
+
+#[test]
+fn parse_list_literal_guards_still_hold_alongside_comprehension() {
+    // Plain array/list literals — including empty `[]` — must be unaffected
+    // by the comprehension grammar addition.
+    let empty = parse("SELECT [] AS l");
+    assert!(empty.errors.is_empty(), "empty list: {:?}", empty.errors);
+    assert!(empty
+        .syntax()
+        .descendants()
+        .any(|n| n.kind() == ARRAY_LITERAL));
+
+    let plain = parse("SELECT [1, 2, 3] AS l");
+    assert!(plain.errors.is_empty(), "plain list: {:?}", plain.errors);
+    assert!(
+        !plain
+            .syntax()
+            .descendants()
+            .any(|n| n.kind() == LIST_COMPREHENSION),
+        "plain list literal must not produce a LIST_COMPREHENSION node"
+    );
+}
+
 #[test]
 fn parse_spread_in_group_by() {
     // `SELECT x FROM t GROUP BY ...keys` — LIST_SPREAD inside the GROUP BY
@@ -6910,7 +7159,7 @@ fn parse_hash_cte_ref() {
     );
 
     // Lossless round-trip.
-    let cst_text = parse.syntax().text().to_string();
+    let cst_text = parse.syntax().text().to_string().trim().to_string();
     assert_eq!(
         cst_text, input,
         "round-trip: CST text must reproduce the exact source"
@@ -6986,7 +7235,7 @@ fn dangling_hash_no_ident_recovers() {
     let parse = parse(input);
 
     // Lossless round-trip: ALL source characters must be preserved in the CST.
-    let cst_text = parse.syntax().text().to_string();
+    let cst_text = parse.syntax().text().to_string().trim().to_string();
     assert_eq!(
         cst_text, input,
         "dangling `#`: CST must losslessly reproduce the source"
@@ -7045,21 +7294,101 @@ fn test_scientific_notation_number() {
 #[test]
 fn number_followed_by_ident_without_space_errors() {
     // Oracle: DuckDB does not have real hex-integer-literal grammar in this
-    // position either — `duckdb -c "SELECT 0x1F;"` prints a column named
-    // `x1F` with value `0` (i.e. DuckDB itself silently reads this as `0`
-    // implicitly aliased to `x1F`; a following `AS a` then fails as a
-    // syntax error, since the alias slot is already filled). smelt refuses
-    // to reproduce that silent split: the whole malformed blob must surface
-    // as a single ERROR token / parse error rather than being read as
+    // position — `duckdb -c "SELECT 0x1F;"` prints a column named `x1F`
+    // with value `0` (i.e. DuckDB itself silently reads this as `0`
+    // implicitly aliased to `x1F`; a following `AS a`, or any binary
+    // operator, then fails as a syntax error, since the alias slot is
+    // already filled / `x1F` isn't a valid operator continuation — verified
+    // empirically with `duckdb -c "SELECT 0x1F AS x"` and
+    // `duckdb -c "SELECT 0x1F + 1"`, both syntax errors). smelt refuses to
+    // reproduce that silent split: the whole malformed blob must surface as
+    // a single ERROR token / parse error rather than being read as
     // `0 AS x1F`.
-    //
-    // Oracle: `1_000_000` **is** a genuine numeric literal in DuckDB
-    // (`duckdb -c "SELECT 1_000_000 AS a, typeof(1_000_000);"` returns
-    // `a = 1000000`, `typeof = INTEGER`, no ambiguity with an alias).
-    // Digit-separator literal *support* is deferred grammar work; this
-    // phase only guarantees the lexer does not silently split it into `1`
-    // aliased to `_000_000`.
-    for (sql, blob) in [("SELECT 0x1F", "0x1F"), ("SELECT 1_000_000", "1_000_000")] {
+    let (sql, blob) = ("SELECT 0x1F", "0x1F");
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "{sql:?} must produce a parse error, not a silent number+identifier split"
+    );
+
+    let error_tokens: Vec<_> = parse
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|t| t.into_token())
+        .filter(|t| t.kind() == crate::SyntaxKind::ERROR)
+        .collect();
+    assert!(
+        error_tokens.iter().any(|t| t.text() == blob),
+        "expected a single ERROR token spanning the whole blob {blob:?}, got: {:?}",
+        error_tokens
+    );
+
+    // Guard: the blob must never appear as a NUMBER token (i.e. it was
+    // never silently split into a shorter numeric prefix).
+    let numbers: Vec<String> = parse
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|t| t.into_token())
+        .filter(|t| t.kind() == NUMBER)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert!(
+        !numbers.iter().any(|n| blob.starts_with(n.as_str())),
+        "{sql:?} must not split off a leading NUMBER token, got NUMBER tokens: {numbers:?}"
+    );
+}
+
+#[test]
+fn number_with_underscore_digit_separator_parses() {
+    // Oracle: DuckDB accepts underscore digit separators strictly between
+    // two digits in the integer part, fractional part, and exponent digits
+    // — verified empirically:
+    //   `duckdb -c "SELECT 1_000_000 x, typeof(1_000_000);"` -> 1000000, INTEGER
+    //   `duckdb -c "SELECT 1_000.000_1 x, typeof(1_000.000_1);"` -> 1000.0001, DECIMAL(8,4)
+    //   `duckdb -c "SELECT 1_000_000.5_00e1_0 x;"` -> 1.0000005e+16 (DOUBLE)
+    for sql in [
+        "SELECT 1_000_000 AS x",
+        "SELECT 1_000.000_1 AS x",
+        "SELECT 1_2_3 AS x",
+        "SELECT 1_000_000.5_00e1_0 AS x",
+    ] {
+        let parse = parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} must parse without errors, got: {:?}",
+            parse.errors
+        );
+
+        let numbers: Vec<String> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == NUMBER)
+            .map(|t| t.text().to_string())
+            .collect();
+        assert_eq!(
+            numbers.len(),
+            1,
+            "{sql:?} must lex the literal as exactly one NUMBER token, got: {numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn number_with_invalid_underscore_placement_errors() {
+    // Oracle: DuckDB rejects a doubled separator, a leading separator, and a
+    // trailing separator — verified empirically:
+    //   `duckdb -c "SELECT 1__0 x;"` -> Parser Error: syntax error at or near "x"
+    //   `duckdb -c "SELECT 1_ x;"` -> Parser Error: syntax error at or near "x"
+    //   `duckdb -c "SELECT 1_.5 x;"` -> Parser Error: syntax error at or near ".5"
+    //   `duckdb -c "SELECT 1e_5 x;"` -> Parser Error: syntax error at or near "x"
+    // smelt must never silently split these into a shorter NUMBER token
+    // plus an identifier — the whole blob stays a single ERROR token.
+    for (sql, blob) in [
+        ("SELECT 1__0", "1__0"),
+        ("SELECT 1_", "1_"),
+        ("SELECT 1000_", "1000_"),
+    ] {
         let parse = parse(sql);
         assert!(
             !parse.errors.is_empty(),
@@ -7078,8 +7407,6 @@ fn number_followed_by_ident_without_space_errors() {
             error_tokens
         );
 
-        // Guard: the blob must never appear as a NUMBER token (i.e. it was
-        // never silently split into a shorter numeric prefix).
         let numbers: Vec<String> = parse
             .syntax()
             .descendants_with_tokens()
@@ -7623,4 +7950,1799 @@ fn check_keyword_contextual() {
         !has_check_no_dot,
         "smelt_check (single IDENT) must NOT produce a SMELT_CHECK node"
     );
+}
+
+// ===== GLOB comparison operator (DuckDB) =====
+
+#[test]
+fn parse_glob_operator() {
+    // `a GLOB 'x*'` parses clean as a BINARY_EXPR (mirrors LIKE/ILIKE), not the
+    // former silent mis-parse where `GLOB` was consumed as a column alias
+    // (`SELECT a GLOB 'x*'` used to become `SELECT a AS GLOB`, dropping the
+    // string literal as a dangling error).
+    let sql = "SELECT a FROM t WHERE b GLOB 'x*'";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+    let binary = parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for the GLOB comparison");
+    assert_eq!(binary.operator().as_deref(), Some("GLOB"));
+}
+
+#[test]
+fn glob_operator_round_trip() {
+    // parse → print → re-parse must have no errors (same convention as the
+    // other round-trip tests in this file — see test_named_window_clause_round_trip).
+    let sql = "SELECT a FROM t WHERE b GLOB 'x*'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("GLOB"),
+        "printed SQL must retain GLOB: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn glob_matches_ilike_identifier_precedent() {
+    // GLOB is lexed unconditionally as a keyword token (GLOB_KW), exactly like
+    // LIKE_KW/ILIKE_KW — there is no contextual identifier fallback for any of
+    // the three in this grammar, so `AS glob` fails to parse just as `AS ilike`
+    // does. This intentionally matches the ILIKE precedent rather than
+    // DuckDB's own (more lenient) soft-keyword treatment of GLOB.
+    let glob_errors = !parse("SELECT 1 AS glob FROM t").errors.is_empty();
+    let ilike_errors = !parse("SELECT 1 AS ilike FROM t").errors.is_empty();
+    assert_eq!(
+        glob_errors, ilike_errors,
+        "GLOB-as-alias must fail identically to ILIKE-as-alias"
+    );
+    assert!(glob_errors, "expected AS glob to be a parse error");
+}
+
+#[test]
+fn not_glob_not_supported() {
+    // DuckDB itself rejects `NOT GLOB` (verified against a live DuckDB via the
+    // CLI oracle: `SELECT 'abc' NOT GLOB 'z*'` => Parser Error). This mirrors
+    // the pre-existing `NOT LIKE` limitation (also unsupported by this
+    // grammar), so smelt intentionally does not special-case NOT GLOB either.
+    let sql = "SELECT a FROM t WHERE b NOT GLOB 'x*'";
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "NOT GLOB is expected to fail loud, matching DuckDB's own rejection \
+         and the pre-existing NOT LIKE limitation"
+    );
+}
+
+#[test]
+fn glob_as_table_function_name() {
+    // DuckDB's glob(pattern) file-listing table function: GLOB followed by `(`
+    // is a function name (LEFT()/RIGHT() keyword-as-function-name precedent),
+    // not the comparison operator — `FROM glob('*.csv')` must parse cleanly.
+    let sql = "SELECT * FROM glob('*.csv')";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let call = parse
+        .syntax()
+        .descendants()
+        .find_map(FunctionCall::cast)
+        .expect("must have a FUNCTION_CALL node for glob('*.csv')");
+    assert_eq!(call.name().as_deref(), Some("glob"));
+}
+
+#[test]
+fn glob_as_scalar_function_name() {
+    // Same keyword-as-function-name treatment in expression position.
+    let sql = "SELECT count(*) FROM (SELECT 1) t WHERE glob('*.csv') IS NOT NULL";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn glob_operator_still_wins_after_expression() {
+    // After a complete left operand, GLOB is always the infix operator — even
+    // when the right operand is parenthesized. Function-name treatment applies
+    // only where a *new* primary expression is expected.
+    let sql = "SELECT a FROM t WHERE b GLOB ('x*')";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let binary = parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for the GLOB comparison");
+    assert_eq!(binary.operator().as_deref(), Some("GLOB"));
+}
+
+// ── SQL-standard TRIM/SUBSTRING/POSITION forms ──────────────────────────
+//
+// Closes `duckdb_trim_modifier`, `duckdb_substring_from_for`, and
+// `duckdb_position_in` in `crates/smelt-parser-compat/src/gaps.rs`. Each
+// accepted form was verified against a real DuckDB (v1.5.4) first — see
+// the task report for the oracle transcript.
+
+fn first_function_call(sql: &str) -> FunctionCall {
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    parse
+        .syntax()
+        .descendants()
+        .find_map(FunctionCall::cast)
+        .expect("must have a FUNCTION_CALL node")
+}
+
+#[test]
+fn trim_both_from_parses() {
+    let call = first_function_call("SELECT trim(BOTH ' ' FROM b) FROM t");
+    assert_eq!(call.name().as_deref(), Some("trim"));
+    assert_eq!(call.arguments().len(), 2, "chars + string expressions");
+    assert!(call.syntax().text().to_string().contains("BOTH"));
+}
+
+#[test]
+fn trim_leading_from_parses() {
+    let call = first_function_call("SELECT trim(LEADING ' ' FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn trim_trailing_from_parses() {
+    let call = first_function_call("SELECT trim(TRAILING ' ' FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn trim_both_from_no_chars_parses() {
+    let call = first_function_call("SELECT trim(BOTH FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 1, "only the string expression");
+}
+
+#[test]
+fn trim_bare_from_parses() {
+    // TRIM(FROM string) — no modifier at all.
+    let call = first_function_call("SELECT trim(FROM b) FROM t");
+    assert_eq!(call.arguments().len(), 1);
+}
+
+#[test]
+fn trim_plain_call_still_parses() {
+    // Guard: the ordinary 1-arg call form must keep working.
+    let call = first_function_call("SELECT trim(b) FROM t");
+    assert_eq!(call.arguments().len(), 1);
+    assert!(!call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains("FROM"));
+}
+
+#[test]
+fn trim_plain_two_arg_call_still_parses() {
+    // Guard: TRIM(x, chars) (regular comma form) must keep working.
+    let call = first_function_call("SELECT trim(b, 'x') FROM t");
+    assert_eq!(call.arguments().len(), 2);
+    assert!(!call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains("FROM"));
+}
+
+#[test]
+fn trim_identifier_named_both_still_parses_as_plain_call() {
+    // A column literally named `both` used as TRIM's sole argument must not
+    // be misparsed as the BOTH modifier (no top-level FROM follows it).
+    let sql = "SELECT trim(both) FROM (SELECT b AS both FROM t)";
+    let call = first_function_call(sql);
+    assert_eq!(call.arguments().len(), 1);
+}
+
+#[test]
+fn substring_from_parses() {
+    let call = first_function_call("SELECT substring(b FROM 2) FROM t");
+    assert_eq!(call.name().as_deref(), Some("substring"));
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn substring_from_for_parses() {
+    let call = first_function_call("SELECT substring(b FROM 2 FOR 3) FROM t");
+    assert_eq!(call.arguments().len(), 3);
+}
+
+#[test]
+fn substring_for_only_parses() {
+    // DuckDB accepts FOR with an implied start of 1.
+    let call = first_function_call("SELECT substring(b FOR 3) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn substring_plain_call_still_parses() {
+    let call = first_function_call("SELECT substring(b, 2, 3) FROM t");
+    assert_eq!(call.arguments().len(), 3);
+    assert!(!call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains("FROM"));
+}
+
+#[test]
+fn substr_from_for_is_not_parsed_as_std_form() {
+    // DuckDB itself rejects `substr(x FROM i FOR n)` (only SUBSTRING gets the
+    // SQL-standard form) — SUBSTR keeps the plain comma-only grammar, so this
+    // must fail to parse cleanly.
+    let parse = parse("SELECT substr(b FROM 2 FOR 3) FROM t");
+    assert!(
+        !parse.errors.is_empty(),
+        "substr(FROM...FOR...) should not parse cleanly (DuckDB itself rejects it)"
+    );
+}
+
+#[test]
+fn position_in_parses() {
+    let call = first_function_call("SELECT position('wor' IN b) FROM t");
+    assert_eq!(call.name().as_deref(), Some("position"));
+    assert_eq!(call.arguments().len(), 2);
+    assert!(call
+        .syntax()
+        .text()
+        .to_string()
+        .to_uppercase()
+        .contains(" IN "));
+}
+
+#[test]
+fn position_in_with_expressions_parses() {
+    let call = first_function_call("SELECT position(a || 'x' IN b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+#[test]
+fn position_comparison_left_operand_is_a_parse_error() {
+    // Registered divergence `duckdb_position_comparison_left_operand`
+    // (crates/smelt-parser-compat/src/gaps.rs): DuckDB *parses*
+    // `position(a = 1 IN b)` but every such form fails at its binder
+    // (comparison yields BOOLEAN; position's only candidate is
+    // (VARCHAR, VARCHAR) with no implicit BOOLEAN→VARCHAR cast), so no
+    // executable SQL can reach the divergence. smelt rejects it at parse
+    // time — this test pins that behavior so a grammar change here is a
+    // deliberate decision, not drift.
+    let parse = parse("SELECT position(a = 1 IN b) FROM t");
+    assert!(
+        !parse.errors.is_empty(),
+        "position(a = 1 IN b) is expected to fail at parse time (registered \
+         gap duckdb_position_comparison_left_operand); if this now parses, \
+         close the gap entry and add round-trip coverage"
+    );
+}
+
+#[test]
+fn position_cast_wrapped_comparison_parses() {
+    // The executable spelling of the same intent — CAST-wrapped comparison —
+    // parses and executes on both engines.
+    let call = first_function_call("SELECT position(CAST(a = 1 AS VARCHAR) IN b) FROM t");
+    assert_eq!(call.arguments().len(), 2);
+}
+
+// ===== Dollar-quoted string literals =====
+// Closes registered gap `duckdb_dollar_quoted_string`
+// (crates/smelt-parser-compat/src/gaps.rs). Oracle evidence (DuckDB v1.5.4,
+// verified live): `SELECT $$hello$$` -> "hello"; `SELECT $$a'b$$` -> "a'b"
+// (embedded single quote is ordinary content); `SELECT $tag$ x $$ y $tag$`
+// -> " x $$ y " (a bare `$$` inside a tagged body is content, not a
+// closer); `SELECT $$abc` (no closer) -> "Parser Error: unterminated
+// dollar-quoted string".
+
+#[test]
+fn dollar_quote_bare_parses_clean_as_string_literal() {
+    let (_, select) = parse_select("SELECT $$a'b$$ AS s");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item
+        .expression()
+        .expect("select item should have an expression");
+    assert_eq!(
+        expr.text().trim(),
+        "$$a'b$$",
+        "expression text should be the dollar-quoted literal verbatim"
+    );
+}
+
+#[test]
+fn dollar_quote_tagged_with_nested_bare_dollar_parses_clean() {
+    // Inner `$$` is ordinary content: the closer must match the tag exactly.
+    let (_, select) = parse_select("SELECT $tag$ x $$ y $tag$ AS s");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    assert!(item.expression().is_some());
+}
+
+#[test]
+fn dollar_quote_unterminated_is_a_parse_error() {
+    let parse = parse("SELECT $$abc");
+    assert!(
+        !parse.errors.is_empty(),
+        "unterminated dollar-quote must be a parse error, not a silent split"
+    );
+}
+
+#[test]
+fn dollar_quote_round_trip() {
+    let sql = "SELECT $$a'b$$ AS s, $tag$ x $$ y $tag$ AS t FROM u";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert_eq!(
+        printed, sql,
+        "printer should reproduce dollar-quotes verbatim"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+// ===== MAP {…} literal tests =====
+
+#[test]
+fn map_literal_parses_clean() {
+    let (_, select) = parse_select("SELECT MAP {'a': 1, 'b': 2} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr
+        .as_map_literal()
+        .expect("expression must contain a MAP_LITERAL");
+    let entries = map_lit.entries();
+    assert_eq!(entries.len(), 2, "MAP literal must have two entries");
+}
+
+#[test]
+fn map_literal_entries_have_key_and_value() {
+    let (_, select) = parse_select("SELECT MAP {'a': 1, 'b': 2} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().unwrap();
+    let entries = map_lit.entries();
+    assert!(entries[0].key().is_some());
+    assert!(entries[0].value().is_some());
+    assert!(entries[1].key().is_some());
+    assert!(entries[1].value().is_some());
+}
+
+#[test]
+fn map_literal_empty_parses_clean() {
+    // Verified against DuckDB: `SELECT MAP {} AS m` parses and executes.
+    let (_, select) = parse_select("SELECT MAP {} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().expect("must parse as MAP_LITERAL");
+    assert!(map_lit.entries().is_empty());
+}
+
+#[test]
+fn map_literal_trailing_comma_allowed() {
+    // Verified against DuckDB: trailing comma before `}` is accepted.
+    let (_, select) = parse_select("SELECT MAP {'a': 1, 'b': 2,} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().unwrap();
+    assert_eq!(map_lit.entries().len(), 2);
+}
+
+#[test]
+fn map_literal_numeric_keys() {
+    // Verified against DuckDB: `MAP {1: 'x', 2: 'y'}` parses and executes.
+    let (_, select) = parse_select("SELECT MAP {1: 'x', 2: 'y'} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let map_lit = expr.as_map_literal().unwrap();
+    assert_eq!(map_lit.entries().len(), 2);
+}
+
+#[test]
+fn map_literal_round_trip() {
+    // Modulo canonical whitespace: the hand-rolled `Display for SelectItem`
+    // prints `expr.text()` (which may include trailing trivia the primary
+    // expression's postfix-lookahead absorbed) followed by its own " AS
+    // alias" — the same pre-existing double-space normalization every other
+    // brace/paren literal (STRUCT(...), record literal, etc.) needs here.
+    let sql = "SELECT MAP {'a': 1, 'b': 2} AS m FROM t";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        normalize(&printed),
+        normalize(sql),
+        "printer should reproduce MAP {{…}} (modulo canonical whitespace)"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn map_function_call_still_parses_as_function_call() {
+    // Guard: `MAP(a, b)` (no brace) must still be an ordinary function call,
+    // never a MAP_LITERAL — DuckDB's key/value-list form of `map()`.
+    let (_, select) = parse_select("SELECT MAP(a, b) AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_map_literal().is_none(),
+        "MAP(a, b) must not parse as a MAP_LITERAL"
+    );
+    assert!(
+        expr.as_function_call().is_some(),
+        "MAP(a, b) must parse as a FUNCTION_CALL"
+    );
+}
+
+#[test]
+fn bare_map_identifier_still_parses_as_column_ref() {
+    // Guard: a bare column named `map` (no following `{`) must parse as a
+    // plain identifier, never a MAP_LITERAL.
+    let (_, select) = parse_select("SELECT map AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_map_literal().is_none(),
+        "bare `map` identifier must not parse as a MAP_LITERAL"
+    );
+}
+
+#[test]
+fn map_literal_lowercase_keyword() {
+    // MAP is contextual and case-insensitive, matching every other SQL keyword.
+    let (_, select) = parse_select("SELECT map {'a': 1} AS m FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(expr.as_map_literal().is_some());
+}
+
+// ===== `{'key': value}` DuckDB struct/dict literal (string-literal keys) =====
+
+#[test]
+fn string_keyed_brace_struct_literal_parses_clean() {
+    // Verified against DuckDB: `{'k': v}` is the canonical struct_pack
+    // literal form (SELECT {'a': 1} → struct(a integer) {'a': 1}).
+    let (parse, select) = parse_select("SELECT {'c': 'VARCHAR', 'd': 'INTEGER'} AS s FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let brace_lit = expr
+        .as_brace_struct_literal()
+        .expect("expression must contain a BRACE_STRUCT_LITERAL");
+    let field_items: Vec<_> = brace_lit.field_items().collect();
+    assert_eq!(field_items.len(), 2, "struct literal must have two fields");
+    for field in &field_items {
+        assert!(field.duckdb_key().is_some(), "field must have a key expr");
+        assert!(field.expression().is_some(), "field must have a value expr");
+    }
+}
+
+#[test]
+fn string_keyed_brace_struct_literal_as_call_argument() {
+    // The `string_keyed_brace_literal` ledger class: DuckDB `read_csv(...,
+    // columns = {'a': 'INTEGER', 'b': 'INTEGER'}, ...)`.
+    let (parse, _select) = parse_select(
+        "SELECT * FROM read_csv('x.csv', columns = {'a': 'INTEGER', 'b': 'INTEGER'}, header = 1)",
+    );
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn string_keyed_brace_struct_literal_comparison() {
+    // The `duckdb_struct_dict_literal_compare` ledger class: struct/dict
+    // literals used directly as comparison operands.
+    let (parse, _select) =
+        parse_select("SELECT {'x': 1, 'y': 2} > {'x': 1, 'y': 3}, {'x': 'duck'} > NULL FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn string_keyed_brace_struct_literal_round_trip() {
+    let sql = "SELECT {'a': 1, 'b': 2} AS s FROM t";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    let normalize = |s: &str| s.split_whitespace().collect::<Vec<_>>().join(" ");
+    assert_eq!(
+        normalize(&printed),
+        normalize(sql),
+        "printer should reproduce {{'k': v}} struct literal (modulo canonical whitespace)"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn double_quoted_keyed_brace_struct_literal_parses_clean() {
+    // Verified against DuckDB: double-quoted keys are accepted the same as
+    // single-quoted keys inside a struct/dict literal.
+    let (parse, _select) = parse_select("SELECT {\"CamelCase\": 1, \"lowercase\": 2} AS s FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn identifier_keyed_brace_literal_keeps_existing_behavior() {
+    // Guard: `{a: 1}` (bare identifier key, no string quotes) is dispatched
+    // to the record-literal parser (`is_record_literal_start`), not the
+    // brace-struct-literal parser — this is pre-existing behavior this task
+    // must not change. It must still parse clean.
+    let (parse, select) = parse_select("SELECT {a: 1} AS s FROM t");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected parse errors: {:?}",
+        parse.errors
+    );
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_brace_struct_literal().is_none(),
+        "identifier-keyed `{{a: 1}}` must still dispatch to the record-literal \
+         parser, not BRACE_STRUCT_LITERAL"
+    );
+}
+
+#[test]
+fn meta_language_brace_struct_literal_alias_form_still_parses() {
+    // Guard: the pre-existing meta-language `{expr AS alias, ..spread}` form
+    // (Phase 35, used in smelt.define bodies) must be unaffected.
+    let input =
+        "smelt.define f(event: Expr<Struct<{ts: Timestamp, ..r}>>) AS ({CAST(event.ts AS TIMESTAMP) AS ts, ..event})";
+    let (parse, _file) = parse_file_text(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+// ===== AT TIME ZONE =====
+
+#[test]
+fn at_time_zone_parses_to_node() {
+    let (_, select) = parse_select("SELECT ts AT TIME ZONE 'UTC' FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_at_time_zone().is_some(),
+        "Expected AT_TIME_ZONE_EXPR node, got syntax: {:?}",
+        expr.syntax().kind()
+    );
+    let atz = expr.as_at_time_zone().unwrap();
+    assert_eq!(
+        atz.operand()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("ts".to_string())
+    );
+    assert_eq!(
+        atz.timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'UTC'".to_string())
+    );
+}
+
+#[test]
+fn at_time_zone_round_trips() {
+    let sql = "SELECT ts AT TIME ZONE 'UTC' FROM t";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let file = File::cast(parse.syntax()).unwrap();
+    // Lossless CST: printed text reconstructs exactly.
+    assert_eq!(file.syntax().text().to_string().trim().to_string(), sql);
+}
+
+#[test]
+fn at_time_zone_chains_left_associatively() {
+    // Verified against the DuckDB oracle: `ts AT TIME ZONE 'UTC' AT TIME ZONE
+    // 'America/New_York'` groups as `(ts AT TIME ZONE 'UTC') AT TIME ZONE
+    // 'America/New_York'` — the outer AT_TIME_ZONE_EXPR's operand is itself
+    // an AT_TIME_ZONE_EXPR, not a re-parenthesized flat chain.
+    let (_, select) =
+        parse_select("SELECT ts AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York' FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let outer = expr.as_at_time_zone().expect("outer AT_TIME_ZONE_EXPR");
+    assert_eq!(
+        outer
+            .timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'America/New_York'".to_string())
+    );
+    let inner_operand = outer.operand().expect("inner operand");
+    let inner = inner_operand
+        .as_at_time_zone()
+        .expect("inner operand should itself be an AT_TIME_ZONE_EXPR (left-associative chain)");
+    assert_eq!(
+        inner
+            .operand()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("ts".to_string())
+    );
+    assert_eq!(
+        inner
+            .timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'UTC'".to_string())
+    );
+}
+
+#[test]
+fn at_time_zone_binds_tighter_than_comparison() {
+    // Verified against the DuckDB oracle: `ts AT TIME ZONE 'UTC' > ts2` groups
+    // as `(ts AT TIME ZONE 'UTC') > ts2`, not `ts AT TIME ZONE ('UTC' > ts2)`.
+    let (_, select) = parse_select("SELECT ts AT TIME ZONE 'UTC' > ts2 FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let binary = expr
+        .as_binary()
+        .expect("top-level expression should be a BINARY_EXPR (`>`)");
+    let left = binary.left().expect("left operand");
+    assert!(
+        left.as_at_time_zone().is_some(),
+        "left operand of `>` should be the AT_TIME_ZONE_EXPR, got: {:?}",
+        left.syntax().kind()
+    );
+}
+
+#[test]
+fn at_time_zone_binds_tighter_than_addition() {
+    // Verified against the DuckDB oracle: `ts AT TIME ZONE 'UTC' + INTERVAL 1
+    // HOUR` groups as `(ts AT TIME ZONE 'UTC') + INTERVAL 1 HOUR` — the `+`
+    // is the outer node, not swallowed into the tz operand.
+    let (_, select) = parse_select("SELECT ts AT TIME ZONE 'UTC' + INTERVAL 1 HOUR FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let binary = expr
+        .as_binary()
+        .expect("top-level expression should be a BINARY_EXPR (`+`)");
+    let left = binary.left().expect("left operand");
+    assert!(
+        left.as_at_time_zone().is_some(),
+        "left operand of `+` should be the AT_TIME_ZONE_EXPR, got: {:?}",
+        left.syntax().kind()
+    );
+}
+
+#[test]
+fn at_time_zone_nested_in_parenthesized_tz_operand() {
+    // The tz operand may be a parenthesized expression or subquery that
+    // itself contains `AT TIME ZONE`. The `in_at_time_zone_operand` guard
+    // must be scoped to the current nesting level — inside `(...)` a fresh
+    // expression context begins, so the inner `AT TIME ZONE` must parse.
+    // DuckDB's PARSER accepts this shape (it only fails later, at bind):
+    //   SELECT ts AT TIME ZONE (SELECT b AT TIME ZONE 'UTC' FROM t2) FROM t
+    let sql = "SELECT ts AT TIME ZONE (SELECT b AT TIME ZONE 'UTC' FROM t2) FROM t";
+    let result = parse(sql);
+    assert!(
+        result.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result.errors
+    );
+
+    // A plain parenthesized inner AT TIME ZONE also parses cleanly.
+    let sql2 = "SELECT ts AT TIME ZONE (b AT TIME ZONE 'UTC') FROM t";
+    let result2 = parse(sql2);
+    assert!(
+        result2.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result2.errors
+    );
+}
+
+#[test]
+fn at_time_zone_nested_in_case_tz_operand() {
+    // The tz operand may be a CASE expression whose arms themselves contain
+    // `AT TIME ZONE`. CASE WHEN/THEN/ELSE arms enter expression parsing via
+    // `parse_pipe_expr` directly (not `parse_expression_inner`), so the
+    // operand guard must be scoped there too. DuckDB's PARSER accepts this
+    // shape (it only fails later, at bind, on the arm-type mix):
+    //   SELECT ts AT TIME ZONE
+    //     CASE WHEN 1 = 1 THEN b AT TIME ZONE 'UTC' ELSE c END FROM t
+    let sql = "SELECT ts AT TIME ZONE CASE WHEN 1 = 1 THEN b AT TIME ZONE 'UTC' ELSE c END FROM t";
+    let result = parse(sql);
+    assert!(
+        result.errors.is_empty(),
+        "Expected no parse errors, got: {:?}",
+        result.errors
+    );
+}
+
+#[test]
+fn at_time_zone_parenthesized_left_operand() {
+    // `(ts AT TIME ZONE 'UTC') AT TIME ZONE 'EST'` — explicit parens around
+    // the left operand (verified to execute on DuckDB). The outer node's
+    // operand is the parenthesized expression containing the inner
+    // AT_TIME_ZONE_EXPR.
+    let (_, select) = parse_select("SELECT (ts AT TIME ZONE 'UTC') AT TIME ZONE 'EST' FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let outer = expr.as_at_time_zone().expect("outer AT_TIME_ZONE_EXPR");
+    assert_eq!(
+        outer
+            .timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'EST'".to_string())
+    );
+}
+
+#[test]
+fn bare_at_still_parses_as_implicit_alias() {
+    // Guard: `at` is a contextual (unreserved) keyword — only the exact `AT
+    // TIME ZONE` sequence triggers AT_TIME_ZONE_EXPR. A bare `at` following
+    // an expression must still work as an implicit select-item alias.
+    let (_, select) = parse_select("SELECT ts at FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    assert_eq!(item.alias().as_deref(), Some("at"));
+    let expr = item.expression().unwrap();
+    assert!(expr.as_at_time_zone().is_none());
+}
+
+#[test]
+fn bare_at_column_reference_still_parses() {
+    // Guard: `at` must remain usable as an ordinary identifier/column name.
+    let (_, select) = parse_select("SELECT at FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(expr.as_at_time_zone().is_none());
+    assert_eq!(expr.syntax().text().to_string().trim(), "at");
+}
+
+// ===== GROUPING SETS (SQL-standard grouping-set extension of GROUP BY) =====
+//
+// `GROUPING SETS ( <set> [, <set>]* )` — grammar verified against DuckDB
+// (parser-gap-closure task 9). Oracle probes:
+//   - full parenthesized-list form: accepted.
+//   - bare-expr elements (`GROUPING SETS (a, b)`, no inner parens): accepted
+//     (PostgreSQL and DuckDB both allow this).
+//   - the empty set `()` as one element, and as the sole element: accepted.
+//   - `ROLLUP(...)`/`CUBE(...)` nested as a bare element inside GROUPING SETS:
+//     accepted (they parse as ordinary function calls; no dedicated smelt-side
+//     CUBE/ROLLUP grammar is needed).
+//   - `GROUPING`/`SETS` are contextual keywords, not reserved: `grouping` and
+//     `sets` stay usable as ordinary identifiers/aliases/columns.
+//   - case-insensitive, whitespace-tolerant between the two keywords.
+//   - may be mixed with a plain grouping key in the same GROUP BY list:
+//     `GROUP BY a, GROUPING SETS ((b))`.
+
+#[test]
+fn grouping_sets_full_form_parses() {
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+
+    let clause = parsed
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == GROUPING_SETS_CLAUSE)
+        .expect("should have a GROUPING_SETS_CLAUSE node");
+    let sets: Vec<_> = clause
+        .children()
+        .filter(|n| n.kind() == GROUPING_SET)
+        .collect();
+    assert_eq!(sets.len(), 3, "expected 3 grouping sets: {:?}", sets);
+
+    // The whole clause flows through GroupByClause::expressions() as a
+    // single opaque grouping-key expression — mirroring how CUBE/ROLLUP
+    // function calls already flow through as one expression each (there is
+    // no dedicated CUBE/ROLLUP grammar; they fall out of the generic
+    // function-call parse).
+    let (_, select) = parse_select(input);
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(
+        exprs.len(),
+        1,
+        "GROUPING SETS should be a single opaque grouping key: {:?}",
+        exprs.iter().map(|e| e.text()).collect::<Vec<_>>()
+    );
+    assert!(exprs[0].text().to_uppercase().starts_with("GROUPING SETS"));
+}
+
+#[test]
+fn grouping_sets_bare_expr_elements_parse() {
+    // PostgreSQL/DuckDB both accept unparenthesized elements.
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (a, b)";
+    let parsed = parse(input);
+    assert!(
+        parsed.errors.is_empty(),
+        "Parse errors: {:?}",
+        parsed.errors
+    );
+    let clause = parsed
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == GROUPING_SETS_CLAUSE)
+        .expect("should have a GROUPING_SETS_CLAUSE node");
+    let sets: Vec<_> = clause
+        .children()
+        .filter(|n| n.kind() == GROUPING_SET)
+        .collect();
+    assert_eq!(sets.len(), 2);
+    // Neither element should have its own LPAREN/RPAREN tokens.
+    for set in &sets {
+        assert!(
+            !set.children_with_tokens()
+                .filter_map(|e| e.into_token())
+                .any(|t| t.kind() == LPAREN),
+            "bare element should not have parens: {}",
+            set.text()
+        );
+    }
+}
+
+#[test]
+fn grouping_sets_empty_set_parses() {
+    // `()` as one element among several.
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())";
+    let parsed = parse(input);
+    assert!(parsed.errors.is_empty(), "{:?}", parsed.errors);
+
+    // `()` as the sole element.
+    let sole_empty = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (())");
+    assert!(
+        sole_empty.errors.is_empty(),
+        "sole empty set should parse: {:?}",
+        sole_empty.errors
+    );
+}
+
+#[test]
+fn grouping_sets_nested_rollup_and_cube_parse() {
+    // ROLLUP/CUBE have no dedicated smelt-side grammar — they parse as
+    // ordinary function calls, so nesting them as a bare GROUPING SETS
+    // element is just the generic function-call path.
+    let rollup = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (ROLLUP(a, b))");
+    assert!(rollup.errors.is_empty(), "{:?}", rollup.errors);
+
+    let cube = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (CUBE(a, b))");
+    assert!(cube.errors.is_empty(), "{:?}", cube.errors);
+
+    let mixed = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS (ROLLUP(a), CUBE(b))");
+    assert!(mixed.errors.is_empty(), "{:?}", mixed.errors);
+}
+
+#[test]
+fn grouping_sets_mixes_with_plain_group_by_keys() {
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY a, GROUPING SETS ((b))";
+    let (_, select) = parse_select(input);
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(exprs.len(), 2, "expected `a` and the GROUPING SETS clause");
+    assert_eq!(exprs[0].text().trim(), "a");
+    assert!(exprs[1].text().to_uppercase().starts_with("GROUPING SETS"));
+}
+
+#[test]
+fn grouping_sets_case_insensitive_and_whitespace_tolerant() {
+    let lower = parse("SELECT a, b, SUM(c) FROM t GROUP BY grouping sets ((a), (b))");
+    assert!(lower.errors.is_empty(), "{:?}", lower.errors);
+
+    let extra_ws = parse("SELECT a, b, SUM(c) FROM t GROUP BY GROUPING   SETS ((a), (b))");
+    assert!(extra_ws.errors.is_empty(), "{:?}", extra_ws.errors);
+}
+
+#[test]
+fn grouping_and_sets_remain_usable_as_plain_identifiers() {
+    // `GROUPING`/`SETS` are contextual keywords — only recognised as the
+    // exact `GROUPING SETS (` sequence in a GROUP BY list position. A bare
+    // `grouping` column, and a `sets` alias, must both parse unaffected.
+    let select_grouping = parse("SELECT grouping FROM t");
+    assert!(
+        select_grouping.errors.is_empty(),
+        "{:?}",
+        select_grouping.errors
+    );
+    assert!(select_grouping
+        .syntax()
+        .descendants()
+        .all(|n| n.kind() != GROUPING_SETS_CLAUSE));
+
+    let sets_alias = parse("SELECT a AS sets FROM t");
+    assert!(sets_alias.errors.is_empty(), "{:?}", sets_alias.errors);
+
+    // `GROUP BY grouping, sets` — two plain columns, comma-separated, with
+    // no trailing `(` — must not trigger the GROUPING SETS grammar path.
+    let (_, select) =
+        parse_select("SELECT grouping, sets, COUNT(*) FROM t GROUP BY grouping, sets");
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(exprs.len(), 2);
+    assert_eq!(exprs[0].text().trim(), "grouping");
+    assert_eq!(exprs[1].text().trim(), "sets");
+}
+
+#[test]
+fn plain_group_by_unaffected_by_grouping_sets_grammar() {
+    let (_, select) = parse_select("SELECT a, b, COUNT(*) FROM t GROUP BY a, b");
+    let group_by = select.group_by_clause().expect("should have GROUP BY");
+    assert!(!group_by.is_all());
+    let exprs: Vec<Expr> = group_by.expressions().collect();
+    assert_eq!(exprs.len(), 2);
+    assert_eq!(exprs[0].text().trim(), "a");
+    assert_eq!(exprs[1].text().trim(), "b");
+}
+
+#[test]
+fn grouping_sets_round_trips_through_printer() {
+    let input = "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.to_uppercase().contains("GROUPING SETS"),
+        "printed SQL should retain GROUPING SETS: {}",
+        printed
+    );
+    // Re-parsing the printed SQL must still be error-free and produce the
+    // same GROUPING_SET count.
+    let reparsed = parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL failed to reparse: {} -> {:?}",
+        printed,
+        reparsed.errors
+    );
+    let sets = reparsed
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == GROUPING_SET)
+        .count();
+    assert_eq!(sets, 3);
+}
+
+#[test]
+fn grouping_sets_nested_grouping_sets_parses() {
+    // DuckDB accepts arbitrary GROUPING SETS nesting (verified against
+    // DuckDB): a GROUPING SETS element may itself be a bare (unparenthesized)
+    // nested GROUPING SETS clause.
+    let nested = parse(
+        "SELECT SUM(c) FROM t GROUP BY GROUPING SETS (GROUPING SETS (ROLLUP(a), GROUPING SETS (CUBE(a))))",
+    );
+    assert!(nested.errors.is_empty(), "{:?}", nested.errors);
+
+    let mixed_nested =
+        parse("SELECT SUM(c) FROM t GROUP BY GROUPING SETS (a, GROUPING SETS (a, CUBE(a)))");
+    assert!(mixed_nested.errors.is_empty(), "{:?}", mixed_nested.errors);
+
+    let inner_count = nested
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == GROUPING_SETS_CLAUSE)
+        .count();
+    assert_eq!(
+        inner_count, 3,
+        "expected 3 nested GROUPING_SETS_CLAUSE nodes"
+    );
+}
+
+// ===== Derived-table alias column list round-trip (printer fidelity) =====
+//
+// smelt's printer previously dropped the derived-table body (subquery/
+// VALUES) — or the alias/alias-column-list on a plain table — when printing
+// a TABLE_REF, because `TableRef::identifier()` matched the alias IDENT
+// token for a derived table (there being no other direct-child IDENT to
+// find), and none of the printer's branches printed `alias()` /
+// `alias_column_names()` at all. See external corpus ledger category
+// `derived_table_column_alias_list`.
+
+fn assert_table_ref_round_trips(input: &str, must_contain: &[&str]) {
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    for needle in must_contain {
+        assert!(
+            printed.contains(needle),
+            "printed SQL should contain {:?}: got {:?}",
+            needle,
+            printed
+        );
+    }
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {:?} (from {:?}) failed to reparse: {:?}",
+        printed,
+        input,
+        reparsed.errors
+    );
+}
+
+#[test]
+fn derived_table_values_alias_col_list_round_trips() {
+    assert_table_ref_round_trips(
+        "SELECT * FROM (VALUES (1, 2)) AS t(a, b)",
+        &["VALUES", "(1, 2)", "AS t(a, b)"],
+    );
+}
+
+#[test]
+fn derived_table_select_alias_col_list_round_trips() {
+    assert_table_ref_round_trips(
+        "SELECT * FROM (SELECT 1, 2) AS t(a, b)",
+        &["SELECT 1, 2", "AS t(a, b)"],
+    );
+}
+
+#[test]
+fn plain_table_alias_col_list_round_trips() {
+    // DuckDB accepts a column-renaming alias list on a plain base table too:
+    // `FROM t1 AS c1(x)` renames t1's first column to `x` under alias `c1`.
+    assert_table_ref_round_trips("SELECT * FROM t1 AS c1(x)", &["t1", "AS c1(x)"]);
+}
+
+#[test]
+fn plain_table_alias_without_col_list_round_trips() {
+    assert_table_ref_round_trips("SELECT * FROM t1 AS c1", &["t1", "AS c1"]);
+}
+
+#[test]
+fn derived_table_values_alias_col_list_no_as_round_trips() {
+    assert_table_ref_round_trips(
+        "SELECT * FROM (VALUES (1, 2)) t(a, b)",
+        &["VALUES", "(1, 2)", "AS t(a, b)"],
+    );
+}
+
+// --- DuckDB `:=` named-argument operator (external corpus ledger category
+// `named_arg_walrus_or_bare_eq`) ---
+//
+// DuckDB accepts `name := value` as a named-argument binding inside an
+// ordinary function-call argument list (`struct_pack(a := 1)`,
+// `read_csv(path, header := 0)`) — semantically the same construct smelt
+// already parsed for `=>` (see `parses_smelt_path_call_with_named_args`
+// above), just DuckDB's own spelling. Verified against a real DuckDB: both
+// `struct_pack(a := 1)` and `struct_pack(a => 1)` parse, and DuckDB's own
+// query-text re-serialization prints `:=` for both — the two spellings are
+// interchangeable at the grammar level.
+
+#[test]
+fn walrus_named_arg_in_ordinary_function_call() {
+    let input = "SELECT struct_pack(a := 1, b := 2)";
+    let (parse, _) = parse_select(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn walrus_named_arg_in_table_function_call() {
+    // read_csv-style: positional path argument followed by walrus-named
+    // options, mirroring DuckDB's own CSV/Parquet reader signatures.
+    let input = "SELECT * FROM read_csv('data.csv', header := 0, auto_detect := false)";
+    let (parse, _) = parse_select(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn walrus_named_arg_mixes_with_bare_eq_option() {
+    // DuckDB's own corpus mixes `:=` named args with bare `name = value`
+    // options in the same call (the bare form already parsed as an ordinary
+    // comparison expression before this change; this asserts the mix still
+    // parses cleanly once `:=` is supported).
+    let input = "SELECT sum(a) FROM read_csv('f.csv', COLUMNS=STRUCT_PACK(a := 'INTEGER'), auto_detect='true', delim = '|')";
+    let (parse, _) = parse_select(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn walrus_named_arg_produces_named_param_node() {
+    let (_, select) = parse_select("SELECT struct_pack(a := 1)");
+    let named_params: Vec<_> = select
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == NAMED_PARAM)
+        .collect();
+    assert_eq!(
+        named_params.len(),
+        1,
+        "expected exactly one NAMED_PARAM node for `a := 1`"
+    );
+}
+
+#[test]
+fn walrus_operator_outside_call_still_errors() {
+    // DuckDB itself rejects `:=` as a general expression/assignment
+    // operator outside a function-call argument position (`Parser Error:
+    // syntax error at or near ":="`, verified against a real DuckDB). The
+    // named-argument grammar only applies inside `parse_argument`, so this
+    // must remain a parse error, not silently swallowed.
+    let result = parse("SELECT a := 1");
+    assert!(
+        !result.errors.is_empty(),
+        "`:=` outside a call argument list should still be a parse error"
+    );
+}
+
+#[test]
+fn bare_eq_in_call_still_parses_as_comparison() {
+    // Bare `name = value` inside a call argument list was never a DuckDB
+    // parser-level named-argument form (verified against a real DuckDB: it
+    // parses as an ordinary boolean equality expression referencing a
+    // column named `name`, and only certain table functions like read_csv
+    // special-case it at bind time). It must keep parsing as a normal
+    // comparison expression, not a NAMED_PARAM.
+    let (parse, select) = parse_select("SELECT foo(a = 1)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let named_params: Vec<_> = select
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == NAMED_PARAM)
+        .collect();
+    assert!(
+        named_params.is_empty(),
+        "bare `a = 1` must not be parsed as a NAMED_PARAM"
+    );
+}
+
+#[test]
+fn walrus_named_arg_round_trips() {
+    let input = "SELECT struct_pack(a := 1, b := 2)";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("a := 1"),
+        "printed SQL should preserve `:=` spelling: got {:?}",
+        printed
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {:?} (from {:?}) failed to reparse: {:?}",
+        printed,
+        input,
+        reparsed.errors
+    );
+}
+
+// ===== UNION [ALL] BY NAME (DuckDB) =====
+
+#[test]
+fn union_by_name_parses() {
+    let (parse, select) = parse_select("SELECT x FROM t1 UNION BY NAME SELECT x FROM t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    assert!(select.has_set_operation());
+}
+
+#[test]
+fn union_all_by_name_parses() {
+    let (parse, _select) = parse_select("SELECT x FROM t1 UNION ALL BY NAME SELECT x FROM t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn union_by_name_round_trips() {
+    let input = "SELECT x FROM t1 UNION BY NAME SELECT x FROM t2";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("UNION BY NAME"),
+        "printed SQL should preserve BY NAME: {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn union_all_by_name_round_trips() {
+    let input = "SELECT x FROM t1 UNION ALL BY NAME SELECT x FROM t2";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("UNION ALL BY NAME"),
+        "printed SQL should preserve ALL BY NAME order: {printed:?}"
+    );
+}
+
+#[test]
+fn plain_union_still_parses_without_by_name() {
+    // Guard: BY NAME support must not affect the plain UNION/UNION ALL path.
+    let (parse, select) = parse_select("SELECT 1 UNION ALL SELECT 2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    assert!(select.has_set_operation());
+    let printed = select.to_string();
+    assert_eq!(printed, "SELECT 1 UNION ALL SELECT 2");
+}
+
+#[test]
+fn by_and_name_remain_usable_as_plain_identifiers() {
+    // `by`/`name` outside a set-operation position must not be misread as
+    // the BY NAME modifier. `by` is a reserved keyword already exercised by
+    // GROUP BY/ORDER BY; `name` (contextual) must still work as a column.
+    let (parse, _select) = parse_select("SELECT name FROM t1");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+// ===== WITH ... AS [NOT] MATERIALIZED (DuckDB / PostgreSQL) =====
+
+#[test]
+fn cte_materialized_parses() {
+    let (parse, select) = parse_select("WITH a AS MATERIALIZED (SELECT 1) SELECT * FROM a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let with_clause = select.with_clause().expect("should have WITH clause");
+    let cte = with_clause.ctes().next().expect("should have a CTE");
+    assert!(cte.is_materialized());
+    assert!(!cte.is_not_materialized());
+}
+
+#[test]
+fn cte_not_materialized_parses() {
+    let (parse, select) = parse_select("WITH a AS NOT MATERIALIZED (SELECT 1) SELECT * FROM a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let with_clause = select.with_clause().expect("should have WITH clause");
+    let cte = with_clause.ctes().next().expect("should have a CTE");
+    assert!(cte.is_not_materialized());
+    assert!(!cte.is_materialized());
+}
+
+#[test]
+fn cte_materialized_with_column_list_and_recursive() {
+    let (parse, _select) = parse_select(
+        "WITH RECURSIVE t(x) AS MATERIALIZED (SELECT 1 AS x UNION ALL SELECT x + 1 FROM t WHERE x < 3) SELECT * FROM t",
+    );
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn cte_materialized_round_trips() {
+    let input = "WITH a AS MATERIALIZED (SELECT 1) SELECT * FROM a";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("AS MATERIALIZED ("),
+        "printed SQL should preserve MATERIALIZED: {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn cte_not_materialized_round_trips() {
+    let input = "WITH a AS NOT MATERIALIZED (SELECT 1) SELECT * FROM a";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("AS NOT MATERIALIZED ("),
+        "printed SQL should preserve NOT MATERIALIZED: {printed:?}"
+    );
+}
+
+#[test]
+fn plain_cte_still_parses_without_materialized_hint() {
+    // Guard: MATERIALIZED support must not affect the plain WITH CTE path.
+    let (parse, select) = parse_select("WITH a AS (SELECT 1) SELECT * FROM a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let with_clause = select.with_clause().expect("should have WITH clause");
+    let cte = with_clause.ctes().next().expect("should have a CTE");
+    assert!(!cte.is_materialized());
+    assert!(!cte.is_not_materialized());
+    assert_eq!(select.to_string(), "WITH a AS (SELECT 1) SELECT * FROM a");
+}
+
+// ===== VALUES trailing comma (DuckDB) =====
+
+#[test]
+fn values_trailing_comma_after_last_row_parses() {
+    let parse = crate::parse("VALUES (1, 2),");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn values_trailing_comma_round_trips() {
+    let input = "VALUES (1, 2),";
+    let parse = crate::parse(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn plain_values_still_parses_without_trailing_comma() {
+    // Guard: trailing-comma support must not affect the plain VALUES path.
+    let parse = crate::parse("VALUES (1, 2), (3, 4)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).unwrap();
+    assert_eq!(file.to_string(), "VALUES (1, 2), (3, 4)");
+}
+
+// ===== NATURAL JOIN (DuckDB / PostgreSQL) =====
+
+#[test]
+fn natural_join_parses() {
+    let (parse, select) = parse_select("SELECT * FROM t1 NATURAL JOIN t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    let join = from.joins().next().expect("should have a JOIN");
+    assert!(join.is_natural());
+    assert_eq!(join.join_type(), None);
+}
+
+#[test]
+fn natural_full_outer_join_parses() {
+    let (parse, select) = parse_select("SELECT * FROM t1 NATURAL FULL OUTER JOIN t2");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    let join = from.joins().next().expect("should have a JOIN");
+    assert!(join.is_natural());
+    assert_eq!(join.join_type(), Some(JoinType::Full));
+}
+
+#[test]
+fn natural_join_round_trips() {
+    let input = "SELECT * FROM t1 NATURAL JOIN t2";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("NATURAL JOIN"),
+        "printed SQL should preserve NATURAL: {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn parenthesized_join_sequence_parses() {
+    let (parse, select) = parse_select(
+        "SELECT * FROM (a NATURAL FULL OUTER JOIN b NATURAL FULL OUTER JOIN c) NATURAL FULL OUTER JOIN (d NATURAL FULL OUTER JOIN e)",
+    );
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    // Two top-level natural joins: the left parenthesized group, and the
+    // right parenthesized group.
+    assert_eq!(from.joins().count(), 1);
+    let top_join = from.joins().next().unwrap();
+    assert!(top_join.is_natural());
+}
+
+#[test]
+fn parenthesized_join_sequence_round_trips() {
+    let input = "SELECT * FROM (a NATURAL JOIN b) NATURAL JOIN (c NATURAL JOIN d)";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} (from {input:?}) failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn parenthesized_table_ref_without_join_parses() {
+    // A bare parenthesized table reference (no JOIN inside) is also a valid
+    // table primary and falls out of the same grammar branch.
+    let (parse, select) = parse_select("SELECT * FROM (t1) x");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    assert_eq!(from.joins().count(), 0);
+}
+
+#[test]
+fn natural_join_with_alias_and_column_list_parses() {
+    let (parse, _select) = parse_select("SELECT * FROM t1 (a, b) NATURAL JOIN t2 (a)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn natural_join_of_subqueries_parses() {
+    let (parse, _select) =
+        parse_select("SELECT (SELECT * FROM (SELECT 42) tbl(a) NATURAL JOIN (SELECT 42) tbl2(a))");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn plain_join_still_parses_without_natural() {
+    // Guard: NATURAL support must not affect the plain JOIN path.
+    let (parse, select) = parse_select("SELECT * FROM t1 JOIN t2 ON t1.a = t2.a");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let from = select.from_clause().expect("should have FROM");
+    let join = from.joins().next().expect("should have a JOIN");
+    assert!(!join.is_natural());
+    assert_eq!(
+        select.to_string(),
+        "SELECT * FROM t1 JOIN t2 ON t1.a = t2.a"
+    );
+}
+
+#[test]
+fn implicit_alias_named_natural_still_works() {
+    // Guard: `NATURAL` is only special right after a table_ref in a
+    // position where a join could start. A column/table literally aliased
+    // `natural` elsewhere is unaffected (this checks the SELECT-list case,
+    // which never touches the FROM-clause NATURAL lookahead at all).
+    let (parse, _select) = parse_select("SELECT 1 AS natural");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn materialized_remains_usable_as_plain_identifier() {
+    // `MATERIALIZED` is a contextual keyword, consumed only immediately
+    // after `AS` (or `AS NOT`) in a CTE header. Everywhere else it must
+    // stay an ordinary identifier: an alias, a column reference, even a
+    // CTE named `materialized`.
+    for sql in [
+        "SELECT 1 AS materialized",
+        "SELECT materialized FROM t",
+        "WITH materialized AS (SELECT 1) SELECT * FROM materialized",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn name_remains_usable_as_plain_identifier_near_by() {
+    // `NAME` is only special as the second token of the exact `BY NAME`
+    // sequence directly after a set operator. `ORDER BY name` contains the
+    // very same BY_KW + `name` IDENT pair and must be untouched — including
+    // right after a UNION operand where the set-op matcher just ran.
+    for sql in [
+        "SELECT name FROM t ORDER BY name",
+        "SELECT x FROM t GROUP BY name",
+        "SELECT 1 UNION SELECT name FROM t ORDER BY name",
+        "SELECT 1 AS name",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn bare_by_identifier_still_rejected_reserved_keyword() {
+    // `BY` was a reserved keyword (BY_KW, for GROUP BY / ORDER BY) long
+    // before the BY NAME work, so a bare column named `by` is a parse error
+    // — pinned here so the BY NAME matcher never accidentally *loosens*
+    // BY's reserved status (DuckDB also rejects an unquoted bare `by`).
+    let parse = crate::parse("SELECT by FROM t");
+    assert!(
+        !parse.errors.is_empty(),
+        "bare unquoted `by` as a column should remain a parse error"
+    );
+}
+
+#[test]
+fn chained_dot_field_access_arbitrary_depth() {
+    for sql in [
+        "SELECT database.schema.table.col FROM database.schema.table",
+        "SELECT * FROM nested_structs WHERE s.a.b < 2",
+        "SELECT t.t.t.t.t.t.t.t FROM t.t",
+        "SELECT s.name.v FROM src WHERE s.nested_struct.b",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn power_and_floor_divide_operators() {
+    for sql in [
+        "SELECT 2 ** 3",
+        "SELECT 2 ^ 3",
+        "SELECT 7 // 2",
+        "SELECT -2 ** 2",
+        "SELECT 2 ** -1",
+        "SELECT 2 * 3 ** 2",
+        "SELECT 2 ** 3 ** 2",
+        "SELECT 7 // 2 * 3",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+}
+
+#[test]
+fn power_operator_left_associative_tree_shape() {
+    use crate::ast::BinaryExpr;
+    // `2 ** 3 ** 2` must parse as `(2 ** 3) ** 2` (left-associative), i.e.
+    // the LEFT operand of the outer BINARY_EXPR wraps a nested BINARY_EXPR,
+    // not the right operand. `descendants()` is pre-order, so the first
+    // `**` BINARY_EXPR found is the outermost (widest span).
+    let parse = crate::parse("SELECT 2 ** 3 ** 2");
+    let root = parse.syntax();
+    let outer = root
+        .descendants()
+        .filter(|n| n.kind() == crate::SyntaxKind::BINARY_EXPR)
+        .find(|n| BinaryExpr::cast(n.clone()).and_then(|b| b.operator()) == Some("**".to_string()))
+        .expect("should find a ** BINARY_EXPR");
+    let outer = BinaryExpr::cast(outer).unwrap();
+    let left = outer.left().expect("left operand");
+    let left_is_binary = left.syntax().kind() == crate::SyntaxKind::BINARY_EXPR;
+    assert!(
+        left_is_binary,
+        "left-associative: left operand of outer ** should wrap a nested BINARY_EXPR"
+    );
+}
+
+#[test]
+fn double_quoted_alias_parses_and_strips_quotes() {
+    // SQL-standard double-quoted identifiers are valid as `AS "alias"`
+    // aliases (SELECT-item and table-ref); smelt's lexer lexes them as
+    // STRING tokens (see `at_quoted_ident_alias` in parser/mod.rs), so
+    // alias parsing must accept STRING as well as IDENT there. External
+    // corpus regression: `SELECT a AS "user"` (reserved-word-shaped quoted
+    // alias) and `SELECT BOOL_OR(b1) AS "t"` previously failed with
+    // "unexpected content after model body".
+    use crate::ast::{File, SelectItem, TableRef};
+
+    let cases = [
+        (r#"SELECT a AS "user" FROM t"#, "user"),
+        (r#"SELECT BOOL_OR(b1) AS "t" FROM bool_test"#, "t"),
+        (
+            r#"SELECT percentile_cont(0.5) AS "median_delay" FROM flights"#,
+            "median_delay",
+        ),
+    ];
+    for (sql, expected_alias) in cases {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+        let file = File::cast(parse.syntax()).expect("root should cast to File");
+        let item = file
+            .syntax()
+            .descendants()
+            .find_map(SelectItem::cast)
+            .expect("should find a SELECT_ITEM");
+        assert_eq!(
+            item.alias().as_deref(),
+            Some(expected_alias),
+            "alias() should strip the surrounding quotes for {sql:?}"
+        );
+    }
+
+    // Table-ref alias: `FROM t AS "alias"`.
+    let sql = r#"SELECT * FROM orders AS "o""#;
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let file = File::cast(parse.syntax()).expect("root should cast to File");
+    let table_ref = file
+        .syntax()
+        .descendants()
+        .find_map(TableRef::cast)
+        .expect("should find a TABLE_REF");
+    assert_eq!(table_ref.alias().as_deref(), Some("o"));
+}
+
+#[test]
+fn first_last_parse_as_aggregate_function_names() {
+    // FIRST/LAST are reserved for `ORDER BY ... NULLS FIRST/LAST` and
+    // `FETCH FIRST`, but DuckDB also ships `first(x)`/`last(x)` aggregate
+    // functions. `at_keyword_as_function_name` in parser/expr.rs must treat
+    // them as function names when directly followed by `(` (LEFT()/RIGHT()
+    // precedent). External corpus regression:
+    // `SELECT LAST(b) FROM tbl WHERE a=1` previously failed with "Expected
+    // expression, found LAST_KW".
+    for sql in [
+        "SELECT LAST(b) FROM tbl WHERE a=1",
+        "SELECT SUM(rowid), MIN(rowid), MAX(rowid), COUNT(rowid), LAST(rowid) FROM a",
+        "select first(struct_pack(i := i, j := i + 2)) from range(10) tbl(i)",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+
+    // Bare `FIRST`/`LAST` (not followed by `(`) must still be usable as
+    // `NULLS FIRST`/`NULLS LAST` — this fix must not regress that.
+    let sql = "SELECT a FROM t ORDER BY a NULLS FIRST, b NULLS LAST";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn null_literal_supports_cast_and_subscript_postfix() {
+    for sql in [
+        "SELECT NULL::INTEGER",
+        "SELECT NULL::UHUGEINT",
+        "SELECT NULL::UHUGEINT AS x",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
 }

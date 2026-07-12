@@ -437,3 +437,64 @@ fn duplicate_ref_deduplicated() {
         "merged entry must require 'id'"
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 6: Parenthesized set-op operand still contributes its FROM entries
+// ---------------------------------------------------------------------------
+
+/// `A UNION ALL (B)` — a parenthesized right-hand operand — must contribute
+/// `bar`'s FROM entry the same way a bare (unparenthesized) operand does.
+/// Exercises the `Subquery`-unwrapping added to `union_select()`/
+/// `set_operation_select()` through the real `model_input_constraints` schema
+/// walk, not just the parser round-trip.
+#[test]
+fn parenthesized_union_operand_collects_both_refs() {
+    let tmp = TempDir::new().expect("tempdir");
+
+    let foo_src = "SELECT CAST(1 AS INTEGER) AS id, CAST('a' AS TEXT) AS name\n";
+    let bar_src = "SELECT CAST(2 AS INTEGER) AS id, CAST('b' AS TEXT) AS name\n";
+    let consumer_src = "SELECT id, name FROM smelt.models.foo\nUNION ALL\n(SELECT id, name FROM smelt.models.bar)\n";
+
+    let (db, ws) = build_db_on_disk(
+        &tmp,
+        &[
+            ("models/foo.sql", foo_src),
+            ("models/bar.sql", bar_src),
+            ("models/consumer.sql", consumer_src),
+        ],
+    );
+
+    let consumer_path = tmp.path().join("models/consumer.sql");
+    let consumer_file = db
+        .source_file(&consumer_path)
+        .expect("consumer file registered");
+    let constraints = model_input_constraints(&db, ws, consumer_file);
+
+    let ref_names: Vec<&str> = constraints.iter().map(|c| c.ref_name.as_str()).collect();
+
+    assert!(
+        ref_names.contains(&"foo"),
+        "input constraints must include 'foo', got: {:?}",
+        ref_names
+    );
+    assert!(
+        ref_names.contains(&"bar"),
+        "input constraints must include 'bar' from the parenthesized operand, got: {:?}",
+        ref_names
+    );
+    assert_eq!(
+        constraints.len(),
+        2,
+        "should have exactly 2 input entries (foo + bar), got: {:?}",
+        ref_names
+    );
+
+    let bar_entry = constraints
+        .iter()
+        .find(|c| c.ref_name == "bar")
+        .expect("bar entry present");
+    assert!(
+        bar_entry.required_columns.contains_key("id"),
+        "parenthesized operand's required columns must still be collected"
+    );
+}

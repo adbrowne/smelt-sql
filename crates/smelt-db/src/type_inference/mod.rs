@@ -12,6 +12,7 @@
 //! data structures. This invariant enables a future `smelt-check` crate
 //! extraction.
 
+pub mod at_time_zone;
 pub mod binary;
 pub mod collation;
 pub mod composite;
@@ -40,6 +41,7 @@ mod tests;
 pub(super) use binary::infer_binary_expr_type;
 pub(super) use composite::{
     infer_array_literal_type, infer_array_slice_type, infer_array_subscript_type,
+    infer_brace_struct_literal_type, infer_list_comprehension_type, infer_map_literal_type,
     infer_row_constructor_type, infer_struct_literal_type,
 };
 pub(super) use function_call::{

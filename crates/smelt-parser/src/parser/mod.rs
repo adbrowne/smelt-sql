@@ -92,6 +92,19 @@ struct Parser<'a> {
     /// meta-language expression node.  The `|>` token at this position is the
     /// next pipe-SQL stage delimiter, not an infix meta-language pipe operator.
     pub(super) in_pipe_stage: bool,
+    /// Whether the parser is currently parsing the timezone (right-hand)
+    /// operand of an `AT TIME ZONE` postfix expression.
+    ///
+    /// When `true`, `parse_primary_expr`'s own `AT TIME ZONE` postfix loop
+    /// must not fire for a subsequent `AT TIME ZONE` sequence — otherwise a
+    /// chain like `ts AT TIME ZONE 'UTC' AT TIME ZONE 'EST'` would parse as
+    /// `ts AT TIME ZONE ('UTC' AT TIME ZONE 'EST')` (right-nested inside the
+    /// timezone operand) instead of the correct left-associative `(ts AT TIME
+    /// ZONE 'UTC') AT TIME ZONE 'EST'` (verified via the DuckDB oracle). The
+    /// outer postfix `while` loop in `parse_primary_expr` is what actually
+    /// consumes the second `AT TIME ZONE`, so the inner (operand) parse must
+    /// stop short of it.
+    pub(super) in_at_time_zone_operand: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -107,6 +120,7 @@ impl<'a> Parser<'a> {
             current_define_row_vars: Vec::new(),
             in_smelt_call_args: false,
             in_pipe_stage: false,
+            in_at_time_zone_operand: false,
         }
     }
 
@@ -144,6 +158,18 @@ impl<'a> Parser<'a> {
     /// Check if current token is an IDENT with specific text (case-insensitive)
     pub(super) fn at_contextual_keyword(&self, text: &str) -> bool {
         self.at(IDENT) && self.current_text().eq_ignore_ascii_case(text)
+    }
+
+    /// Check if current token is a double-quoted identifier lexed as STRING
+    /// (`"foo"`), usable anywhere an alias IDENT is expected. DuckDB and
+    /// PostgreSQL both treat double-quoted text as a quoted identifier while
+    /// single-quoted text is a string literal, but smelt's lexer does not
+    /// distinguish the two at the token-kind level (`consume_string` returns
+    /// `STRING` for either quote character) — alias sites that want to
+    /// accept `AS "alias"` must check the leading quote character
+    /// themselves via this helper.
+    pub(super) fn at_quoted_ident_alias(&self) -> bool {
+        self.at(STRING) && self.current_text().starts_with('"')
     }
 
     /// Advance to next token, consuming trivia
@@ -273,6 +299,7 @@ impl<'a> Parser<'a> {
             INTERSECT_KW,
             EXCEPT_KW,
         ]) || self.at_contextual_keyword("FETCH")
+            || self.at_contextual_keyword("NATURAL")
     }
 
     /// Check if current token can start an expression
@@ -353,6 +380,117 @@ impl<'a> Parser<'a> {
             self.tokens.get(self.pos + la2).map(|t| t.kind),
             Some(LPAREN)
         )
+    }
+
+    /// Peek ahead from the current position (which must be at an `IDENT`
+    /// token) to check whether the token stream looks like the postfix
+    /// `AT TIME ZONE` sequence.
+    ///
+    /// Returns `true` iff the current token and the next two non-trivia
+    /// tokens are `IDENT`s with text (case-insensitively) `AT`, `TIME`,
+    /// `ZONE` in that order. Does not consume any tokens — `AT`, `TIME`, and
+    /// `ZONE` are all contextual (unreserved) keywords, so a bare `AT` not
+    /// followed by `TIME ZONE` must be left alone (e.g. to be consumed later
+    /// as an implicit select-item alias).
+    pub(super) fn peek_at_time_zone(&self) -> bool {
+        if !self.at_contextual_keyword("AT") {
+            return false;
+        }
+
+        // Find the next non-trivia token after the current AT token.
+        let mut la = 1usize;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(time_tok) = self.tokens.get(self.pos + la) else {
+            return false;
+        };
+        if time_tok.kind != IDENT {
+            return false;
+        }
+        let mut time_offset = self.offset;
+        for i in 0..la {
+            time_offset += self.tokens[self.pos + i].len;
+        }
+        let time_text = &self.input[time_offset..time_offset + time_tok.len];
+        if !time_text.eq_ignore_ascii_case("TIME") {
+            return false;
+        }
+
+        // Find the next non-trivia token after TIME.
+        let mut la2 = la + 1;
+        while let Some(t) = self.tokens.get(self.pos + la2) {
+            if t.kind.is_trivia() {
+                la2 += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(zone_tok) = self.tokens.get(self.pos + la2) else {
+            return false;
+        };
+        if zone_tok.kind != IDENT {
+            return false;
+        }
+        let mut zone_offset = self.offset;
+        for i in 0..la2 {
+            zone_offset += self.tokens[self.pos + i].len;
+        }
+        let zone_text = &self.input[zone_offset..zone_offset + zone_tok.len];
+        zone_text.eq_ignore_ascii_case("ZONE")
+    }
+
+    /// Look ahead `n` non-trivia tokens from the current position (0 = the
+    /// current token itself) and return its text, without consuming
+    /// anything. Used by stateless contextual-keyword lookaheads (e.g.
+    /// [`peek_grouping_sets_clause`](Self::peek_grouping_sets_clause)) that
+    /// need to inspect a fixed sequence of tokens before committing to a
+    /// grammar path. Companion to [`peek_nth_non_trivia`](Self::peek_nth_non_trivia)
+    /// (`parser/types.rs`), which returns only the token kind.
+    pub(super) fn peek_nth_non_trivia_text(&self, n: usize) -> Option<&str> {
+        let mut la = 0usize;
+        let mut seen = 0usize;
+        loop {
+            let tok = self.tokens.get(self.pos + la)?;
+            if tok.kind.is_trivia() {
+                la += 1;
+                continue;
+            }
+            if seen == n {
+                let mut offset = self.offset;
+                for i in 0..la {
+                    offset += self.tokens[self.pos + i].len;
+                }
+                return Some(&self.input[offset..offset + tok.len]);
+            }
+            seen += 1;
+            la += 1;
+        }
+    }
+
+    /// Stateless lookahead for `GROUPING SETS (` at a GROUP BY list position.
+    /// `GROUPING` and `SETS` are both contextual keywords (lexed as plain
+    /// `IDENT`); this only recognises the clause when the exact three-token
+    /// sequence `GROUPING SETS (` appears, so `grouping`/`sets` stay usable
+    /// as ordinary identifiers everywhere else (`SELECT grouping FROM t`,
+    /// `GROUP BY grouping, sets`). Pure lookahead — consumes nothing, holds
+    /// no parser-state flag, so it is safe to call from any expression-ladder
+    /// entry point without a reset obligation.
+    pub(super) fn peek_grouping_sets_clause(&self) -> bool {
+        if !self.at_contextual_keyword("GROUPING") {
+            return false;
+        }
+        let Some(sets_text) = self.peek_nth_non_trivia_text(1) else {
+            return false;
+        };
+        if !sets_text.eq_ignore_ascii_case("SETS") {
+            return false;
+        }
+        matches!(self.peek_nth_non_trivia(2), Some(LPAREN))
     }
 
     // Domain-specific parsing methods live in submodules:

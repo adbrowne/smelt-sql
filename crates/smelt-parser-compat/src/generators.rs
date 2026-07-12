@@ -143,6 +143,26 @@ fn is_keyword(s: &str) -> bool {
         // Additional SQL keywords used in our generators
         "between",
         "following",
+        // DuckDB-reserved words that are unreserved in PostgreSQL, so they are
+        // absent from the PG list above but make DuckDB's own parser reject a
+        // generated statement that uses them as a bare identifier (probed via
+        // `CREATE TABLE probe (<word> INTEGER)` on a real DuckDB: each word
+        // below fails with a Parser Error). `at` was the observed offender —
+        // it flaked `prop_generated_clean_sql_executes_on_duckdb` whenever the
+        // generator emitted it as a column name (e.g. `PARTITION BY at ORDER
+        // BY a`), because DuckDB reserves `at` (AT TIME ZONE) while PostgreSQL
+        // does not.
+        "anti",
+        "asof",
+        "at",
+        "describe",
+        "glob",
+        "pivot",
+        "positional",
+        "qualify",
+        "semi",
+        "summarize",
+        "unpivot",
     ];
     KEYWORDS.contains(&s.to_lowercase().as_str())
 }

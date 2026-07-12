@@ -393,6 +393,84 @@ pub enum SyntaxKind {
     SMELT_CHECK,
     CHECK_NAME,
 
+    // GLOB pattern-match comparison operator (DuckDB): `expr GLOB pattern`.
+    // Mirrors LIKE_KW/ILIKE_KW; DuckDB itself rejects `NOT GLOB` (verified via
+    // the DuckDB oracle), so — like LIKE — there is no dedicated NOT GLOB form.
+    GLOB_KW,
+
+    // MAP {key: value, …} literal (DuckDB): the contextual `MAP` identifier
+    // immediately followed by `{` wrapping the same colon-delimited entry
+    // grammar as RECORD_LITERAL, but with expression keys (string/numeric
+    // literals, not just IDENT). `MAP` is not a reserved keyword — it stays
+    // usable as a plain identifier/function name (`MAP(a, b)`, `SELECT map
+    // FROM t`) everywhere else; only `IDENT("MAP") LBRACE` triggers this node.
+    MAP_LITERAL,
+    // Single `key : value` pair inside a MAP_LITERAL.
+    MAP_ENTRY,
+
+    // List comprehension (DuckDB): `[expr FOR ident IN list (IF cond)?]`.
+    // `FOR` is a contextual keyword (lexed as IDENT, recognized by the parser
+    // only immediately after the leading element expression inside a bracket
+    // list literal — see `is_comprehension_for_start`); it stays usable as a
+    // plain identifier everywhere else. Verified against DuckDB: exactly one
+    // FOR clause is accepted (no chained `FOR … FOR …`), and IF may only
+    // follow the IN-list expression, never precede it.
+    LIST_COMPREHENSION,
+    // Wraps the single loop-variable IDENT bound by a LIST_COMPREHENSION,
+    // mirroring LAMBDA_PARAM's wrap-single-ident convention.
+    LIST_COMPREHENSION_VAR,
+
+    // `expr AT TIME ZONE tz_expr` (PostgreSQL/DuckDB timezone conversion
+    // operator). `AT`, `TIME`, and `ZONE` are all contextual keywords (lexed
+    // as IDENT); the parser only recognises the AT_TIME_ZONE_EXPR postfix
+    // when the exact three-token sequence `AT TIME ZONE` follows a parsed
+    // primary expression (see `Parser::peek_at_time_zone`). This keeps `at`,
+    // `time`, and `zone` usable as ordinary identifiers/implicit aliases
+    // everywhere else (e.g. `SELECT ts at FROM t` still parses `at` as an
+    // implicit alias for `ts`).
+    AT_TIME_ZONE_EXPR,
+
+    // `GROUP BY GROUPING SETS ( <set> [, <set>]* )` (SQL-standard / DuckDB /
+    // PostgreSQL). `GROUPING` and `SETS` are both contextual keywords (lexed
+    // as IDENT); the parser only recognises this clause when the exact
+    // three-token sequence `GROUPING SETS (` appears at a GROUP BY list
+    // position (see `Parser::peek_grouping_sets_clause`). This keeps
+    // `grouping` and `sets` usable as ordinary identifiers/columns everywhere
+    // else (e.g. `SELECT grouping FROM t`, `SELECT a AS sets FROM t`).
+    //
+    // GROUPING_SETS_CLAUSE wraps the whole `GROUPING SETS (...)` construct
+    // and is itself `Expr`-castable, so it slots into `GroupByClause::expressions()`
+    // as a single opaque grouping-key expression — mirroring how `CUBE(a, b)`
+    // / `ROLLUP(a, b)` already flow through as one function-call expression
+    // (there is no dedicated smelt-side CUBE/ROLLUP grammar; they fall out of
+    // the generic function-call parse). GROUPING_SET wraps one comma-separated
+    // set element: `(expr, expr, ...)`, `()` (the empty set), or a bare `expr`
+    // (PostgreSQL/DuckDB both accept unparenthesized elements).
+    GROUPING_SETS_CLAUSE,
+    GROUPING_SET,
+
+    // DuckDB "walrus" named-argument operator: `name := value` inside an
+    // ordinary function-call argument list (e.g. `struct_pack(a := 1)`,
+    // `read_csv(path, header := 0)`). Semantically equivalent to the
+    // existing `=>` named-parameter form (`NAMED_PARAM`, see ARROW) —
+    // DuckDB itself treats `:=` and `=>` as interchangeable spellings for
+    // the same named-argument syntax (verified against a real DuckDB: both
+    // forms parse identically and DuckDB's own re-serialization prints
+    // `:=`). `parse_argument`/`is_named_parameter` accept either token when
+    // building a NAMED_PARAM node.
+    WALRUS, // := (named parameter, DuckDB spelling)
+
+    // DuckDB power/floor-division operators. `**` and `^` are synonyms for
+    // exponentiation (both left-associative, higher precedence than `*`/`/`,
+    // lower than unary `-`/`NOT` — verified against a real DuckDB:
+    // `-2 ** 2` is `4` (unary minus binds first), `2 ** 3 ** 2` is `64`
+    // (left-associative: `(2**3)**2`), `2 * 3 ** 2` is `18` (`**` binds
+    // tighter than `*`)). `//` is integer-preserving floor division, same
+    // precedence tier as `*`/`/`/`%` (verified: `7 // 2 * 3` is `9`).
+    DOUBLE_STAR,  // ** (power)
+    CARET,        // ^ (power, synonym for **)
+    FLOOR_DIVIDE, // // (floor division)
+
     // Special
     EOF, // End of file
 }
@@ -478,6 +556,7 @@ impl SyntaxKind {
                 | UNPIVOT_KW
                 | LIKE_KW
                 | ILIKE_KW
+                | GLOB_KW
                 | EXTRACT_KW
                 | COLLATE_KW
         )

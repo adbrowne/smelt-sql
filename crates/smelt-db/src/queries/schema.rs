@@ -66,6 +66,42 @@ pub fn model_schema(db: &dyn salsa::Database, file: SourceFile) -> Arc<ModelSche
         Vec::new()
     };
 
+    // NATURAL / USING joined refs also contribute to `SELECT *`, with the
+    // join-shared columns deduped (DuckDB-verified: `a NATURAL JOIN b` and
+    // `a JOIN b USING (x)` both expand to [a.*, b.* minus shared]; only ON
+    // joins keep both occurrences). ON-joined refs are deliberately NOT
+    // collected here — expanding them means introducing duplicate column
+    // names into inferred schemas, a separate piece of work tracked in
+    // docs/TODO.md.
+    let joined_refs: Vec<(String, schema::RowExtensionDedupe)> =
+        if let Some(from_clause) = select_stmt.from_clause() {
+            from_clause
+                .joins()
+                .filter_map(|join| {
+                    let ref_name = join
+                        .table_ref()?
+                        .smelt_path_ref()
+                        .and_then(|pr| pr.segments().last().cloned())?;
+                    if join.is_natural() {
+                        Some((ref_name, schema::RowExtensionDedupe::SharedWithPrior))
+                    } else if let Some(cond) = join.condition() {
+                        if cond.is_using() {
+                            Some((
+                                ref_name,
+                                schema::RowExtensionDedupe::UsingColumns(cond.using_columns()),
+                            ))
+                        } else {
+                            None // ON join — not expanded (see above).
+                        }
+                    } else {
+                        None // CROSS / conditionless join — not expanded.
+                    }
+                })
+                .collect()
+        } else {
+            Vec::new()
+        };
+
     let mut columns = Vec::new();
     let mut row_extensions = Vec::new();
 
@@ -75,6 +111,15 @@ pub fn model_schema(db: &dyn salsa::Database, file: SourceFile) -> Arc<ModelSche
                 row_extensions.push(schema::RowExtension {
                     ref_name: ref_name.clone(),
                     excluded_columns: vec![],
+                    dedupe: schema::RowExtensionDedupe::None,
+                    range: item.range(),
+                });
+            }
+            for (ref_name, dedupe) in &joined_refs {
+                row_extensions.push(schema::RowExtension {
+                    ref_name: ref_name.clone(),
+                    excluded_columns: vec![],
+                    dedupe: dedupe.clone(),
                     range: item.range(),
                 });
             }
@@ -1110,8 +1155,20 @@ fn process_table_ref_pure(
 
                     let column_types = infer_select_column_types(&select_stmt, &subquery_ctx);
 
+                    // Column names: an explicit alias column list on the
+                    // derived table (`(SELECT …) AS t(c1, c2, …)`) renames
+                    // the subquery's own output columns positionally, taking
+                    // precedence over the subquery's own item aliases /
+                    // column-ref names (mirrors the VALUES-clause branch
+                    // below and DuckDB/PostgreSQL derived-table semantics).
+                    let alias_names = table_ref.alias_column_names();
+
                     for (i, item) in select_list.items().enumerate() {
-                        let col_name = if let Some(item_alias) = item.alias() {
+                        let col_name = if let Some(renamed) =
+                            alias_names.as_ref().and_then(|names| names.get(i))
+                        {
+                            renamed.clone()
+                        } else if let Some(item_alias) = item.alias() {
                             item_alias
                         } else if let Some(expr) = item.expression() {
                             if let Some(col_ref) = expr.as_column_ref() {
@@ -1725,15 +1782,30 @@ pub fn resolved_model_schema(
 
     let project = find_project(db, workspace, &file.project_root(db).clone());
 
+    // Names contributed by earlier extensions in this expansion — consulted
+    // by `RowExtensionDedupe::SharedWithPrior` (NATURAL JOIN), which drops
+    // any column the left side already contributed (first occurrence wins).
+    let mut prior_names: std::collections::HashSet<String> = std::collections::HashSet::new();
+
     for ext in &typed_schema.row_extensions {
         if let Some(upstream) =
             project.and_then(|p| resolve_ref_leaf(db, workspace, p, ext.ref_name.clone()))
         {
             let upstream_resolved = resolved_model_schema(db, workspace, upstream);
             for col in &upstream_resolved.columns {
-                if !ext.excluded_columns.contains(&col.name) {
-                    columns.push(col.clone());
+                if ext.excluded_columns.contains(&col.name) {
+                    continue;
                 }
+                let join_deduped = match &ext.dedupe {
+                    schema::RowExtensionDedupe::None => false,
+                    schema::RowExtensionDedupe::UsingColumns(using) => using.contains(&col.name),
+                    schema::RowExtensionDedupe::SharedWithPrior => prior_names.contains(&col.name),
+                };
+                if join_deduped {
+                    continue;
+                }
+                prior_names.insert(col.name.clone());
+                columns.push(col.clone());
             }
             if !upstream_resolved.is_fully_resolved {
                 is_fully_resolved = false;

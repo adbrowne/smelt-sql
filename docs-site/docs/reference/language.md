@@ -291,9 +291,13 @@ nullable**, regardless of the input.
 
 ### Numeric literal forms
 
-smelt accepts plain integer and decimal literals (`1`, `1.5`), including scientific notation (`1e8`, `1.5e-3`). A numeric literal immediately followed by letters or an underscore with no separating space — `0x1F`, `1_000_000` — is not accepted as a single literal; it produces a parse error rather than being silently reinterpreted (e.g. as `0` implicitly aliased to `x1F`). Write a space before an intended alias (`1 x`) or drop the digit-separator/hex-prefix form.
+smelt accepts plain integer and decimal literals (`1`, `1.5`), including scientific notation (`1e8`, `1.5e-3`). Underscore digit separators are accepted anywhere a run of digits appears — the integer part, the fractional part, and the exponent digits — as long as each underscore sits strictly between two digits: `1_000_000`, `1_000.000_1`, and `1_000_000.5_00e1_0` all lex as a single numeric literal. A leading, trailing, or doubled underscore (`_1`, `1_`, `1__0`) is rejected as a parse error rather than being silently reinterpreted as a shorter literal plus an alias.
+
+A numeric literal immediately followed by letters with no separating space — `0x1F` — is not accepted as a single literal; it produces a parse error rather than being silently reinterpreted (e.g. as `0` implicitly aliased to `x1F`). Write a space before an intended alias (`1 x`) or drop the hex-prefix form.
 
 `E'...'` (escape string) and `B'...'` (bit-string-shaped) prefixed string literals lex as ordinary string literals.
+
+Dollar-quoted string literals — `$$...$$` and tagged `$tag$...$tag$` (tag: a letter or underscore followed by letters, digits, or underscores) — also lex as ordinary string literals and infer as Text. The body needs no escaping: embedded single quotes are content, and a `$$` inside a tagged body is content too (only the exact matching closing delimiter ends the string). An unterminated dollar-quote is a parse error rather than being silently split into smaller tokens.
 
 ## Date/time extraction
 
@@ -312,6 +316,50 @@ EXTRACT(WEEK FROM date_col)          -- returns BIGINT
 ```
 
 `EXTRACT(EPOCH FROM ...)` returns a `DOUBLE` (floating-point Unix timestamp). All other fields return `BIGINT`.
+
+## Timezone conversion
+
+`AT TIME ZONE` converts between naive (`TIMESTAMP`) and timezone-aware (`TIMESTAMP WITH TIME ZONE`) values:
+
+```sql
+ts AT TIME ZONE 'UTC'                -- TIMESTAMP -> TIMESTAMP WITH TIME ZONE
+tstz AT TIME ZONE 'America/New_York' -- TIMESTAMP WITH TIME ZONE -> TIMESTAMP
+```
+
+The result type depends only on the operand's tz-awareness, not the timezone name:
+
+- A naive `TIMESTAMP` operand attaches the given timezone, producing `TIMESTAMP WITH TIME ZONE`.
+- A `TIMESTAMP WITH TIME ZONE` operand converts to that timezone's local wall-clock time and drops the offset, producing a naive `TIMESTAMP`.
+
+Because each application flips tz-awareness, the operator chains: `ts AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` first attaches `UTC` (producing `TIMESTAMP WITH TIME ZONE`), then converts to `America/New_York` local time and drops the offset again (producing `TIMESTAMP`). `AT TIME ZONE` binds tighter than comparison and arithmetic operators, so `ts AT TIME ZONE 'UTC' > ts2` and `ts AT TIME ZONE 'UTC' + INTERVAL 1 HOUR` both apply the conversion before the outer operator. Nullability propagates from the operand: a `NULL` timestamp produces a `NULL` result.
+
+## SQL-standard string function forms
+
+`TRIM`, `SUBSTRING`, and `POSITION` accept both the ordinary comma-separated
+call form and the SQL-standard keyword-argument form:
+
+```sql
+TRIM(x)                              -- ordinary form
+TRIM(x, chars)                       -- ordinary form
+TRIM(BOTH chars FROM x)              -- SQL-standard form
+TRIM(LEADING chars FROM x)
+TRIM(TRAILING chars FROM x)
+TRIM(BOTH FROM x)                    -- modifier without explicit chars
+TRIM(FROM x)                         -- no modifier at all
+
+SUBSTRING(x, start)                  -- ordinary form
+SUBSTRING(x, start, length)          -- ordinary form
+SUBSTRING(x FROM start)              -- SQL-standard form
+SUBSTRING(x FROM start FOR length)
+SUBSTRING(x FOR length)              -- start implied as 1
+
+POSITION(sub IN x)                   -- SQL-standard form only — POSITION has
+                                      -- no comma-separated equivalent; use
+                                      -- STRPOS(x, sub) for that
+```
+
+Both forms produce the same result type: `TRIM`/`SUBSTRING` return `VARCHAR`;
+`POSITION` returns `BIGINT` (a 1-based match offset).
 
 ## Aggregate result types
 
@@ -396,3 +444,23 @@ These features are parsed in smelt SQL and rewritten to target-specific syntax:
 - **PIVOT / UNPIVOT** — table rotation
 - **Array subscript** — `arr[1]` notation
 - **DATE literals** — `DATE '2024-01-01'` normalization
+- **Pattern matching operators** — `LIKE`, `ILIKE` (case-insensitive `LIKE`), and
+  `GLOB` (DuckDB glob-style pattern matching, e.g. `name GLOB 'x*'`) each infer
+  `Boolean`. `NOT GLOB` is not supported — DuckDB itself rejects that form.
+- **MAP literals** — `MAP {'a': 1, 'b': 2}` (DuckDB's brace map-literal syntax)
+  infers `Map(key_type, value_type)`, unifying key types and value types
+  independently across entries the same way `ARRAY[…]` element types unify.
+  An empty `MAP {}` infers `Map(Unknown, Unknown)`. `MAP` is not a reserved
+  word — `MAP(a, b)`-style function calls and a column literally named `map`
+  both continue to parse as before; only `MAP` immediately followed by `{`
+  is treated as a map literal.
+- **List comprehensions** — `[expr FOR x IN list]`, optionally filtered with
+  `[expr FOR x IN list IF cond]` (DuckDB syntax), builds a new list by
+  evaluating `expr` once per element of `list`, keeping only the elements
+  that satisfy `IF cond` when present. Comprehensions can nest (the source
+  list, or the element expression, may itself be a comprehension). Exactly
+  one `FOR` clause is accepted per `[...]` — chained `FOR x IN a FOR y IN b`
+  is a syntax error, matching DuckDB. The result always infers as
+  `Array<T>`: when `expr` is exactly the loop variable (`[x FOR x IN list]`),
+  `T` is the source list's element type; for any other `expr`, `T` infers as
+  `Unknown`.

@@ -30,6 +30,12 @@ impl File {
         self.0.children().find_map(PipeQuery::cast)
     }
 
+    /// The top-level `VALUES_CLAUSE` node, if the file body is a bare
+    /// `VALUES (…), (…)` statement (no `SELECT` wrapper).
+    pub fn values_clause(&self) -> Option<ValuesClause> {
+        self.0.children().find_map(ValuesClause::cast)
+    }
+
     /// Whether the file has a valid top-level query body (SELECT_STMT or PIPE_QUERY).
     pub fn has_query_body(&self) -> bool {
         self.select_stmt().is_some() || self.pipe_query().is_some()
@@ -683,6 +689,17 @@ fn leading_ident_text(node: &SyntaxNode) -> Option<String> {
         .map(|t| t.text().to_string())
 }
 
+/// Strip a leading/trailing matching quote (`"` or `'`) from raw token text,
+/// used to turn a double-quoted identifier lexed as `STRING` (e.g.
+/// `"median_delay"`) back into its bare name. Text with no matching quote
+/// pair is returned unchanged.
+fn strip_ident_quotes(raw: &str) -> &str {
+    raw.strip_prefix('"')
+        .and_then(|s| s.strip_suffix('"'))
+        .or_else(|| raw.strip_prefix('\'').and_then(|s| s.strip_suffix('\'')))
+        .unwrap_or(raw)
+}
+
 impl RowRequirement {
     pub fn cast(node: SyntaxNode) -> Option<Self> {
         if node.kind() == ROW_REQUIREMENT {
@@ -1226,7 +1243,9 @@ impl SelectStmt {
         false
     }
 
-    /// Get the SELECT statement after UNION (if any)
+    /// Get the SELECT statement after UNION (if any). The operand may be a
+    /// bare `SELECT_STMT` or a parenthesized `SUBQUERY` wrapping one
+    /// (`A UNION (B)`); both unwrap to the inner `SelectStmt`.
     pub fn union_select(&self) -> Option<SelectStmt> {
         let mut found_union = false;
 
@@ -1239,6 +1258,13 @@ impl SelectStmt {
                 if let Some(n) = child.as_node() {
                     if n.kind() == SELECT_STMT {
                         return SelectStmt::cast(n.clone());
+                    }
+                    if n.kind() == SUBQUERY {
+                        if let Some(select) =
+                            Subquery::cast(n.clone()).and_then(|sq| sq.select_stmt())
+                        {
+                            return Some(select);
+                        }
                     }
                 }
             }
@@ -1254,7 +1280,41 @@ impl SelectStmt {
             .any(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
     }
 
-    /// Get the SELECT statement after any set operation (UNION, INTERSECT, or EXCEPT)
+    /// Whether this SELECT's set operation (if any) carries a `BY NAME`
+    /// modifier (DuckDB): operands are unified by column name rather than
+    /// position, and the result widens to the union of column names across
+    /// all operands — a different algorithm from smelt's positional set-op
+    /// column combination. Returns `false` when there is no set operation.
+    pub fn is_set_operation_by_name(&self) -> bool {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        let Some(op_idx) = tokens
+            .iter()
+            .position(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
+        else {
+            return false;
+        };
+        let mut idx = op_idx + 1;
+        if tokens.get(idx).is_some_and(|t| t.kind() == ALL_KW) {
+            idx += 1;
+        }
+        matches!(
+            (tokens.get(idx), tokens.get(idx + 1)),
+            (Some(by), Some(name))
+                if by.kind() == BY_KW
+                    && name.kind() == IDENT
+                    && name.text().eq_ignore_ascii_case("NAME")
+        )
+    }
+
+    /// Get the SELECT statement after any set operation (UNION, INTERSECT,
+    /// or EXCEPT). The operand may be a bare `SELECT_STMT` or a
+    /// parenthesized `SUBQUERY` wrapping one (`A EXCEPT (B)`); both unwrap
+    /// to the inner `SelectStmt`.
     pub fn set_operation_select(&self) -> Option<SelectStmt> {
         let mut found_set_op = false;
 
@@ -1267,6 +1327,13 @@ impl SelectStmt {
                 if let Some(n) = child.as_node() {
                     if n.kind() == SELECT_STMT {
                         return SelectStmt::cast(n.clone());
+                    }
+                    if n.kind() == SUBQUERY {
+                        if let Some(select) =
+                            Subquery::cast(n.clone()).and_then(|sq| sq.select_stmt())
+                        {
+                            return Some(select);
+                        }
                     }
                 }
             }
@@ -1347,6 +1414,42 @@ impl SelectItem {
                             // Implicit alias: `expr alias` (IDENT after expression node)
                             return Some(token.text().to_string());
                         }
+                    } else if token.kind() == STRING && (found_as || found_expr) {
+                        // Double-quoted-identifier alias (`AS "median_delay"`
+                        // or implicit `expr "alias"`) — lexed as STRING since
+                        // smelt's lexer does not distinguish quote characters
+                        // at the token-kind level; strip the quotes.
+                        return Some(strip_ident_quotes(token.text()).to_string());
+                    }
+                }
+                rowan::NodeOrToken::Node(_) => {
+                    found_expr = true;
+                }
+            }
+        }
+        None
+    }
+
+    /// Get the alias's raw source text, quotes intact if it was written as
+    /// `AS "quoted alias"`. Used by the printer (`Display for SelectItem`),
+    /// which must re-quote an alias that needs it (contains whitespace,
+    /// matches a keyword, ...) rather than emit `alias()`'s unquoted name —
+    /// re-emitting `AS median_delay` for a quoted `AS "median delay"` would
+    /// silently mis-print into SQL DuckDB/PostgreSQL reject. Every other
+    /// caller wants the unquoted semantic name and should use `alias()`.
+    pub fn alias_token_text(&self) -> Option<String> {
+        let mut found_as = false;
+        let mut found_expr = false;
+
+        for child in self.0.children_with_tokens() {
+            match &child {
+                rowan::NodeOrToken::Token(token) => {
+                    if token.kind() == AS_KW {
+                        found_as = true;
+                    } else if (token.kind() == IDENT || token.kind() == STRING)
+                        && (found_as || found_expr)
+                    {
+                        return Some(token.text().to_string());
                     }
                 }
                 rowan::NodeOrToken::Node(_) => {
@@ -1367,7 +1470,9 @@ impl SelectItem {
                 rowan::NodeOrToken::Token(token) => {
                     if token.kind() == AS_KW {
                         found_as = true;
-                    } else if token.kind() == IDENT && (found_as || found_expr) {
+                    } else if (token.kind() == IDENT || token.kind() == STRING)
+                        && (found_as || found_expr)
+                    {
                         return Some(token.text_range());
                     }
                 }
@@ -1524,6 +1629,18 @@ impl JoinClause {
     pub fn condition(&self) -> Option<JoinCondition> {
         self.0.children().find_map(JoinCondition::cast)
     }
+
+    /// Whether this JOIN carries a `NATURAL` prefix (`NATURAL [INNER |
+    /// LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`). `NATURAL` is a
+    /// contextual keyword (lexed as a plain IDENT) and, when present, is
+    /// always the first non-trivia token of the `JOIN_CLAUSE`.
+    pub fn is_natural(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .is_some_and(|t| t.kind() == IDENT && t.text().eq_ignore_ascii_case("NATURAL"))
+    }
 }
 
 /// JOIN type enumeration
@@ -1656,6 +1773,12 @@ impl TableRef {
                     }
                     last_ident = Some(token.text().to_string());
                 }
+                STRING if found_as => {
+                    // Double-quoted-identifier alias (`AS "alias"`), lexed as
+                    // STRING since smelt's lexer does not distinguish quote
+                    // characters at the token-kind level; strip the quotes.
+                    return Some(strip_ident_quotes(token.text()).to_string());
+                }
                 _ => {}
             }
         }
@@ -1729,6 +1852,25 @@ impl TableRef {
             }
         }
 
+        None
+    }
+
+    /// Get the explicit `AS alias`'s raw source text, quotes intact if it
+    /// was written as `AS "quoted alias"`. Used by the printer (`Display
+    /// for TableRef`), which must re-quote an alias that needs it rather
+    /// than emit `alias()`'s unquoted name — see `SelectItem::alias_token_text`
+    /// for the rationale. Only covers the explicit-`AS` form: an implicit
+    /// quoted alias (`FROM t "alias"`, no `AS`) is not accepted by the
+    /// parser (see the comment in `parse_table_ref`'s implicit-alias arm).
+    pub fn alias_token_text(&self) -> Option<String> {
+        let mut found_as = false;
+        for token in self.0.children_with_tokens().filter_map(|e| e.into_token()) {
+            match token.kind() {
+                AS_KW => found_as = true,
+                IDENT | STRING if found_as => return Some(token.text().to_string()),
+                _ => {}
+            }
+        }
         None
     }
 
@@ -1818,6 +1960,7 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | COLLATE_EXPR
+            | AT_TIME_ZONE_EXPR | GROUPING_SETS_CLAUSE | GROUPING_SET
             | SUBQUERY | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL
             | SMELT_PATH_REF | SMELT_PATH_CALL
             // Phase B (meta-language): lambdas and pipe expressions are expressions.
@@ -1838,7 +1981,11 @@ impl Expr {
             // (parsed at pipe level, no EXPRESSION wrapper) can be cast when the
             // operand is an inline list — including the empty-list case `...[]`
             // whose ARRAY_LITERAL has no child nodes.
-            | ARRAY_LITERAL => Some(Self(node)),
+            | ARRAY_LITERAL
+            // List comprehensions are directly Expr-castable for the same reason
+            // (and so a comprehension nested as an outer comprehension's source
+            // list expression, e.g. `[y FOR y IN x FOR-outer...]`, casts cleanly).
+            | LIST_COMPREHENSION => Some(Self(node)),
             _ => {
                 // Also try to wrap the node if it contains expression-like children
                 if node.children().any(|n| {
@@ -1851,6 +1998,7 @@ impl Expr {
                             | CAST_EXPR
                             | EXTRACT_EXPR
                             | COLLATE_EXPR
+                            | AT_TIME_ZONE_EXPR
                             | SUBQUERY
                             | BETWEEN_EXPR
                             | IN_EXPR
@@ -1989,6 +2137,14 @@ impl Expr {
             .or_else(|| ExtractExpr::cast(self.0.clone()))
     }
 
+    /// Check if this is an AT TIME ZONE expression
+    pub fn as_at_time_zone(&self) -> Option<AtTimeZoneExpr> {
+        self.0
+            .children()
+            .find_map(AtTimeZoneExpr::cast)
+            .or_else(|| AtTimeZoneExpr::cast(self.0.clone()))
+    }
+
     /// Check if this is a COLLATE expression
     pub fn as_collate(&self) -> Option<CollateExpr> {
         self.0
@@ -2053,6 +2209,14 @@ impl Expr {
             .or_else(|| ArrayLiteral::cast(self.0.clone()))
     }
 
+    /// Check if this is a list comprehension (`[expr FOR x IN list]`)
+    pub fn as_list_comprehension(&self) -> Option<ListComprehension> {
+        self.0
+            .children()
+            .find_map(ListComprehension::cast)
+            .or_else(|| ListComprehension::cast(self.0.clone()))
+    }
+
     /// Check if this contains an array subscript (expr[index])
     pub fn as_array_subscript(&self) -> Option<ArraySubscript> {
         self.0
@@ -2083,6 +2247,23 @@ impl Expr {
             .children()
             .find_map(StructLiteral::cast)
             .or_else(|| StructLiteral::cast(self.0.clone()))
+    }
+
+    /// Check if this is a MAP literal (MAP {'a': 1, 'b': 2})
+    pub fn as_map_literal(&self) -> Option<MapLiteral> {
+        self.0
+            .children()
+            .find_map(MapLiteral::cast)
+            .or_else(|| MapLiteral::cast(self.0.clone()))
+    }
+
+    /// Check if this is a brace-struct literal (`{expr AS name, ..spread}`
+    /// meta-language form, or a DuckDB struct/dict literal `{'a': 1}`).
+    pub fn as_brace_struct_literal(&self) -> Option<BraceStructLiteral> {
+        self.0
+            .children()
+            .find_map(BraceStructLiteral::cast)
+            .or_else(|| BraceStructLiteral::cast(self.0.clone()))
     }
 
     /// Check if this expression has a window specification (OVER clause)
@@ -2197,6 +2378,9 @@ impl BinaryExpr {
                     STAR | MULTIPLY => return Some("*".to_string()),
                     DIVIDE => return Some("/".to_string()),
                     PERCENT => return Some("%".to_string()),
+                    DOUBLE_STAR => return Some("**".to_string()),
+                    CARET => return Some("^".to_string()),
+                    FLOOR_DIVIDE => return Some("//".to_string()),
                     EQ => return Some("=".to_string()),
                     NE => return Some("<>".to_string()),
                     LT => return Some("<".to_string()),
@@ -2210,6 +2394,7 @@ impl BinaryExpr {
                     NOT_KW => return Some("NOT".to_string()),
                     LIKE_KW => return Some("LIKE".to_string()),
                     ILIKE_KW => return Some("ILIKE".to_string()),
+                    GLOB_KW => return Some("GLOB".to_string()),
                     TILDE => return Some("~".to_string()),
                     TILDE_STAR => return Some("~*".to_string()),
                     NOT_TILDE => return Some("!~".to_string()),
@@ -2234,7 +2419,8 @@ impl BinaryExpr {
         for child in self.0.children_with_tokens() {
             if let Some(token) = child.as_token() {
                 match token.kind() {
-                    PLUS | MINUS | STAR | MULTIPLY | DIVIDE | PERCENT => {
+                    PLUS | MINUS | STAR | MULTIPLY | DIVIDE | PERCENT | DOUBLE_STAR | CARET
+                    | FLOOR_DIVIDE => {
                         return Some(token.text_range());
                     }
                     _ => {}
@@ -2351,6 +2537,7 @@ impl FunctionCall {
                     || k == UNPIVOT_KW
                     || k == VALUES_KW
                     || k == FN_KW
+                    || k == GLOB_KW
             })
             .map(|t| t.text().to_string())
     }
@@ -2441,6 +2628,49 @@ impl ArrayLiteral {
     /// Get all element expressions in the array literal
     pub fn elements(&self) -> Vec<Expr> {
         self.0.children().filter_map(Expr::cast).collect()
+    }
+}
+
+/// List comprehension: `[expr FOR ident IN list (IF cond)?]` (DuckDB).
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct ListComprehension(SyntaxNode);
+
+impl ListComprehension {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == LIST_COMPREHENSION {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// The result-element expression, e.g. `x + 1` in `[x + 1 FOR x IN l]`.
+    pub fn element(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// The loop variable name, e.g. `x` in `[x FOR x IN l]`.
+    pub fn var_name(&self) -> Option<String> {
+        self.0
+            .children()
+            .find(|n| n.kind() == LIST_COMPREHENSION_VAR)
+            .and_then(|n| {
+                n.children_with_tokens()
+                    .filter_map(|t| t.into_token())
+                    .find(|t| t.kind() == IDENT)
+            })
+            .map(|t| t.text().to_string())
+    }
+
+    /// The source list expression, e.g. `l` in `[x FOR x IN l]`.
+    pub fn source(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+
+    /// The optional `IF` filter condition, e.g. `x > 1` in
+    /// `[x FOR x IN l IF x > 1]`.
+    pub fn filter(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(2)
     }
 }
 
@@ -2558,6 +2788,51 @@ impl StructLiteral {
             result.push((expr, None));
         }
         result
+    }
+}
+
+/// MAP literal: MAP {'a': 1, 'b': 2}
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapLiteral(SyntaxNode);
+
+impl MapLiteral {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == MAP_LITERAL {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
+    /// Get all (key, value) entry expression pairs.
+    pub fn entries(&self) -> Vec<MapEntry> {
+        self.0.children().filter_map(MapEntry::cast).collect()
+    }
+}
+
+/// A single `key : value` entry inside a `MapLiteral`.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct MapEntry(SyntaxNode);
+
+impl MapEntry {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == MAP_ENTRY {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    pub fn key(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).next()
+    }
+
+    pub fn value(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
     }
 }
 
@@ -2929,6 +3204,34 @@ impl CollateExpr {
     }
 }
 
+/// `expr AT TIME ZONE tz_expr` timezone-conversion expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AtTimeZoneExpr(SyntaxNode);
+
+impl AtTimeZoneExpr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == AT_TIME_ZONE_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the operand expression (the left-hand side of AT TIME ZONE).
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Get the timezone expression (the right-hand side, after ZONE).
+    pub fn timezone_expr(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
 /// Type specification (e.g., INTEGER, VARCHAR(255), DECIMAL(10,2))
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct TypeSpec(SyntaxNode);
@@ -2989,13 +3292,30 @@ impl Subquery {
     }
 
     /// Get the SELECT statement (returns `None` for VALUES subqueries).
+    ///
+    /// Unwraps arbitrarily deep redundant parenthesization —
+    /// `(((SELECT …)))` — by descending through nested `SUBQUERY` children
+    /// until a direct `SELECT_STMT` child is found.
     pub fn select_stmt(&self) -> Option<SelectStmt> {
-        self.0.children().find_map(SelectStmt::cast)
+        let mut node = self.0.clone();
+        loop {
+            if let Some(select) = node.children().find_map(SelectStmt::cast) {
+                return Some(select);
+            }
+            match node.children().find(|n| n.kind() == SUBQUERY) {
+                Some(inner) => node = inner,
+                None => return None,
+            }
+        }
     }
 
     /// Get the VALUES clause if this is a `(VALUES …)` subquery.
     pub fn values_clause(&self) -> Option<ValuesClause> {
         self.0.children().find_map(ValuesClause::cast)
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
     }
 }
 
@@ -3567,6 +3887,51 @@ impl Cte {
                 .collect(),
         }
     }
+
+    /// Whether this CTE carries an explicit `MATERIALIZED` hint
+    /// (`AS MATERIALIZED (…)`). Purely informational (DuckDB/PostgreSQL
+    /// materialization directive) — does not change the CTE's schema.
+    pub fn is_materialized(&self) -> bool {
+        self.materialization_hint().0
+    }
+
+    /// Whether this CTE carries an explicit `NOT MATERIALIZED` hint
+    /// (`AS NOT MATERIALIZED (…)`).
+    pub fn is_not_materialized(&self) -> bool {
+        self.materialization_hint().1
+    }
+
+    /// `(is_materialized, is_not_materialized)`, scanning the direct child
+    /// tokens for `AS [NOT] MATERIALIZED`. `MATERIALIZED` is a contextual
+    /// keyword (lexed as a plain IDENT), matched only immediately after
+    /// `AS` or `AS NOT`.
+    fn materialization_hint(&self) -> (bool, bool) {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia())
+            .collect();
+        let Some(as_idx) = tokens.iter().position(|t| t.kind() == AS_KW) else {
+            return (false, false);
+        };
+        let rest = &tokens[as_idx + 1..];
+        let mut it = rest.iter();
+        if let Some(first) = it.next() {
+            if first.kind() == IDENT && first.text().eq_ignore_ascii_case("MATERIALIZED") {
+                return (true, false);
+            }
+            if first.kind() == NOT_KW {
+                if let Some(second) = it.next() {
+                    if second.kind() == IDENT && second.text().eq_ignore_ascii_case("MATERIALIZED")
+                    {
+                        return (false, true);
+                    }
+                }
+            }
+        }
+        (false, false)
+    }
 }
 
 // ===== Phase 35: Struct type references and brace-struct literals =====
@@ -3691,7 +4056,10 @@ impl BraceStructLiteral {
     }
 }
 
-/// A single `expr AS alias` field inside a `BRACE_STRUCT_LITERAL`.
+/// A single field inside a `BRACE_STRUCT_LITERAL`: either the meta-language
+/// `expr AS alias` form, or a DuckDB struct/dict literal `key : value` form
+/// (`{'a': 1}` — the canonical form uses a string-literal key; a bare
+/// identifier key, `{a: 1}`, parses the same way).
 #[derive(Debug, Clone, PartialEq, Eq, Hash)]
 pub struct StructFieldItem(SyntaxNode);
 
@@ -3708,12 +4076,30 @@ impl StructFieldItem {
         &self.0
     }
 
-    /// The value expression (before `AS`).
+    /// The value expression: the operand before `AS` in the meta-language
+    /// form, or the expression after `:` in the DuckDB `key: value` form.
+    /// Both forms have exactly one Expr child in the "value" position; the
+    /// `key: value` form has a second (earlier) Expr child for the key,
+    /// which `duckdb_key()` returns instead.
     pub fn expression(&self) -> Option<Expr> {
-        self.0.children().find_map(Expr::cast)
+        self.0.children().filter_map(Expr::cast).last()
     }
 
-    /// The declared alias (after `AS`).
+    /// The key expression of a DuckDB struct/dict literal `key: value` field.
+    /// `None` for the meta-language `expr AS alias` form, which has no key —
+    /// distinguished structurally by child count (the `key: value` form has
+    /// two Expr children, key then value; the `expr AS alias` form has one).
+    pub fn duckdb_key(&self) -> Option<Expr> {
+        let exprs: Vec<Expr> = self.0.children().filter_map(Expr::cast).collect();
+        if exprs.len() >= 2 {
+            exprs.into_iter().next()
+        } else {
+            None
+        }
+    }
+
+    /// The declared alias (after `AS`) in the meta-language `expr AS alias`
+    /// form. `None` for the DuckDB `key: value` form.
     pub fn alias(&self) -> Option<String> {
         self.0
             .children_with_tokens()

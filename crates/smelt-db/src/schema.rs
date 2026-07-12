@@ -78,6 +78,28 @@ pub enum ColumnSource {
     Unknown,
 }
 
+/// How a [`RowExtension`]'s columns are deduped against columns contributed
+/// by *earlier* extensions when the wildcard is resolved.
+///
+/// DuckDB-verified join-star semantics (`SELECT * FROM a JOIN b …`):
+/// - `NATURAL JOIN` and `JOIN … USING (…)` emit each join-shared column
+///   once (the left side's occurrence and type win);
+/// - `JOIN … ON …` keeps both occurrences.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowExtensionDedupe {
+    /// No join-level dedupe (base table refs, ON joins).
+    None,
+    /// `JOIN … USING (cols)`: skip exactly these column names — they were
+    /// already contributed by the left side. Known syntactically, so no
+    /// resolution-time schema comparison is needed.
+    UsingColumns(Vec<String>),
+    /// `NATURAL JOIN`: skip any column whose name was already contributed
+    /// by an earlier extension in the same wildcard expansion. The shared
+    /// set is only knowable at resolution time (it is the intersection of
+    /// both sides' resolved schemas).
+    SharedWithPrior,
+}
+
 /// Represents a row extension: "...plus all other columns from this ref"
 /// Replaces wildcard Column entries with a structured reference that can be resolved.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -85,6 +107,8 @@ pub struct RowExtension {
     pub ref_name: String,
     /// Columns already explicitly selected (excluded from expansion to avoid duplicates)
     pub excluded_columns: Vec<String>,
+    /// Join-level dedupe mode for NATURAL / USING joined refs.
+    pub dedupe: RowExtensionDedupe,
     pub range: TextRange,
 }
 
