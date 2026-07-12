@@ -63,6 +63,7 @@ The current `silver.sessions` enforces its length cap in `sessionize`'s window f
 |-------|----------|--------|------|
 | 1     | done     | (see date) | 2026-07-11 |
 | 2     | done     | (see date) | 2026-07-12 |
+| 3a    | done     | (see date) | 2026-07-12 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
@@ -135,6 +136,39 @@ The current `silver.sessions` enforces its length cap in `sessionize`'s window f
 - [ ] No scope creep into `sessions_chained`
 
 **Commit.** `feat(examples): clock-anchored session cut replaces the frame-cap rule in web_analytics`
+
+---
+
+### Phase 3a: Self-referential first-run bootstrap (framework)
+
+*(Inserted during implementation, 2026-07-12, with user sign-off. Phase 3 surfaced that a self-referential model cannot be built from scratch — `CREATE TABLE ... AS SELECT` cannot resolve the self-reference when the target table does not yet exist. This was a documented Known Divergence in `docs/specs/batched_models.md`; the example (and Phase 5's tutorial) needs a clean `smelt run` from scratch, so the gap is closed here rather than worked around with seeded fixtures.)*
+
+**Goal.** A self-referential partition-grain model builds from scratch with no manual seed: when the target table does not exist, the runtime first materialises an empty table with the model's output schema, then executes the run's batches as normal inserts (the self-read over the empty table correctly yields no prior state for the first partition).
+
+**Pre-conditions.** Phase 1 (ordered × Form B). Phase 3's uncommitted example work may sit in the tree but this phase must not touch it.
+
+**TDD tests to write first.**
+- Extend `crates/smelt-cli/tests/property_discovery/g_08_running_total_self_ref.rs` (or a sibling test in the same file/family): a self-referential model with **no** pre-seeded target table, built from scratch over N partitions, equals the expected sequential result; second run is idempotent.
+- A statement-parity leg if the bootstrap DDL is a new executed-statement family (`cargo test -p smelt-runtime --test statement_parity` must stay green and cover it).
+
+**Implementation shape.** Spec-first: rewrite the Known Divergence bullet in `docs/specs/batched_models.md` ("A self-referential model's very first partition cannot be created via `CREATE TABLE ... AS SELECT ...`") into normative Semantics: first-run bootstrap creates the empty target from the model's inferred output schema, then batches insert. Honour the **maintenance-plan purity** invariant: the bootstrap DDL is authored by a pure emitter in `smelt-logical`'s maintenance layer (taking the schema as data); the backend only executes it. Wire into the first-run path in `smelt-runtime`/`smelt-backend` where `CREATE TABLE AS SELECT` is chosen today, gated on the model being self-referential (non-self-ref models keep the existing CTAS path).
+
+**Critical files (allowed to touch in this phase).**
+- `docs/specs/batched_models.md` — Known Divergence → normative first-run bootstrap semantics (timeless)
+- `crates/smelt-logical/src/maintenance/` — pure bootstrap-DDL emitter
+- `crates/smelt-runtime/` and `crates/smelt-backend*/` — first-run dispatch
+- `crates/smelt-cli/tests/property_discovery/g_08_running_total_self_ref.rs` (or sibling) — from-scratch bootstrap test
+- `crates/smelt-runtime/tests/statement_parity.rs` — parity leg if a new statement family is added
+- `docs-site/docs/guide/incremental-models.md` — remove/adjust any "must pre-seed" caveat if one exists
+
+**Review checklist** (material findings only):
+- [ ] From-scratch self-ref build works with no seed; result equals sequential expectation; idempotent
+- [ ] Bootstrap DDL emitted by a pure `smelt-logical` emitter (backends execute, never author); statement_parity green
+- [ ] Non-self-referential models keep the existing CTAS first-run path (no behaviour change)
+- [ ] Spec edit is timeless and the Known Divergence bullet is gone
+- [ ] Phase 3's uncommitted example files untouched
+
+**Commit.** `feat(runtime): self-referential models bootstrap an empty target on first run`
 
 ---
 

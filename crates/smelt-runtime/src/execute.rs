@@ -541,6 +541,11 @@ pub async fn execute_project(
         let upstream = UpstreamSchemas::from_database(db_ref, project_dir, &all_models)?;
         Arc::new(upstream)
     };
+    // Kept alongside the registry's own clone (`set_upstream_schemas_all`
+    // moves its argument) — the self-referential first-run bootstrap below
+    // reads `upstream_schemas.models` directly for the SAME resolved output
+    // schema `apply_type_casts` already uses for every other model.
+    let upstream_schemas_for_bootstrap = Arc::clone(&upstream_schemas);
     compilers.set_upstream_schemas_all(upstream_schemas);
     if !fn_bodies.is_empty() {
         compilers.set_function_bodies_all(fn_bodies);
@@ -1088,6 +1093,37 @@ pub async fn execute_project(
                         None => None,
                     };
 
+                // First-run bootstrap for a self-referential model
+                // (`docs/specs/batched_models.md` §"First-run and backfill"
+                // — "First-run bootstrap for a self-referential model"):
+                // when the target doesn't exist yet, `CREATE TABLE … AS
+                // SELECT …` over the first batch cannot resolve the
+                // self-reference (no engine can create a table and read it
+                // in the same statement). Materialise an EMPTY target
+                // carrying the model's own resolved output schema first
+                // (`bootstrap_self_ref_empty_target`), then fall through to
+                // the ordinary per-batch DELETE+INSERT loop below, whose
+                // first iteration now sees an existing-but-empty table and
+                // reads no prior state, exactly as if the table had been
+                // seeded by hand with zero rows.
+                if crate::compile::is_self_referential(&plan.model_file) {
+                    let table_exists = backend
+                        .table_exists(schema, &plan.model_file.db_name_owned())
+                        .await?;
+                    if !table_exists {
+                        bootstrap_self_ref_empty_target(
+                            backend,
+                            schema,
+                            &plan.model_file,
+                            &plan.name,
+                            &upstream_schemas_for_bootstrap,
+                            reporter,
+                            &run_id,
+                        )
+                        .await?;
+                    }
+                }
+
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
                         reporter.run_cancelled(&run_id);
@@ -1469,16 +1505,80 @@ pub async fn execute_project(
                     }
                 };
 
-                let exec_result = backend
-                    .execute_model(
+                // A self-referential model has no well-defined single-shot
+                // full refresh: `CREATE TABLE … AS SELECT …` cannot resolve
+                // the self-reference, and `execute_model`'s ordinary full-
+                // refresh contract (drop, then CTAS) would in any case drop
+                // the very prior state the SELECT reads before the SELECT
+                // ever runs. This arm is the unwindowed sibling of the
+                // incremental path's own first-run bootstrap
+                // (`docs/specs/batched_models.md` §"First-run and
+                // backfill" — "First-run bootstrap for a self-referential
+                // model"): drop, bootstrap an EMPTY target from the
+                // resolved output schema, then `INSERT` the compiled
+                // query's rows — the self-read sees no prior state, the
+                // same starting condition an incremental run's first
+                // partition gets. There is no window to sequence multiple
+                // partitions over here (this arm only runs when `smelt
+                // build`/`smelt run` supplied no `--event-time-start`/
+                // `--event-time-end`), so the whole unfiltered query
+                // executes as one INSERT — correct for the model's FIRST
+                // build, the same one-shot shape a plain (non-self-
+                // referential) full refresh already is.
+                let exec_result = if crate::compile::is_self_referential(&plan.model_file)
+                    && matches!(mat, Materialization::Table)
+                {
+                    backend
+                        .drop_view_if_exists(schema, &plan.model_file.db_name_owned())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    backend
+                        .drop_table_if_exists(schema, &plan.model_file.db_name_owned())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                    bootstrap_self_ref_empty_target(
+                        backend,
                         schema,
-                        &plan.model_file.db_name_owned(),
-                        &compiled.sql,
-                        mat,
-                        false,
+                        &plan.model_file,
+                        &plan.name,
+                        &upstream_schemas_for_bootstrap,
+                        reporter,
+                        &run_id,
                     )
-                    .await
-                    .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    .await?;
+
+                    backend
+                        .insert_into_from_query(
+                            schema,
+                            &plan.model_file.db_name_owned(),
+                            &compiled.sql,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+
+                    let row_count = backend
+                        .get_row_count(schema, &plan.model_file.db_name_owned())
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    smelt_backend::ExecutionResult {
+                        model_name: plan.model_file.db_name_owned(),
+                        duration: StdDuration::from_millis(0),
+                        row_count,
+                        preview: None,
+                    }
+                } else {
+                    backend
+                        .execute_model(
+                            schema,
+                            &plan.model_file.db_name_owned(),
+                            &compiled.sql,
+                            mat,
+                            false,
+                        )
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                };
 
                 total_rows = exec_result.row_count;
                 total_rows_overall += exec_result.row_count;
@@ -1763,6 +1863,100 @@ fn build_model_plans(
     }
 
     Ok((model_plans, total_batches))
+}
+
+/// Create the EMPTY target table for a **self-referential** model's first
+/// run (`docs/specs/batched_models.md` §"First-run and backfill" —
+/// "First-run bootstrap for a self-referential model"). Shared by both
+/// dispatch arms in `execute_project` — the windowed incremental batch loop
+/// (bootstrap-then-DELETE+INSERT) and the unwindowed full-refresh arm
+/// (drop-bootstrap-INSERT) — so the schema lookup, the fail-loud guards,
+/// and the emitter call can never drift between them.
+///
+/// Fail-loud guards (`architecture.md` §"Fail-loud discipline") — DDL is
+/// authored from `upstream.models`' resolved output schema, so the schema
+/// must actually be trustworthy before any statement reaches the backend:
+///
+/// 1. the model's schema fixpoint must have **converged**
+///    (`UpstreamSchemas::unconverged_self_ref_models`) — an unconverged
+///    last-iterate is never silently accepted as "the schema";
+/// 2. the resolved column list must be non-empty;
+/// 3. no output column may still be `DataType::Unknown` — an
+///    `UNKNOWN`-typed column would otherwise surface as an opaque engine
+///    catalog error (`Type with name UNKNOWN does not exist`) instead of a
+///    diagnostic naming the column and the fix.
+///
+/// The emitted DDL comes from the pure single-owner emitter
+/// (`smelt_logical::maintenance::emit::emit_create_empty_table`); this
+/// function only resolves inputs, guards, reports, and executes.
+async fn bootstrap_self_ref_empty_target(
+    backend: &dyn Backend,
+    schema: &str,
+    model_file: &smelt_core::ModelFile,
+    model_display_name: &str,
+    upstream: &crate::compile::UpstreamSchemas,
+    reporter: &dyn RunReporter,
+    run_id: &str,
+) -> Result<()> {
+    // `UpstreamSchemas.models` is keyed on `ModelFile::name` — the bare
+    // leaf name (file stem), not the full dotted graph address — matching
+    // the same key every `smelt.ref()` lookup elsewhere uses
+    // (`StaticRefSchemaProvider::resolved_columns` is always called with a
+    // bare table name).
+    if upstream
+        .unconverged_self_ref_models
+        .contains(&model_file.name)
+    {
+        anyhow::bail!(
+            "model '{model_display_name}' is self-referential and its output-schema \
+             fixpoint did not converge — refusing to bootstrap an empty target table \
+             from an unconverged schema. Pre-create the table manually (or add explicit \
+             CASTs to the model's output columns) and re-run."
+        );
+    }
+    let columns: Vec<(String, smelt_types::DataType)> = upstream
+        .models
+        .get(&model_file.name)
+        .map(|cols| {
+            cols.iter()
+                .map(|(name, typed)| (name.clone(), typed.data_type.clone()))
+                .collect()
+        })
+        .unwrap_or_default();
+    if columns.is_empty() {
+        anyhow::bail!(
+            "model '{model_display_name}' is self-referential but its output schema could \
+             not be resolved — cannot bootstrap an empty target table without a known \
+             column list"
+        );
+    }
+    let unknown_columns: Vec<&str> = columns
+        .iter()
+        .filter(|(_, dt)| matches!(dt, smelt_types::DataType::Unknown(_)))
+        .map(|(name, _)| name.as_str())
+        .collect();
+    if !unknown_columns.is_empty() {
+        anyhow::bail!(
+            "model '{model_display_name}' is self-referential but the type of output \
+             column(s) [{}] could not be inferred — cannot bootstrap an empty target \
+             table with unknown column types. Add an explicit CAST to those columns \
+             (or pre-create the table manually) and re-run.",
+            unknown_columns.join(", ")
+        );
+    }
+
+    let table_name = format!("{schema}.{}", model_file.db_name_owned());
+    let group = smelt_logical::maintenance::emit::emit_create_empty_table(
+        &table_name,
+        &columns,
+        smelt_backend::maintenance_dialect(backend.dialect()),
+    );
+    reporter.maintenance_statements(run_id, model_display_name, None, &group);
+    backend
+        .execute_statement_group(&group)
+        .await
+        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    Ok(())
 }
 
 /// The maintenance-statement dialect for a target, derived from its declared

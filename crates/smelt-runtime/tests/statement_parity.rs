@@ -575,6 +575,199 @@ async fn region_recompute_statements_come_from_the_emitter() {
     );
 }
 
+/// First-run bootstrap for a **self-referential** partition-grain model
+/// (`docs/specs/batched_models.md` §"First-run and backfill" — "First-run
+/// bootstrap for a self-referential model"): building from scratch (no
+/// pre-seeded target table) must emit exactly ONE statement group before
+/// any region `DELETE`+`INSERT` — a plain `CREATE TABLE main.running_balance
+/// (…)` with no `SELECT` — byte-identical to a direct call of
+/// `emit_create_empty_table` with the same table name/columns/dialect.
+/// Every batch's own region `DELETE`+`INSERT` group after it must still
+/// match `emit_delete_insert`, exactly like the non-self-referential family
+/// above — the bootstrap only replaces the otherwise-impossible first-run
+/// `CREATE TABLE … AS SELECT …`, it does not change any later batch's
+/// technique.
+#[tokio::test]
+async fn self_referential_bootstrap_statements_come_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    write_model(
+        project_dir,
+        "running_balance",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: partition\n\
+         timeseries:\n\
+         \x20\x20partition_column: d\n\
+         \x20\x20event_time_column: d\n\
+         \x20\x20granularity: day\n\
+         batched:\n\
+         \x20\x20unique_key: [d]\n\
+         ---\n\
+         SELECT d, balance FROM (\n\
+         \x20\x20SELECT\n\
+         \x20\x20\x20\x20t.d AS d,\n\
+         \x20\x20\x20\x20COALESCE(bal.balance, 0) + SUM(t.amt) AS balance\n\
+         \x20\x20FROM smelt.sources.transactions t\n\
+         \x20\x20LEFT JOIN smelt.running_balance bal\n\
+         \x20\x20\x20\x20ON bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d\n\
+         \x20\x20GROUP BY t.d, bal.balance\n\
+         ) inner_balance",
+    );
+    std::fs::write(
+        project_dir.join("models/sources/transactions.yml"),
+        "description: statement-parity self-ref source.\n\
+         mutation_profile: append_only\n\
+         columns:\n\
+         \x20\x20- name: d\n\
+         \x20\x20\x20\x20type: DATE\n\
+         \x20\x20- name: amt\n\
+         \x20\x20\x20\x20type: DOUBLE\n",
+    )
+    .unwrap();
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: statement_parity_self_ref_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    // Seed the source table only — deliberately NO pre-created
+    // `main.running_balance` target, proving the bootstrap builds it.
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main;\n\
+             CREATE TABLE main.sources_transactions (d DATE, amt DOUBLE);\n\
+             INSERT INTO main.sources_transactions VALUES \
+             (DATE '2024-01-01', 10.0), (DATE '2024-01-02', 5.0);",
+        )
+        .expect("seed source table");
+    }
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+
+    execute_project(
+        "statement-parity-self-ref-run".to_string(),
+        make_request("dev", "2024-01-01", "2024-01-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("execute_project self-referential from-scratch run");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert!(
+        !groups.is_empty(),
+        "at least the bootstrap CREATE TABLE group must have executed"
+    );
+
+    // First group: the bootstrap, non-transactional, exactly one
+    // `CREATE TABLE main.running_balance (…)` statement with no `SELECT`.
+    let bootstrap = &groups[0];
+    assert!(
+        !bootstrap.transactional,
+        "the bootstrap CREATE TABLE is not a DELETE+INSERT pair"
+    );
+    assert_eq!(bootstrap.statements.len(), 1);
+    let bootstrap_sql = &bootstrap.statements[0].sql;
+    assert!(
+        bootstrap_sql.starts_with("CREATE TABLE main.running_balance ("),
+        "bootstrap statement: {bootstrap_sql}"
+    );
+    assert!(
+        !bootstrap_sql.contains("SELECT"),
+        "the bootstrap must be a plain empty CREATE TABLE, not a CREATE TABLE … AS SELECT: \
+         {bootstrap_sql}"
+    );
+
+    // Re-derive the same statement directly from the emitter over the
+    // columns parsed back out of the executed DDL text, proving byte
+    // parity rather than merely emitter-shaped text.
+    let col_defs = bootstrap_sql
+        .strip_prefix("CREATE TABLE main.running_balance (")
+        .and_then(|s| s.strip_suffix(')'))
+        .expect("bootstrap DDL shape");
+    let columns: Vec<(String, smelt_types::DataType)> = col_defs
+        .split(", ")
+        .map(|col| {
+            let (name, ty) = col.split_once(' ').expect("column definition shape");
+            (
+                name.to_string(),
+                smelt_types::parse_type(ty).expect("column type text"),
+            )
+        })
+        .collect();
+    let expected = smelt_logical::maintenance::emit::emit_create_empty_table(
+        "main.running_balance",
+        &columns,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, bootstrap,
+        "executed bootstrap group must be byte-identical to a direct emitter call over the \
+         same table/columns"
+    );
+
+    // Every subsequent group is the ordinary region DELETE+INSERT family —
+    // the bootstrap only replaces the impossible first-run CTAS, it does
+    // not change any later batch's technique.
+    for group in &groups[1..] {
+        assert!(
+            group.transactional,
+            "region DELETE+INSERT must be transactional"
+        );
+        assert_eq!(group.statements.len(), 2);
+        assert!(group.statements[0]
+            .sql
+            .starts_with("DELETE FROM main.running_balance WHERE"));
+        assert!(group.statements[1]
+            .sql
+            .starts_with("INSERT INTO main.running_balance "));
+    }
+
+    // Result-equivalence: the maintained trajectory must equal a full
+    // sequential re-derivation from the source's current contents.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT balance FROM main.running_balance WHERE d = DATE '2024-01-01'",
+            "SELECT 10.0 AS balance",
+        )
+        .await,
+        "day 1 balance must equal the sequential expectation"
+    );
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT balance FROM main.running_balance WHERE d = DATE '2024-01-02'",
+            "SELECT 15.0 AS balance",
+        )
+        .await,
+        "day 2 balance must equal the sequential expectation"
+    );
+}
+
 /// The keyed fold family (`refresh: keyed`, `grain: key`): every statement
 /// `execute_project` sends for the windowed-keyed-maintenance driver's
 /// steps — the first-run `CREATE TABLE … AS` and each following step's
