@@ -3,8 +3,9 @@
 #![allow(unused_imports)]
 use rowan::TextRange;
 use smelt_parser::ast::{
-    BinaryExpr, CaseExpr, CastExpr, CollateExpr, Cte, Expr, ExtractExpr, FunctionCall,
-    RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral, Subquery,
+    AtTimeZoneExpr, BinaryExpr, CaseExpr, CastExpr, CollateExpr, Cte, Expr, ExtractExpr,
+    FunctionCall, RowConstructor, SelectStmt, SmeltAsStructCall, SmeltPathCall, StructLiteral,
+    Subquery,
 };
 use smelt_types::signatures::{
     kind_ceiling, unify_call_with_expected, BuiltinRegistry, ExprKind, FunctionSig, RecordRegistry,
@@ -26,6 +27,12 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // `check_collation_diagnostics` in `lib.rs::check_file_diagnostics`.
     if let Some(collate_expr) = expr.as_collate() {
         return super::collation::infer_collate_expr_type(&collate_expr, ctx);
+    }
+
+    // Try AT TIME ZONE expression (timezone conversion): toggles
+    // Timestamp{with_timezone}; nullability propagates from the operand.
+    if let Some(at_tz) = expr.as_at_time_zone() {
+        return super::at_time_zone::infer_at_time_zone_type(&at_tz, ctx);
     }
 
     // Try CAST expression first

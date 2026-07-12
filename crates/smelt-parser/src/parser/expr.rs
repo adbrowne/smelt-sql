@@ -848,6 +848,40 @@ impl<'a> super::Parser<'a> {
             self.finish_node(); // CAST_EXPR
             self.skip_trivia();
         }
+
+        // Postfix: `expr AT TIME ZONE tz_expr` (PostgreSQL/DuckDB timezone
+        // conversion). `AT`, `TIME`, `ZONE` are contextual keywords (lexed as
+        // IDENT) — `peek_at_time_zone` verifies the full three-token sequence
+        // before committing, so a bare `AT` (e.g. an implicit select-item
+        // alias, `SELECT ts at FROM t`) is left untouched. Binds tighter than
+        // arithmetic/comparison (verified via the DuckDB oracle: `ts AT TIME
+        // ZONE 'UTC' + INTERVAL 1 HOUR` groups as `(ts AT TIME ZONE 'UTC') +
+        // INTERVAL 1 HOUR`) and left-associates so it chains: `ts AT TIME
+        // ZONE 'UTC' AT TIME ZONE 'EST'` groups as `(ts AT TIME ZONE 'UTC')
+        // AT TIME ZONE 'EST'` (also verified via the oracle). The right-hand
+        // timezone operand parses at `parse_unary_expr` level (a bare
+        // string/identifier/parenthesized expr, per the oracle), so a
+        // trailing lower-precedence operator (`+`, comparison, …) is left for
+        // the outer expression rather than swallowed into the tz operand.
+        self.skip_trivia();
+        while !self.in_at_time_zone_operand && self.peek_at_time_zone() {
+            self.start_node_at(primary_checkpoint, AT_TIME_ZONE_EXPR);
+            self.advance(); // consume AT
+            self.skip_trivia();
+            self.advance(); // consume TIME
+            self.skip_trivia();
+            self.advance(); // consume ZONE
+            self.skip_trivia();
+            // Parse the timezone operand with the guard set so a chained `AT
+            // TIME ZONE` is left for *this* loop (left-associative), not
+            // swallowed into the operand (see `in_at_time_zone_operand` doc).
+            let was_in_operand = self.in_at_time_zone_operand;
+            self.in_at_time_zone_operand = true;
+            self.parse_unary_expr();
+            self.in_at_time_zone_operand = was_in_operand;
+            self.finish_node(); // AT_TIME_ZONE_EXPR
+            self.skip_trivia();
+        }
     }
 
     pub(super) fn parse_array_subscript(&mut self) {

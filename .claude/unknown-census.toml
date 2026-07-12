@@ -184,6 +184,13 @@ classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"
 
+# ── smelt-db / type_inference/at_time_zone ─────────────────────────────────────
+
+["crates/smelt-db/src/type_inference/at_time_zone.rs:41"]
+classification = "legitimate"
+reason = "AT TIME ZONE operand is not a Timestamp (e.g. Date, Time, or an unresolved/other type) — only the Timestamp{with_timezone} round-trip is implemented; Unknown(Unresolved) is the conservative recovery type"
+discriminant = "unresolved"
+
 # ── smelt-db / type_inference/binary ──────────────────────────────────────────
 
 ["crates/smelt-db/src/type_inference/binary.rs:77"]
@@ -210,32 +217,32 @@ discriminant = "unresolved"
 
 # ── smelt-db / type_inference/dispatch ────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/dispatch.rs:522"]
+["crates/smelt-db/src/type_inference/dispatch.rs:529"]
 classification = "legitimate"
 reason = "SELECT item expression type inference fallback — infer_expression_type returns None; conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:527"]
+["crates/smelt-db/src/type_inference/dispatch.rs:534"]
 classification = "legitimate"
 reason = "SELECT item has no expression (star-expand or syntax error) — Unknown placeholder for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:757"]
+["crates/smelt-db/src/type_inference/dispatch.rs:764"]
 classification = "legitimate"
 reason = "type promotion wildcard — incompatible temporal sub-types produce Unknown; conservative conservatism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:761"]
+["crates/smelt-db/src/type_inference/dispatch.rs:768"]
 classification = "legitimate"
 reason = "type promotion wildcard — top-level incompatible families; Unknown is deliberate conservatism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:782"]
+["crates/smelt-db/src/type_inference/dispatch.rs:789"]
 classification = "legitimate"
 reason = "UNION branch SELECT item fallback — expression type unknown; conservative Unknown for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:787"]
+["crates/smelt-db/src/type_inference/dispatch.rs:794"]
 classification = "legitimate"
 reason = "UNION branch SELECT item (no expression) fallback — Unknown placeholder"
 discriminant = "dynamic"

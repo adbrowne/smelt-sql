@@ -795,18 +795,6 @@ note = "smelt's printer drops the derived-table body (subquery/VALUES) when the 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found STRING"
 
-["298dd08e7c5b9b63"]
-category = "at_time_zone_or_time_tz_type"
-note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
-
-["d7c0f7716796a39b"]
-category = "at_time_zone_or_time_tz_type"
-note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
-
-["e37f7e02ad9a1a05"]
-category = "at_time_zone_or_time_tz_type"
-note = "AT TIME ZONE operator / TIME WITH[OUT] TIME ZONE type literal is not parsed (tracked gaps.rs::at_time_zone)"
-
 ["8150a207f52fa0e4"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"

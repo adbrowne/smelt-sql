@@ -12,6 +12,7 @@
 //! data structures. This invariant enables a future `smelt-check` crate
 //! extraction.
 
+pub mod at_time_zone;
 pub mod binary;
 pub mod collation;
 pub mod composite;

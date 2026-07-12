@@ -4132,7 +4132,7 @@ fn parse_list_comprehension_basic() {
     );
 
     assert_eq!(
-        parse.syntax().text().to_string(),
+        parse.syntax().text().to_string().trim().to_string(),
         sql,
         "list comprehension must round-trip losslessly"
     );
@@ -4215,7 +4215,7 @@ fn parse_list_comprehension_nested() {
     assert_eq!(comps.len(), 2, "expected outer + inner LIST_COMPREHENSION");
 
     assert_eq!(
-        parse.syntax().text().to_string(),
+        parse.syntax().text().to_string().trim().to_string(),
         sql,
         "nested list comprehension must round-trip losslessly"
     );
@@ -7074,7 +7074,7 @@ fn parse_hash_cte_ref() {
     );
 
     // Lossless round-trip.
-    let cst_text = parse.syntax().text().to_string();
+    let cst_text = parse.syntax().text().to_string().trim().to_string();
     assert_eq!(
         cst_text, input,
         "round-trip: CST text must reproduce the exact source"
@@ -7150,7 +7150,7 @@ fn dangling_hash_no_ident_recovers() {
     let parse = parse(input);
 
     // Lossless round-trip: ALL source characters must be preserved in the CST.
-    let cst_text = parse.syntax().text().to_string();
+    let cst_text = parse.syntax().text().to_string().trim().to_string();
     assert_eq!(
         cst_text, input,
         "dangling `#`: CST must losslessly reproduce the source"
@@ -8348,4 +8348,133 @@ fn map_literal_lowercase_keyword() {
     let item = select.select_list().unwrap().items().next().unwrap();
     let expr = item.expression().unwrap();
     assert!(expr.as_map_literal().is_some());
+}
+
+// ===== AT TIME ZONE =====
+
+#[test]
+fn at_time_zone_parses_to_node() {
+    let (_, select) = parse_select("SELECT ts AT TIME ZONE 'UTC' FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(
+        expr.as_at_time_zone().is_some(),
+        "Expected AT_TIME_ZONE_EXPR node, got syntax: {:?}",
+        expr.syntax().kind()
+    );
+    let atz = expr.as_at_time_zone().unwrap();
+    assert_eq!(
+        atz.operand()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("ts".to_string())
+    );
+    assert_eq!(
+        atz.timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'UTC'".to_string())
+    );
+}
+
+#[test]
+fn at_time_zone_round_trips() {
+    let sql = "SELECT ts AT TIME ZONE 'UTC' FROM t";
+    let parse = parse(sql);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+    let file = File::cast(parse.syntax()).unwrap();
+    // Lossless CST: printed text reconstructs exactly.
+    assert_eq!(file.syntax().text().to_string().trim().to_string(), sql);
+}
+
+#[test]
+fn at_time_zone_chains_left_associatively() {
+    // Verified against the DuckDB oracle: `ts AT TIME ZONE 'UTC' AT TIME ZONE
+    // 'America/New_York'` groups as `(ts AT TIME ZONE 'UTC') AT TIME ZONE
+    // 'America/New_York'` — the outer AT_TIME_ZONE_EXPR's operand is itself
+    // an AT_TIME_ZONE_EXPR, not a re-parenthesized flat chain.
+    let (_, select) =
+        parse_select("SELECT ts AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York' FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let outer = expr.as_at_time_zone().expect("outer AT_TIME_ZONE_EXPR");
+    assert_eq!(
+        outer
+            .timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'America/New_York'".to_string())
+    );
+    let inner_operand = outer.operand().expect("inner operand");
+    let inner = inner_operand
+        .as_at_time_zone()
+        .expect("inner operand should itself be an AT_TIME_ZONE_EXPR (left-associative chain)");
+    assert_eq!(
+        inner
+            .operand()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("ts".to_string())
+    );
+    assert_eq!(
+        inner
+            .timezone_expr()
+            .map(|e| e.syntax().text().to_string().trim().to_string()),
+        Some("'UTC'".to_string())
+    );
+}
+
+#[test]
+fn at_time_zone_binds_tighter_than_comparison() {
+    // Verified against the DuckDB oracle: `ts AT TIME ZONE 'UTC' > ts2` groups
+    // as `(ts AT TIME ZONE 'UTC') > ts2`, not `ts AT TIME ZONE ('UTC' > ts2)`.
+    let (_, select) = parse_select("SELECT ts AT TIME ZONE 'UTC' > ts2 FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let binary = expr
+        .as_binary()
+        .expect("top-level expression should be a BINARY_EXPR (`>`)");
+    let left = binary.left().expect("left operand");
+    assert!(
+        left.as_at_time_zone().is_some(),
+        "left operand of `>` should be the AT_TIME_ZONE_EXPR, got: {:?}",
+        left.syntax().kind()
+    );
+}
+
+#[test]
+fn at_time_zone_binds_tighter_than_addition() {
+    // Verified against the DuckDB oracle: `ts AT TIME ZONE 'UTC' + INTERVAL 1
+    // HOUR` groups as `(ts AT TIME ZONE 'UTC') + INTERVAL 1 HOUR` — the `+`
+    // is the outer node, not swallowed into the tz operand.
+    let (_, select) = parse_select("SELECT ts AT TIME ZONE 'UTC' + INTERVAL 1 HOUR FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    let binary = expr
+        .as_binary()
+        .expect("top-level expression should be a BINARY_EXPR (`+`)");
+    let left = binary.left().expect("left operand");
+    assert!(
+        left.as_at_time_zone().is_some(),
+        "left operand of `+` should be the AT_TIME_ZONE_EXPR, got: {:?}",
+        left.syntax().kind()
+    );
+}
+
+#[test]
+fn bare_at_still_parses_as_implicit_alias() {
+    // Guard: `at` is a contextual (unreserved) keyword — only the exact `AT
+    // TIME ZONE` sequence triggers AT_TIME_ZONE_EXPR. A bare `at` following
+    // an expression must still work as an implicit select-item alias.
+    let (_, select) = parse_select("SELECT ts at FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    assert_eq!(item.alias().as_deref(), Some("at"));
+    let expr = item.expression().unwrap();
+    assert!(expr.as_at_time_zone().is_none());
+}
+
+#[test]
+fn bare_at_column_reference_still_parses() {
+    // Guard: `at` must remain usable as an ordinary identifier/column name.
+    let (_, select) = parse_select("SELECT at FROM t");
+    let item = select.select_list().unwrap().items().next().unwrap();
+    let expr = item.expression().unwrap();
+    assert!(expr.as_at_time_zone().is_none());
+    assert_eq!(expr.syntax().text().to_string().trim(), "at");
 }

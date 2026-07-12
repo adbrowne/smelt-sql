@@ -785,6 +785,110 @@ fn test_temporal_arithmetic_with_columns() {
 }
 
 #[test]
+fn test_at_time_zone_naive_to_aware() {
+    // TIMESTAMP AT TIME ZONE tz → TIMESTAMP WITH TIME ZONE (verified against
+    // the DuckDB oracle: `typeof(ts AT TIME ZONE 'UTC')` on a naive TIMESTAMP
+    // column returns `TIMESTAMP WITH TIME ZONE`).
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::not_null(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Timestamp {
+            with_timezone: true
+        }
+    );
+    assert!(
+        !types[0].nullable,
+        "nullability propagates from the operand"
+    );
+}
+
+#[test]
+fn test_at_time_zone_aware_to_naive() {
+    // TIMESTAMP WITH TIME ZONE AT TIME ZONE tz → TIMESTAMP (plain) — verified
+    // against the DuckDB oracle: `typeof((ts AT TIME ZONE 'UTC') AT TIME ZONE
+    // 'America/New_York')` on a naive TIMESTAMP returns `TIMESTAMP` (the
+    // second AT TIME ZONE strips the tz-awareness added by the first).
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::not_null(DataType::Timestamp {
+            with_timezone: true,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Timestamp {
+            with_timezone: false
+        }
+    );
+    assert!(
+        !types[0].nullable,
+        "nullability propagates from the operand"
+    );
+}
+
+#[test]
+fn test_at_time_zone_chained_round_trip() {
+    // ts AT TIME ZONE 'UTC' AT TIME ZONE 'EST' on a naive TIMESTAMP: first
+    // conversion → TIMESTAMP WITH TIME ZONE, second conversion strips it back
+    // to plain TIMESTAMP (verified against the DuckDB oracle).
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::not_null(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' AT TIME ZONE 'EST' FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Timestamp {
+            with_timezone: false
+        }
+    );
+}
+
+#[test]
+fn test_at_time_zone_nullable_operand_propagates() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "ts",
+        TypedColumn::nullable(DataType::Timestamp {
+            with_timezone: false,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS ts) SELECT ts AT TIME ZONE 'UTC' FROM t",
+        &ctx,
+    );
+    assert!(
+        types[0].nullable,
+        "nullable operand should propagate nullability"
+    );
+}
+
+#[test]
 fn test_promote_types_numeric_hierarchy() {
     let mk = |dt: DataType| TypedColumn {
         data_type: dt,

@@ -317,6 +317,22 @@ EXTRACT(WEEK FROM date_col)          -- returns BIGINT
 
 `EXTRACT(EPOCH FROM ...)` returns a `DOUBLE` (floating-point Unix timestamp). All other fields return `BIGINT`.
 
+## Timezone conversion
+
+`AT TIME ZONE` converts between naive (`TIMESTAMP`) and timezone-aware (`TIMESTAMP WITH TIME ZONE`) values:
+
+```sql
+ts AT TIME ZONE 'UTC'                -- TIMESTAMP -> TIMESTAMP WITH TIME ZONE
+tstz AT TIME ZONE 'America/New_York' -- TIMESTAMP WITH TIME ZONE -> TIMESTAMP
+```
+
+The result type depends only on the operand's tz-awareness, not the timezone name:
+
+- A naive `TIMESTAMP` operand attaches the given timezone, producing `TIMESTAMP WITH TIME ZONE`.
+- A `TIMESTAMP WITH TIME ZONE` operand converts to that timezone's local wall-clock time and drops the offset, producing a naive `TIMESTAMP`.
+
+Because each application flips tz-awareness, the operator chains: `ts AT TIME ZONE 'UTC' AT TIME ZONE 'America/New_York'` first attaches `UTC` (producing `TIMESTAMP WITH TIME ZONE`), then converts to `America/New_York` local time and drops the offset again (producing `TIMESTAMP`). `AT TIME ZONE` binds tighter than comparison and arithmetic operators, so `ts AT TIME ZONE 'UTC' > ts2` and `ts AT TIME ZONE 'UTC' + INTERVAL 1 HOUR` both apply the conversion before the outer operator. Nullability propagates from the operand: a `NULL` timestamp produces a `NULL` result.
+
 ## SQL-standard string function forms
 
 `TRIM`, `SUBSTRING`, and `POSITION` accept both the ordinary comma-separated

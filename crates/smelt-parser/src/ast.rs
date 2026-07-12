@@ -1818,6 +1818,7 @@ impl Expr {
                 Some(Self(inner))
             }
             BINARY_EXPR | FUNCTION_CALL | CASE_EXPR | CAST_EXPR | EXTRACT_EXPR | COLLATE_EXPR
+            | AT_TIME_ZONE_EXPR
             | SUBQUERY | BETWEEN_EXPR | IN_EXPR | EXISTS_EXPR | SMELT_AS_STRUCT_CALL
             | SMELT_PATH_REF | SMELT_PATH_CALL
             // Phase B (meta-language): lambdas and pipe expressions are expressions.
@@ -1855,6 +1856,7 @@ impl Expr {
                             | CAST_EXPR
                             | EXTRACT_EXPR
                             | COLLATE_EXPR
+                            | AT_TIME_ZONE_EXPR
                             | SUBQUERY
                             | BETWEEN_EXPR
                             | IN_EXPR
@@ -1991,6 +1993,14 @@ impl Expr {
             .children()
             .find_map(ExtractExpr::cast)
             .or_else(|| ExtractExpr::cast(self.0.clone()))
+    }
+
+    /// Check if this is an AT TIME ZONE expression
+    pub fn as_at_time_zone(&self) -> Option<AtTimeZoneExpr> {
+        self.0
+            .children()
+            .find_map(AtTimeZoneExpr::cast)
+            .or_else(|| AtTimeZoneExpr::cast(self.0.clone()))
     }
 
     /// Check if this is a COLLATE expression
@@ -3032,6 +3042,34 @@ impl CollateExpr {
             }
         }
         None
+    }
+
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+}
+
+/// `expr AT TIME ZONE tz_expr` timezone-conversion expression.
+#[derive(Debug, Clone, PartialEq, Eq, Hash)]
+pub struct AtTimeZoneExpr(SyntaxNode);
+
+impl AtTimeZoneExpr {
+    pub fn cast(node: SyntaxNode) -> Option<Self> {
+        if node.kind() == AT_TIME_ZONE_EXPR {
+            Some(Self(node))
+        } else {
+            None
+        }
+    }
+
+    /// Get the operand expression (the left-hand side of AT TIME ZONE).
+    pub fn operand(&self) -> Option<Expr> {
+        self.0.children().find_map(Expr::cast)
+    }
+
+    /// Get the timezone expression (the right-hand side, after ZONE).
+    pub fn timezone_expr(&self) -> Option<Expr> {
+        self.0.children().filter_map(Expr::cast).nth(1)
     }
 
     pub fn syntax(&self) -> &SyntaxNode {

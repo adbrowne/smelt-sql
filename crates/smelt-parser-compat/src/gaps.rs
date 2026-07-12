@@ -58,15 +58,8 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         severity: "medium",
         planned_fix: true,
     },
-    KnownGap {
-        id: "at_time_zone",
-        description: "AT TIME ZONE operator is not parsed",
-        category: "smelt_fails",
-        dialect: "all",
-        patterns: &[r"(?i)\bAT\s+TIME\s+ZONE\b"],
-        severity: "medium",
-        planned_fix: true,
-    },
+    // at_time_zone gap removed - AT TIME ZONE operator now parses, prints,
+    // and infers the tz-conversion type rules (July 2026).
     KnownGap {
         id: "for_update",
         description: "FOR UPDATE / FOR SHARE row-locking clauses are not parsed",
@@ -477,9 +470,11 @@ mod tests {
     fn test_gaps_by_category() {
         // smelt_fails gaps: fail-loud trailing-content parsing (July 2026)
         // exposed constructs whose tails were previously swallowed silently
-        // (grouping_sets, at_time_zone, for_update).
+        // (grouping_sets, for_update). at_time_zone was a third such entry;
+        // AT TIME ZONE now parses, prints, and infers cleanly, so it was
+        // removed and this count shrank accordingly.
         let smelt_gaps = get_gaps_by_category("smelt_fails");
-        assert_eq!(smelt_gaps.len(), 3);
+        assert_eq!(smelt_gaps.len(), 2);
         for gap in smelt_gaps {
             assert_eq!(gap.category, "smelt_fails");
         }

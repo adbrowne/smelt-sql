@@ -420,6 +420,16 @@ pub enum SyntaxKind {
     // mirroring LAMBDA_PARAM's wrap-single-ident convention.
     LIST_COMPREHENSION_VAR,
 
+    // `expr AT TIME ZONE tz_expr` (PostgreSQL/DuckDB timezone conversion
+    // operator). `AT`, `TIME`, and `ZONE` are all contextual keywords (lexed
+    // as IDENT); the parser only recognises the AT_TIME_ZONE_EXPR postfix
+    // when the exact three-token sequence `AT TIME ZONE` follows a parsed
+    // primary expression (see `Parser::peek_at_time_zone`). This keeps `at`,
+    // `time`, and `zone` usable as ordinary identifiers/implicit aliases
+    // everywhere else (e.g. `SELECT ts at FROM t` still parses `at` as an
+    // implicit alias for `ts`).
+    AT_TIME_ZONE_EXPR,
+
     // Special
     EOF, // End of file
 }

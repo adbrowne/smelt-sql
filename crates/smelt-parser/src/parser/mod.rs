@@ -92,6 +92,19 @@ struct Parser<'a> {
     /// meta-language expression node.  The `|>` token at this position is the
     /// next pipe-SQL stage delimiter, not an infix meta-language pipe operator.
     pub(super) in_pipe_stage: bool,
+    /// Whether the parser is currently parsing the timezone (right-hand)
+    /// operand of an `AT TIME ZONE` postfix expression.
+    ///
+    /// When `true`, `parse_primary_expr`'s own `AT TIME ZONE` postfix loop
+    /// must not fire for a subsequent `AT TIME ZONE` sequence — otherwise a
+    /// chain like `ts AT TIME ZONE 'UTC' AT TIME ZONE 'EST'` would parse as
+    /// `ts AT TIME ZONE ('UTC' AT TIME ZONE 'EST')` (right-nested inside the
+    /// timezone operand) instead of the correct left-associative `(ts AT TIME
+    /// ZONE 'UTC') AT TIME ZONE 'EST'` (verified via the DuckDB oracle). The
+    /// outer postfix `while` loop in `parse_primary_expr` is what actually
+    /// consumes the second `AT TIME ZONE`, so the inner (operand) parse must
+    /// stop short of it.
+    pub(super) in_at_time_zone_operand: bool,
 }
 
 impl<'a> Parser<'a> {
@@ -107,6 +120,7 @@ impl<'a> Parser<'a> {
             current_define_row_vars: Vec::new(),
             in_smelt_call_args: false,
             in_pipe_stage: false,
+            in_at_time_zone_operand: false,
         }
     }
 
@@ -353,6 +367,68 @@ impl<'a> Parser<'a> {
             self.tokens.get(self.pos + la2).map(|t| t.kind),
             Some(LPAREN)
         )
+    }
+
+    /// Peek ahead from the current position (which must be at an `IDENT`
+    /// token) to check whether the token stream looks like the postfix
+    /// `AT TIME ZONE` sequence.
+    ///
+    /// Returns `true` iff the current token and the next two non-trivia
+    /// tokens are `IDENT`s with text (case-insensitively) `AT`, `TIME`,
+    /// `ZONE` in that order. Does not consume any tokens — `AT`, `TIME`, and
+    /// `ZONE` are all contextual (unreserved) keywords, so a bare `AT` not
+    /// followed by `TIME ZONE` must be left alone (e.g. to be consumed later
+    /// as an implicit select-item alias).
+    pub(super) fn peek_at_time_zone(&self) -> bool {
+        if !self.at_contextual_keyword("AT") {
+            return false;
+        }
+
+        // Find the next non-trivia token after the current AT token.
+        let mut la = 1usize;
+        while let Some(t) = self.tokens.get(self.pos + la) {
+            if t.kind.is_trivia() {
+                la += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(time_tok) = self.tokens.get(self.pos + la) else {
+            return false;
+        };
+        if time_tok.kind != IDENT {
+            return false;
+        }
+        let mut time_offset = self.offset;
+        for i in 0..la {
+            time_offset += self.tokens[self.pos + i].len;
+        }
+        let time_text = &self.input[time_offset..time_offset + time_tok.len];
+        if !time_text.eq_ignore_ascii_case("TIME") {
+            return false;
+        }
+
+        // Find the next non-trivia token after TIME.
+        let mut la2 = la + 1;
+        while let Some(t) = self.tokens.get(self.pos + la2) {
+            if t.kind.is_trivia() {
+                la2 += 1;
+            } else {
+                break;
+            }
+        }
+        let Some(zone_tok) = self.tokens.get(self.pos + la2) else {
+            return false;
+        };
+        if zone_tok.kind != IDENT {
+            return false;
+        }
+        let mut zone_offset = self.offset;
+        for i in 0..la2 {
+            zone_offset += self.tokens[self.pos + i].len;
+        }
+        let zone_text = &self.input[zone_offset..zone_offset + zone_tok.len];
+        zone_text.eq_ignore_ascii_case("ZONE")
     }
 
     // Domain-specific parsing methods live in submodules:

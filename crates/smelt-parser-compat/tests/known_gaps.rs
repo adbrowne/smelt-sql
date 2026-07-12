@@ -436,13 +436,12 @@ fn test_smelt_supports_type_qualified_literal() {
 }
 
 #[test]
-fn test_gap_at_time_zone() {
-    // AT TIME ZONE is not parsed by smelt — documented smelt_fails gap.
-    // Previously appeared "supported" because the parser silently swallowed
-    // the unparsed tail; fail-loud trailing-content parsing exposed it.
-    assert_smelt_fails_pg_succeeds(
+fn test_smelt_supports_at_time_zone() {
+    // AT TIME ZONE is now parsed by smelt (closes the former `at_time_zone`
+    // smelt_fails gap — see gaps.rs).
+    assert_both_succeed(
         "SELECT created_at AT TIME ZONE 'UTC' FROM t",
-        "at_time_zone",
+        "AT TIME ZONE operator",
     );
 }
 
