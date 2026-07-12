@@ -126,6 +126,29 @@ fn test_literal_type_inference() {
     assert!(matches!(decimal_type.data_type, DataType::Decimal { .. }));
     assert!(!decimal_type.nullable);
 
+    // Underscore digit separators: DuckDB types `1_000_000` as INTEGER
+    // (`duckdb -c "SELECT typeof(1_000_000);"` -> INTEGER) and
+    // `1_000.000_1` as DECIMAL(8,4) (`duckdb -c "SELECT typeof(1_000.000_1);"`
+    // -> DECIMAL(8,4)) — separators must be stripped before value-parsing,
+    // not treated as part of the digit count or cause an Unknown inference.
+    assert_eq!(
+        infer_literal_type("1_000_000"),
+        Some(TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        })
+    );
+    assert_eq!(
+        infer_literal_type("1_000.000_1"),
+        Some(TypedColumn {
+            data_type: DataType::Decimal {
+                precision: 8,
+                scale: 4,
+            },
+            nullable: false,
+        })
+    );
+
     // Double (scientific notation)
     assert_eq!(
         infer_literal_type("1.5e10"),

@@ -159,15 +159,6 @@ pub static KNOWN_GAPS: &[KnownGap] = &[
         planned_fix: false,
     },
     KnownGap {
-        id: "duckdb_underscore_digit_separator",
-        description: "Underscore digit separators (1_000_000) are not lexed as one numeric literal",
-        category: "duckdb_fails_to_parse",
-        dialect: "duckdb",
-        patterns: &[r"\b\d+_\d"],
-        severity: "low",
-        planned_fix: false,
-    },
-    KnownGap {
         id: "coalesce_nullif",
         description: "COALESCE and NULLIF functions (may parse but different behavior)",
         category: "fingerprint_mismatch",

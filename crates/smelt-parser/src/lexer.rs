@@ -392,16 +392,12 @@ impl<'a> Lexer<'a> {
     }
 
     fn consume_number(&mut self) -> SyntaxKind {
-        while self.current_char().is_ascii_digit() {
-            self.advance();
-        }
+        self.consume_digits_with_separators();
 
         // Handle decimal point
         if self.current_char() == '.' && self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
             self.advance(); // consume '.'
-            while self.current_char().is_ascii_digit() {
-                self.advance();
-            }
+            self.consume_digits_with_separators();
         }
 
         // Handle scientific notation: e/E followed by optional +/- and then digits.
@@ -426,25 +422,31 @@ impl<'a> Lexer<'a> {
                 if self.current_char() == '+' || self.current_char() == '-' {
                     self.advance(); // consume optional sign
                 }
-                while self.current_char().is_ascii_digit() {
-                    self.advance(); // consume exponent digits
-                }
+                self.consume_digits_with_separators(); // consume exponent digits
             }
         }
 
         // Fail-loud: a numeric literal immediately followed by an identifier
         // continuation character (letter or `_`) must never be silently
         // split into a shorter NUMBER token plus a following IDENT/alias —
-        // e.g. `0x1F` must not read as `0` implicitly aliased to `x1F`, and
-        // `1_000_000` must not read as `1` implicitly aliased to `_000_000`.
-        // Digit-separator and hex-literal grammar *support* is deferred; for
-        // now the whole malformed blob becomes a single ERROR token so the
-        // parser surfaces a diagnostic instead of guessing at user intent.
-        // (DuckDB's own default grammar has no true hex-integer-literal
-        // syntax in this position either — `SELECT 0x1F` on DuckDB silently
-        // reads as `0` aliased to `x1F`; smelt refuses to reproduce that.
-        // DuckDB *does* treat `1_000_000` as a real numeric literal with no
-        // ambiguity, which is exactly the silent-split risk this guards.)
+        // e.g. `0x1F` must not read as `0` implicitly aliased to `x1F`.
+        // Verified empirically against DuckDB v1.5.4: `SELECT 0x1F` (no
+        // whitespace before an alias) reads as `0` implicitly aliased to
+        // `x1F` — DuckDB has no true hex-integer-literal grammar in this
+        // position, so a following `AS a` or any binary operator fails as a
+        // syntax error (the alias slot is already filled, or the trailing
+        // ident isn't a valid operator continuation). smelt refuses to
+        // reproduce that silent split: the whole malformed blob becomes a
+        // single ERROR token instead of being read as `0` aliased to `x1F`.
+        //
+        // Underscore digit separators (`1_000_000`, `1_000.000_1`,
+        // `1_000e1_0`) are handled by `consume_digits_with_separators`
+        // above/below and never reach this fallback — DuckDB accepts an
+        // underscore only strictly *between* two digits within a single
+        // digit run (integer part, fractional part, or exponent digits);
+        // a leading/trailing underscore or a doubled `__` is rejected by
+        // DuckDB too (verified empirically), and stays a single ERROR token
+        // here rather than being silently split.
         if self.current_char().is_alphabetic() || self.current_char() == '_' {
             while self.current_char().is_alphanumeric() || self.current_char() == '_' {
                 self.advance();
@@ -453,6 +455,21 @@ impl<'a> Lexer<'a> {
         }
 
         NUMBER
+    }
+
+    /// Consume a run of ASCII digits, allowing DuckDB-style underscore digit
+    /// separators strictly between two digits (never leading, trailing, or
+    /// doubled). E.g. `1_000_000` and `1_0_0` are consumed in full; `1__0`
+    /// and `1_` stop before the invalid underscore, leaving it for the
+    /// fail-loud fallback in `consume_number` to fold into a single ERROR
+    /// token.
+    fn consume_digits_with_separators(&mut self) {
+        while self.current_char().is_ascii_digit() {
+            self.advance();
+            if self.current_char() == '_' && self.peek_char().is_some_and(|c| c.is_ascii_digit()) {
+                self.advance(); // consume the separator; loop consumes the following digit
+            }
+        }
     }
 
     fn consume_ident_or_keyword(&mut self) -> SyntaxKind {

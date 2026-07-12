@@ -7045,21 +7045,101 @@ fn test_scientific_notation_number() {
 #[test]
 fn number_followed_by_ident_without_space_errors() {
     // Oracle: DuckDB does not have real hex-integer-literal grammar in this
-    // position either — `duckdb -c "SELECT 0x1F;"` prints a column named
-    // `x1F` with value `0` (i.e. DuckDB itself silently reads this as `0`
-    // implicitly aliased to `x1F`; a following `AS a` then fails as a
-    // syntax error, since the alias slot is already filled). smelt refuses
-    // to reproduce that silent split: the whole malformed blob must surface
-    // as a single ERROR token / parse error rather than being read as
+    // position — `duckdb -c "SELECT 0x1F;"` prints a column named `x1F`
+    // with value `0` (i.e. DuckDB itself silently reads this as `0`
+    // implicitly aliased to `x1F`; a following `AS a`, or any binary
+    // operator, then fails as a syntax error, since the alias slot is
+    // already filled / `x1F` isn't a valid operator continuation — verified
+    // empirically with `duckdb -c "SELECT 0x1F AS x"` and
+    // `duckdb -c "SELECT 0x1F + 1"`, both syntax errors). smelt refuses to
+    // reproduce that silent split: the whole malformed blob must surface as
+    // a single ERROR token / parse error rather than being read as
     // `0 AS x1F`.
-    //
-    // Oracle: `1_000_000` **is** a genuine numeric literal in DuckDB
-    // (`duckdb -c "SELECT 1_000_000 AS a, typeof(1_000_000);"` returns
-    // `a = 1000000`, `typeof = INTEGER`, no ambiguity with an alias).
-    // Digit-separator literal *support* is deferred grammar work; this
-    // phase only guarantees the lexer does not silently split it into `1`
-    // aliased to `_000_000`.
-    for (sql, blob) in [("SELECT 0x1F", "0x1F"), ("SELECT 1_000_000", "1_000_000")] {
+    let (sql, blob) = ("SELECT 0x1F", "0x1F");
+    let parse = parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "{sql:?} must produce a parse error, not a silent number+identifier split"
+    );
+
+    let error_tokens: Vec<_> = parse
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|t| t.into_token())
+        .filter(|t| t.kind() == crate::SyntaxKind::ERROR)
+        .collect();
+    assert!(
+        error_tokens.iter().any(|t| t.text() == blob),
+        "expected a single ERROR token spanning the whole blob {blob:?}, got: {:?}",
+        error_tokens
+    );
+
+    // Guard: the blob must never appear as a NUMBER token (i.e. it was
+    // never silently split into a shorter numeric prefix).
+    let numbers: Vec<String> = parse
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|t| t.into_token())
+        .filter(|t| t.kind() == NUMBER)
+        .map(|t| t.text().to_string())
+        .collect();
+    assert!(
+        !numbers.iter().any(|n| blob.starts_with(n.as_str())),
+        "{sql:?} must not split off a leading NUMBER token, got NUMBER tokens: {numbers:?}"
+    );
+}
+
+#[test]
+fn number_with_underscore_digit_separator_parses() {
+    // Oracle: DuckDB accepts underscore digit separators strictly between
+    // two digits in the integer part, fractional part, and exponent digits
+    // — verified empirically:
+    //   `duckdb -c "SELECT 1_000_000 x, typeof(1_000_000);"` -> 1000000, INTEGER
+    //   `duckdb -c "SELECT 1_000.000_1 x, typeof(1_000.000_1);"` -> 1000.0001, DECIMAL(8,4)
+    //   `duckdb -c "SELECT 1_000_000.5_00e1_0 x;"` -> 1.0000005e+16 (DOUBLE)
+    for sql in [
+        "SELECT 1_000_000 AS x",
+        "SELECT 1_000.000_1 AS x",
+        "SELECT 1_2_3 AS x",
+        "SELECT 1_000_000.5_00e1_0 AS x",
+    ] {
+        let parse = parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} must parse without errors, got: {:?}",
+            parse.errors
+        );
+
+        let numbers: Vec<String> = parse
+            .syntax()
+            .descendants_with_tokens()
+            .filter_map(|t| t.into_token())
+            .filter(|t| t.kind() == NUMBER)
+            .map(|t| t.text().to_string())
+            .collect();
+        assert_eq!(
+            numbers.len(),
+            1,
+            "{sql:?} must lex the literal as exactly one NUMBER token, got: {numbers:?}"
+        );
+    }
+}
+
+#[test]
+fn number_with_invalid_underscore_placement_errors() {
+    // Oracle: DuckDB rejects a doubled separator, a leading separator, and a
+    // trailing separator — verified empirically:
+    //   `duckdb -c "SELECT 1__0 x;"` -> Parser Error: syntax error at or near "x"
+    //   `duckdb -c "SELECT 1_ x;"` -> Parser Error: syntax error at or near "x"
+    //   `duckdb -c "SELECT 1_.5 x;"` -> Parser Error: syntax error at or near ".5"
+    //   `duckdb -c "SELECT 1e_5 x;"` -> Parser Error: syntax error at or near "x"
+    // smelt must never silently split these into a shorter NUMBER token
+    // plus an identifier — the whole blob stays a single ERROR token.
+    for (sql, blob) in [
+        ("SELECT 1__0", "1__0"),
+        ("SELECT 1_", "1_"),
+        ("SELECT 1000_", "1000_"),
+    ] {
         let parse = parse(sql);
         assert!(
             !parse.errors.is_empty(),
@@ -7078,8 +7158,6 @@ fn number_followed_by_ident_without_space_errors() {
             error_tokens
         );
 
-        // Guard: the blob must never appear as a NUMBER token (i.e. it was
-        // never silently split into a shorter numeric prefix).
         let numbers: Vec<String> = parse
             .syntax()
             .descendants_with_tokens()

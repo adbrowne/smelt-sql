@@ -291,7 +291,9 @@ nullable**, regardless of the input.
 
 ### Numeric literal forms
 
-smelt accepts plain integer and decimal literals (`1`, `1.5`), including scientific notation (`1e8`, `1.5e-3`). A numeric literal immediately followed by letters or an underscore with no separating space — `0x1F`, `1_000_000` — is not accepted as a single literal; it produces a parse error rather than being silently reinterpreted (e.g. as `0` implicitly aliased to `x1F`). Write a space before an intended alias (`1 x`) or drop the digit-separator/hex-prefix form.
+smelt accepts plain integer and decimal literals (`1`, `1.5`), including scientific notation (`1e8`, `1.5e-3`). Underscore digit separators are accepted anywhere a run of digits appears — the integer part, the fractional part, and the exponent digits — as long as each underscore sits strictly between two digits: `1_000_000`, `1_000.000_1`, and `1_000_000.5_00e1_0` all lex as a single numeric literal. A leading, trailing, or doubled underscore (`_1`, `1_`, `1__0`) is rejected as a parse error rather than being silently reinterpreted as a shorter literal plus an alias.
+
+A numeric literal immediately followed by letters with no separating space — `0x1F` — is not accepted as a single literal; it produces a parse error rather than being silently reinterpreted (e.g. as `0` implicitly aliased to `x1F`). Write a space before an intended alias (`1 x`) or drop the hex-prefix form.
 
 `E'...'` (escape string) and `B'...'` (bit-string-shaped) prefixed string literals lex as ordinary string literals.
 

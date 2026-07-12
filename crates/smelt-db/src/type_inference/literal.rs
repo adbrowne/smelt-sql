@@ -244,6 +244,21 @@ pub fn infer_literal_type(text: &str) -> Option<TypedColumn> {
 
 /// Infer the type of a numeric literal
 pub fn infer_numeric_literal_type(text: &str) -> Option<DataType> {
+    // Strip DuckDB-style underscore digit separators (`1_000_000`,
+    // `1_000.000_1`) before value-parsing — the lexer already validated
+    // separator placement (strictly between two digits, never leading,
+    // trailing, or doubled), so it's always safe to drop them here. The
+    // stripped text is also what feeds the precision/scale digit counts
+    // below, so `1_000.000_1` still yields DECIMAL(8,4) (8 total digits),
+    // matching DuckDB.
+    let owned;
+    let text = if text.contains('_') {
+        owned = text.replace('_', "");
+        owned.as_str()
+    } else {
+        text
+    };
+
     // Check for decimal point
     if text.contains('.') {
         // Could be DECIMAL or DOUBLE
