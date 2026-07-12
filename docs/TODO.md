@@ -151,6 +151,10 @@ column names into inferred schemas (find-by-name consumers, LSP completion, inpu
 keying all assume unique names today), so it needs its own pass. Current behavior is pinned
 by `on_join_star_current_behavior_left_side_only` in
 `crates/smelt-db/tests/integration/join_star_schema.rs` — update that test when fixing.
+Related limitation to fix in the same pass: `SharedWithPrior` (NATURAL) dedupes against ALL
+prior refs' names, but DuckDB's NATURAL binds only to the adjacent join operand — in
+`FROM a, b NATURAL JOIN c`, a column shared between a and c (but not b) is wrongly dropped
+where DuckDB would carry the duplicate.
 
 ## 2026-07-12 — TABLESAMPLE/PIVOT/UNPIVOT vs alias ordering (parser + printer)
 
