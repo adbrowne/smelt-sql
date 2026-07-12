@@ -37,6 +37,14 @@
 //!   into `Admitted`/`Refused`, plus the adversarial leaf pool and the
 //!   over-refusal ledger
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 2).
+//! - [`schedule_gen`] — schema-generic row/schedule generation over a
+//!   [`recipe::ModelRecipe`]'s own source shape, replacing
+//!   [`run_schedule`]'s fixed `events(d,id,val)` hard-coding
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 3).
+//! - [`s_tracker`] — the S-tracker: records `(window, source snapshot)` per
+//!   run and derives `S_k`, the append-only pool's S-restricted oracle
+//!   baseline (`docs/plans/20260712-generative-maintenance-conformance.md`
+//!   Phase 3).
 
 pub mod link_c_harness;
 pub mod model_shapes;
@@ -44,4 +52,6 @@ pub mod oracle;
 pub mod recipe;
 pub mod render;
 pub mod run_schedule;
+pub mod s_tracker;
+pub mod schedule_gen;
 pub mod verdict;

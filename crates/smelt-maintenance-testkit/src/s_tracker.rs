@@ -1,0 +1,249 @@
+//! The S-tracker (`docs/plans/20260712-generative-maintenance-conformance.md`
+//! Phase 3; design doc
+//! `docs/research/20260711-generative-maintenance-conformance.md` §6 "The
+//! equivalence oracle, generalized"): records `(window, per-source
+//! snapshot)` per run and derives `S_k` — "the rows visible-in-window at
+//! some processed run ≤ k" — the append-only pool's full-refresh oracle
+//! baseline. Lateness needs no special-casing (design §6): a row appended
+//! between two runs simply isn't in any run's recorded
+//! snapshot-restricted-to-that-run's-own-window until a run's snapshot
+//! actually contains it AND that run's own window covers it.
+
+#![allow(dead_code)]
+
+use std::collections::HashSet;
+
+use chrono::NaiveDate;
+use duckdb::Connection;
+
+use crate::recipe::{ModelRecipe, SourceRecipe};
+use crate::render;
+use crate::schedule_gen::GenRow;
+
+struct RunRecord {
+    start: NaiveDate,
+    end: NaiveDate,
+    snapshot: Vec<GenRow>,
+}
+
+/// Tracks per-run `(window, source snapshot)` pairs for one [`SourceRecipe`]
+/// and derives `S_k` (design §6).
+pub struct STracker {
+    source: SourceRecipe,
+    runs: Vec<RunRecord>,
+}
+
+impl STracker {
+    pub fn new(source: &SourceRecipe) -> Self {
+        Self {
+            source: source.clone(),
+            runs: Vec::new(),
+        }
+    }
+
+    /// Record one run: `snapshot` is the source's full contents AT THE TIME
+    /// this run executed (`schedule_gen::read_source_snapshot`, taken
+    /// immediately before `execute_project` is called for this window).
+    /// Returns the run's index — `s_at(index)` is `S_k` after this run.
+    pub fn record_run(&mut self, start: NaiveDate, end: NaiveDate, snapshot: Vec<GenRow>) -> usize {
+        self.runs.push(RunRecord {
+            start,
+            end,
+            snapshot,
+        });
+        self.runs.len() - 1
+    }
+
+    /// `S_k`: the deduplicated union, over every run `0..=k`, of that run's
+    /// snapshot restricted to that run's own `[start, end)` window (design
+    /// §6). A row present in a later run's snapshot but outside every run's
+    /// own window (i.e. appended but never covered by a re-run) never enters
+    /// this set — the horizon semantics fall out with no special-casing.
+    pub fn s_at(&self, k: usize) -> Vec<GenRow> {
+        let mut seen: HashSet<GenRow> = HashSet::new();
+        for run in self.runs.iter().take(k + 1) {
+            for row in &run.snapshot {
+                let t = row.event_time();
+                if t >= run.start && t < run.end {
+                    seen.insert(row.clone());
+                }
+            }
+        }
+        let mut rows: Vec<GenRow> = seen.into_iter().collect();
+        rows.sort_by_key(|a| (a.d, a.id));
+        rows
+    }
+
+    /// The most recently recorded run's index, or `None` before any run has
+    /// been recorded.
+    pub fn latest_index(&self) -> Option<usize> {
+        self.runs.len().checked_sub(1)
+    }
+
+    fn oracle_table_name(&self) -> String {
+        format!("oracle_{}", self.source.name)
+    }
+
+    /// Materialize `S_k` (`Self::s_at(k)`) into a fresh `TEMP TABLE
+    /// oracle_<source_name>` on `conn` — the S-restricted oracle's input
+    /// table (design §6: "materializes `S_k` into temp tables").
+    pub fn materialize_s(&self, conn: &Connection, k: usize) -> anyhow::Result<()> {
+        let table = self.oracle_table_name();
+        conn.execute_batch(&format!(
+            "DROP TABLE IF EXISTS {table}; \
+             CREATE TEMP TABLE {table} ({d} DATE, {id} INTEGER, {val} INTEGER);",
+            d = self.source.clock_column,
+            id = self.source.key_column,
+            val = self.source.payload_column,
+        ))?;
+        for row in self.s_at(k) {
+            conn.execute(
+                &format!(
+                    "INSERT INTO {table} VALUES (DATE '{}', {}, {})",
+                    row.d.format("%Y-%m-%d"),
+                    row.id,
+                    row.val,
+                ),
+                [],
+            )?;
+        }
+        Ok(())
+    }
+
+    /// The oracle body query for `recipe` evaluated over the materialized
+    /// `S_k` table rather than the physical source table — the same body
+    /// [`render::render_model_body`] produces (design §4 "renders once,
+    /// serves three"), with `smelt.sources.<x>` swapped for `oracle_<x>`
+    /// (this module's `TEMP TABLE`) instead of
+    /// [`render::render_oracle_sql`]'s `main.sources_<x>` (the full-input
+    /// oracle). Kept here rather than in `render.rs` (outside this phase's
+    /// edit scope, plan Critical files) but reuses `render_model_body` so
+    /// the body itself is still rendered exactly once.
+    pub fn s_restricted_oracle_sql(&self, recipe: &ModelRecipe) -> String {
+        render::render_model_body(recipe).replace(
+            &format!("smelt.sources.{}", self.source.name),
+            &self.oracle_table_name(),
+        )
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::recipe::KeyShape;
+
+    fn events_source() -> SourceRecipe {
+        SourceRecipe {
+            name: "events".to_string(),
+            clock_column: "d".to_string(),
+            key_column: "id".to_string(),
+            payload_column: "val".to_string(),
+            key_shape: KeyShape::Single,
+        }
+    }
+
+    fn date(y: i32, m: u32, d: u32) -> NaiveDate {
+        NaiveDate::from_ymd_opt(y, m, d).expect("valid date")
+    }
+
+    fn sorted(mut rows: Vec<GenRow>) -> Vec<GenRow> {
+        rows.sort_by_key(|a| (a.d, a.id));
+        rows
+    }
+
+    /// `s_matches_hand_computed_set_on_fixed_schedule` (plan Phase 3 TDD
+    /// list): for a hand-written 3-run schedule with one late append, `S_k`
+    /// per step equals the hand-computed row multiset.
+    #[test]
+    fn s_matches_hand_computed_set_on_fixed_schedule() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+        let w2 = (date(2024, 1, 2), date(2024, 1, 3));
+
+        let a = GenRow {
+            d: w1.0,
+            id: 1,
+            val: 10,
+        };
+        let b = GenRow {
+            d: w2.0,
+            id: 2,
+            val: 20,
+        };
+        // C is a late row landing back inside w1's range.
+        let c = GenRow {
+            d: w1.0,
+            id: 3,
+            val: 5,
+        };
+
+        // Run 1: window w1, snapshot = {A}.
+        let k0 = tracker.record_run(w1.0, w1.1, vec![a.clone()]);
+        assert_eq!(sorted(tracker.s_at(k0)), sorted(vec![a.clone()]));
+
+        // Run 2: window w2, snapshot = {A, B}.
+        let k1 = tracker.record_run(w2.0, w2.1, vec![a.clone(), b.clone()]);
+        assert_eq!(sorted(tracker.s_at(k1)), sorted(vec![a.clone(), b.clone()]));
+
+        // C is appended out of band here (no run recorded for the append
+        // itself — it is a bare source mutation).
+
+        // Run 3: RE-RUN w1, snapshot now = {A, B, C}.
+        let k2 = tracker.record_run(w1.0, w1.1, vec![a.clone(), b.clone(), c.clone()]);
+        assert_eq!(
+            sorted(tracker.s_at(k2)),
+            sorted(vec![a.clone(), b.clone(), c.clone()]),
+            "S after the w1 re-run must include the late row C"
+        );
+    }
+
+    /// `late_row_is_outside_s_until_its_window_reruns` (plan Phase 3 TDD
+    /// list): the spec's horizon semantics fall out of S-tracking with no
+    /// special-casing.
+    #[test]
+    fn late_row_is_outside_s_until_its_window_reruns() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+        let w2 = (date(2024, 1, 2), date(2024, 1, 3));
+        let a = GenRow {
+            d: w1.0,
+            id: 1,
+            val: 10,
+        };
+        let b = GenRow {
+            d: w2.0,
+            id: 2,
+            val: 20,
+        };
+        let c = GenRow {
+            d: w1.0,
+            id: 3,
+            val: 5,
+        };
+
+        tracker.record_run(w1.0, w1.1, vec![a.clone()]);
+        let k1 = tracker.record_run(w2.0, w2.1, vec![a.clone(), b.clone()]);
+
+        // C has been "appended" to the source (out of band) but no run has
+        // processed it yet — the most recent S must not contain it, even
+        // though C's own window (w1) already ran once.
+        assert!(
+            !tracker.s_at(k1).contains(&c),
+            "late row must be outside S until its window is re-run — no \
+             special-casing needed, it just fell out of no run's snapshot \
+             covering it yet"
+        );
+
+        // w1 re-runs, now seeing C.
+        let k2 = tracker.record_run(w1.0, w1.1, vec![a.clone(), b.clone(), c.clone()]);
+        assert!(
+            tracker.s_at(k2).contains(&c),
+            "late row must enter S once its window has re-run with a \
+             snapshot that includes it"
+        );
+    }
+}
