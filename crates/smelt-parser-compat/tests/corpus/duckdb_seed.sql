@@ -36,3 +36,6 @@ SELECT CAST(ts AS TIMESTAMPTZ) AT TIME ZONE 'UTC' AS x FROM t
 SELECT x FROM (VALUES (1, 2)) AS s(x, y)
 SELECT x FROM (SELECT a, c FROM t) AS s(x, y)
 SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())
+SELECT struct_pack(x := a, y := b) AS s FROM t
+SELECT struct_pack(x => a, y => b) AS s FROM t
+SELECT UNNEST([[1, 2, 3]], recursive := true) AS u

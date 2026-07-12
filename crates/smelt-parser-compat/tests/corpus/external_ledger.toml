@@ -175,10 +175,6 @@ note = "unclassified parser gap (list comprehension itself now parses; residual 
 category = "natural_join_chain"
 note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
 
-["366a6098c46dbf5d"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
 ["4d1c47594b381d8e"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
@@ -186,10 +182,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 ["bfd77a838c18b1ee"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
-
-["b12be8f116c89c25"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
 
 ["f4f84f035bf107c7"]
 category = "smelt_fails_unclassified"
@@ -207,25 +199,17 @@ note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
 
-["d84ebfb7140d34a4"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
-["ed9d5fdcb15fdac4"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
 ["29f60f6deca55932"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "string_keyed_brace_literal"
+note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
 
 ["bf60747d66d2cb39"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "string_keyed_brace_literal"
+note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
 
 ["a6137afa188d4bc7"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "string_keyed_brace_literal"
+note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
 
 ["315571c158974ea3"]
 category = "smelt_fails_unclassified"
@@ -455,17 +439,9 @@ note = "unclassified parser gap; first smelt parser error: Expected AS alias in 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected type name"
 
-["fd856e4f47ac0cc7"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
-["2820fea4f3ab5403"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
 ["34c41fe5c5680ccb"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found DOUBLE_COLON (a `NULL::TYPE` cast as a named-arg value)"
 
 ["42fc08aa5a971e67"]
 category = "smelt_fails_unclassified"
@@ -532,8 +508,8 @@ category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
 ["bff464cbbf158492"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "string_keyed_brace_literal"
+note = "DuckDB struct/dict brace literal `{'k': v, ...}` with a string-literal key (not a bare identifier) is not parsed; first smelt parser error: Expected AS alias in struct field item"
 
 ["c566463312d1e03f"]
 category = "smelt_fails_unclassified"
@@ -547,10 +523,6 @@ note = "unclassified parser gap; first smelt parser error: Expected table refere
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
-["8a6be84d3e138256"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
 ["4370f8971e388a7d"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found PLUS"
@@ -558,10 +530,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 ["da676b8ed997d2e7"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected table reference"
-
-["8eeed1c2f5c0ec60"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
 
 ["744042caf9e788fe"]
 category = "smelt_fails_unclassified"
@@ -614,10 +582,6 @@ note = "A trailing comma inside a parenthesized GROUPING SETS element, e.g. GROU
 ["d93932f2d774acbc"]
 category = "pivot_unpivot"
 note = "PIVOT/UNPIVOT clauses are not parsed (tracked gaps.rs::pivot_unpivot)"
-
-["4b1bfc630ecedbc5"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
 
 ["327d2fe1686ecd7c"]
 category = "smelt_fails_unclassified"
@@ -795,10 +759,6 @@ note = "unclassified parser gap; first smelt parser error: Expected expression, 
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
 
-["d3d41e1355313850"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
 ["f75f39efc83ae601"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
@@ -844,16 +804,12 @@ category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
 
 ["c8923c43debfab8b"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found FIRST_KW (FIRST used as an ordinary aggregate function name)"
 
 ["5e169df3949c71bb"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
-["b51c675b6c3c339b"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found DIVIDE (DuckDB `//` floor-division operator)"
 
 ["31cbbfb11333cb31"]
 category = "smelt_fails_unclassified"
@@ -1299,10 +1255,6 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: unexpected content after model body"
 
-["5d463740d1279cb2"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
 ["6827d4f00ad27d04"]
 category = "natural_join_chain"
 note = "Parenthesized/chained NATURAL JOIN sequences are not parsed in this form"
@@ -1598,14 +1550,6 @@ note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VA
 ["61000844d1e6291c"]
 category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
-
-["3c7323b703ff6dfd"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
-
-["daeba064d77e4897"]
-category = "named_arg_walrus_or_bare_eq"
-note = "Function call with a DuckDB `name := value` or bare `name = value` argument form (read_csv/read_parquet-style) is not parsed"
 
 ["c38be65d41d4fd27"]
 category = "smelt_fails_unclassified"

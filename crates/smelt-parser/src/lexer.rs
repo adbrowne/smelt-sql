@@ -200,6 +200,13 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 RBRACE
             }
+            // DuckDB "walrus" named-argument operator: `name := value`.
+            // Must be checked before the bare-COLON fallback below.
+            ':' if self.peek_char() == Some('=') => {
+                self.advance();
+                self.advance();
+                WALRUS
+            }
             ':' if self.peek_char() != Some(':') => {
                 self.advance();
                 COLON

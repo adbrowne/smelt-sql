@@ -449,6 +449,17 @@ pub enum SyntaxKind {
     GROUPING_SETS_CLAUSE,
     GROUPING_SET,
 
+    // DuckDB "walrus" named-argument operator: `name := value` inside an
+    // ordinary function-call argument list (e.g. `struct_pack(a := 1)`,
+    // `read_csv(path, header := 0)`). Semantically equivalent to the
+    // existing `=>` named-parameter form (`NAMED_PARAM`, see ARROW) —
+    // DuckDB itself treats `:=` and `=>` as interchangeable spellings for
+    // the same named-argument syntax (verified against a real DuckDB: both
+    // forms parse identically and DuckDB's own re-serialization prints
+    // `:=`). `parse_argument`/`is_named_parameter` accept either token when
+    // building a NAMED_PARAM node.
+    WALRUS, // := (named parameter, DuckDB spelling)
+
     // Special
     EOF, // End of file
 }

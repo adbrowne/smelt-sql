@@ -8838,3 +8838,128 @@ fn derived_table_values_alias_col_list_no_as_round_trips() {
         &["VALUES", "(1, 2)", "AS t(a, b)"],
     );
 }
+
+// --- DuckDB `:=` named-argument operator (external corpus ledger category
+// `named_arg_walrus_or_bare_eq`) ---
+//
+// DuckDB accepts `name := value` as a named-argument binding inside an
+// ordinary function-call argument list (`struct_pack(a := 1)`,
+// `read_csv(path, header := 0)`) — semantically the same construct smelt
+// already parsed for `=>` (see `parses_smelt_path_call_with_named_args`
+// above), just DuckDB's own spelling. Verified against a real DuckDB: both
+// `struct_pack(a := 1)` and `struct_pack(a => 1)` parse, and DuckDB's own
+// query-text re-serialization prints `:=` for both — the two spellings are
+// interchangeable at the grammar level.
+
+#[test]
+fn walrus_named_arg_in_ordinary_function_call() {
+    let input = "SELECT struct_pack(a := 1, b := 2)";
+    let (parse, _) = parse_select(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn walrus_named_arg_in_table_function_call() {
+    // read_csv-style: positional path argument followed by walrus-named
+    // options, mirroring DuckDB's own CSV/Parquet reader signatures.
+    let input = "SELECT * FROM read_csv('data.csv', header := 0, auto_detect := false)";
+    let (parse, _) = parse_select(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn walrus_named_arg_mixes_with_bare_eq_option() {
+    // DuckDB's own corpus mixes `:=` named args with bare `name = value`
+    // options in the same call (the bare form already parsed as an ordinary
+    // comparison expression before this change; this asserts the mix still
+    // parses cleanly once `:=` is supported).
+    let input = "SELECT sum(a) FROM read_csv('f.csv', COLUMNS=STRUCT_PACK(a := 'INTEGER'), auto_detect='true', delim = '|')";
+    let (parse, _) = parse_select(input);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
+fn walrus_named_arg_produces_named_param_node() {
+    let (_, select) = parse_select("SELECT struct_pack(a := 1)");
+    let named_params: Vec<_> = select
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == NAMED_PARAM)
+        .collect();
+    assert_eq!(
+        named_params.len(),
+        1,
+        "expected exactly one NAMED_PARAM node for `a := 1`"
+    );
+}
+
+#[test]
+fn walrus_operator_outside_call_still_errors() {
+    // DuckDB itself rejects `:=` as a general expression/assignment
+    // operator outside a function-call argument position (`Parser Error:
+    // syntax error at or near ":="`, verified against a real DuckDB). The
+    // named-argument grammar only applies inside `parse_argument`, so this
+    // must remain a parse error, not silently swallowed.
+    let result = parse("SELECT a := 1");
+    assert!(
+        !result.errors.is_empty(),
+        "`:=` outside a call argument list should still be a parse error"
+    );
+}
+
+#[test]
+fn bare_eq_in_call_still_parses_as_comparison() {
+    // Bare `name = value` inside a call argument list was never a DuckDB
+    // parser-level named-argument form (verified against a real DuckDB: it
+    // parses as an ordinary boolean equality expression referencing a
+    // column named `name`, and only certain table functions like read_csv
+    // special-case it at bind time). It must keep parsing as a normal
+    // comparison expression, not a NAMED_PARAM.
+    let (parse, select) = parse_select("SELECT foo(a = 1)");
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let named_params: Vec<_> = select
+        .syntax()
+        .descendants()
+        .filter(|n| n.kind() == NAMED_PARAM)
+        .collect();
+    assert!(
+        named_params.is_empty(),
+        "bare `a = 1` must not be parsed as a NAMED_PARAM"
+    );
+}
+
+#[test]
+fn walrus_named_arg_round_trips() {
+    let input = "SELECT struct_pack(a := 1, b := 2)";
+    let (_, select) = parse_select(input);
+    let printed = select.to_string();
+    assert!(
+        printed.contains("a := 1"),
+        "printed SQL should preserve `:=` spelling: got {:?}",
+        printed
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {:?} (from {:?}) failed to reparse: {:?}",
+        printed,
+        input,
+        reparsed.errors
+    );
+}

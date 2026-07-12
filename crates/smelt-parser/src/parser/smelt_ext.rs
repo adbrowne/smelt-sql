@@ -1708,14 +1708,16 @@ impl<'a> Parser<'a> {
             self.skip_trivia();
         }
 
-        // Check for named parameter: IDENT => expression
+        // Check for named parameter: IDENT => expression or IDENT := expression
+        // (`:=` is DuckDB's own spelling for the same named-argument syntax;
+        // DuckDB accepts both interchangeably in ordinary function calls.)
         // Use lookahead to check without consuming the identifier first
         if (self.at(IDENT) || self.current().is_keyword()) && self.is_named_parameter() {
             // It's a named parameter
             self.start_node(NAMED_PARAM);
             self.advance(); // consume IDENT or keyword
             self.skip_trivia();
-            self.advance(); // consume ARROW (=>)
+            self.advance(); // consume ARROW (=>) or WALRUS (:=)
             self.skip_trivia();
             self.parse_expression();
             self.finish_node();
@@ -1745,11 +1747,11 @@ impl<'a> Parser<'a> {
         }
     }
 
-    /// Check if current position starts a named parameter (IDENT => ...)
-    /// Uses lookahead without consuming tokens
+    /// Check if current position starts a named parameter (IDENT => ... or
+    /// IDENT := ...). Uses lookahead without consuming tokens.
     pub(super) fn is_named_parameter(&self) -> bool {
         // We know we're at IDENT or keyword, check what comes after
-        // Need to skip ahead past the current token and any whitespace to find ARROW
+        // Need to skip ahead past the current token and any whitespace to find ARROW/WALRUS
         let mut lookahead = 1; // Skip current token
 
         // Skip whitespace tokens
@@ -1761,10 +1763,10 @@ impl<'a> Parser<'a> {
             }
         }
 
-        // Check if next non-trivia token is ARROW
+        // Check if next non-trivia token is ARROW (=>) or WALRUS (:=)
         self.tokens
             .get(self.pos + lookahead)
-            .map(|t| t.kind == ARROW)
+            .map(|t| t.kind == ARROW || t.kind == WALRUS)
             .unwrap_or(false)
     }
 }
