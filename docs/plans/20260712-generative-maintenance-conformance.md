@@ -74,7 +74,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 4 — Mutable sources + settled-point oracle + sensitivity probe | done | 34440187 | 2026-07-12 |
 | 5 — Keyed grain + ledger probes + carve-outs | done | 0ebe6e02 | 2026-07-12 |
 | 6 — Schedule enrichment | done | 3ffa9ffd | 2026-07-12 |
-| 7 — Plan-claim probes | done | | 2026-07-13 |
+| 7 — Plan-claim probes | done | 7c0478cb | 2026-07-13 |
 | 8 — Simulated change feed | pending | | |
 | 9 — Definition-change steps | pending | | |
 | 10 — Generated DAGs | pending | | |
