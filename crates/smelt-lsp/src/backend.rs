@@ -259,6 +259,7 @@ impl Backend {
         let code = diag.code.map(|c| {
             let code_str = match c {
                 DbCode::ParseError => "parse-error",
+                DbCode::TrailingTopLevelContent => "trailing-top-level-content",
                 DbCode::InvalidModel => "invalid-model",
                 DbCode::UndefinedModelRef => "undefined-model-ref",
                 DbCode::UndefinedSource => "undefined-source",
@@ -441,6 +442,7 @@ impl Backend {
                 }
                 DbCode::StateModeWidening => "state-mode-widening",
                 DbCode::CteRefOutsideTest => "cte-ref-outside-test",
+                DbCode::CheckHasTestClause => "check-has-test-clause",
                 DbCode::UnknownTestInput => "unknown-test-input",
                 DbCode::UnknownTestCte => "unknown-test-cte",
                 // Pipe SQL (Data-World |> pipe query) diagnostic codes.

@@ -56,8 +56,8 @@ pub async fn explain(args: ExplainArgs, scope: Option<&str>) -> Result<()> {
         .collect();
     models.extend(emitted_model_files);
 
-    // Filter out test models — they shouldn't appear in explain output
-    models.retain(|m| !m.is_test());
+    // Filter out assertion files (tests and checks) — they shouldn't appear in explain output
+    models.retain(|m| !m.is_assertion());
 
     let python_files = discovery
         .discover_python_files()

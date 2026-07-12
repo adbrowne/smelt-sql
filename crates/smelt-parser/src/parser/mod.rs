@@ -157,7 +157,16 @@ impl<'a> Parser<'a> {
                 let display_text = if text.len() <= 10 {
                     text.to_string()
                 } else {
-                    format!("{}...", &text[..10])
+                    // Truncate at a char boundary at or before byte 10 —
+                    // `text` may contain multi-byte UTF-8 characters (an
+                    // ERROR token can now span a whole malformed
+                    // number+identifier blob), so a naive byte index can
+                    // land inside a multi-byte character and panic.
+                    let cut = (0..=10)
+                        .rev()
+                        .find(|&i| text.is_char_boundary(i))
+                        .unwrap_or(0);
+                    format!("{}...", &text[..cut])
                 };
                 let message = format!("Unexpected character: '{}'", display_text);
                 let start = self.offset as u32;

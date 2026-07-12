@@ -781,7 +781,14 @@ Spark backend implemented via PySpark/PyO3 bridge. All Backend trait methods are
 
 Concrete work deferred during plan implementation (`docs/plans/`) that is not otherwise tracked above. Listed so it is *visible* and can be triaged into the queue — inclusion here is identification, not commitment. Maintained as part of [What's Next #1](#1-silent-failures--code-health-hardening). Grouped by area; each item cites its source plan.
 
+**Parser / dialect conformance** (`20260711-parser-type-testing-hardening.md`)
+- Grammar support for the remaining registered DuckDB gaps, sized by the differential-gate ratchet (8 seed gaps) and the external-corpus ledger (~500 entries): dollar-quoted strings, list comprehensions, `MAP {…}` literals, `GLOB`, SQL-standard function forms (`trim(BOTH…)`, `substring(FROM FOR)`, `position(IN)`), `LIKE ANY`, and hex/underscore numeric literals *as accepted syntax* (they currently fail loud).
+- Spark-side differential parsing beyond the existing sqlparser-rs checks — needs the gated Spark server; the DuckDB harness shape applies as-is.
+- Nullability-oracle generator extension — mirror the type-side generator widening (temporal/decimal/tz/function coverage) against the value-based nullability oracle now that the type-side pattern has settled.
+
 **Type system / function registry**
+- Dialect-alias resolution (`NVL`, `GET_JSON_OBJECT`, `JSON_BUILD_OBJECT`, …) lives in `SqlFunction::from_name`, not `BuiltinRegistry` — moving it into the registry would let recognition go fully registry-side; recorded in `architecture.md` §Constraints #14 (`20260711-parser-type-testing-hardening.md`).
+- 30 functions remain on the legacy hand-written inference match (named exception list under the shrink-only `registry-migration` ratchet) because their return types are argument-dependent (widening, first-concrete-of-N, tz-mirroring); shrinking further needs a richer signature language (`20260711-parser-type-testing-hardening.md`).
 - `to_seconds` returns `Interval` but inference doesn't recognise it — forces `epoch_us()` microsecond-arithmetic workarounds in models (`20260517-web-analytics-4-sessionize.md`).
 - `md5` absent from the function registry — emits a Warning that fails the diagnostics gate; models fall back to `CONCAT` surrogate keys (`20260517-web-analytics-4-sessionize.md`).
 - `arg_min` deliberately unregistered (only `arg_max` shipped), pending a real call site (`20260517-web-analytics-5-forward-only.md`).
@@ -821,6 +828,8 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - **Retain-parsed-AST cleanup sweep** — Phase 0 retains the parsed `Expr` on `analyze_select` items; other analyses still re-scan raw text and should retain what's parsed instead: `analysis/mod.rs` clause string-scanning, `source_bounds.rs` textual `INTERVAL`/`RANGE BETWEEN` recognition, `rules/incremental.rs` `Frontmatter::strip`+re-scan, and the `temporal.rs` re-parse sites.
 
 **smelt-logical / smelt-planner extraction**
+- Window-function select items leak into `GROUP BY ALL` grouping keys — `classify_select_items` routes items to non-key kinds only via `is_aggregate()`, never `is_window()`, so a bare `ROW_NUMBER() OVER (…)` projection becomes a grouping key where DuckDB would exclude it; add an `is_window()` guard so every key consumer excludes window items (`20260711-parser-type-testing-hardening.md`).
+- Re-tighten the smelt-logical `expect` hardening baseline (bumped 1→3 for two production `.expect("live implies Some")` in `maintenance/choice.rs` merged as MP13 WIP) — classify as infallible or convert to `Result`, then `hardening-budget.sh --update` (`20260711-parser-type-testing-hardening.md`).
 - **Consolidate the duplicated analysis modules.** `smelt-planner/src/` still carries a parallel copy of nearly every `smelt-logical` module — `analysis/{mod,source_bounds,temporal}.rs`, `rules/{incremental,cumulative,rule_diagnostics,cube_split}.rs`, `logical.rs`, `graph.rs`, `types.rs`, `lowering/as_struct.rs` — from the recent (incomplete) extraction into `smelt-logical`. Finish the extraction so each analysis lives once (in `smelt-logical`, consumed by both `smelt-db` and `smelt-planner`), leaving `smelt-planner` only its planner-only pieces (`logical_plan_rules.rs`, `plan_printer.rs`, `python_bridge.rs`). Prerequisite context for where any future type-aware analysis moves.
 
 **Datagen / incremental**

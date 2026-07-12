@@ -4320,6 +4320,7 @@ dependencies = [
 name = "smelt-parser-compat"
 version = "0.3.2"
 dependencies = [
+ "duckdb",
  "pg_query",
  "proptest",
  "rand 0.8.6",

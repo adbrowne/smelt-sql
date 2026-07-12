@@ -26,6 +26,29 @@ fn assert_pg_fails_smelt_succeeds(sql: &str, gap_id: &str) {
     );
 }
 
+/// Test that smelt fails but pg_query succeeds (documented smelt gap)
+fn assert_smelt_fails_pg_succeeds(sql: &str, gap_id: &str) {
+    let smelt = SmeltParseResult::parse(sql);
+    let pg = PgParseResult::parse(sql);
+
+    assert!(
+        !smelt.success,
+        "{}: Expected smelt to fail (documented gap — update gaps.rs if now supported), but it succeeded\nSQL: {}",
+        gap_id, sql
+    );
+    assert!(
+        pg.success,
+        "{}: Expected pg_query to succeed, but it failed: {:?}\nSQL: {}",
+        gap_id, pg.error, sql
+    );
+    assert!(
+        gaps::is_known_gap(sql, "smelt_fails"),
+        "{}: SQL should match a registered smelt_fails gap pattern\nSQL: {}",
+        gap_id,
+        sql
+    );
+}
+
 /// Test that both parsers succeed
 fn assert_both_succeed(sql: &str, description: &str) {
     let smelt = SmeltParseResult::parse(sql);
@@ -350,16 +373,25 @@ fn test_smelt_supports_intersect_except() {
 }
 
 #[test]
-fn test_smelt_supports_grouping_sets() {
-    // GROUPING SETS, CUBE, ROLLUP are supported by smelt
-    assert_both_succeed(
-        "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())",
-        "GROUPING SETS",
-    );
+fn test_smelt_supports_cube_rollup() {
+    // CUBE and ROLLUP are supported by smelt (they parse as function-call
+    // shaped GROUP BY expressions). GROUPING SETS is a documented gap — see
+    // test_gap_grouping_sets. The old claim that GROUPING SETS was supported
+    // was an artifact of the parser silently swallowing the unparsed tail;
+    // fail-loud trailing-content parsing (July 2026) exposed it.
     assert_both_succeed("SELECT a, b, SUM(c) FROM t GROUP BY CUBE (a, b)", "CUBE");
     assert_both_succeed(
         "SELECT a, b, SUM(c) FROM t GROUP BY ROLLUP (a, b)",
         "ROLLUP",
+    );
+}
+
+#[test]
+fn test_gap_grouping_sets() {
+    // GROUPING SETS is not parsed by smelt — documented smelt_fails gap.
+    assert_smelt_fails_pg_succeeds(
+        "SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())",
+        "grouping_sets",
     );
 }
 
@@ -404,11 +436,13 @@ fn test_smelt_supports_type_qualified_literal() {
 }
 
 #[test]
-fn test_smelt_supports_at_time_zone() {
-    // AT TIME ZONE is supported by smelt
-    assert_both_succeed(
+fn test_gap_at_time_zone() {
+    // AT TIME ZONE is not parsed by smelt — documented smelt_fails gap.
+    // Previously appeared "supported" because the parser silently swallowed
+    // the unparsed tail; fail-loud trailing-content parsing exposed it.
+    assert_smelt_fails_pg_succeeds(
         "SELECT created_at AT TIME ZONE 'UTC' FROM t",
-        "AT TIME ZONE",
+        "at_time_zone",
     );
 }
 
@@ -419,9 +453,12 @@ fn test_smelt_supports_fetch_clause() {
 }
 
 #[test]
-fn test_smelt_supports_for_update() {
-    // FOR UPDATE is supported by smelt
-    assert_both_succeed("SELECT * FROM t FOR UPDATE", "FOR UPDATE");
+fn test_gap_for_update() {
+    // FOR UPDATE is not parsed by smelt — documented smelt_fails gap.
+    // Previously appeared "supported" because the parser silently swallowed
+    // the unparsed tail; fail-loud trailing-content parsing exposed it.
+    // Row-locking has no meaning in smelt models, so no fix is planned.
+    assert_smelt_fails_pg_succeeds("SELECT * FROM t FOR UPDATE", "for_update");
 }
 
 // ===== Spark-specific gap helpers =====

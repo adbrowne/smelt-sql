@@ -1,0 +1,14 @@
+name: build_checks_skip
+version: 1
+
+paths:
+  - models
+  - checks
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: table

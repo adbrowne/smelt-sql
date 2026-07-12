@@ -35,9 +35,9 @@ pub fn build_graph_response(graph: &DependencyGraph, config: &Config) -> GraphRe
         let metadata = model.metadata.as_deref();
         let tags = config.get_tags(name, metadata);
 
-        let is_test = model.is_test();
+        let is_assertion = model.is_assertion();
 
-        let node_type = if is_test {
+        let node_type = if is_assertion {
             NodeType::Test
         } else {
             NodeType::Model

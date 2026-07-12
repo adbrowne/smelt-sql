@@ -1,0 +1,17 @@
+name: test_inlining_non_standalone
+version: 1
+
+paths:
+  - models
+  - tests
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+
+vars:
+  region: us-east

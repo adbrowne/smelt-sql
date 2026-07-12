@@ -139,6 +139,8 @@ fn dry_run_request(start: &str, end: &str) -> ExecuteRequest {
         allow_column_removal: false,
         allow_full_refresh: false,
         ephemeral_seed_ctes: vec![],
+        run_checks: false,
+        checks: vec![],
     }
 }
 

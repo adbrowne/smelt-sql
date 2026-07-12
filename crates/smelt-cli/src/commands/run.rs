@@ -210,6 +210,8 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         allow_column_removal: args.allow_column_removal,
         allow_full_refresh: args.allow_full_refresh,
         ephemeral_seed_ctes,
+        run_checks: false,
+        checks: vec![],
     };
 
     let run_id = generate_run_id();
@@ -396,6 +398,8 @@ async fn run_since_upstream(
             allow_column_removal: args.allow_column_removal,
             allow_full_refresh: args.allow_full_refresh,
             ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
+            run_checks: false,
+            checks: Vec::new(),
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

@@ -141,6 +141,46 @@ pub fn project_paths(db: &dyn salsa::Database, project: ProjectInput) -> Arc<Vec
     Arc::new(paths)
 }
 
+/// Return the project's `maintenance:` baseline (`scan_bounds`) from
+/// `smelt.yml`, or `None` when absent or the config fails to parse.
+///
+/// Reads from `ProjectInput::smelt_yml_text` so the result is Salsa-tracked
+/// and reused across every per-file `maintenance_plan` call. Without this,
+/// `maintenance_plan` re-parsed `smelt.yml`'s full YAML text once per model
+/// file, turning per-file diagnostics into an O(N^2) operation over the
+/// workspace — the same anti-pattern `project_paths` above was introduced to
+/// fix for `resolve_ref_path`.
+#[salsa::tracked]
+pub fn project_maintenance_config(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> Arc<Option<smelt_core::config::ProjectMaintenanceConfig>> {
+    let text = project.smelt_yml_text(db);
+    let maintenance = smelt_core::Config::parse_with_warnings(text)
+        .ok()
+        .and_then(|(c, _warnings)| c.maintenance);
+    Arc::new(maintenance)
+}
+
+/// Return the project's `state.mode` posture from `smelt.yml`, defaulting to
+/// [`smelt_core::config::StateMode::default`] when absent or the config
+/// fails to parse.
+///
+/// Reads from `ProjectInput::smelt_yml_text` so the result is Salsa-tracked
+/// — the same rationale as [`project_maintenance_config`] above, for the
+/// per-file `state.mode` widening check in `check_file_diagnostics`.
+#[salsa::tracked]
+pub fn project_state_mode(
+    db: &dyn salsa::Database,
+    project: ProjectInput,
+) -> smelt_core::config::StateMode {
+    let text = project.smelt_yml_text(db);
+    smelt_core::Config::parse_with_warnings(text)
+        .ok()
+        .map(|(c, _warnings)| c.state.mode)
+        .unwrap_or_default()
+}
+
 /// Discover seed CSV files for a project root and infer their column types.
 ///
 /// Reads from disk (not a tracked Salsa input) — seeds that change on disk
@@ -428,12 +468,12 @@ pub fn project_emitted_name_collisions(
             .into_iter()
             .collect();
 
-    // Filter to persisted-only: no functions, no ephemeral, no test.
+    // Filter to persisted-only: no functions, no ephemeral, no test, no check.
     let persisted: Vec<&smelt_core::discovery::ModelFile> = sql_files
         .iter()
         .filter(|f| !function_paths.contains(&f.path))
         .filter(|f| {
-            if f.is_test() {
+            if f.is_assertion() {
                 return false;
             }
             let mat = f.metadata.as_ref().and_then(|m| m.materialization.as_ref());

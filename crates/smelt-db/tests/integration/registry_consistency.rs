@@ -1,0 +1,157 @@
+//! Function-registry single-ownership gates (Phase 8).
+//!
+//! These tests enforce the "Function-registry single ownership" invariant
+//! (docs/specs/architecture.md): a built-in SQL function's recognition,
+//! classification (aggregate/window/scalar), and — for migrated functions —
+//! typing all derive from `BuiltinRegistry`. A name that lives in one list
+//! but not the others must fail here rather than degrade silently.
+
+use smelt_db::type_inference::{infer_select_column_types, registry_migrated_names, TypeContext};
+use smelt_parser::ast::File;
+use smelt_types::signatures::{BuiltinRegistry, ExprKind};
+use smelt_types::{DataType, FunctionCategory, SqlFunction, TypedColumn};
+
+/// Registry entries that model SQL *operators* / dedicated-syntax forms
+/// (predicates, `CAST`, interval add/sub) rather than callable functions.
+/// They live in the registry for hover/completion/lint purposes but are not
+/// part of the `SqlFunction` (callable-function) surface, so they are exempt
+/// from the enum⇔registry function-consistency check.
+const OPERATOR_REGISTRY_ENTRIES: &[&str] = &[
+    "BETWEEN",
+    "CAST",
+    "DATE_ADD",
+    "DATE_SUB",
+    "EXISTS",
+    "ILIKE",
+    "IN",
+    "IS_NULL",
+    "IS_NOT_NULL",
+    "LIKE",
+];
+
+/// Expected `ExprKind` classification for a `SqlFunction`, derived from its
+/// category. This is the oracle for registry-vs-enum classification parity.
+fn expected_kind(f: SqlFunction) -> ExprKind {
+    match f.category() {
+        FunctionCategory::Aggregate => ExprKind::Agg,
+        FunctionCategory::WindowRanking
+        | FunctionCategory::WindowDistribution
+        | FunctionCategory::WindowNavigation => ExprKind::Window,
+        _ => ExprKind::Scalar,
+    }
+}
+
+#[test]
+fn every_recognized_function_is_registry_backed() {
+    let mut missing_from_registry: Vec<String> = Vec::new();
+    let mut kind_mismatch: Vec<String> = Vec::new();
+
+    // Direction 1: every canonical name `SqlFunction` recognises resolves in
+    // the registry, and its classification agrees.
+    for f in SqlFunction::all() {
+        match BuiltinRegistry::resolve(f.name()) {
+            None => missing_from_registry.push(f.name().to_string()),
+            Some(sig) => {
+                let want = expected_kind(f);
+                if sig.kind != want {
+                    kind_mismatch.push(format!(
+                        "{}: enum says {:?}, registry says {:?}",
+                        f.name(),
+                        want,
+                        sig.kind
+                    ));
+                }
+            }
+        }
+    }
+
+    // Direction 2: every non-operator registry entry is a recognised function.
+    let mut missing_from_enum: Vec<String> = Vec::new();
+    for name in BuiltinRegistry::names() {
+        if OPERATOR_REGISTRY_ENTRIES.contains(&name) {
+            continue;
+        }
+        if SqlFunction::from_name(name).is_none() {
+            missing_from_enum.push(name.to_string());
+        }
+    }
+
+    missing_from_registry.sort();
+    missing_from_enum.sort();
+    kind_mismatch.sort();
+
+    assert!(
+        missing_from_registry.is_empty()
+            && missing_from_enum.is_empty()
+            && kind_mismatch.is_empty(),
+        "function-registry drift detected:\n\
+         - recognised by SqlFunction but MISSING from BuiltinRegistry ({}): {:?}\n\
+         - in BuiltinRegistry but NOT a recognised function ({}): {:?}\n\
+         - classification (kind) mismatches ({}): {:?}",
+        missing_from_registry.len(),
+        missing_from_registry,
+        missing_from_enum.len(),
+        missing_from_enum,
+        kind_mismatch.len(),
+        kind_mismatch,
+    );
+}
+
+#[test]
+fn legacy_match_ratchet() {
+    // The number of recognised functions whose primary typing path is still
+    // the hand-written `match` in `function_call.rs` (i.e. NOT registry-first
+    // via `try_registry_inference`). Shrink-only: the checked-in baseline is
+    // an upper bound that migration drives down. Raising it requires editing
+    // `.claude/registry-migration-baseline.txt` (reviewer-visible).
+    let migrated: std::collections::HashSet<&str> =
+        registry_migrated_names().iter().copied().collect();
+    let legacy_typed: Vec<&str> = SqlFunction::all()
+        .map(|f| f.name())
+        .filter(|n| !migrated.contains(n))
+        .collect();
+    let count = legacy_typed.len();
+
+    let baseline: usize = include_str!("../../../../.claude/registry-migration-baseline.txt")
+        .lines()
+        .find(|l| !l.trim().is_empty() && !l.trim_start().starts_with('#'))
+        .and_then(|l| l.trim().parse().ok())
+        .expect("registry-migration-baseline.txt must contain a count");
+
+    assert!(
+        count <= baseline,
+        "legacy-match ratchet regressed: {count} functions still typed by the \
+         hand-written match (baseline {baseline}). Migrate more into \
+         BuiltinRegistry or, with reviewer sign-off, raise the baseline.\n\
+         Still-legacy functions: {legacy_typed:?}"
+    );
+    if count < baseline {
+        eprintln!(
+            "note: registry-migration ratchet can shrink to {count} \
+             (baseline {baseline}); update .claude/registry-migration-baseline.txt"
+        );
+    }
+}
+
+#[test]
+fn unrecognized_function_still_warns() {
+    // The consolidation must not make an unknown name panic or pass silently:
+    // it still infers `Unknown(Dynamic)` (which the lib-level checker turns
+    // into an `UnrecognizedFunction` warning through the known-unknowns path).
+    let mut ctx = TypeContext::new();
+    ctx.add_model_column(
+        "upstream",
+        "x",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: true,
+        },
+    );
+    let sql = "SELECT DEFINITELY_NOT_A_FUNCTION(x) AS r FROM upstream";
+    let parse = smelt_parser::parse(sql);
+    let file = File::cast(parse.syntax()).expect("parse File");
+    let select = file.select_stmt().expect("parse SELECT");
+    let types = infer_select_column_types(&select, &ctx);
+    assert_eq!(types.len(), 1);
+    assert_eq!(types[0].data_type, DataType::unknown_dynamic());
+}

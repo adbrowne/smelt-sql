@@ -1500,8 +1500,8 @@ pub fn smelt_fn_call_diagnostics_for_file(
                                 }
                             }
                         }
-                        RefKind::Function | RefKind::Test => {
-                            // A function or test in `TableExpr` arg
+                        RefKind::Function | RefKind::Test | RefKind::Check => {
+                            // A function, test, or check in `TableExpr` arg
                             // position is a kind mismatch; surface the
                             // failure to downstream UnknownIdentifier
                             // diagnostics — no schema is provided.

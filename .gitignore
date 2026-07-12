@@ -11,6 +11,8 @@ target/
 !.claude/scripts/
 !.claude/active-plan
 !.claude/hardening-baseline.txt
+!.claude/parser-gaps-baseline.txt
+!.claude/registry-migration-baseline.txt
 !.claude/unknown-census.toml
 !.claude/property-loop-prompt.txt
 /.vscode/

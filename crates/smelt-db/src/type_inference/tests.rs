@@ -406,6 +406,51 @@ fn test_extended_function_types() {
     assert_eq!(string_agg.data_type, DataType::Text);
 }
 
+/// Regression: MEDIAN over integer-family inputs interpolates to Double in
+/// DuckDB and Spark (`median(INTEGER) -> DOUBLE`), so smelt must widen too;
+/// previously it returned the argument type (Integer). Decimal/Double inputs
+/// keep their own type. Surfaced by the extended type-oracle generators.
+#[test]
+fn median_integer_infers_double() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column("t", "x", TypedColumn::nullable(DataType::Integer));
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT CAST(1 AS INTEGER) AS x) SELECT MEDIAN(x) FROM t",
+        &ctx,
+    );
+    assert_eq!(types[0].data_type, DataType::Double);
+
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::BigInt));
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT CAST(1 AS BIGINT) AS b) SELECT MEDIAN(b) FROM t",
+        &ctx,
+    );
+    assert_eq!(types[0].data_type, DataType::Double);
+
+    // Decimal input preserves its precision/scale.
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column(
+        "t",
+        "d",
+        TypedColumn::nullable(DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT CAST(1 AS DECIMAL(10,2)) AS d) SELECT MEDIAN(d) FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+    );
+}
+
 /// Parse a SQL SELECT and return the inferred types of all columns.
 fn infer_sql(sql: &str) -> Vec<TypedColumn> {
     infer_sql_with_ctx(sql, &TypeContext::new())
@@ -6352,5 +6397,26 @@ fn inner_join_preserves_nullability() {
         !right_id.1.nullable,
         "INNER JOIN: right-side column must stay non-nullable, got nullable: {}",
         right_id.1.nullable
+    );
+}
+
+#[test]
+fn try_cast_infers_nullable_target() {
+    // TRY_CAST yields the target type but is ALWAYS nullable — it returns NULL
+    // on a failed conversion — even when the input expression is non-nullable.
+    let types = infer_sql("SELECT TRY_CAST('x' AS INTEGER)");
+    assert_eq!(types[0].data_type, DataType::Integer);
+    assert!(
+        types[0].nullable,
+        "TRY_CAST result must be nullable even over a non-nullable input"
+    );
+
+    // Plain CAST over the same non-nullable literal stays non-nullable — this
+    // guards that the TRY flag, not the input, drives the difference.
+    let plain = infer_sql("SELECT CAST('x' AS INTEGER)");
+    assert_eq!(plain[0].data_type, DataType::Integer);
+    assert!(
+        !plain[0].nullable,
+        "plain CAST over a non-nullable input should stay non-nullable"
     );
 }

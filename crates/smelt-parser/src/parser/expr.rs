@@ -243,7 +243,7 @@ impl<'a> super::Parser<'a> {
                 }
                 self.finish_node();
             } else if self.at(IS_KW) {
-                // IS [NOT] NULL
+                // IS [NOT] NULL  |  IS [NOT] DISTINCT FROM expr
                 self.start_node_at(checkpoint, BINARY_EXPR);
                 self.advance(); // consume IS
                 self.skip_trivia();
@@ -253,6 +253,13 @@ impl<'a> super::Parser<'a> {
                 }
                 if self.at(NULL_KW) {
                     self.advance(); // consume NULL
+                } else if self.at(DISTINCT_KW) {
+                    // Null-safe comparison: `a IS [NOT] DISTINCT FROM b`.
+                    self.advance(); // consume DISTINCT
+                    self.skip_trivia();
+                    self.expect(FROM_KW);
+                    self.skip_trivia();
+                    self.parse_collate_expr(); // right operand
                 }
                 self.finish_node();
             } else if self.at(BETWEEN_KW) {
@@ -489,7 +496,7 @@ impl<'a> super::Parser<'a> {
             }
         } else if self.at(CASE_KW) {
             self.parse_case_expr();
-        } else if self.at(CAST_KW) {
+        } else if self.at(CAST_KW) || self.at(TRY_CAST_KW) {
             self.parse_cast_expr();
         } else if self.at(EXTRACT_KW) {
             self.parse_extract_expr();
@@ -1130,9 +1137,16 @@ impl<'a> super::Parser<'a> {
         self.finish_node();
     }
 
+    /// Parse `CAST(expr AS type)` or the DuckDB error-tolerant `TRY_CAST(expr AS
+    /// type)`. Both share the `CAST_EXPR` node kind; a `TRY_CAST` is distinguished
+    /// by the leading `TRY_CAST_KW` token (see `CastExpr::is_try_cast`).
     pub(super) fn parse_cast_expr(&mut self) {
         self.start_node(CAST_EXPR);
-        self.expect(CAST_KW);
+        if self.at(TRY_CAST_KW) {
+            self.advance(); // TRY_CAST
+        } else {
+            self.expect(CAST_KW);
+        }
 
         self.skip_trivia();
         if !self.expect(LPAREN) {
@@ -1292,8 +1306,30 @@ impl<'a> super::Parser<'a> {
             }
         }
 
+        // Null-treatment modifier: `IGNORE NULLS` / `RESPECT NULLS` inside the
+        // argument list (e.g. `last_value(a IGNORE NULLS)`). This is a generic
+        // call clause, not keyed to any specific function name.
+        self.parse_null_treatment_if_present();
+
         self.expect(RPAREN);
         self.finish_node();
+    }
+
+    /// Parse an optional `IGNORE NULLS` / `RESPECT NULLS` null-treatment clause.
+    ///
+    /// `IGNORE` / `RESPECT` are contextual keywords (lexed as `IDENT`), so this
+    /// never reserves either word as an identifier; `NULLS` is the existing
+    /// `NULLS_KW` keyword. Emitted as a `NULL_TREATMENT_CLAUSE` child so it is a
+    /// structured, generic call modifier (like `FILTER` / `WITHIN GROUP`).
+    pub(super) fn parse_null_treatment_if_present(&mut self) {
+        self.skip_trivia();
+        if self.at_contextual_keyword("IGNORE") || self.at_contextual_keyword("RESPECT") {
+            self.start_node(NULL_TREATMENT_CLAUSE);
+            self.advance(); // IGNORE / RESPECT
+            self.skip_trivia();
+            self.expect(NULLS_KW);
+            self.finish_node();
+        }
     }
 
     /// Parse the argument list of a `reduce(collection, reducer)` call.

@@ -284,38 +284,146 @@ fn registry_lub(a: &DataType, b: &DataType) -> DataType {
     promote_types(&lhs, &rhs).data_type
 }
 
-/// Names we've migrated from the hand-written match to registry-driven
-/// inference. Phase 9 deliberately keeps this allowlist small — each entry is
-/// one that the registry's `unify_call` shape reproduces the legacy
-/// `infer_function_type` behaviour for. Entries NOT on this list continue
-/// through the legacy match unchanged (see coverage-spike findings in the
-/// Phase 9 implementer report).
+/// Names whose typing is driven registry-first (via [`try_registry_inference`])
+/// rather than by the hand-written `match` in [`infer_function_type`]. Every
+/// entry's `BuiltinRegistry` signature reproduces the legacy arm's return type,
+/// and [`registry_result_nullable`] reproduces its nullability. Names NOT on
+/// this list stay on the legacy path; that residual set is the
+/// `legacy_match_ratchet` count and shrinks as functions migrate.
+///
+/// Excluded on purpose (the **named exception list** — their return type or
+/// nullability depends on argument types/values in a way a static `Signature`
+/// cannot express, so they remain hand-written):
+///   * `SUM` — precision/width widening (`SUM(DECIMAL(p,s)) → DECIMAL(38,s)`).
+///   * `CEIL`/`CEILING`/`FLOOR` — `DECIMAL(p,s) → DECIMAL(p,0)`, else Double.
+///   * `ROUND`/`TRUNC`/`TRUNCATE`/`MOD` — first-argument identity else Double/Integer.
+///   * `MEDIAN` — integer inputs widen to Double, others keep their type.
+///   * `ARRAY_AGG` — wraps the argument type in `Array<…>`.
+///   * `DATE_TRUNC` — return tz-axis mirrors the second argument.
+///   * `COALESCE`/`IFNULL`/`NULLIF`/`GREATEST`/`LEAST` — first-concrete-of-N
+///     with argument-derived nullability.
+///   * `MODE`/`ANY_VALUE`/`ARG_MAX`/`FIRST`/`LAST` and the window-navigation
+///     family (`LAG`/`LEAD`/`FIRST_VALUE`/`LAST_VALUE`/`NTH_VALUE`) — first-
+///     argument identity with optional trailing arguments (variable arity).
+///   * `BIT_AND`/`BIT_OR`/`BIT_XOR` — first-argument identity else BigInt.
+///   * `EXTRACT` — routed as `ExtractExpr` syntax, not a plain call.
 ///
 /// The list is ordered by family for easy review.
 const REGISTRY_MIGRATED: &[&str] = &[
-    // Aggregates — simple identity-return or fixed-return.
-    "AVG",   // registry: <T: Numeric>(T) → Double — matches legacy (Double, nullable=true)
-    "MIN",   // registry: <T: Ordered>(T) → T — matches legacy first-arg + nullable=true
-    "MAX",   // same as MIN
-    "COUNT", // registry: (Any) → BigInt — matches legacy (BigInt, nullable=false)
-    // Arithmetic scalars.
-    "ABS", // registry: <T: Numeric>(T) → T — matches legacy (preserves arg type + nullable)
-    // Text scalars (registry demands Text arg; legacy is permissive. On a
-    // constraint violation we fall back to legacy).
+    // ── Aggregates ──────────────────────────────────────────────────────────
+    "AVG",   // <T: Numeric>(T) → Double
+    "MIN",   // <T: Ordered>(T) → T (first-arg identity, nullable=true)
+    "MAX",   // <T: Ordered>(T) → T
+    "COUNT", // (Any) → BigInt (nullable=false)
+    "STDDEV",
+    "STDDEV_POP",
+    "STDDEV_SAMP",
+    "VARIANCE",
+    "VAR_POP",
+    "VAR_SAMP",
+    "CORR",
+    "COVAR_POP",
+    "COVAR_SAMP",
+    "REGR_SLOPE",
+    "PERCENTILE_CONT",
+    "PERCENTILE_DISC",
+    "BOOL_AND",
+    "BOOL_OR",
+    "EVERY",
+    "STRING_AGG",
+    "LISTAGG",
+    "GROUP_CONCAT",
+    "APPROX_COUNT_DISTINCT", // (Any) → BigInt (nullable=false)
+    // ── Window (fixed return) ───────────────────────────────────────────────
+    "ROW_NUMBER",
+    "RANK",
+    "DENSE_RANK",
+    "NTILE",
+    "CUME_DIST",
+    "PERCENT_RANK",
+    // ── Arithmetic / numeric scalars (fixed return) ─────────────────────────
+    "ABS", // <T: Numeric>(T) → T (preserves arg nullability)
+    "SIGN",
+    "POWER",
+    "POW",
+    "SQRT",
+    "EXP",
+    "LN",
+    "LOG",
+    "LOG10",
+    "LOG2",
+    "SIN",
+    "COS",
+    "TAN",
+    "ASIN",
+    "ACOS",
+    "ATAN",
+    "ATAN2",
+    "SINH",
+    "COSH",
+    "TANH",
+    "PI",     // () → Double (nullable=false)
+    "RANDOM", // () → Double (nullable=false)
+    // ── Text scalars ────────────────────────────────────────────────────────
     "LOWER",
     "UPPER",
     "TRIM",
+    "LTRIM",
+    "RTRIM",
     "CONCAT",
-    // Date/time basics (fixed returns).
-    // NOTE: "DATE_TRUNC" is intentionally NOT in this list — its return type
-    // mirrors the tz-axis of its second argument (dynamic behaviour a static
-    // registry signature cannot express). The corrected inference arm lives in
-    // the legacy match below.
+    "REPLACE",
+    "TRANSLATE",
+    "REVERSE",
+    "REPEAT",
+    "LPAD",
+    "RPAD",
+    "INITCAP",
+    "QUOTE_IDENT",
+    "QUOTE_LITERAL",
+    "LEFT",
+    "RIGHT",
+    "SUBSTRING",
+    "SUBSTR",
+    "SPLIT_PART",
+    "TO_CHAR",
+    "LENGTH",           // → BigInt
+    "CHAR_LENGTH",      // → BigInt
+    "CHARACTER_LENGTH", // → BigInt
+    "POSITION",         // → BigInt
+    "STRPOS",           // → BigInt
+    // ── Date / time (fixed return) ──────────────────────────────────────────
     "DATE",
     "CURRENT_DATE",
-    "NOW",               // registry: () → Timestamp{with_timezone:true} (§16)
-    "CURRENT_TIMESTAMP", // same as NOW
+    "NOW",               // () → Timestamp{tz} (nullable=false)
+    "CURRENT_TIMESTAMP", // () → Timestamp{tz} (nullable=false)
+    "MAKE_DATE",
+    "MAKE_TIME",
+    "MAKE_TIMESTAMP",
+    "MAKE_TIMESTAMPTZ",
+    "AGE",
+    "YEAR",
+    "MONTH",
+    "DAY",
+    "DAYOFWEEK",
+    "QUARTER",
+    "DATE_PART",
+    // ── JSON (fixed return) ─────────────────────────────────────────────────
+    "JSON_OBJECT",
+    "JSON_ARRAY",
+    "TO_JSON",
+    "JSON_EXTRACT",
+    "JSON_EXTRACT_TEXT",
+    "JSON_ARRAY_LENGTH",
+    "JSON_OBJECT_KEYS",
+    "JSON_CONTAINS",
 ];
+
+/// The residual set of recognised functions still typed by the hand-written
+/// match, exposed for the `legacy_match_ratchet` gate. A name is registry-first
+/// iff it appears in [`REGISTRY_MIGRATED`].
+pub fn registry_migrated_names() -> &'static [&'static str] {
+    REGISTRY_MIGRATED
+}
 
 /// Policy for deriving [`TypedColumn::nullable`] on a registry-resolved call.
 ///
@@ -325,8 +433,21 @@ const REGISTRY_MIGRATED: &[&str] = &[
 /// here.
 fn registry_result_nullable(name: &str, arg_nullable: &[bool]) -> bool {
     match name {
-        // Non-nullable aggregates / niladic clocks.
-        "COUNT" | "NOW" | "CURRENT_DATE" | "CURRENT_TIMESTAMP" => false,
+        // Non-nullable aggregates / niladic clocks / ranking windows /
+        // deterministic niladic scalars — mirrors the legacy per-function rule.
+        "COUNT"
+        | "NOW"
+        | "CURRENT_DATE"
+        | "CURRENT_TIMESTAMP"
+        | "APPROX_COUNT_DISTINCT"
+        | "ROW_NUMBER"
+        | "RANK"
+        | "DENSE_RANK"
+        | "NTILE"
+        | "CUME_DIST"
+        | "PERCENT_RANK"
+        | "PI"
+        | "RANDOM" => false,
         // ABS preserves its arg's nullability — legacy returns the arg
         // TypedColumn verbatim when a single-arg inference succeeds.
         "ABS" => arg_nullable.first().copied().unwrap_or(true),
@@ -848,7 +969,19 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
-        SqlFunction::Median => first_arg_type_or(func, ctx, DataType::Double, true),
+        SqlFunction::Median => {
+            // MEDIAN interpolates: integer-family inputs widen to Double (DuckDB
+            // and Spark both return DOUBLE for integer medians); Decimal/Double/
+            // temporal inputs keep their own type.
+            // Regression: median_integer_infers_double.
+            first_arg_type_or(func, ctx, DataType::Double, true).map(|tc| match tc.data_type {
+                DataType::SmallInt | DataType::Integer | DataType::BigInt => TypedColumn {
+                    data_type: DataType::Double,
+                    nullable: tc.nullable,
+                },
+                _ => tc,
+            })
+        }
 
         SqlFunction::Mode => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 

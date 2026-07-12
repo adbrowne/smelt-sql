@@ -123,8 +123,8 @@ pub fn select_executable_models(
                 // Unknown entries pass through; downstream catches them.
                 return true;
             };
-            // Drop tests: they are never executed by `run`.
-            if model.is_test() {
+            // Drop assertions (tests and checks): they are never executed by `run`.
+            if model.is_assertion() {
                 return false;
             }
             // Drop generator files: their bodies are meta-language, not SQL.
