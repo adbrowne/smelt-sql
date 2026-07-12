@@ -127,6 +127,14 @@ Decision needed (pick one direction):
   contradicts the just-committed P7c forbid-bare-loaders design decision
   (`3c58cd29`), so only with Andrew's sign-off.
 
+## Pre-existing issues surfaced by the clock-vs-root sessions plan (2026-07-12)
+
+Found during `docs/plans/20260711-clock-vs-root-anchored-sessions.md`; both predate that work (confirmed reproducible on unmodified trees) and were left untouched as out of scope.
+
+- [ ] **`extract_interval_days_from_combined` mis-parses sub-day intervals as days.** `crates/smelt-logical/src/analysis/temporal.rs` has no MINUTE/SECOND branch, so `INTERVAL '5 minutes'` parses as 5 days. Impact is limited to the advisory `analyze_batch_safety` JSON label (e.g. `context=5d`); actual runtime chunk sizing uses `batch_safety_from_bounds` and is unaffected. Fix: add sub-day unit branches (round up to 1 day, or carry finer granularity) plus a regression test pinning `INTERVAL '5 minutes'`.
+
+- [ ] **Rare parallel-execution flake in DuckDB-backed integration suites.** Observed twice during the plan run: `smelt-datagen/tests/example_web_analytics.rs::test_identity_backward_fill_materializes` and one `crates/smelt-cli/tests/e2e/per_partition_equivalence.rs` test failed under a full parallel `cargo test`, then passed in isolation and on re-run of the full suite — same failure family both times (parallel load), reproduced on an unmodified tree. Worth capturing the exact failure output next time it fires and checking for a shared-resource collision (e.g. temp DB paths, memory pressure) before it erodes trust in the gates.
+
 ## Refresh-as-maintenance-plan: ratification queue (2026-07-06) — CLOSED 2026-07-07
 
 All items done: decisions 1–11 ratified 2026-07-06 (`09-spec-readiness.md` §1); F4 (`25c04a70`)
