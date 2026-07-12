@@ -55,7 +55,14 @@
 //!   write-window containment, technique interchangeability), plus the
 //!   skip-accounting `ReachabilityReport` fold
 //!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 7).
+//! - [`feed`] — the `SimulatedChangeFeed` step family for `change_feed`-
+//!   declared sources: base-table mutation + staged `(op, key, payload,
+//!   seq)` feed-table bookkeeping, gated retraction/tombstone steps, and the
+//!   `change_feed` YAML rendering the recompute-only admission gate stages
+//!   against (`docs/plans/20260712-generative-maintenance-conformance.md`
+//!   Phase 8).
 
+pub mod feed;
 pub mod link_c_harness;
 pub mod model_shapes;
 pub mod oracle;

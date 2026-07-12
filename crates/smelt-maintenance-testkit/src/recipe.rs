@@ -197,7 +197,13 @@ pub struct SourceRecipe {
 }
 
 impl SourceRecipe {
-    fn events(key_shape: KeyShape) -> Self {
+    /// The append-only, clocked `events(d, id, val)` source shape (`d`
+    /// clocked/partition, `id` the row key, `val` the INTEGER payload).
+    /// `pub(crate)` rather than private: [`crate::feed`]'s Phase 8
+    /// `change_feed`-driven keyed recipe reuses this exact shape, declaring
+    /// the resulting source as `change_feed` at staging time rather than
+    /// through [`SourcePosture`] (see that module's doc comment for why).
+    pub(crate) fn events(key_shape: KeyShape) -> Self {
         Self {
             name: "events".to_string(),
             clock_column: "d".to_string(),
