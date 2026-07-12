@@ -192,8 +192,8 @@ category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
 
 ["4563e9312dc33851"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body (SELECT * EXCLUDE (col) list is not parsed; unrelated to set-operation nesting)"
 
 ["72346eb01e27547a"]
 category = "smelt_fails_unclassified"
@@ -256,8 +256,8 @@ category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected expression, found RANGE_KW"
 
 ["3156d5843df8e3df"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "file_glob_or_path_literal_from"
+note = "A glob/path string literal used directly as a FROM target is not parsed (right-hand side of an EXCEPT; unrelated to set-operation nesting itself)"
 
 ["31e689f81aaddaf6"]
 category = "file_glob_or_path_literal_from"
@@ -424,8 +424,8 @@ category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
 
 ["c32e459dcc171212"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; corpus artifact: un-substituted DuckDB test-suite template placeholder `${f}` is not valid SQL; first smelt parser error: Unexpected character: '$' (unrelated to set-operation nesting)"
 
 ["3d2f3a348900dcb0"]
 category = "smelt_fails_unclassified"
@@ -627,17 +627,13 @@ note = "DuckDB UNION [ALL] BY NAME is not parsed"
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected AS alias in struct field item"
 
-["a9d3badfc45dff85"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
-
 ["c9c3dbc3b91c8643"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference (`range(...)` as a FROM table function is not parsed — RANGE is reserved for window-frame RANGE BETWEEN and isn't accepted as a function name in FROM position; unrelated to set-operation nesting)"
 
 ["cb4f1ada7439d9aa"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected table reference (`range(...)` as a FROM table function is not parsed — RANGE is reserved for window-frame RANGE BETWEEN and isn't accepted as a function name in FROM position; unrelated to set-operation nesting)"
 
 ["dca844a46bc203da"]
 category = "smelt_fails_unclassified"
@@ -660,20 +656,12 @@ category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected RPAREN, found COMMA"
 
 ["8ffa23b311216bca"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: unexpected content after model body (comma-separated FROM items — implicit CROSS JOIN via `FROM a, b` — are not parsed; the UNION appears only inside an already-parenthesized, aliased derived table and is not the cause)"
 
 ["a2a0218136085c71"]
 category = "smelt_fails_unclassified"
 note = "unclassified parser gap; first smelt parser error: Expected SELECT after EXISTS ("
-
-["f79a2c821451faef"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found WITH_KW"
-
-["f4df58a72ab9997a"]
-category = "smelt_fails_unclassified"
-note = "unclassified parser gap; first smelt parser error: Expected expression, found WITH_KW"
 
 ["c1307297692b3fcc"]
 category = "smelt_fails_unclassified"
@@ -872,12 +860,12 @@ category = "power_operator_or_cast_target_literal"
 note = "A numeric literal/cast/operator form (power operator on a signed literal, float8 'literal', UHUGEINT/HUGEINT cast) is not parsed"
 
 ["8d25f22ec749e9ca"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name (DuckDB's UNION(field type, ...) type constructor is not parsed as a type — the UNION keyword is a type-constructor name here, not a set operator; unrelated to set-operation nesting)"
 
 ["10473e2a67b8dceb"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected type name (DuckDB's UNION(field type, ...) type constructor is not parsed as a type — the UNION keyword is a type-constructor name here, not a set operator; unrelated to set-operation nesting)"
 
 ["d5ffbcb21a05ca9d"]
 category = "smelt_fails_unclassified"
@@ -1693,7 +1681,7 @@ note = "unclassified parser gap; first smelt parser error: unexpected content af
 
 ["3419183ec6d2f76e"]
 category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+note = "A parenthesized query used as a scalar-subquery expression whose *own* first (unparenthesized) operand is itself parenthesized — `((SELECT …) UNION SELECT …)` — is not parsed; the parenthesized right-hand operand of an explicit UNION/EXCEPT/INTERSECT (`A UNION (B)`) and nested `(((SELECT …)))` forms now parse"
 
 ["96df5cd72067098a"]
 category = "lambda_or_lateral_syntax"
@@ -1783,13 +1771,9 @@ note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) 
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
-["87fac7f5b45ef952"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
-
 ["191708174fb6c5c1"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
+category = "smelt_fails_unclassified"
+note = "unclassified parser gap; first smelt parser error: Expected expression, found FROM_KW (a SELECT with no select-list, `SELECT FROM …`, is not parsed; unrelated to set-operation nesting)"
 
 ["bd5f317418980fde"]
 category = "information_schema_roundtrip"
@@ -1811,9 +1795,6 @@ note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/floa
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
 
-["f9722cb8182767ea"]
-category = "set_operation_nesting"
-note = "Set-operation (UNION/EXCEPT/INTERSECT) nesting or ORDER BY placement not yet parsed"
 
 ["0513478606d4f13d"]
 category = "xml_functions"

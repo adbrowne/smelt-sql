@@ -141,9 +141,13 @@ impl<'a> super::Parser<'a> {
                 self.advance();
             }
             self.skip_trivia();
-            // Parse next SELECT
-            if self.at(SELECT_KW) || self.at(WITH_KW) {
-                self.parse_select_stmt();
+            // Parse next operand: a plain SELECT/WITH statement, or a
+            // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
+            // arbitrarily nested. The parenthesized form recurses through
+            // `parse_query_expr`, so it carries its own set-op tail and
+            // ORDER BY/LIMIT inside the parens.
+            if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(LPAREN) {
+                self.parse_query_expr();
             } else {
                 self.error("Expected SELECT after set operation".to_string());
             }
@@ -151,6 +155,61 @@ impl<'a> super::Parser<'a> {
 
         self.depth -= 1;
         self.finish_node();
+    }
+
+    /// Parses a full query expression: either a plain `SELECT`/`WITH`
+    /// statement (`parse_select_stmt`, which already handles its own
+    /// UNION/INTERSECT/EXCEPT tail and ORDER BY/LIMIT), or a parenthesized
+    /// query (`parse_parenthesized_query`). Used wherever a complete query
+    /// is expected as a unit: set-operation operands, and (via
+    /// `parse_parenthesized_query`) nested parenthesized queries at any
+    /// depth.
+    pub(super) fn parse_query_expr(&mut self) {
+        self.skip_trivia();
+        if self.at(LPAREN) {
+            self.parse_parenthesized_query();
+        } else {
+            self.parse_select_stmt();
+        }
+    }
+
+    /// Parses `( <query> )`, wrapping the whole thing (including the
+    /// parens) in a `SUBQUERY` node. The inner query is parsed via
+    /// `parse_query_expr`, so `((( SELECT … )))`-style redundant nesting
+    /// and a parenthesized query with its own trailing ORDER BY/LIMIT or
+    /// set-op tail both work.
+    pub(super) fn parse_parenthesized_query(&mut self) {
+        self.start_node(SUBQUERY);
+        self.advance(); // consume LPAREN
+        self.skip_trivia();
+        self.parse_query_expr();
+        self.skip_trivia();
+        self.expect(RPAREN);
+        self.finish_node();
+    }
+
+    /// Lookahead-only: true if, starting at the current position, the
+    /// token stream is zero or more `LPAREN`s (skipping trivia) followed
+    /// directly by `SELECT_KW` or `WITH_KW`.
+    ///
+    /// Distinguishes a (possibly redundantly parenthesized) query —
+    /// `(SELECT …)`, `((SELECT …))`, … — from a plain grouped expression
+    /// that merely happens to start with nested parens, e.g. `((1))` or
+    /// `((a + b))`. Callers that already know the current token opens a
+    /// query context (e.g. the operand slot right after UNION/EXCEPT/
+    /// INTERSECT, where nothing but a query can legally appear) don't need
+    /// this guard; it exists for positions — a general expression primary,
+    /// a FROM-clause table reference — where a bare `(` is ambiguous
+    /// between "grouped expression" and "parenthesized query".
+    pub(super) fn at_parenthesized_query_start(&self) -> bool {
+        let mut n = 0usize;
+        loop {
+            match self.peek_nth_non_trivia(n) {
+                Some(LPAREN) => n += 1,
+                Some(SELECT_KW) | Some(WITH_KW) => return true,
+                _ => return false,
+            }
+        }
     }
 
     pub(super) fn parse_select_list(&mut self) {
@@ -339,10 +398,15 @@ impl<'a> super::Parser<'a> {
             self.advance(); // consume LPAREN
             self.skip_trivia();
 
-            // Check if it's a subquery (starts with SELECT or WITH) or VALUES
-            if self.at(SELECT_KW) || self.at(WITH_KW) {
+            // Check if it's a subquery (starts with SELECT or WITH, or is
+            // itself a nested parenthesized query, e.g. a derived table
+            // whose body is `(SELECT …) UNION SELECT …`) or VALUES
+            if self.at(SELECT_KW)
+                || self.at(WITH_KW)
+                || (self.at(LPAREN) && self.at_parenthesized_query_start())
+            {
                 self.start_node_at(checkpoint, SUBQUERY);
-                self.parse_select_stmt();
+                self.parse_query_expr();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node(); // Close SUBQUERY

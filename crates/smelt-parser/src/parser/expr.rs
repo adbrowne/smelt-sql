@@ -532,10 +532,19 @@ impl<'a> super::Parser<'a> {
             self.advance(); // consume LPAREN
             self.skip_trivia();
 
-            // Check if it's a subquery (starts with SELECT)
-            if self.at(SELECT_KW) {
+            // Check if it's a subquery (starts with SELECT, or WITH for a
+            // CTE-scoped subquery, or is itself a nested parenthesized
+            // query — e.g. `((SELECT 2) UNION SELECT 2)`, whose set-op
+            // left operand is parenthesized).
+            if self.at(SELECT_KW) || self.at(WITH_KW) {
                 self.start_node_at(checkpoint, SUBQUERY);
                 self.parse_select_stmt();
+                self.skip_trivia();
+                self.expect(RPAREN);
+                self.finish_node();
+            } else if self.at(LPAREN) && self.at_parenthesized_query_start() {
+                self.start_node_at(checkpoint, SUBQUERY);
+                self.parse_query_expr();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();

@@ -939,6 +939,91 @@ fn test_union_all() {
 }
 
 #[test]
+fn test_union_parenthesized_right_operand() {
+    // `A UNION (B)` — the right-hand operand of a set operation may be
+    // parenthesized. `union_select()` must unwrap the SUBQUERY wrapper to
+    // reach the inner SelectStmt so downstream schema unification still
+    // sees it.
+    let input = "SELECT id FROM users UNION (SELECT id FROM customers)";
+    let (_, select) = parse_select(input);
+
+    assert!(select.has_union(), "should have UNION");
+    assert!(
+        select.union_select().is_some(),
+        "should unwrap the parenthesized right operand"
+    );
+    assert!(select.union_select().unwrap().select_list().is_some());
+}
+
+#[test]
+fn test_union_deeply_nested_parenthesized_operand() {
+    // Redundant nesting `(((...)))` and a set-op tail inside the parens
+    // (EXCEPT + ORDER BY) both round-trip through the same
+    // parse_query_expr/parse_parenthesized_query recursion.
+    let input =
+        "SELECT q1 FROM t UNION ALL (((SELECT q2 FROM t EXCEPT SELECT q1 FROM t ORDER BY 1)))";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let select = file.select_stmt().unwrap();
+    assert!(select.has_union(), "should have UNION");
+    assert!(select.is_union_all(), "should be UNION ALL");
+    let right = select
+        .union_select()
+        .expect("should unwrap triple-nested parens to reach the inner SelectStmt");
+    assert!(
+        right.has_set_operation(),
+        "the parenthesized right operand's own EXCEPT tail should still be reachable"
+    );
+}
+
+#[test]
+fn test_union_parenthesized_operand_in_from_subquery() {
+    // Parenthesized set-op nesting inside a FROM-clause derived table:
+    // `FROM (A UNION (B UNION C)) alias`.
+    let input = "SELECT * FROM (SELECT 1 UNION (SELECT 1 UNION SELECT 1)) t";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_union_chain_still_parses_without_parens() {
+    // Regression guard: a plain (unparenthesized) UNION ALL chain with a
+    // trailing LIMIT must still parse exactly as before.
+    let input = "SELECT 1 UNION ALL SELECT 2 UNION ALL SELECT 3 LIMIT 5";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_subquery_in_from_still_parses() {
+    // Regression guard: a plain (non-set-op) derived-table subquery in FROM
+    // must still parse; the FROM-clause LPAREN branch now dispatches
+    // through parse_query_expr instead of parse_select_stmt directly.
+    let input = "SELECT * FROM (SELECT id FROM users) u";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_scalar_subquery_still_parses() {
+    // Regression guard: a plain scalar subquery expression must still
+    // parse; the expr.rs LPAREN branch now also accepts WITH_KW and a
+    // nested LPAREN alongside the original SELECT_KW check.
+    let input = "SELECT (SELECT COUNT(*) FROM orders) AS n";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
+fn test_scalar_subquery_with_internal_union_still_parses() {
+    let input = "SELECT (SELECT 2 UNION SELECT 2)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
 fn test_smelt_ref_with_cte() {
     // Phase 4: smelt.ref() is removed; updated to use smelt.<path> form.
     let input = r#"

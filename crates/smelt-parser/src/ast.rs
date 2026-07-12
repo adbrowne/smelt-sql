@@ -1226,7 +1226,9 @@ impl SelectStmt {
         false
     }
 
-    /// Get the SELECT statement after UNION (if any)
+    /// Get the SELECT statement after UNION (if any). The operand may be a
+    /// bare `SELECT_STMT` or a parenthesized `SUBQUERY` wrapping one
+    /// (`A UNION (B)`); both unwrap to the inner `SelectStmt`.
     pub fn union_select(&self) -> Option<SelectStmt> {
         let mut found_union = false;
 
@@ -1239,6 +1241,13 @@ impl SelectStmt {
                 if let Some(n) = child.as_node() {
                     if n.kind() == SELECT_STMT {
                         return SelectStmt::cast(n.clone());
+                    }
+                    if n.kind() == SUBQUERY {
+                        if let Some(select) =
+                            Subquery::cast(n.clone()).and_then(|sq| sq.select_stmt())
+                        {
+                            return Some(select);
+                        }
                     }
                 }
             }
@@ -1254,7 +1263,10 @@ impl SelectStmt {
             .any(|t| matches!(t.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW))
     }
 
-    /// Get the SELECT statement after any set operation (UNION, INTERSECT, or EXCEPT)
+    /// Get the SELECT statement after any set operation (UNION, INTERSECT,
+    /// or EXCEPT). The operand may be a bare `SELECT_STMT` or a
+    /// parenthesized `SUBQUERY` wrapping one (`A EXCEPT (B)`); both unwrap
+    /// to the inner `SelectStmt`.
     pub fn set_operation_select(&self) -> Option<SelectStmt> {
         let mut found_set_op = false;
 
@@ -1267,6 +1279,13 @@ impl SelectStmt {
                 if let Some(n) = child.as_node() {
                     if n.kind() == SELECT_STMT {
                         return SelectStmt::cast(n.clone());
+                    }
+                    if n.kind() == SUBQUERY {
+                        if let Some(select) =
+                            Subquery::cast(n.clone()).and_then(|sq| sq.select_stmt())
+                        {
+                            return Some(select);
+                        }
                     }
                 }
             }
@@ -3137,8 +3156,21 @@ impl Subquery {
     }
 
     /// Get the SELECT statement (returns `None` for VALUES subqueries).
+    ///
+    /// Unwraps arbitrarily deep redundant parenthesization —
+    /// `(((SELECT …)))` — by descending through nested `SUBQUERY` children
+    /// until a direct `SELECT_STMT` child is found.
     pub fn select_stmt(&self) -> Option<SelectStmt> {
-        self.0.children().find_map(SelectStmt::cast)
+        let mut node = self.0.clone();
+        loop {
+            if let Some(select) = node.children().find_map(SelectStmt::cast) {
+                return Some(select);
+            }
+            match node.children().find(|n| n.kind() == SUBQUERY) {
+                Some(inner) => node = inner,
+                None => return None,
+            }
+        }
     }
 
     /// Get the VALUES clause if this is a `(VALUES …)` subquery.

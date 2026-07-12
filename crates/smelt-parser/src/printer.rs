@@ -154,8 +154,10 @@ impl Display for SelectStmt {
             if set_op.all {
                 write!(f, " ALL")?;
             }
-            if let Some(select) = set_op.select {
-                write!(f, " {}", select)?;
+            match set_op.operand {
+                SetOperand::Select(select) => write!(f, " {}", select)?,
+                SetOperand::Paren(subquery) => write!(f, " {}", subquery)?,
+                SetOperand::None => {}
             }
         }
 
@@ -663,7 +665,16 @@ fn extract_group_by_expressions(node: &SyntaxNode) -> String {
 struct SetOperation {
     keyword: &'static str,
     all: bool,
-    select: Option<SelectStmt>,
+    operand: SetOperand,
+}
+
+/// The right-hand operand of a set operation: a bare `SELECT_STMT`
+/// (`A UNION B`), or a parenthesized `SUBQUERY` (`A UNION (B)`) — printed
+/// via `Subquery`'s own Display so the parens round-trip.
+enum SetOperand {
+    None,
+    Select(SelectStmt),
+    Paren(Subquery),
 }
 
 /// Detect and extract set operation (UNION/INTERSECT/EXCEPT) from a SELECT_STMT node
@@ -706,9 +717,10 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
         _ => unreachable!(),
     };
 
-    // Find the SELECT statement after the set operation
+    // Find the operand after the set operation: either a bare SELECT_STMT
+    // or a parenthesized SUBQUERY.
     let mut found_op = false;
-    let mut select = None;
+    let mut operand = SetOperand::None;
     for child in node.children_with_tokens() {
         if let Some(token) = child.as_token() {
             if token.kind() == op_kind {
@@ -717,7 +729,15 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
         } else if found_op {
             if let Some(n) = child.as_node() {
                 if n.kind() == SELECT_STMT {
-                    select = SelectStmt::cast(n.clone());
+                    if let Some(select) = SelectStmt::cast(n.clone()) {
+                        operand = SetOperand::Select(select);
+                    }
+                    break;
+                }
+                if n.kind() == SUBQUERY {
+                    if let Some(subquery) = Subquery::cast(n.clone()) {
+                        operand = SetOperand::Paren(subquery);
+                    }
                     break;
                 }
             }
@@ -727,7 +747,7 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
     Some(SetOperation {
         keyword,
         all: has_all,
-        select,
+        operand,
     })
 }
 
