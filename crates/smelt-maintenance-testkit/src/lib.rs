@@ -27,8 +27,15 @@
 //!   directions).
 //! - [`run_schedule`] — the run-schedule generator + driver, including
 //!   between-run source mutation (append/update/delete).
+//! - [`recipe`] — `ModelRecipe`, the typed proptest value generating models
+//!   as data over the partition-grain append-only construct pool
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 1).
+//! - [`render`] — renders a `ModelRecipe` into model/source/oracle SQL and a
+//!   staged project.
 
 pub mod link_c_harness;
 pub mod model_shapes;
 pub mod oracle;
+pub mod recipe;
+pub mod render;
 pub mod run_schedule;

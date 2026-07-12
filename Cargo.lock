@@ -4304,6 +4304,7 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-runtime",
+ "tempfile",
  "tokio",
  "tokio-util",
 ]
