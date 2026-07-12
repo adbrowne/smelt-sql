@@ -75,7 +75,7 @@ You are executing this plan from the start of a new session. Your job is to driv
 | 5 — Keyed grain + ledger probes + carve-outs | done | 0ebe6e02 | 2026-07-12 |
 | 6 — Schedule enrichment | done | 3ffa9ffd | 2026-07-12 |
 | 7 — Plan-claim probes | done | 7c0478cb | 2026-07-13 |
-| 8 — Simulated change feed | done | | 2026-07-13 |
+| 8 — Simulated change feed | done | 7d3f3195 | 2026-07-13 |
 | 9 — Definition-change steps | pending | | |
 | 10 — Generated DAGs | pending | | |
 | 11 — Graduation & consolidation | pending | | |
