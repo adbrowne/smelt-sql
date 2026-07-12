@@ -489,14 +489,14 @@ maintenance statements for the target model:
 
 ## Where to look
 
-- The models: [`silver/events_parsed.sql`](models/silver/events_parsed.sql),
-  [`silver/sessions.sql`](models/silver/sessions.sql) +
-  [`functions/sessionize.sql`](functions/sessionize.sql) (clock-anchored),
-  [`silver/sessions_chained.sql`](models/silver/sessions_chained.sql)
+- The models: [`silver/events_parsed.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/events_parsed.sql),
+  [`silver/sessions.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/sessions.sql) +
+  [`functions/sessionize.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/functions/sessionize.sql) (clock-anchored),
+  [`silver/sessions_chained.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/sessions_chained.sql)
   (root-anchored, self-referential),
-  [`silver/events_enriched.sql`](models/silver/events_enriched.sql).
+  [`silver/events_enriched.sql`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/events_enriched.sql).
 - The datagen fixture producing the redelivered/late-arriving feed:
-  [`datagen.yaml`](datagen.yaml).
+  [`datagen.yaml`](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/datagen.yaml).
 - The design doc behind the two-table split:
   [`docs/research/20260711-clock-vs-root-anchored-sessions.md`](https://github.com/adbrowne/smelt-sql/tree/main/docs/research/20260711-clock-vs-root-anchored-sessions.md).
 - `docs/specs/maintenance_plan.md` — the plan/statement machinery this page
