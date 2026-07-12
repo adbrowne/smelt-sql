@@ -16,3 +16,4 @@
 
 mod gate;
 mod harness_self_check;
+mod probes;

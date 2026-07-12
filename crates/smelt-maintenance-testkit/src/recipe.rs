@@ -36,6 +36,23 @@ pub fn arb_payload_value() -> impl Strategy<Value = i64> {
     -PAYLOAD_BOUND..=PAYLOAD_BOUND
 }
 
+/// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
+/// Phase 4; design §6 "mixed models"). Phase 1-3's pool is exclusively
+/// [`SourcePosture::AppendOnly`] (the fixed `events(d, id, val)` shape);
+/// Phase 4's [`MutableEnrichedRecipe`] adds an unclocked
+/// [`SourcePosture::MutableSnapshot`] dimension into the pool. Mirrors
+/// `smelt_core::sources::MutationProfile`'s two testkit-relevant variants
+/// (the `ChangeFeed` variant is out of this crate's generated pool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePosture {
+    /// Rows are only ever appended; an existing row never changes.
+    AppendOnly,
+    /// The table is a mutable snapshot: rows may be updated in place with no
+    /// change history — the wire name `mutation_profile: mutable_snapshot`
+    /// (`sources.md`).
+    MutableSnapshot,
+}
+
 /// The shape of a clocked source's declared `batched.unique_key`
 /// (`reachability_sample_inhabits_every_pool_construct` requires both shapes
 /// be reachable). Only [`BodyConstruct::PassThrough`] and
@@ -173,6 +190,10 @@ pub struct SourceRecipe {
     pub key_column: String,
     pub payload_column: String,
     pub key_shape: KeyShape,
+    /// Declared mutation posture (Phase 4). Every Phase 1-3 source is
+    /// [`SourcePosture::AppendOnly`]; only [`SourceRecipe::mutable_dimension`]
+    /// produces [`SourcePosture::MutableSnapshot`].
+    pub posture: SourcePosture,
 }
 
 impl SourceRecipe {
@@ -183,6 +204,30 @@ impl SourceRecipe {
             key_column: "id".to_string(),
             payload_column: "val".to_string(),
             key_shape,
+            posture: SourcePosture::AppendOnly,
+        }
+    }
+
+    /// An unclocked `mutable_snapshot` dimension source, keyed on `id` and
+    /// carrying one mutable INTEGER attribute column `attr` (the
+    /// `daily_events_enriched.sql`/`raw.users.user_name` role, narrowed to
+    /// INTEGER so it keeps the same numeric-payload discipline — design §5 —
+    /// as every other generated payload). Deliberately reuses the fact
+    /// source's own key space rather than introducing a separate
+    /// foreign-key column: [`MutableEnrichedRecipe`] joins the fact's own
+    /// row key straight to this dimension's `id` (1:1), so
+    /// [`crate::schedule_gen::GenRow`] /
+    /// [`crate::s_tracker::STracker`]'s existing `events(d, id, val)` shape
+    /// needs no widening for this phase — design §6 "mixed models" only
+    /// requires *a* mutable dimension in the pool, not a fan-out join.
+    pub fn mutable_dimension(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            clock_column: String::new(),
+            key_column: "id".to_string(),
+            payload_column: "attr".to_string(),
+            key_shape: KeyShape::Single,
+            posture: SourcePosture::MutableSnapshot,
         }
     }
 
@@ -426,6 +471,128 @@ pub fn arb_adversarial_leaf() -> impl Strategy<Value = AdversarialLeaf> {
 /// counterpart of [`arb_recipe`].
 pub fn arb_adversarial_recipe() -> impl Strategy<Value = AdversarialLeafRecipe> {
     arb_adversarial_leaf().prop_map(AdversarialLeafRecipe::new)
+}
+
+/// The fact+mutable-dimension enrichment recipe
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 4;
+/// design §6 "mixed models"; the
+/// `examples/timeseries/models/daily_events_enriched.sql` shape): one
+/// append-only clocked fact source (`events(d, id, val)`) joined 1:1 to one
+/// unclocked `mutable_snapshot` dimension source
+/// ([`SourceRecipe::mutable_dimension`]), producing a
+/// `ColumnScopedMerge`-eligible cell (MP11) for the dimension-sourced `attr`
+/// column group, alongside a `{d, id, val}` group never sensitive to the
+/// dimension's mutations. Self-renders like [`AdversarialLeafRecipe`] — the
+/// join body sits outside [`BodyConstruct`]'s exhaustive match, and
+/// `render.rs` is outside this phase's edit scope (plan Critical files).
+#[derive(Debug, Clone)]
+pub struct MutableEnrichedRecipe {
+    pub model_name: String,
+    pub fact: SourceRecipe,
+    pub dimension: SourceRecipe,
+}
+
+impl Default for MutableEnrichedRecipe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MutableEnrichedRecipe {
+    /// The pool's one fixed mixed-model shape (design §6's "mixed models"
+    /// needs exactly one mutable-dimension shape reachable; schedule
+    /// generation — not model-shape generation — is this pool's generative
+    /// surface, per the plan's Phase 4 Implementation shape).
+    pub fn new() -> Self {
+        Self {
+            model_name: "recipe_mutable_enriched".to_string(),
+            fact: SourceRecipe::events(KeyShape::Single),
+            dimension: SourceRecipe::mutable_dimension("dim"),
+        }
+    }
+
+    /// The declared `batched.unique_key`: the fact's own row key — still
+    /// uniquely identifies each output row since the join is 1:1
+    /// (`SourceRecipe::mutable_dimension`'s doc comment).
+    pub fn unique_key(&self) -> Vec<String> {
+        vec![self.fact.key_column.clone()]
+    }
+
+    /// The coverage-matrix cell id this recipe inhabits (mirrors
+    /// [`BodyConstruct::matrix_cell_ids`]'s convention).
+    pub fn matrix_cell_id(&self) -> String {
+        "mutable_enriched×mixed".to_string()
+    }
+
+    /// The model's `SELECT` body: the fact source passed through, enriched
+    /// by the dimension's `attr` column, joined on the fact's own row key.
+    pub fn model_body(&self) -> String {
+        let fact_src = format!("smelt.sources.{}", self.fact.name);
+        let dim_src = format!("smelt.sources.{}", self.dimension.name);
+        let d = &self.fact.clock_column;
+        let id = &self.fact.key_column;
+        let val = &self.fact.payload_column;
+        let dim_id = &self.dimension.key_column;
+        let attr = &self.dimension.payload_column;
+        format!(
+            "SELECT f.{d} AS {d}, f.{id} AS {id}, f.{val} AS {val}, dim.{attr} AS {attr} \
+             FROM {fact_src} f JOIN {dim_src} dim ON f.{id} = dim.{dim_id}"
+        )
+    }
+
+    /// The full model file contents: frontmatter (`timeseries:` + `refresh:
+    /// incremental` + `grain: partition` + `batched.unique_key` +
+    /// `maintenance.scan_bounds.per_source.<dim>.allow_full_scan: true`,
+    /// mirroring `daily_events_enriched.sql`'s own frontmatter) followed by
+    /// [`Self::model_body`].
+    pub fn model_file(&self) -> String {
+        let d = &self.fact.clock_column;
+        let unique_key = self.unique_key().join(", ");
+        format!(
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
+            dim_name = self.dimension.name,
+            body = self.model_body(),
+        )
+    }
+
+    /// The fact source YAML sidecar — the same append-only `events(d, id,
+    /// val)` shape [`crate::render::render_source_yaml`] renders for
+    /// [`ModelRecipe`].
+    pub fn fact_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance mixed-pool fact source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+            d = self.fact.clock_column,
+            id = self.fact.key_column,
+            val = self.fact.payload_column,
+        )
+    }
+
+    /// The dimension source YAML sidecar — unclocked,
+    /// `mutation_profile: mutable_snapshot` (`sources.md`).
+    pub fn dimension_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance mixed-pool mutable dimension.\nmutation_profile: mutable_snapshot\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {attr}\n    type: INTEGER\n",
+            id = self.dimension.key_column,
+            attr = self.dimension.payload_column,
+        )
+    }
+
+    /// The oracle query for this recipe (design §6 "mixed models": "the
+    /// S-restriction applies to the driving source; the dimension
+    /// contributes its current state"): [`Self::model_body`] with the fact
+    /// source's `smelt.sources.*` reference swapped for `fact_table_ref`
+    /// (either the physical fact table, for a full-refresh oracle, or an
+    /// `STracker`-materialized `S_k` temp table) and the dimension's
+    /// reference always swapped for its CURRENT physical table — the
+    /// dimension is never S-restricted.
+    pub fn oracle_body_over(&self, fact_table_ref: &str) -> String {
+        self.model_body()
+            .replace(&format!("smelt.sources.{}", self.fact.name), fact_table_ref)
+            .replace(
+                &format!("smelt.sources.{}", self.dimension.name),
+                &format!("main.sources_{}", self.dimension.name),
+            )
+    }
 }
 
 #[cfg(test)]

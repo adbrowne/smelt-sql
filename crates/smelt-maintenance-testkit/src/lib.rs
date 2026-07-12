@@ -44,11 +44,16 @@
 //! - [`s_tracker`] — the S-tracker: records `(window, source snapshot)` per
 //!   run and derives `S_k`, the append-only pool's S-restricted oracle
 //!   baseline (`docs/plans/20260712-generative-maintenance-conformance.md`
-//!   Phase 3).
+//!   Phase 3); Phase 4 extends it with per-window outstanding-dimension-
+//!   mutation bookkeeping for mixed (fact + mutable dimension) models.
+//! - [`oracle_modes`] — the `OracleMode` enum a mixed model selects between
+//!   (S-restricted vs settled-point,
+//!   `docs/plans/20260712-generative-maintenance-conformance.md` Phase 4).
 
 pub mod link_c_harness;
 pub mod model_shapes;
 pub mod oracle;
+pub mod oracle_modes;
 pub mod recipe;
 pub mod render;
 pub mod run_schedule;

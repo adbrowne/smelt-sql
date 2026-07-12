@@ -8,6 +8,17 @@
 //! between two runs simply isn't in any run's recorded
 //! snapshot-restricted-to-that-run's-own-window until a run's snapshot
 //! actually contains it AND that run's own window covers it.
+//!
+//! Phase 4 (`docs/plans/20260712-generative-maintenance-conformance.md`;
+//! design §6 "Mixed models") extends the tracker with per-window outstanding-
+//! dimension-mutation bookkeeping: [`STracker::record_dimension_mutation`]
+//! marks a window's region as having an unresolved mutation against a
+//! mutable dimension the model reads; [`STracker::record_run`] clears any
+//! outstanding mutation for THAT SAME window (a re-run of the affected
+//! window is the catch-up — MP11's `ColumnScopedMerge` write is scoped to
+//! the run's own window, so re-running an unrelated window does not resync
+//! it); [`STracker::oracle_mode`] reports [`crate::oracle_modes::OracleMode`]
+//! accordingly.
 
 #![allow(dead_code)]
 
@@ -16,6 +27,7 @@ use std::collections::HashSet;
 use chrono::NaiveDate;
 use duckdb::Connection;
 
+use crate::oracle_modes::OracleMode;
 use crate::recipe::{ModelRecipe, SourceRecipe};
 use crate::render;
 use crate::schedule_gen::GenRow;
@@ -27,10 +39,12 @@ struct RunRecord {
 }
 
 /// Tracks per-run `(window, source snapshot)` pairs for one [`SourceRecipe`]
-/// and derives `S_k` (design §6).
+/// and derives `S_k` (design §6). Also tracks outstanding mutable-dimension
+/// mutations by the window they affect (Phase 4).
 pub struct STracker {
     source: SourceRecipe,
     runs: Vec<RunRecord>,
+    outstanding_mutated_windows: HashSet<(NaiveDate, NaiveDate)>,
 }
 
 impl STracker {
@@ -38,20 +52,46 @@ impl STracker {
         Self {
             source: source.clone(),
             runs: Vec::new(),
+            outstanding_mutated_windows: HashSet::new(),
         }
     }
 
     /// Record one run: `snapshot` is the source's full contents AT THE TIME
     /// this run executed (`schedule_gen::read_source_snapshot`, taken
     /// immediately before `execute_project` is called for this window).
-    /// Returns the run's index — `s_at(index)` is `S_k` after this run.
+    /// Returns the run's index — `s_at(index)` is `S_k` after this run. A
+    /// run of window `[start, end)` also clears any outstanding dimension
+    /// mutation recorded against THAT SAME window (Phase 4's catch-up rule —
+    /// see the module doc comment for why re-running an unrelated window
+    /// does not clear it).
     pub fn record_run(&mut self, start: NaiveDate, end: NaiveDate, snapshot: Vec<GenRow>) -> usize {
+        self.outstanding_mutated_windows.remove(&(start, end));
         self.runs.push(RunRecord {
             start,
             end,
             snapshot,
         });
         self.runs.len() - 1
+    }
+
+    /// Mark `window` as having an outstanding mutable-dimension mutation
+    /// (Phase 4; design §6 "Mixed models"): full equivalence assertion for
+    /// this window defers to the next run of THAT SAME window (the catch-up
+    /// — [`Self::record_run`] clears it).
+    pub fn record_dimension_mutation(&mut self, window: (NaiveDate, NaiveDate)) {
+        self.outstanding_mutated_windows.insert(window);
+    }
+
+    /// The tracker's current oracle mode (design §6 "Mixed models"):
+    /// [`OracleMode::SettledPoint`] while any window has an outstanding
+    /// dimension mutation, [`OracleMode::SRestricted`] once every recorded
+    /// mutation has been caught up by a re-run of its own window.
+    pub fn oracle_mode(&self) -> OracleMode {
+        if self.outstanding_mutated_windows.is_empty() {
+            OracleMode::SRestricted
+        } else {
+            OracleMode::SettledPoint
+        }
     }
 
     /// `S_k`: the deduplicated union, over every run `0..=k`, of that run's
@@ -130,7 +170,7 @@ impl STracker {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::recipe::KeyShape;
+    use crate::recipe::{KeyShape, SourcePosture};
 
     fn events_source() -> SourceRecipe {
         SourceRecipe {
@@ -139,6 +179,7 @@ mod tests {
             key_column: "id".to_string(),
             payload_column: "val".to_string(),
             key_shape: KeyShape::Single,
+            posture: SourcePosture::AppendOnly,
         }
     }
 
@@ -244,6 +285,55 @@ mod tests {
             tracker.s_at(k2).contains(&c),
             "late row must enter S once its window has re-run with a \
              snapshot that includes it"
+        );
+    }
+
+    /// `outstanding_mutation_flips_to_settled_point_mode` (plan Phase 4 TDD
+    /// list): mode selection — an in-place update on a mutable source defers
+    /// full assertion to the next catch-up run covering the affected region
+    /// (the mutation's own window); re-running a DIFFERENT window must not
+    /// clear it.
+    #[test]
+    fn outstanding_mutation_flips_to_settled_point_mode() {
+        let source = events_source();
+        let mut tracker = STracker::new(&source);
+
+        let w1 = (date(2024, 1, 1), date(2024, 1, 2));
+        let w2 = (date(2024, 1, 2), date(2024, 1, 3));
+
+        tracker.record_run(w1.0, w1.1, vec![]);
+        assert_eq!(
+            tracker.oracle_mode(),
+            OracleMode::SRestricted,
+            "no mutation has been recorded yet"
+        );
+
+        // A dimension mutation affecting w1's rows is now outstanding.
+        tracker.record_dimension_mutation(w1);
+        assert_eq!(
+            tracker.oracle_mode(),
+            OracleMode::SettledPoint,
+            "an outstanding mutation must defer full assertion until its \
+             own window's catch-up run"
+        );
+
+        // Re-running an UNRELATED window (w2) must not catch it up — MP11's
+        // ColumnScopedMerge write is scoped to the run's own window.
+        tracker.record_run(w2.0, w2.1, vec![]);
+        assert_eq!(
+            tracker.oracle_mode(),
+            OracleMode::SettledPoint,
+            "re-running a different window must not clear an unrelated \
+             outstanding mutation"
+        );
+
+        // Re-running w1 itself is the catch-up.
+        tracker.record_run(w1.0, w1.1, vec![]);
+        assert_eq!(
+            tracker.oracle_mode(),
+            OracleMode::SRestricted,
+            "re-running the mutation's own window must settle it back to \
+             S-restricted mode"
         );
     }
 }

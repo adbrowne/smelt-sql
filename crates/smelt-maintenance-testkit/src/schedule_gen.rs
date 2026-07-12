@@ -67,6 +67,14 @@ pub enum ConformanceStep {
 #[derive(Debug, Clone)]
 pub struct ConformanceSchedule(pub Vec<ConformanceStep>);
 
+/// The shared base date every generated schedule (append-only or mixed)
+/// starts from — a hardcoded literal, so infallible by construction; factored
+/// out once so [`arb_schedule_for`] and [`arb_mixed_schedule`] don't each
+/// carry their own `.expect(` on the same constant.
+fn base_date() -> NaiveDate {
+    chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid base date")
+}
+
 /// Schema-generic schedule generator (design §5): 2-3 disjoint one-day
 /// windows, each seeded with 1-2 rows landing inside its own range before
 /// the window is first run; a subset of windows additionally receive a late
@@ -76,7 +84,7 @@ pub struct ConformanceSchedule(pub Vec<ConformanceStep>);
 /// every window that received a late row, so a settled point always exists
 /// for the S-restricted assertion to land on.
 pub fn arb_schedule_for(recipe: &ModelRecipe) -> impl Strategy<Value = ConformanceSchedule> {
-    let base = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid base date");
+    let base = base_date();
     let source = recipe.source.clone();
     (2_usize..=3).prop_flat_map(move |n_windows| {
         let source = source.clone();
@@ -148,6 +156,164 @@ fn build_schedule(
     }
 
     ConformanceSchedule(steps)
+}
+
+/// One step of a generated mixed (fact + mutable dimension) schedule
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 4;
+/// design §5 "multi-source interleave" / §6 "Mixed models").
+#[derive(Debug, Clone)]
+pub enum MixedStep {
+    /// Insert `rows` into the fact source (or none, for a pure catch-up
+    /// re-run), then run `execute_project` over `[start, end)` — the mixed
+    /// pool's analogue of [`ConformanceStep::RunWindow`].
+    RunWindow {
+        start: NaiveDate,
+        end: NaiveDate,
+        rows: Vec<GenRow>,
+    },
+    /// In-place `UPDATE` of the mutable dimension row keyed by `id` — no
+    /// accompanying run. Leaves the maintained output's dimension-sensitive
+    /// column group stale for `id`'s own window until a later `RunWindow`
+    /// step re-runs THAT SAME window (MP11's `ColumnScopedMerge` write is
+    /// scoped to the run's own window — design §6 "Mixed models").
+    MutateDimension { id: i64, new_attr: i64 },
+}
+
+/// A generated sequence of [`MixedStep`]s.
+#[derive(Debug, Clone)]
+pub struct MixedSchedule(pub Vec<MixedStep>);
+
+/// Schema-generic mixed-pool schedule generator (design §5 "multi-source
+/// interleave"): 2-3 disjoint one-day fact windows (mirrors
+/// [`arb_schedule_for`]'s window shape), each seeded with 1-2 rows; exactly
+/// one window is chosen to receive a dimension mutation (targeting the FIRST
+/// row that window produced, so the mutation is always observable), and the
+/// schedule always ends by re-running that same window — the catch-up
+/// (design §5: "every generated schedule ends by re-running every window
+/// affected by late/mutating steps"), so a settled point always exists.
+pub fn arb_mixed_schedule() -> impl Strategy<Value = MixedSchedule> {
+    let base = base_date();
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        (
+            proptest::collection::vec(
+                proptest::collection::vec(arb_payload_value(), 1..=2),
+                n_windows,
+            ),
+            0..n_windows,
+            arb_payload_value(),
+        )
+            .prop_map(move |(window_vals, mutate_window, new_attr)| {
+                build_mixed_schedule(base, &window_vals, mutate_window, new_attr)
+            })
+    })
+}
+
+fn build_mixed_schedule(
+    base: NaiveDate,
+    window_vals: &[Vec<i64>],
+    mutate_window: usize,
+    new_attr: i64,
+) -> MixedSchedule {
+    let mut steps = Vec::new();
+    let mut next_id = 1_i64;
+    let mut mutated_window: Option<(NaiveDate, NaiveDate)> = None;
+
+    for (i, vals) in window_vals.iter().enumerate() {
+        let start = base + chrono::Duration::days(i as i64);
+        let end = start + chrono::Duration::days(1);
+
+        let mut first_id = None;
+        let rows: Vec<GenRow> = vals
+            .iter()
+            .map(|val| {
+                let row = GenRow {
+                    d: start,
+                    id: next_id,
+                    val: *val,
+                };
+                first_id.get_or_insert(next_id);
+                next_id += 1;
+                row
+            })
+            .collect();
+        steps.push(MixedStep::RunWindow { start, end, rows });
+
+        if i == mutate_window {
+            if let Some(id) = first_id {
+                steps.push(MixedStep::MutateDimension { id, new_attr });
+                mutated_window = Some((start, end));
+            }
+        }
+    }
+
+    // Catch-up: re-run the mutated window so a settled point always exists
+    // (design §5/§6).
+    if let Some((start, end)) = mutated_window {
+        steps.push(MixedStep::RunWindow {
+            start,
+            end,
+            rows: Vec::new(),
+        });
+    }
+
+    MixedSchedule(steps)
+}
+
+/// The mixed-pool `check_profile` self-check (design §5: "The
+/// `MutationProfile` self-check … extends to every new step kind: a
+/// schedule's declared posture is verified against its actual steps, never
+/// trusted"): verifies every `MutateDimension` step's target `id` was
+/// actually produced by some `RunWindow` step, AND that id's own window is
+/// re-run again strictly after the mutation — the structural invariant
+/// [`arb_mixed_schedule`] is supposed to uphold by construction, checked
+/// rather than assumed.
+pub fn check_profile(schedule: &MixedSchedule) -> Result<(), String> {
+    let mut id_window: std::collections::HashMap<i64, (NaiveDate, NaiveDate)> =
+        std::collections::HashMap::new();
+    for step in &schedule.0 {
+        if let MixedStep::RunWindow { start, end, rows } = step {
+            for row in rows {
+                id_window.insert(row.id, (*start, *end));
+            }
+        }
+    }
+
+    let mutation_positions: Vec<(usize, i64)> = schedule
+        .0
+        .iter()
+        .enumerate()
+        .filter_map(|(i, s)| match s {
+            MixedStep::MutateDimension { id, .. } => Some((i, *id)),
+            _ => None,
+        })
+        .collect();
+
+    if mutation_positions.is_empty() {
+        return Err(
+            "schedule declares the mixed profile but contains no MutateDimension step \
+                     — the generator's own guarantee was violated"
+                .to_string(),
+        );
+    }
+
+    for (pos, id) in mutation_positions {
+        let window = id_window.get(&id).copied().ok_or_else(|| {
+            format!(
+                "MutateDimension targets id {id} which no RunWindow step in \
+                                     the schedule ever produced"
+            )
+        })?;
+        let rerun_after = schedule.0[pos + 1..].iter().any(
+            |s| matches!(s, MixedStep::RunWindow { start, end, .. } if (*start, *end) == window),
+        );
+        if !rerun_after {
+            return Err(format!(
+                "mutated id {id}'s window {window:?} is never re-run after the mutation \
+                 step at index {pos} — no settled point exists for it"
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Read the full current contents of `source`'s physical table
@@ -230,5 +396,43 @@ mod tests {
                 );
             }
         }
+    }
+
+    /// `check_profile_verifies_mutable_schedules` (plan Phase 4 TDD list):
+    /// the `check_profile` self-check extends to multi-source interleave
+    /// steps — every generated [`MixedSchedule`] passes its own declared-
+    /// posture check, and the check actually fires (rather than being
+    /// vacuously true) when the catch-up step is stripped out.
+    #[test]
+    fn check_profile_verifies_mutable_schedules() {
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_mixed_schedule();
+
+        for i in 0..30 {
+            let schedule = strat.new_tree(&mut runner).unwrap().current();
+            check_profile(&schedule).unwrap_or_else(|e| {
+                panic!(
+                    "case {i}: generated mixed schedule {schedule:?} failed its own \
+                     self-check: {e}"
+                )
+            });
+        }
+
+        // Negative case: strip the trailing catch-up `RunWindow` so the
+        // self-check must actually catch the violation — never trust an
+        // unverified posture label (design §5 "F7").
+        let schedule = strat.new_tree(&mut runner).unwrap().current();
+        assert!(
+            matches!(schedule.0.last(), Some(MixedStep::RunWindow { .. })),
+            "generator's own guarantee: schedule must end with the catch-up RunWindow"
+        );
+        let mut corrupted_steps = schedule.0.clone();
+        corrupted_steps.pop();
+        let corrupted = MixedSchedule(corrupted_steps);
+        assert!(
+            check_profile(&corrupted).is_err(),
+            "removing the catch-up RunWindow must be caught by check_profile, got Ok for \
+             {corrupted:?}"
+        );
     }
 }
