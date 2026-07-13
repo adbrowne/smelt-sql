@@ -113,8 +113,9 @@ when persona rounds come back clean (budget 2–3 rounds).
 - [x] Ground-truth verification (CLI flags, schema-evolution behavior,
       refusal message, freshness gate, datagen numbers)
 - [x] Stage `01_first_model` scaffolded + `explain` verified
-- [ ] Stages 02–04 + validation
-- [ ] Generator multi-page rewrite + freshness-gate update
-- [ ] Page drafts
+- [x] Stages 02–05 + validation (05 added for propagation: the canonical
+      workspace's self-referential table makes `--since-upstream` refuse)
+- [x] Generator multi-page rewrite + freshness-gate update
+- [x] Page drafts
 - [ ] Review rounds + revisions
-- [ ] Old-page redirect, nav update, final gates
+- [x] Old-page redirect, nav update (final gates pending)

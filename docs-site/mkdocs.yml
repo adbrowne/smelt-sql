@@ -45,6 +45,12 @@ extra_css:
 
 edit_uri: edit/main/docs-site/docs/
 
+plugins:
+  - search
+  - redirects:
+      redirect_maps:
+        examples/web-analytics-maintenance.md: examples/web-analytics/index.md
+
 markdown_extensions:
   - pymdownx.highlight:
       anchor_linenums: true
@@ -98,8 +104,14 @@ nav:
     - Editor Setup: guide/editor-setup.md
     - Editor Features: guide/editor-features.md
   - Examples:
-    - Web Analytics: examples/web_analytics.md
-    - Web Analytics Maintenance Demo: examples/web-analytics-maintenance.md
+    - Web Analytics Pipeline (tutorial):
+      - Overview: examples/web-analytics/index.md
+      - A First Incremental Model: examples/web-analytics/first-model.md
+      - Duplicates & Late Data: examples/web-analytics/late-data.md
+      - Sessions & Cross-Midnight Backfills: examples/web-analytics/sessions.md
+      - Backfills, New Columns, Late Updates: examples/web-analytics/changing-things.md
+      - Taking Stock: examples/web-analytics/taking-stock.md
+    - Web Analytics Identity: examples/web_analytics.md
   - Reference:
     - CLI Commands: reference/cli.md
     - Project Configuration: reference/smelt-yml.md

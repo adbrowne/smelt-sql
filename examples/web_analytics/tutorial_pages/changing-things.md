@@ -1,8 +1,25 @@
 # Backfills, new columns, and late updates
 
-<!-- PLACEHOLDER: intro — the three ways an existing pipeline changes. -->
+A pipeline that only ever moves forward one day at a time is the easy
+case. Real ones change in three distinct ways, and it's worth keeping
+them distinct, because the correct response to each is different:
+
+1. **Backfill** — recompute history that already has a definition: a new
+   model needs the past year, or a bug fix invalidates March.
+2. **A new column** — the *shape* changes: the query grows a column that
+   history never had.
+3. **Late updates** — the definition and shape are fine, but upstream
+   data changed: late arrivals landed, a source was corrected.
+
+This page runs each one against the pipeline as built so far, on the
+stage projects ([stage 3](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/03_late_data),
+[stage 4](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/04_add_column),
+[stage 5](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/05_enrichment)).
 
 ## Backfilling a range
+
+`smelt backbuild` rebuilds a model (and anything upstream it needs) over
+a date range. `--dry-run` prints the full plan without executing:
 
 ```bash
 smelt backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run
@@ -10,15 +27,37 @@ smelt backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-r
 
 <!-- smelt-generate: @cwd=tutorial_stages/03_late_data @render=skeleton backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
 
-??? example "Full dry-run transcript — `smelt backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run`"
+??? example "Full dry-run transcript"
 
     <!-- smelt-generate: @cwd=tutorial_stages/03_late_data backbuild silver.events_parsed --start 2026-04-01 --end 2026-04-19 --dry-run -->
 
-<!-- PLACEHOLDER: chunking walkthrough. -->
+The 18-day range didn't become one giant statement: it was split into
+chunks (`-- chunk 1/2`, `-- chunk 2/2`), each its own transactional
+`DELETE`+`INSERT`, so a long backfill holds bounded memory and commits
+incrementally. Notice each chunk's *read* carries its own three-day
+widening at the edge — `chunk 1` writes `[04-01, 04-10)` but reads bronze
+from `03-29` — the late-arrival derivation from [the late-data
+page](late-data.md), composing with chunking instead of being re-derived
+by hand for the backfill case.
+
+For a partition-independent model like this one, the chunks may run in
+any order; for the ordered `sessions_chained` variant from
+[the sessions page](sessions.md), smelt runs them strictly oldest-first
+instead. Same command, different derived execution.
 
 ## Adding a column
 
-<!-- PLACEHOLDER: the is_purchase change (stage 04). -->
+Add a derived flag to `events_parsed` — one new line in the SELECT:
+
+```sql
+    CASE WHEN json_extract_string(payload, '$.event_name') = 'purchase'
+         THEN TRUE
+    END AS is_purchase
+```
+
+History was built without this column, so model and table now disagree.
+`smelt diff` compares the model against the deployed schema and shows the
+migration it implies, before anything runs:
 
 ```bash
 smelt diff --select silver.events_parsed
@@ -26,9 +65,47 @@ smelt diff --select silver.events_parsed
 
 <!-- smelt-generate: @cwd=tutorial_stages/04_add_column @fixture-schemas @render=text @expect-exit=1 diff --select silver.events_parsed -->
 
-<!-- PLACEHOLDER: ALTER + NULL history, backfill:, NOT NULL caveat. -->
+The change classifies as **safe**: adding a nullable column needs no
+rewrite. The next `smelt run` applies the `ALTER TABLE` automatically and
+carries on incrementally — already-built partitions keep `NULL` for
+`is_purchase`, and partitions built from now on populate it. (This exact
+flow — baseline saved, column added, `ALTER` applied, old rows `NULL`,
+new rows populated — is pinned end-to-end by
+`e2e::schema_evolution_incremental` in the repo.)
+
+Two follow-ups you'll want eventually:
+
+- **Populating history.** `NULL` history is often fine (the flag simply
+  starts existing). When it isn't, declare a `backfill:` expression for
+  the column in frontmatter, or `smelt backbuild` the range — the
+  definition already computes the column, so a backfill fills it. See
+  [schema evolution](../../guide/schema-evolution.md).
+- **The not-nullable trap.** If the new column is provably `NOT NULL`
+  (say, `amount >= 100` over a non-null `amount`), an in-place `ALTER`
+  is impossible — `NULL` history would violate the type — and smelt
+  responds with a **full-table rebuild** on the next run. Correct, but
+  on a large table you want to choose the moment. Keep intentionally
+  nullable additions nullable (our `CASE` has no `ELSE` for exactly this
+  reason), or declare a `default:`.
+
+For comparison: dbt's `on_schema_change: append_new_columns` does the
+`ALTER` but nothing checks nullability against history, and sync is
+opt-in per model; Spark's `mergeSchema` similarly appends columns. The
+difference here is mostly that the diff is inspectable *before* the run,
+and the unsafe variant is refused rather than attempted.
 
 ## When upstream data changes
+
+Late arrivals were accepted on [the late-data page](late-data.md) by
+*policy*; this is the mechanics
+of absorbing them. Suppose the feed delivers a batch of stragglers whose
+`event_date` is April 10th — bronze's April 10th partition just gained
+rows, today. Everything computed *from* that day is now stale: parsed
+events for the 10th, any session that day's events participate in, and
+every enriched row that referenced those sessions.
+
+You could re-run a generous window over the whole pipeline. The precise
+alternative: tell smelt what landed, and let it work out the rest —
 
 ```bash
 smelt run --since-upstream \
@@ -37,5 +114,27 @@ smelt run --since-upstream \
 
 <!-- smelt-generate: @cwd=tutorial_stages/05_enrichment @render=dirty-set run --since-upstream --source silver.events_parsed --landed 2026-04-10..2026-04-11 --dry-run -->
 
-<!-- PLACEHOLDER: propagation walkthrough; note the canonical example's
-self-referential table makes the propagation graph refuse. -->
+Read the dirty set bottom-up. A one-day delta in `events_parsed` dirties
+`sessions` over four days — `[04-09, 04-13)` — because sessions starting
+the day before can be extended and the sessionizer looks two days back;
+and `events_enriched` over six, composing the session spread with its own
+join reach. Every widening is the inversion of a filter you've already
+seen declared; none of it is configured in the run command. smelt then
+runs exactly those partitions, in dependency order.
+
+The stage-5 project this runs against contains the enrichment model —
+event rows with their session identity joined back on
+([source](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/tutorial_stages/05_enrichment/models/silver/events_enriched.sql)) —
+but notably *not* the ordered `sessions_chained` table. That's the cost from [the sessions page](sessions.md) arriving on
+schedule: propagation refuses graphs with
+self-referential nodes rather than guessing at them, so the full example
+(which keeps both session tables) currently answers `--since-upstream`
+with a named refusal. The workaround is the generous-window re-run; the
+honest summary is that ordered models buy expressiveness with operational
+machinery, and you should order only what needs ordering.
+
+Two pragmatic notes: `--landed` windows come from you (or your loader's
+bookkeeping) — smelt does not yet watermark-diff sources automatically.
+And for the simple "resume where I left off" case, `smelt run --auto`
+fills whatever intervals haven't been processed yet
+([CLI reference](../../reference/cli.md)).
