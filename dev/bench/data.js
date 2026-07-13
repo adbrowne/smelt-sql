@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783917110306,
+  "lastUpdate": 1783917112756,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.996766,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "5e9f1202c0f60cfe3b751acbe28c438c88ef198a",
+          "message": "Merge pull request #161 from adbrowne/ci-docs-pr-previews",
+          "timestamp": "2026-07-13T14:29:06+10:00",
+          "tree_id": "845d19a003f42bc19c4eb303181f35a8a90ca630",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/5e9f1202c0f60cfe3b751acbe28c438c88ef198a"
+        },
+        "date": 1783917112062,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.628975007512448,
+            "unit": "MB/s"
           }
         ]
       }
