@@ -20,17 +20,18 @@ that stay correct as data keeps arriving. Three facts about the feed make
   twice, identical except for their arrival time.
 - **Late data.** An event that happened on Monday can arrive on Thursday —
   ingestion trails occurrence by up to three days.
-- **Sessions.** Your headline metrics are defined over sessions — runs of
-  activity separated by 30-minute gaps — and a session that starts at
-  23:47 doesn't care that your tables are partitioned by day.
+- **Sessions.** Your headline metrics are defined over sessions (runs of
+  activity separated by 30-minute gaps), and a session that starts at
+  23:47 doesn't care that your tables are organized in day-sized slices.
 
 Teams usually build this one of two ways:
 
 1. **Rebuild everything, every night.** Correct by construction and easy
    to reason about, but the cost grows with history: a year in, you are
    rescanning twelve months of events to update one day.
-2. **Hand-built incremental jobs.** `MERGE` or insert-overwrite over a
-   trailing window — "reprocess the last 3 days" — with the window widths
+2. **Hand-built incremental jobs.** `MERGE` statements, or jobs that
+   re-replace a trailing slice of the table ("reprocess the last 3
+   days"), with the window widths
    encoded in orchestration config, Jinja macros, or job code. Fast and
    cheap, but every one of those numbers is a promise someone made once.
    Change the session rule and the 3 stops being right, and nothing tells
@@ -64,6 +65,9 @@ silver.sessions          30-min sessionization
 silver.events_enriched   session identity joined back
 ```
 
+(The `bronze`/`silver` names are this example's layering convention —
+raw, then cleaned — not smelt keywords.)
+
 The [complete example](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics)
 also carries a gold identity-resolution layer, covered separately in
 [the identity-stitching example](../web_analytics.md). These pages build
@@ -81,7 +85,9 @@ so you can run every command yourself.
    into derived read windows.
 3. **[Sessions and the cross-midnight backfill](sessions.md)** — why any
    incrementally-maintained sessionizer must cut somewhere, and how a run
-   for today correctly rewrites yesterday's partition.
+   for today correctly rewrites yesterday's partition. (An optional
+   [deep dive](ordered-sessions.md) covers the session table that has to
+   read its own history.)
 4. **[Backfills, new columns, and late updates](changing-things.md)** —
    the three ways a live pipeline changes, and what smelt does for each.
 5. **[Taking stock](taking-stock.md)** — what you wrote versus what smelt

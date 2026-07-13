@@ -1,8 +1,8 @@
 # Duplicates and late data
 
 The feed has two hygiene problems the first model ignored. About 2% of
-events are **redelivered** — a second, byte-identical copy arrives later
-(at-least-once delivery doing what it says). And events are **late**: in
+events are **redelivered**: a second copy arrives later, identical except
+for its arrival time (at-least-once delivery doing what it says). And events are **late**: in
 this feed, a fifth of events arrive an hour or more after they
 happened, and one in twenty arrives a full three days late.
 
@@ -25,8 +25,7 @@ smelt run --select silver.events_parsed \
 
 <!-- smelt-generate: @cwd=tutorial_stages/02_dedup_refused @render=text @expect-exit=1 run --select silver.events_parsed --event-time-start 2026-04-10 --event-time-end 2026-04-11 --dry-run -->
 
-smelt refused the model. This is worth slowing down for, because the
-refusal is the feature.
+smelt refused the model, deliberately, and the reason repays attention.
 
 Rebuilding a table one partition at a time is only correct if each
 partition's contents can be computed without seeing the other partitions.
@@ -51,12 +50,15 @@ batched:
     allow_window_functions: true
 ```
 
+(`batched:` is the frontmatter section governing how a model behaves when
+maintained in time-bounded batches; safety overrides live under it.)
+
 The override is a signed statement, sitting next to the window function
 it excuses, with a comment explaining why it's safe (see the stage-3
 model below). Compare the alternatives you may have lived with: dbt will
-happily template whatever dedup you write into an incremental model and
-never ask the question; the question still exists, you just answer it in
-production.
+happily template whatever dedup you write into an incremental model;
+nothing asks whether it is partition-safe, so the question surfaces
+later, as a data bug.
 
 ## Accepting late arrivals
 
@@ -99,6 +101,11 @@ sufficient**, not hopefully sufficient:
 smelt run --event-time-start 2026-04-08 --event-time-end 2026-04-12
 ```
 
+This is the move the rest of smelt's documentation calls **deriving
+properties**: an operational fact — here, how far back a rebuild must
+read — is read out of the SQL and proven, instead of being declared
+somewhere beside it and trusted.
+
 (The [changing-things page](changing-things.md) shows the surgical alternative — telling smelt exactly which
 upstream days received data and letting it rebuild only what's affected.)
 
@@ -111,8 +118,11 @@ If you've built this in other tools, the contrast is the point:
 - **SQLMesh**: closer — `lookback` is a first-class model config key. But
   it is still a declared number the engine trusts, not a fact derived
   from the query; the SQL and the config can disagree.
-- **Spark**: the reprocess window lives in job code or orchestration
-  config, one abstraction layer away from the filter it must agree with.
+- **Spark**: the reprocess window lives in job code or, in Structured
+  Streaming, as a `withWatermark` threshold — either way a configured
+  number one layer away from the logic it must agree with. The
+  `INTERVAL '3 days'` here plays the watermark's role, read out of the
+  query instead of set beside it.
 
 smelt's version is one clause that is simultaneously the policy, its
 enforcement, and the source the windows are derived from.

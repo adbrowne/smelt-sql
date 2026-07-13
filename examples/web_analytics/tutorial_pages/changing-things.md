@@ -36,14 +36,14 @@ chunks (`-- chunk 1/2`, `-- chunk 2/2`), each its own transactional
 `DELETE`+`INSERT`, so a long backfill holds bounded memory and commits
 incrementally. Notice each chunk's *read* carries its own three-day
 widening at the edge — `chunk 1` writes `[04-01, 04-10)` but reads bronze
-from `03-29` — the late-arrival derivation from [the late-data
-page](late-data.md), composing with chunking instead of being re-derived
-by hand for the backfill case.
+from `03-29` — the late-arrival derivation from
+[the late-data page](late-data.md), composing with chunking instead of
+being re-derived by hand for the backfill case.
 
-For a partition-independent model like this one, the chunks may run in
-any order; for the ordered `sessions_chained` variant from
-[the sessions page](sessions.md), smelt runs them strictly oldest-first
-instead. Same command, different derived execution.
+Because this model's partitions are independent, no ordering between
+chunks is required for correctness. For the ordered sessionizer in
+[the deep dive](ordered-sessions.md), the same command enforces
+oldest-first instead — same interface, different derived discipline.
 
 ## Adding a column
 
@@ -90,22 +90,27 @@ Two follow-ups you'll want eventually:
 
 For comparison: dbt's `on_schema_change: append_new_columns` does the
 `ALTER` but nothing checks nullability against history, and sync is
-opt-in per model; Spark's `mergeSchema` similarly appends columns. The
-difference here is mostly that the diff is inspectable *before* the run,
-and the unsafe variant is refused rather than attempted.
+opt-in per model. SQLMesh's plan preview is the nearest analog to
+`smelt diff` — it categorizes changes as breaking or non-breaking before
+applying. Spark's `mergeSchema` appends columns on write. The difference
+here is mostly that the classification extends to the physical migration
+statement, shown before the run, with the unsafe variant refused rather
+than attempted.
 
 ## When upstream data changes
 
 Late arrivals were accepted on [the late-data page](late-data.md) by
-*policy*; this is the mechanics
-of absorbing them. Suppose the feed delivers a batch of stragglers whose
-`event_date` is April 10th — bronze's April 10th partition just gained
-rows, today. Everything computed *from* that day is now stale: parsed
-events for the 10th, any session that day's events participate in, and
-every enriched row that referenced those sessions.
+*policy*; this is the mechanics of absorbing them. Suppose the feed
+delivers a batch of stragglers whose `event_date` is April 10th —
+bronze's April 10th partition just gained rows, today. Everything
+computed *from* that day is now stale: parsed events for the 10th, any
+session that day's events participate in, and every enriched row that
+referenced those sessions.
 
 You could re-run a generous window over the whole pipeline. The precise
-alternative: tell smelt what landed, and let it work out the rest —
+alternative: tell smelt what landed, and it answers with a **dirty set**
+— every model-and-window pair the declared delta could have made stale —
+then runs exactly that, in dependency order:
 
 ```bash
 smelt run --since-upstream \
@@ -114,27 +119,34 @@ smelt run --since-upstream \
 
 <!-- smelt-generate: @cwd=tutorial_stages/05_enrichment @render=dirty-set run --since-upstream --source silver.events_parsed --landed 2026-04-10..2026-04-11 --dry-run -->
 
-Read the dirty set bottom-up. A one-day delta in `events_parsed` dirties
-`sessions` over four days — `[04-09, 04-13)` — because sessions starting
-the day before can be extended and the sessionizer looks two days back;
-and `events_enriched` over six, composing the session spread with its own
-join reach. Every widening is the inversion of a filter you've already
-seen declared; none of it is configured in the run command. smelt then
-runs exactly those partitions, in dependency order.
+The widening rule is the same one you've been reading all along, applied
+in reverse: **a partition is dirty if its read window touches the
+delta.** A `sessions` partition P reads events from two days before P
+(the sessionizer's lookback) through one day after (the session span) —
+so a one-day delta dirties the four session partitions `[04-09, 04-13)`.
+An `events_enriched` partition reads sessions from a day either side of
+itself, so those four dirty session days spread to six enriched days,
+`[04-08, 04-14)`. None of it is configured in the run command; every
+number is the inversion of a filter you've already seen declared.
 
 The stage-5 project this runs against contains the enrichment model —
 event rows with their session identity joined back on
 ([source](https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/tutorial_stages/05_enrichment/models/silver/events_enriched.sql)) —
-but notably *not* the ordered `sessions_chained` table. That's the cost from [the sessions page](sessions.md) arriving on
-schedule: propagation refuses graphs with
-self-referential nodes rather than guessing at them, so the full example
-(which keeps both session tables) currently answers `--since-upstream`
-with a named refusal. The workaround is the generous-window re-run; the
-honest summary is that ordered models buy expressiveness with operational
-machinery, and you should order only what needs ordering.
+but not the ordered `sessions_chained` table. That's the cost from
+[the sessions page](sessions.md) arriving on schedule: propagation
+refuses graphs with self-referential nodes rather than guessing at them,
+so the full example (which keeps both session tables) currently answers
+`--since-upstream` with a named refusal, and the workaround is the
+generous-window re-run.
 
-Two pragmatic notes: `--landed` windows come from you (or your loader's
-bookkeeping) — smelt does not yet watermark-diff sources automatically.
-And for the simple "resume where I left off" case, `smelt run --auto`
-fills whatever intervals haven't been processed yet
-([CLI reference](../../reference/cli.md)).
+!!! note "Two pragmatic notes"
+    `--landed` windows come from you or your loader's bookkeeping —
+    smelt does not yet watermark-diff sources automatically. And for the
+    simple "resume where I left off" case, `smelt run --auto` fills
+    whatever intervals haven't been processed yet
+    ([CLI reference](../../reference/cli.md)).
+
+The through-line of all three changes is the same: you described *what
+changed* — a range, a column, a landed window — and every bound in
+smelt's response was derived from declarations the pipeline had already
+made.
