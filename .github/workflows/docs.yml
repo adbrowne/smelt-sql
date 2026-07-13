@@ -22,16 +22,12 @@ jobs:
     steps:
       - uses: actions/checkout@v6
 
-      - name: Setup Python
-        uses: actions/setup-python@v5
-        with:
-          python-version: "3.12"
-
-      - name: Install dependencies
-        run: pip install -r docs-site/requirements.txt
+      - name: Install uv
+        uses: astral-sh/setup-uv@v5
 
       - name: Build site
-        run: cd docs-site && mkdocs build --strict
+        working-directory: docs-site
+        run: uv run mkdocs build --strict
 
       - name: Publish to gh-pages (root)
         uses: ./.github/actions/publish-docs
