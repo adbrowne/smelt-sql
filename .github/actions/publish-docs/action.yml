@@ -1,0 +1,75 @@
+name: Publish docs to gh-pages
+description: >
+  Syncs a built mkdocs site into a target directory of the gh-pages branch,
+  fully replacing that directory's previous contents while leaving the rest
+  of the branch untouched. Retries on push races (serialize via the
+  gh-pages-publish concurrency group at the workflow-job level).
+inputs:
+  source-dir:
+    description: Built site directory to publish (e.g. docs-site/site)
+    required: true
+  target-dir:
+    description: >
+      Directory within gh-pages to publish into. Use "." for the root
+      (production site) or "branches/pr-<number>" for a PR preview.
+    required: true
+  commit-message:
+    description: Commit message for the gh-pages commit
+    required: true
+runs:
+  using: composite
+  steps:
+    - name: Sync and push
+      shell: bash
+      run: |
+        set -euo pipefail
+
+        WORKTREE=$(mktemp -d)
+        SOURCE_DIR="${{ inputs.source-dir }}"
+        TARGET_DIR="${{ inputs.target-dir }}"
+
+        git config --global user.name "github-actions[bot]"
+        git config --global user.email "github-actions[bot]@users.noreply.github.com"
+
+        for attempt in 1 2 3 4 5; do
+          rm -rf "$WORKTREE"
+          if git ls-remote --exit-code --heads origin gh-pages >/dev/null 2>&1; then
+            git fetch origin gh-pages
+            git worktree add "$WORKTREE" origin/gh-pages
+            (cd "$WORKTREE" && git checkout -B gh-pages)
+          else
+            git worktree add --orphan -b gh-pages "$WORKTREE"
+          fi
+
+          mkdir -p "$WORKTREE/$TARGET_DIR"
+          # --checksum: freshly-built mkdocs output can match a previous
+          # commit's size and same-second mtime, which would make rsync's
+          # default quick-check skip real content changes.
+          if [ "$TARGET_DIR" = "." ]; then
+            rsync -a --checksum --delete --exclude '/branches' --exclude '/.git' "$SOURCE_DIR"/ "$WORKTREE"/
+          else
+            rsync -a --checksum --delete --exclude '/CNAME' "$SOURCE_DIR"/ "$WORKTREE/$TARGET_DIR"/
+          fi
+
+          pushd "$WORKTREE" >/dev/null
+          git add -A
+          if git diff --cached --quiet; then
+            echo "No changes to publish for $TARGET_DIR"
+            popd >/dev/null
+            git worktree remove "$WORKTREE" --force
+            exit 0
+          fi
+          git commit -q -m "${{ inputs.commit-message }}"
+          if git push origin gh-pages; then
+            popd >/dev/null
+            git worktree remove "$WORKTREE" --force
+            exit 0
+          fi
+          popd >/dev/null
+          git worktree remove "$WORKTREE" --force
+          echo "Push rejected (attempt $attempt), retrying..."
+          sleep $((attempt * 3))
+        done
+
+        echo "Failed to push to gh-pages after retries" >&2
+        exit 1
