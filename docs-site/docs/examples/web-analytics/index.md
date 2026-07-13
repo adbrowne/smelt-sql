@@ -35,7 +35,9 @@ Teams usually build this one of two ways:
    encoded in orchestration config, Jinja macros, or job code. Fast and
    cheap, but every one of those numbers is a promise someone made once.
    Change the session rule and the 3 stops being right, and nothing tells
-   you.
+   you. (Declarative tools soften this — SQLMesh makes the lookback a
+   first-class config key — but the number is still declared rather than
+   derived; the [late-data page](late-data.md) takes this up properly.)
 
 smelt's position is that the numbers should not be promises. You write the
 plain, full-history query, and where incremental maintenance depends on a

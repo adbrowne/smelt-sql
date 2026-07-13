@@ -23,16 +23,19 @@ should.
 
 ## The cut rule
 
-`silver.sessions` uses the ordinary 30-minute gap rule (plus a platform
-change starting a new session), with one added deadline: a session dies
-at the first midnight it fails to reach into. Concretely, a session gets
-to cross at most one midnight, and only if it has an event in the new
-day's first 30 minutes — which a genuinely continuous session always does,
-since its gaps are under 30 minutes. Follow that through and you get a
-rule you can evaluate from a timestamp alone, worth stating because
-everything else on this page leans on it: **every session spans at most
-two calendar days.** No memory of the session's history is needed to know
-when it must end.
+`silver.sessions` keeps the ordinary 30-minute gap rule (plus a platform
+change starting a new session) and adds one deadline on top. The gap
+rule ends a session when the user pauses; the deadline exists so a
+session that never pauses still ends: a session dies at the first
+midnight it fails to reach into, where "reaching into" a day means
+having an event in its first 30 minutes. A session that genuinely
+crosses a midnight always reaches into the new day (its gaps are under
+30 minutes, so some event lands within 30 minutes of the boundary),
+which means the deadline only ever fires at the *next* midnight after
+that. Two consequences, and everything on this page leans on them:
+a session can cross at most one midnight, so **every session spans at
+most two calendar days** — and whether it must end is computable from a
+timestamp alone, with no memory of the session's history.
 
 ## The model
 
@@ -84,7 +87,7 @@ GROUP BY device_id, session_start_ts, session_start_date
 HAVING MAX(event_ts) - MIN(event_ts) < INTERVAL '2 days' -- max_session_span: explicit, checkable cap assertion
 ```
 
-Two things in here deserve names:
+Three things in here deserve names:
 
 - **The sessionization is a reusable function.**
   `smelt.functions.sessionize`
@@ -103,6 +106,12 @@ Two things in here deserve names:
   restates the same cap as a per-row assertion the emitted SQL enforces.
   And, same move as the lateness filter on the previous page, smelt
   derives windows from it — this time in the opposite direction.
+- **The attribution expression is just SQL.** `ARG_MAX(utm_campaign,
+  -epoch_us(event_ts)) FILTER (WHERE …)` picks the earliest non-NULL
+  campaign within the session's first five minutes — negating the
+  timestamp turns "value at the maximum" into "value at the earliest
+  event." It plays no role in the maintenance derivation; it's here so
+  the pipeline computes something a marketer would recognize.
 
 ## The write window inverts the filter
 
@@ -409,6 +418,10 @@ fires and only the cap decides:
 | Root-anchored cap (`silver.sessions_chained`) | 5 sessions (~1/2 days) | strictly ordered, sequential |
 | Cap inside the window frame only (this example's original design, since replaced) | ~50 single-event sessions per day | "independent," and wrong |
 
+(If you build streaming pipelines: the clock-anchored table is roughly
+what `session_window` can express; the root-anchored one is loosely the
+shape you'd otherwise reach for stateful processing for.)
+
 The third row is the cautionary one. A cap enforced only by a window
 frame's reach *looks* partition-independent — no self-reference, nothing
 for an analyzer to object to — but under the never-idle input the frame
@@ -416,8 +429,3 @@ simply stops containing what it needs, and session counts inflate 50×.
 Session count is a headline metric. The difference between the first two
 designs and the third is exactly the difference between a bound that is
 *true of the data* and one that is merely present in the code.
-
-(If you build streaming pipelines: the clock-anchored table is roughly
-what `session_window` can express; the root-anchored one is the shape
-you'd otherwise reach for stateful processing with checkpointed state
-for.)

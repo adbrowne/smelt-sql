@@ -1,8 +1,10 @@
 # Duplicates and late data
 
-The feed has two hygiene problems the first model ignored. About 2% of
-events are **redelivered**: a second copy arrives later, identical except
-for its arrival time (at-least-once delivery doing what it says). And events are **late**: in
+The feed has two hygiene problems the first model ignored — the
+duplicates and the lateness from the overview, now with mechanisms.
+Roughly one event in fifty is **redelivered**: a second copy arrives
+later, identical except for its arrival time (at-least-once delivery
+doing what it says). And events are **late**: in
 this feed, a fifth of events arrive an hour or more after they
 happened, and one in twenty arrives a full three days late.
 
@@ -86,7 +88,10 @@ one-day run compiles to now:
 The write window is unchanged — `[2026-04-10, 2026-04-11)` — but the read
 of `bronze_raw_events` widened to `[2026-04-07, 2026-04-11)`: the
 three-day acceptance window, derived from the filter, not configured
-anywhere. Change the `INTERVAL '3 days'` to `'7 days'` and every window
+anywhere. The read being wider than the write is also why a new wrapper
+appears: `_smelt_output_clamp` filters the result back down to exactly
+the write window before the `INSERT`, so the extra source days inform
+the computation without leaking extra rows into the table. Change the `INTERVAL '3 days'` to `'7 days'` and every window
 smelt ever emits for this model follows; there is no second copy of the
 number to forget.
 

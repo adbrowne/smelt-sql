@@ -66,8 +66,12 @@ the model is refused.
   *is* expressible as SQL, which for warehouse analytics is most of it.
 - **It's a young project.** Two backends — DuckDB and
   [Spark](../../guide/targets.md), where models materialize as Delta
-  tables by default; no automatic source watermarking yet; APIs still
-  move. The
+  tables by default; you write one dialect and smelt compiles it per
+  backend (`QUALIFY` rewrites, function and type translation), erroring
+  on constructs a target can't support. No automatic source watermarking
+  yet; no dev/prod environment isolation in the SQLMesh sense; nothing
+  coordinates two overlapping runs (serialize them in your scheduler);
+  APIs still move. The
   [roadmap](https://github.com/adbrowne/smelt-sql/blob/main/docs/ROADMAP.md)
   is public.
 
@@ -77,9 +81,11 @@ smelt is a CLI, not a scheduler. Run state — processed-interval history,
 run manifests, deployed-schema baselines — lives in a `.smelt/` directory
 beside the project, next to the warehouse tables themselves; scheduling
 is whatever you already use (cron, an orchestrator) invoking
-`smelt run --auto` or explicit windows. Data tests ship with the example
-(`smelt test`); the [CLI reference](../../reference/cli.md) has the full
-command surface.
+`smelt run --auto` or explicit windows. `smelt test` runs SQL test
+fixtures against models with mocked inputs — the example ships eight,
+covering the session-boundary and attribution invariants these pages
+rely on ([testing guide](../../guide/testing.md)). The
+[CLI reference](../../reference/cli.md) has the full command surface.
 
 ## Where next
 

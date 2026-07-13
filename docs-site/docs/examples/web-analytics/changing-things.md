@@ -13,6 +13,13 @@ them distinct, because the correct response to each is different:
 3. **Late updates** — the definition and shape are fine, but upstream
    data changed: late arrivals landed, a source was corrected.
 
+There is a fourth kind — changing the *logic* of an existing column —
+that smelt does not yet detect: the schema is unchanged, so nothing
+flags that history is stale, and you re-run or `backbuild` the affected
+range yourself. Automatic definition-change handling is tracked in the
+project's maintenance-plan spec; until it lands, treat logic edits as
+backfills you initiate.
+
 This page runs each one against the pipeline as built so far, on the
 stage projects ([stage 3](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/03_late_data),
 [stage 4](https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/04_add_column),
@@ -158,7 +165,9 @@ COMMIT
 The 18-day range didn't become one giant statement: it was split into
 chunks (`-- chunk 1/2`, `-- chunk 2/2`), each its own transactional
 `DELETE`+`INSERT`, so a long backfill holds bounded memory and commits
-incrementally. Notice each chunk's *read* carries its own three-day
+incrementally — and fails cleanly: if a later chunk dies, earlier
+chunks are already durable, and re-running the backfill is safe because
+each chunk's recompute is idempotent. Notice each chunk's *read* carries its own three-day
 widening at the edge — `chunk 1` writes `[04-01, 04-10)` but reads bronze
 from `03-29` — the late-arrival derivation from
 [the late-data page](late-data.md), composing with chunking instead of

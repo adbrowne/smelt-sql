@@ -117,5 +117,8 @@ when persona rounds come back clean (budget 2–3 rounds).
       workspace's self-referential table makes `--since-upstream` refuse)
 - [x] Generator multi-page rewrite + freshness-gate update
 - [x] Page drafts
-- [ ] Review rounds + revisions
-- [x] Old-page redirect, nav update (final gates pending)
+- [x] Review rounds + revisions (2 rounds: 3 personas + flow editor +
+      accuracy each; round 2 clean of structural findings, all 14 new
+      claims fact-checked CONFIRMED)
+- [x] Old-page redirect, nav update, final gates (generator --check,
+      tutorial_freshness, mkdocs build, verify-phase --fast)

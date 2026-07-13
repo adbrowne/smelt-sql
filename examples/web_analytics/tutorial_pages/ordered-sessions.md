@@ -63,14 +63,14 @@ part of the plan:
   [incremental models guide](../../guide/incremental-models.md#self-referential-ordered-models)
   for the general rules.)
 
+If you're mapping this to other stacks: this is loosely the batch analog
+of stateful stream processing — with the difference that the "state" is
+the table's own committed output rather than a mutable state store, and
+the checkpoint discipline is the derived ordering constraint.
+
 None of this is a defect — the root-anchored semantics genuinely require
 memory, and smelt's contribution is proving *which* execution discipline
 makes those semantics converge, then enforcing it, instead of letting a
 parallel backfill quietly corrupt the table. But the costs are real,
 which is why the main page's advice stands: order only what needs
 ordering.
-
-If you're mapping this to other stacks: this is the batch analog of
-stateful stream processing with a checkpoint store — the state is just
-kept in the table itself, and the "checkpoint discipline" is the derived
-ordering constraint.
