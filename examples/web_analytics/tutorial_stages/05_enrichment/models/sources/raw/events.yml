@@ -1,0 +1,21 @@
+description: Raw web analytics events with a JSON-encoded payload.
+name: raw.events
+columns:
+  - name: event_id
+    type: BIGINT
+  - name: device_id
+    type: INTEGER
+  - name: user_id
+    type: INTEGER
+  - name: seconds_in_day
+    type: INTEGER
+  - name: event_time
+    type: VARCHAR  # ISO 8601 string emitted by the timestamp_offset generator; DuckDB casts to TIMESTAMP on use
+  - name: arrival_time
+    type: VARCHAR  # ISO 8601 string; ingestion clock, >= event_time (up to 3 days later, the lateness tail; more for a redelivered duplicate)
+  - name: utm_campaign
+    type: VARCHAR  # nullable; present only for traffic that arrived via a tracked marketing link
+  - name: payload
+    type: VARCHAR
+  - name: event_date
+    type: VARCHAR  # hive partition value; emitted as Utf8 by the partitioned writer (DuckDB casts to DATE on use)
