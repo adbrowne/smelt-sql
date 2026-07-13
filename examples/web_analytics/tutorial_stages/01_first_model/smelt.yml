@@ -1,0 +1,11 @@
+name: web_analytics_tutorial_01
+version: 1
+paths:
+  - models
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+default_materialization: view
+unstable_schema: true
