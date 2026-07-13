@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1783917422148,
+  "lastUpdate": 1783917424958,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.015789000000002,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "11558e29cf88ff6b9f99cfd83742d8c92e35c9a0",
+          "message": "ci(docs): build via uv instead of a stale requirements.txt\n\ndocs-site/pyproject.toml + uv.lock have been the documented dependency\nsource since docs-site/CLAUDE.md introduced them, but docs.yml and\ndocs-pr-preview.yml still installed from a vestigial requirements.txt\nthat never tracked new plugin deps. This went unnoticed because no CI\nhad ever built docs for a PR branch before docs-pr-preview.yml existed\ntoday; its first real run (PR #160, which adds the mkdocs-redirects\nplugin) failed with \"the 'redirects' plugin is not installed\" since\nrequirements.txt only lists mkdocs-material.\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>\nClaude-Session: https://claude.ai/code/session_015PV1emYQUydUw5bRxEa7Zf",
+          "timestamp": "2026-07-13T14:33:56+10:00",
+          "tree_id": "b873363bed295a427200615c4b44396d0df0be59",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/11558e29cf88ff6b9f99cfd83742d8c92e35c9a0"
+        },
+        "date": 1783917423911,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.59554720751004,
+            "unit": "MB/s"
           }
         ]
       }
