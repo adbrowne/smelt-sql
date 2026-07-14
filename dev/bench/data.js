@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784023424259,
+  "lastUpdate": 1784023426517,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -341,6 +341,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.065584058589277,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "6a169e00536aaec36acceaae8781b8440072afba",
+          "message": "fix(test): parse Spark ARRAY<...> types in type-property Spark oracle (#162)\n\n* fix(test): parse Spark ARRAY<...> types in the type-property Spark oracle\n\nDESCRIBE QUERY output for ARRAY_AGG(BOOLEAN) reports \"array<boolean>\",\nwhich the oracle's type mapper didn't recognize and fell back to\nUnknown(Dynamic), causing prop_type_inference to fail against smelt's\ncorrect Array(Boolean) inference. Recurse into the element type instead.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n\n* fix(core): prune nested-project subtrees from a parent project's file walk\n\nproject_root_files_by_dir walked a project's entire subtree unbounded,\nso a parent project's discovery also claimed files belonging to a\nnested project (one with its own smelt.yml/smelt.yaml). The same\nabsolute path then got registered under two projects, corrupting\nworkspace-wide checks keyed on file identity — e.g. the LSP's\nduplicate-function-name diagnostic firing against the file itself when\na nested project's function collided by path with its own double\nregistration (examples/web_analytics/tutorial_stages/05_enrichment,\nadded by the web-analytics-tutorial PR, first exposed this).\n\nPer the \"Project isolation rule\", a nested project owns its files\nexclusively, so its directory is now a walk boundary alongside the\nexisting dotfile/target exclusions.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>\n\n---------\n\nCo-authored-by: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-14T20:01:47+10:00",
+          "tree_id": "818d551e1f4493b8e5f8f3daa85c399acd4606c0",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6a169e00536aaec36acceaae8781b8440072afba"
+        },
+        "date": 1784023425881,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.218190022104306,
             "unit": "MB/s"
           }
         ]
