@@ -10,6 +10,7 @@ description = "Dev-only Link-C schedule/oracle harness + model-shape catalogue f
 [dependencies]
 smelt-core = { path = "../smelt-core" }
 smelt-db = { path = "../smelt-db" }
+smelt-logical = { path = "../smelt-logical" }
 smelt-backend = { path = "../smelt-backend" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-runtime = { path = "../smelt-runtime" }
@@ -20,3 +21,18 @@ tokio-util = { version = "0.7", features = ["rt"] }
 anyhow.workspace = true
 chrono = "0.4"
 proptest.workspace = true
+tempfile = "3"
+rowan.workspace = true
+
+[dev-dependencies]
+# Dev-only, test-target-only dependency (`schedule_gen.rs`'s
+# `rewrite_model_step_changes_the_hash`, Phase 9 of
+# `docs/plans/20260712-generative-maintenance-conformance.md`): the
+# `RewriteModel` step's TDD test asserts against the REAL
+# `smelt_state::intervals::compute_model_hash` the interval store keys
+# coverage on, rather than a harness-local reimplementation. `smelt-runtime`
+# (already a normal dependency above) itself depends on `smelt-state`, but
+# Rust's extern prelude only exposes a crate's own direct dependencies, so
+# this crate needs its own entry — mirrors the same class of addition
+# `smelt-cli/Cargo.toml` already made for `smelt-state` in Phase 5.
+smelt-state = { path = "../smelt-state" }

@@ -1,0 +1,1035 @@
+//! `ModelRecipe` — a typed proptest value for the partition-grain
+//! append-only pool (`docs/plans/20260712-generative-maintenance-conformance.md`
+//! Phase 1; `docs/research/20260711-generative-maintenance-conformance.md` §4
+//! "`ModelRecipe` — generating models as typed data").
+//!
+//! A recipe is data, not SQL text: [`ModelRecipe`] pairs one [`SourceRecipe`]
+//! (an append-only, clocked `events(d, id, val)`-shaped source) with one
+//! [`BodyConstruct`] drawn from the coverage-matrix construct axis
+//! (pass-through · filter · additive aggregate · idempotent aggregate ·
+//! decomposed aggregate (`AVG`) · holistic aggregate) and a [`GrainDecl`]
+//! describing the `grain: partition` output shape. [`render`] turns a recipe
+//! into SQL/YAML text; this module owns only the typed value and its
+//! generator.
+//!
+//! Valid-by-construction (design §4): every field is a typed enum/struct, not
+//! a string the generator could mangle into unparseable SQL, so a generated
+//! recipe is expected to render, parse, and type-check cleanly — a recipe
+//! that trips a non-maintenance diagnostic is a generator bug (asserted by
+//! `render::rendered_recipe_stages_cleanly`), never silently discarded.
+
+use proptest::prelude::*;
+
+/// Bound for generated integer payload literals (design §5 "Numeric payload
+/// discipline"): integer-valued payloads with magnitude at most this bound
+/// keep additive folds bit-exact well under 2^53, so incremental-vs-full
+/// `EXCEPT ALL` comparisons stay exact regardless of fold order. Doubles /
+/// variance-class combiners are excluded from the v1 pool for the same
+/// reason (design §5).
+pub const PAYLOAD_BOUND: i64 = 1_000;
+
+/// A `Strategy` producing integer-valued payload literals in
+/// `[-PAYLOAD_BOUND, PAYLOAD_BOUND]` (design §5's numeric discipline). Shared
+/// by every pool construct that needs a literal (today: [`BodyConstruct::Filter`]'s
+/// threshold); future phases' row-data generation reuses the same bound.
+pub fn arb_payload_value() -> impl Strategy<Value = i64> {
+    -PAYLOAD_BOUND..=PAYLOAD_BOUND
+}
+
+/// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
+/// Phase 4; design §6 "mixed models"). Phase 1-3's pool is exclusively
+/// [`SourcePosture::AppendOnly`] (the fixed `events(d, id, val)` shape);
+/// Phase 4's [`MutableEnrichedRecipe`] adds an unclocked
+/// [`SourcePosture::MutableSnapshot`] dimension into the pool. Mirrors
+/// `smelt_core::sources::MutationProfile`'s two testkit-relevant variants
+/// (the `ChangeFeed` variant is out of this crate's generated pool).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SourcePosture {
+    /// Rows are only ever appended; an existing row never changes.
+    AppendOnly,
+    /// The table is a mutable snapshot: rows may be updated in place with no
+    /// change history — the wire name `mutation_profile: mutable_snapshot`
+    /// (`sources.md`).
+    MutableSnapshot,
+}
+
+/// The shape of a clocked source's declared `batched.unique_key`
+/// (`reachability_sample_inhabits_every_pool_construct` requires both shapes
+/// be reachable). Only [`BodyConstruct::PassThrough`] and
+/// [`BodyConstruct::Filter`] project a row per source row, so only they use
+/// this to pick the declared key; the aggregate constructs always key on the
+/// partition column alone (one row per partition, by construction of
+/// `GROUP BY`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum KeyShape {
+    /// `unique_key: [id]` — the source's own row key alone.
+    Single,
+    /// `unique_key: [d, id]` — partition column plus row key.
+    Composite,
+}
+
+fn arb_key_shape() -> impl Strategy<Value = KeyShape> {
+    prop_oneof![Just(KeyShape::Single), Just(KeyShape::Composite)]
+}
+
+/// The construct drawn from the coverage-matrix construct axis
+/// (`docs/research/20260711-generative-maintenance-conformance.md` §4). Phase
+/// 1's pool covers the six named in the plan's Phase 1 goal; adversarial
+/// (refusal-branch) variants are Phase 2 scope, added to this enum then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BodyConstruct {
+    /// `SELECT d, id, val FROM smelt.sources.<src>` — row-for-row passthrough.
+    PassThrough,
+    /// Passthrough with a `WHERE val > <threshold>` predicate. `threshold` is
+    /// drawn from [`arb_payload_value`] — the payload literal
+    /// `payloads_are_integer_valued_and_bounded` checks.
+    Filter { threshold: i64 },
+    /// `SUM(val) GROUP BY d` — a commutative-group combiner (maintenance
+    /// ladder rung 1/3, `maintenance_plan.md` §"The algebraic maintenance
+    /// ladder").
+    AdditiveAgg,
+    /// `MAX(val) GROUP BY d` — an idempotent, non-invertible monoid combiner
+    /// (ladder rung 1, not a group).
+    IdempotentAgg,
+    /// `AVG(val) GROUP BY d` — a decomposed monoid: the user value is a pure
+    /// presentation of a richer state (`sum`, `count`) (ladder rung 2).
+    DecomposedAgg,
+    /// `MEDIAN(val)` + `COUNT(DISTINCT id) GROUP BY d` — holistic aggregates
+    /// needing the full per-partition row set (ladder rung 4).
+    HolisticAgg,
+}
+
+/// Stable, human-readable identifier for a construct — used both for model
+/// naming (`recipe_<kind>`) and coverage-matrix cell ids
+/// (`recipe_names_its_matrix_cells`).
+fn construct_kind_name(construct: BodyConstruct) -> &'static str {
+    match construct {
+        BodyConstruct::PassThrough => "pass_through",
+        BodyConstruct::Filter { .. } => "filter",
+        BodyConstruct::AdditiveAgg => "additive_agg",
+        BodyConstruct::IdempotentAgg => "idempotent_agg",
+        BodyConstruct::DecomposedAgg => "decomposed_agg",
+        BodyConstruct::HolisticAgg => "holistic_agg",
+    }
+}
+
+impl BodyConstruct {
+    /// Whether this construct projects one output row per source row
+    /// (`PassThrough`/`Filter`) rather than one row per partition (the
+    /// aggregate family) — decides whether [`KeyShape`] affects the declared
+    /// `unique_key`.
+    fn is_row_shaped(self) -> bool {
+        matches!(
+            self,
+            BodyConstruct::PassThrough | BodyConstruct::Filter { .. }
+        )
+    }
+
+    /// The coverage-matrix cell id(s) this construct inhabits, `construct ×
+    /// source-property` (design §4 "Matrix-aware"). Phase 1's pool is
+    /// exclusively append-only sources, so every construct maps to exactly
+    /// one cell today; a construct crossed with more source properties in a
+    /// later phase would return more than one id, which is why this returns
+    /// a `Vec` rather than a single id.
+    pub fn matrix_cell_ids(self) -> Vec<String> {
+        vec![format!("{}×append_only", construct_kind_name(self))]
+    }
+}
+
+/// The pool of [`BodyConstruct`] kinds [`arb_recipe`] draws from — a
+/// unit-only mirror of [`BodyConstruct`] so the pool can be enumerated and
+/// sampled without needing a `threshold` value up front (that is filled in by
+/// [`arb_recipe`] itself, from [`arb_payload_value`]).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConstructKind {
+    PassThrough,
+    Filter,
+    AdditiveAgg,
+    IdempotentAgg,
+    DecomposedAgg,
+    HolisticAgg,
+}
+
+/// A named set of eligible [`ConstructKind`]s [`arb_recipe`] draws from.
+/// Phase 1 ships exactly one pool (the partition-grain append-only
+/// six-construct set); later phases (adversarial refusal leaves, mutable
+/// sources) add pools rather than growing this one, so a cell can pin exactly
+/// which constructs it wants reachable.
+#[derive(Debug, Clone)]
+pub struct RecipePool {
+    pub constructs: Vec<ConstructKind>,
+}
+
+impl RecipePool {
+    /// The Phase 1 pool: pass-through · filter · additive agg · idempotent
+    /// agg · decomposed agg (`AVG`) · holistic agg, over the partition-grain
+    /// append-only shape (plan Phase 1 goal).
+    pub fn partition_append_only() -> Self {
+        Self {
+            constructs: vec![
+                ConstructKind::PassThrough,
+                ConstructKind::Filter,
+                ConstructKind::AdditiveAgg,
+                ConstructKind::IdempotentAgg,
+                ConstructKind::DecomposedAgg,
+                ConstructKind::HolisticAgg,
+            ],
+        }
+    }
+}
+
+/// The one staged source every Phase 1 recipe uses: an append-only, clocked
+/// `events(d DATE, id INTEGER, val INTEGER)` source — the same column shape
+/// `model_shapes.rs` uses elsewhere in this crate, with `val` narrowed to
+/// `INTEGER` per design §5's numeric-payload discipline (a `DOUBLE` payload
+/// would make additive folds order-sensitive).
+#[derive(Debug, Clone)]
+pub struct SourceRecipe {
+    pub name: String,
+    pub clock_column: String,
+    pub key_column: String,
+    pub payload_column: String,
+    pub key_shape: KeyShape,
+    /// Declared mutation posture (Phase 4). Every Phase 1-3 source is
+    /// [`SourcePosture::AppendOnly`]; only [`SourceRecipe::mutable_dimension`]
+    /// produces [`SourcePosture::MutableSnapshot`].
+    pub posture: SourcePosture,
+}
+
+impl SourceRecipe {
+    /// The append-only, clocked `events(d, id, val)` source shape (`d`
+    /// clocked/partition, `id` the row key, `val` the INTEGER payload).
+    /// `pub(crate)` rather than private: [`crate::feed`]'s Phase 8
+    /// `change_feed`-driven keyed recipe reuses this exact shape, declaring
+    /// the resulting source as `change_feed` at staging time rather than
+    /// through [`SourcePosture`] (see that module's doc comment for why).
+    pub(crate) fn events(key_shape: KeyShape) -> Self {
+        Self {
+            name: "events".to_string(),
+            clock_column: "d".to_string(),
+            key_column: "id".to_string(),
+            payload_column: "val".to_string(),
+            key_shape,
+            posture: SourcePosture::AppendOnly,
+        }
+    }
+
+    /// An unclocked `mutable_snapshot` dimension source, keyed on `id` and
+    /// carrying one mutable INTEGER attribute column `attr` (the
+    /// `daily_events_enriched.sql`/`raw.users.user_name` role, narrowed to
+    /// INTEGER so it keeps the same numeric-payload discipline — design §5 —
+    /// as every other generated payload). Deliberately reuses the fact
+    /// source's own key space rather than introducing a separate
+    /// foreign-key column: [`MutableEnrichedRecipe`] joins the fact's own
+    /// row key straight to this dimension's `id` (1:1), so
+    /// [`crate::schedule_gen::GenRow`] /
+    /// [`crate::s_tracker::STracker`]'s existing `events(d, id, val)` shape
+    /// needs no widening for this phase — design §6 "mixed models" only
+    /// requires *a* mutable dimension in the pool, not a fan-out join.
+    pub fn mutable_dimension(name: &str) -> Self {
+        Self {
+            name: name.to_string(),
+            clock_column: String::new(),
+            key_column: "id".to_string(),
+            payload_column: "attr".to_string(),
+            key_shape: KeyShape::Single,
+            posture: SourcePosture::MutableSnapshot,
+        }
+    }
+
+    /// The declared `batched.unique_key` for `construct` over this source:
+    /// row-shaped constructs use [`KeyShape`]; aggregate constructs always
+    /// key on the partition column alone.
+    pub fn unique_key_for(&self, construct: BodyConstruct) -> Vec<String> {
+        if construct.is_row_shaped() {
+            match self.key_shape {
+                KeyShape::Single => vec![self.key_column.clone()],
+                KeyShape::Composite => vec![self.clock_column.clone(), self.key_column.clone()],
+            }
+        } else {
+            vec![self.clock_column.clone()]
+        }
+    }
+}
+
+/// The `grain: partition` output declaration: `timeseries:` block +
+/// `batched.unique_key`. Phase 1's pool is partition-grain only (plan Phase 1
+/// goal); a `grain: key` variant is future scope.
+#[derive(Debug, Clone)]
+pub struct GrainDecl {
+    pub event_time_column: String,
+    pub partition_column: String,
+    pub granularity: String,
+    pub unique_key: Vec<String>,
+}
+
+/// A definition-change edit a `RewriteModel` schedule step
+/// (`crate::schedule_gen::ConformanceStep::RewriteModel`) can apply to an
+/// already-staged recipe's model body
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
+/// `maintenance_plan.md` §"The definition-change trigger"). Both variants
+/// are deliberately narrow, hand-picked shapes — not a generated construct
+/// pool — since Phase 9's scope is asserting TODAY's contract (model-hash
+/// change invalidates the interval store; the run pipeline always compiles
+/// and executes whatever SQL is currently on disk), not the spec's
+/// `SkeletonAdd`/`PureBackfill`/`UpstreamRederive` classification, which is
+/// unbuilt (no `derive_model_maintenance_plan` caller reads a prior
+/// definition to classify an added column — confirmed by the same `rg`
+/// sweep noted in this plan's "Deferred during implementation" section for
+/// Phase 7's pin surface).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ModelEdit {
+    /// Adds a derived, non-skeleton payload column computed from the
+    /// existing payload column (e.g. `COUNT(*) AS row_count` alongside an
+    /// aggregate's existing `SUM(val)`) — same `GROUP BY`/identity shape,
+    /// so [`ModelRecipe::grain`]'s declared `unique_key` is unchanged.
+    AddPayloadColumn,
+    /// Adds the source's row-key column into the aggregate's `GROUP BY` (a
+    /// skeleton/identity position) — a grain change:
+    /// `maintenance_plan.md`'s `SkeletonAdd` territory. Only meaningful for
+    /// the aggregate constructs (`AdditiveAgg`/`IdempotentAgg`/
+    /// `DecomposedAgg`/`HolisticAgg`), which have a `GROUP BY` skeleton to
+    /// widen; the row-shaped constructs (`PassThrough`/`Filter`) already
+    /// project every source column and have none.
+    AddGroupingColumn,
+}
+
+/// The [`ModelEdit`]s meaningful for `construct` — [`ModelRecipe::evolution`]'s
+/// value, and the set [`crate::render::render_model_body_with_edit`] must
+/// handle for that construct.
+fn applicable_evolutions(construct: BodyConstruct) -> Vec<ModelEdit> {
+    match construct {
+        BodyConstruct::PassThrough | BodyConstruct::Filter { .. } => {
+            vec![ModelEdit::AddPayloadColumn]
+        }
+        BodyConstruct::AdditiveAgg
+        | BodyConstruct::IdempotentAgg
+        | BodyConstruct::DecomposedAgg
+        | BodyConstruct::HolisticAgg => {
+            vec![ModelEdit::AddPayloadColumn, ModelEdit::AddGroupingColumn]
+        }
+    }
+}
+
+/// A fully-typed model recipe: one source, one body construct, one grain
+/// declaration, ready for [`crate::render`] to turn into SQL/YAML text.
+#[derive(Debug, Clone)]
+pub struct ModelRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub grain: GrainDecl,
+    pub construct: BodyConstruct,
+    /// The [`ModelEdit`]s a `RewriteModel` schedule step may apply to this
+    /// recipe (Phase 9) — empty for constructs with no meaningful edit.
+    pub evolution: Vec<ModelEdit>,
+}
+
+impl ModelRecipe {
+    fn new(construct: BodyConstruct, key_shape: KeyShape) -> Self {
+        let source = SourceRecipe::events(key_shape);
+        let unique_key = source.unique_key_for(construct);
+        let grain = GrainDecl {
+            event_time_column: source.clock_column.clone(),
+            partition_column: source.clock_column.clone(),
+            granularity: "day".to_string(),
+            unique_key,
+        };
+        Self {
+            model_name: format!("recipe_{}", construct_kind_name(construct)),
+            source,
+            grain,
+            construct,
+            evolution: applicable_evolutions(construct),
+        }
+    }
+}
+
+/// The typed generator: draws a [`ConstructKind`] from `pool`, a
+/// [`KeyShape`], and (when the construct is [`ConstructKind::Filter`]) a
+/// payload threshold from [`arb_payload_value`], and assembles a
+/// [`ModelRecipe`]. Structural shrinking (proptest shrinks the drawn kind /
+/// threshold, never the rendered SQL text — design §4 "Structural
+/// shrinking") falls out of composing `Strategy`s rather than generating SQL
+/// directly.
+pub fn arb_recipe(pool: RecipePool) -> impl Strategy<Value = ModelRecipe> {
+    (
+        proptest::sample::select(pool.constructs),
+        arb_key_shape(),
+        arb_payload_value(),
+    )
+        .prop_map(|(kind, key_shape, threshold)| {
+            let construct = match kind {
+                ConstructKind::PassThrough => BodyConstruct::PassThrough,
+                ConstructKind::Filter => BodyConstruct::Filter { threshold },
+                ConstructKind::AdditiveAgg => BodyConstruct::AdditiveAgg,
+                ConstructKind::IdempotentAgg => BodyConstruct::IdempotentAgg,
+                ConstructKind::DecomposedAgg => BodyConstruct::DecomposedAgg,
+                ConstructKind::HolisticAgg => BodyConstruct::HolisticAgg,
+            };
+            ModelRecipe::new(construct, key_shape)
+        })
+}
+
+/// Adversarial leaf constructs (`docs/plans/20260712-generative-maintenance-conformance.md`
+/// Phase 2's "Implementation shape"): each deliberately defeats one of
+/// `model_properties.md`'s fail-closed proofs rather than merely being an
+/// unusual-but-provable shape. Kept as a type *separate* from
+/// [`BodyConstruct`] — [`BodyConstruct`]'s only renderer
+/// (`render::render_model_body`) is an exhaustive match, and `render.rs` is
+/// outside Phase 2's edit scope (Critical files: `verdict.rs` new,
+/// `recipe.rs` for the adversarial pool) — so [`AdversarialLeafRecipe`]
+/// renders itself instead of routing through that match.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum AdversarialLeaf {
+    /// An opaque/unrecognised function call wraps the projected event-time
+    /// column. `model_properties.md`'s event-time trace classifies an
+    /// unrecognised function call as `Undecidable` — fail-closed, never an
+    /// optimistic pass.
+    OpaqueEventTime,
+    /// `INTERSECT` combines two arms of the same source.
+    /// `model_properties.md` §Known Divergences: set-operation distribution
+    /// covers `UNION ALL` only; `derive_column_groups` fails closed on any
+    /// other set operation, collapsing every payload column into one group
+    /// sensitive to every declared source (`maintenance_plan.md` §Known
+    /// Divergences' `INTERSECT`/`EXCEPT` entry).
+    IntersectBody,
+    /// `RANDOM()` occupies a skeleton (identity/dedup-key) position — a
+    /// row-nondeterministic function feeding the column the plan needs a
+    /// stable identity from.
+    NondeterministicSkeleton,
+    /// The projected event-time column is shifted by a calendar-variable
+    /// (`INTERVAL '1 month'`) offset — `Offset::Symbolic`, which cannot
+    /// populate a `Bounded{before, after}` scan window, forcing
+    /// `NotDerivable` for the source rather than an approximate fixed-day
+    /// guess (`model_properties.md`'s interval-literal parsing note).
+    SymbolicIntervalBound,
+}
+
+/// Stable, human-readable identifier for an [`AdversarialLeaf`] — mirrors
+/// [`construct_kind_name`]'s role for [`BodyConstruct`].
+fn adversarial_leaf_name(leaf: AdversarialLeaf) -> &'static str {
+    match leaf {
+        AdversarialLeaf::OpaqueEventTime => "opaque_event_time",
+        AdversarialLeaf::IntersectBody => "intersect_body",
+        AdversarialLeaf::NondeterministicSkeleton => "nondeterministic_skeleton",
+        AdversarialLeaf::SymbolicIntervalBound => "symbolic_interval_bound",
+    }
+}
+
+/// A fully-typed adversarial recipe: one [`SourceRecipe`] (always the
+/// append-only `events` shape, `KeyShape::Single`) paired with one
+/// [`AdversarialLeaf`]. Self-rendering (see [`AdversarialLeaf`]'s doc
+/// comment for why): [`Self::model_body`]/[`Self::model_file`]/
+/// [`Self::source_yaml`] produce the same artifacts
+/// [`crate::render::render_model_body`]/[`crate::render::render_model_file`]/
+/// [`crate::render::render_source_yaml`] do for [`ModelRecipe`], without
+/// routing through `render.rs`.
+#[derive(Debug, Clone)]
+pub struct AdversarialLeafRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub leaf: AdversarialLeaf,
+}
+
+impl AdversarialLeafRecipe {
+    fn new(leaf: AdversarialLeaf) -> Self {
+        Self {
+            model_name: format!("adversarial_{}", adversarial_leaf_name(leaf)),
+            source: SourceRecipe::events(KeyShape::Single),
+            leaf,
+        }
+    }
+
+    /// The declared `batched.unique_key` for this leaf's body shape: the
+    /// source's own row key, plus the nondeterministic `tag` column for
+    /// [`AdversarialLeaf::NondeterministicSkeleton`] (the whole point of
+    /// that leaf is putting the nondeterministic function in a skeleton/
+    /// identity position).
+    pub fn unique_key(&self) -> Vec<String> {
+        match self.leaf {
+            AdversarialLeaf::NondeterministicSkeleton => {
+                vec![self.source.key_column.clone(), "tag".to_string()]
+            }
+            _ => vec![self.source.key_column.clone()],
+        }
+    }
+
+    /// The coverage-matrix cell id this leaf inhabits
+    /// (`construct × source-property`, matching [`BodyConstruct::matrix_cell_ids`]'s
+    /// convention).
+    pub fn matrix_cell_id(&self) -> String {
+        format!("{}×adversarial", adversarial_leaf_name(self.leaf))
+    }
+
+    /// The model's `SELECT` body — no frontmatter, mirroring
+    /// [`crate::render::render_model_body`]'s contract for [`ModelRecipe`].
+    pub fn model_body(&self) -> String {
+        let src = format!("smelt.sources.{}", self.source.name);
+        let d = &self.source.clock_column;
+        let id = &self.source.key_column;
+        let val = &self.source.payload_column;
+        match self.leaf {
+            AdversarialLeaf::OpaqueEventTime => {
+                format!("SELECT smelt_testkit_opaque_udf({d}) AS {d}, {id}, {val} FROM {src}")
+            }
+            AdversarialLeaf::IntersectBody => {
+                format!(
+                    "SELECT {d}, {id}, {val} FROM {src} \
+                     INTERSECT \
+                     SELECT {d}, {id}, {val} FROM {src}"
+                )
+            }
+            AdversarialLeaf::NondeterministicSkeleton => {
+                format!("SELECT {d}, {id}, {val}, RANDOM() AS tag FROM {src}")
+            }
+            AdversarialLeaf::SymbolicIntervalBound => {
+                format!("SELECT {d} + INTERVAL '1 month' AS {d}, {id}, {val} FROM {src}")
+            }
+        }
+    }
+
+    /// The full model file contents: frontmatter (`timeseries:` + `refresh:
+    /// incremental` + `grain: partition` + `batched.unique_key`) followed by
+    /// [`Self::model_body`] — the same shape
+    /// [`crate::render::render_model_file`] produces for [`ModelRecipe`].
+    pub fn model_file(&self) -> String {
+        let d = &self.source.clock_column;
+        let unique_key = self.unique_key().join(", ");
+        format!(
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+            body = self.model_body(),
+        )
+    }
+
+    /// The source YAML sidecar — same append-only `events(d, id, val)`
+    /// shape [`crate::render::render_source_yaml`] renders for
+    /// [`ModelRecipe`].
+    pub fn source_yaml(&self) -> String {
+        format!(
+            "description: adversarial-leaf conformance source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+            d = self.source.clock_column,
+            id = self.source.key_column,
+            val = self.source.payload_column,
+        )
+    }
+}
+
+/// A `Strategy` drawing uniformly from the four named [`AdversarialLeaf`]
+/// kinds (plan Phase 2 TDD list: "proptest over the adversarial pool").
+pub fn arb_adversarial_leaf() -> impl Strategy<Value = AdversarialLeaf> {
+    prop_oneof![
+        Just(AdversarialLeaf::OpaqueEventTime),
+        Just(AdversarialLeaf::IntersectBody),
+        Just(AdversarialLeaf::NondeterministicSkeleton),
+        Just(AdversarialLeaf::SymbolicIntervalBound),
+    ]
+}
+
+/// The typed generator over [`AdversarialLeafRecipe`] — the adversarial-pool
+/// counterpart of [`arb_recipe`].
+pub fn arb_adversarial_recipe() -> impl Strategy<Value = AdversarialLeafRecipe> {
+    arb_adversarial_leaf().prop_map(AdversarialLeafRecipe::new)
+}
+
+/// The fact+mutable-dimension enrichment recipe
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 4;
+/// design §6 "mixed models"; the
+/// `examples/timeseries/models/daily_events_enriched.sql` shape): one
+/// append-only clocked fact source (`events(d, id, val)`) joined 1:1 to one
+/// unclocked `mutable_snapshot` dimension source
+/// ([`SourceRecipe::mutable_dimension`]), producing a
+/// `ColumnScopedMerge`-eligible cell (MP11) for the dimension-sourced `attr`
+/// column group, alongside a `{d, id, val}` group never sensitive to the
+/// dimension's mutations. Self-renders like [`AdversarialLeafRecipe`] — the
+/// join body sits outside [`BodyConstruct`]'s exhaustive match, and
+/// `render.rs` is outside this phase's edit scope (plan Critical files).
+#[derive(Debug, Clone)]
+pub struct MutableEnrichedRecipe {
+    pub model_name: String,
+    pub fact: SourceRecipe,
+    pub dimension: SourceRecipe,
+}
+
+impl Default for MutableEnrichedRecipe {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl MutableEnrichedRecipe {
+    /// The pool's one fixed mixed-model shape (design §6's "mixed models"
+    /// needs exactly one mutable-dimension shape reachable; schedule
+    /// generation — not model-shape generation — is this pool's generative
+    /// surface, per the plan's Phase 4 Implementation shape).
+    pub fn new() -> Self {
+        Self {
+            model_name: "recipe_mutable_enriched".to_string(),
+            fact: SourceRecipe::events(KeyShape::Single),
+            dimension: SourceRecipe::mutable_dimension("dim"),
+        }
+    }
+
+    /// The declared `batched.unique_key`: the fact's own row key — still
+    /// uniquely identifies each output row since the join is 1:1
+    /// (`SourceRecipe::mutable_dimension`'s doc comment).
+    pub fn unique_key(&self) -> Vec<String> {
+        vec![self.fact.key_column.clone()]
+    }
+
+    /// The coverage-matrix cell id this recipe inhabits (mirrors
+    /// [`BodyConstruct::matrix_cell_ids`]'s convention).
+    pub fn matrix_cell_id(&self) -> String {
+        "mutable_enriched×mixed".to_string()
+    }
+
+    /// The model's `SELECT` body: the fact source passed through, enriched
+    /// by the dimension's `attr` column, joined on the fact's own row key.
+    pub fn model_body(&self) -> String {
+        let fact_src = format!("smelt.sources.{}", self.fact.name);
+        let dim_src = format!("smelt.sources.{}", self.dimension.name);
+        let d = &self.fact.clock_column;
+        let id = &self.fact.key_column;
+        let val = &self.fact.payload_column;
+        let dim_id = &self.dimension.key_column;
+        let attr = &self.dimension.payload_column;
+        format!(
+            "SELECT f.{d} AS {d}, f.{id} AS {id}, f.{val} AS {val}, dim.{attr} AS {attr} \
+             FROM {fact_src} f JOIN {dim_src} dim ON f.{id} = dim.{dim_id}"
+        )
+    }
+
+    /// The full model file contents: frontmatter (`timeseries:` + `refresh:
+    /// incremental` + `grain: partition` + `batched.unique_key` +
+    /// `maintenance.scan_bounds.per_source.<dim>.allow_full_scan: true`,
+    /// mirroring `daily_events_enriched.sql`'s own frontmatter) followed by
+    /// [`Self::model_body`].
+    pub fn model_file(&self) -> String {
+        let d = &self.fact.clock_column;
+        let unique_key = self.unique_key().join(", ");
+        format!(
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
+            dim_name = self.dimension.name,
+            body = self.model_body(),
+        )
+    }
+
+    /// The fact source YAML sidecar — the same append-only `events(d, id,
+    /// val)` shape [`crate::render::render_source_yaml`] renders for
+    /// [`ModelRecipe`].
+    pub fn fact_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance mixed-pool fact source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+            d = self.fact.clock_column,
+            id = self.fact.key_column,
+            val = self.fact.payload_column,
+        )
+    }
+
+    /// The dimension source YAML sidecar — unclocked,
+    /// `mutation_profile: mutable_snapshot` (`sources.md`).
+    pub fn dimension_source_yaml(&self) -> String {
+        format!(
+            "description: generative-conformance mixed-pool mutable dimension.\nmutation_profile: mutable_snapshot\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {attr}\n    type: INTEGER\n",
+            id = self.dimension.key_column,
+            attr = self.dimension.payload_column,
+        )
+    }
+
+    /// The oracle query for this recipe (design §6 "mixed models": "the
+    /// S-restriction applies to the driving source; the dimension
+    /// contributes its current state"): [`Self::model_body`] with the fact
+    /// source's `smelt.sources.*` reference swapped for `fact_table_ref`
+    /// (either the physical fact table, for a full-refresh oracle, or an
+    /// `STracker`-materialized `S_k` temp table) and the dimension's
+    /// reference always swapped for its CURRENT physical table — the
+    /// dimension is never S-restricted.
+    pub fn oracle_body_over(&self, fact_table_ref: &str) -> String {
+        self.model_body()
+            .replace(&format!("smelt.sources.{}", self.fact.name), fact_table_ref)
+            .replace(
+                &format!("smelt.sources.{}", self.dimension.name),
+                &format!("main.sources_{}", self.dimension.name),
+            )
+    }
+}
+
+/// A source's declared `batched.unique_key`/source-YAML rendering, factored
+/// out of [`SourceRecipe`] so [`KeyedRecipe`] (which has no `GrainDecl` —
+/// keyed output declares no `timeseries:`/`unique_key`, `keyed_models.md`
+/// Known Divergences) can render its driving source's YAML the same way
+/// [`crate::render::render_source_yaml`] does for a [`ModelRecipe`], without
+/// requiring a `GrainDecl` to exist.
+impl SourceRecipe {
+    pub fn source_yaml(&self) -> String {
+        match self.posture {
+            SourcePosture::AppendOnly => format!(
+                "description: generative-conformance keyed driving source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+                d = self.clock_column,
+                id = self.key_column,
+                val = self.payload_column,
+            ),
+            SourcePosture::MutableSnapshot => format!(
+                "description: generative-conformance keyed unclocked source.\nmutation_profile: mutable_snapshot\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+                id = self.key_column,
+                val = self.payload_column,
+            ),
+        }
+    }
+}
+
+/// The `grain: key` pool's combiner family
+/// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
+/// `maintenance_plan.md` §"The algebraic maintenance ladder"): both are
+/// direct-monoid, admitted by the built classifier seed
+/// (`crates/smelt-logical/src/rules/cumulative.rs`'s aggregator allowlist —
+/// `keyed_models.md` Known Divergences "the classifier covers only the
+/// direct-monoid families").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeyedCombiner {
+    /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
+    /// `Grade::Additive` reconciliation-ledger family: entries record delta
+    /// identities and a repeat fold of an already-processed window is
+    /// refused (`KeyedReprocessedWindow`, `keyed_models.md` §"Reprocessing").
+    Additive,
+    /// `MAX(val)` — an idempotent, non-invertible monoid (ladder rung 1,
+    /// not a group). The `Grade::Idempotent` family: entries record only a
+    /// frontier watermark, so re-folding a window is harmless.
+    Idempotent,
+}
+
+impl KeyedCombiner {
+    pub fn kind_name(self) -> &'static str {
+        match self {
+            KeyedCombiner::Additive => "additive",
+            KeyedCombiner::Idempotent => "idempotent",
+        }
+    }
+
+    /// `(aggregate function, output column alias)` this combiner projects.
+    pub fn agg_and_alias(self) -> (&'static str, &'static str) {
+        match self {
+            KeyedCombiner::Additive => ("SUM", "total"),
+            KeyedCombiner::Idempotent => ("MAX", "max_val"),
+        }
+    }
+}
+
+/// A `Strategy` drawing uniformly from the two [`KeyedCombiner`] families.
+pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
+    prop_oneof![
+        Just(KeyedCombiner::Additive),
+        Just(KeyedCombiner::Idempotent),
+    ]
+}
+
+/// A `grain: key` recipe (Phase 5): `SELECT <key>, <agg>(<val>) AS <alias>
+/// FROM smelt.sources.<name> GROUP BY <key>` over one [`SourceRecipe`].
+/// [`Self::new_window_forward`] uses the clocked append-only `events` shape
+/// (the run-shape derivation's window-forward posture,
+/// `keyed_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
+/// uses the unclocked `mutable_snapshot` dimension shape (selecting the
+/// snapshot-reconcile posture, refused today — `keyed_models.md` Known
+/// Divergences "the snapshot-reconcile executor is unbuilt").
+#[derive(Debug, Clone)]
+pub struct KeyedRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub combiner: KeyedCombiner,
+}
+
+impl KeyedRecipe {
+    pub fn new_window_forward(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!("recipe_keyed_{}", combiner.kind_name()),
+            source: SourceRecipe::events(KeyShape::Single),
+            combiner,
+        }
+    }
+
+    pub fn new_snapshot_reconcile(combiner: KeyedCombiner) -> Self {
+        Self {
+            model_name: format!("recipe_keyed_snapshot_{}", combiner.kind_name()),
+            source: SourceRecipe::mutable_dimension("keyed_snapshot_dim"),
+            combiner,
+        }
+    }
+}
+
+/// One `[start, end)` window of a generated keyed schedule, plus the rows
+/// landing in it — the keyed pool's analogue of
+/// [`crate::schedule_gen::ConformanceStep::RunWindow`], with no late-row/
+/// re-run step kinds (redelivery is a dedicated probe, not a generated
+/// schedule shape — plan Phase 5 TDD list
+/// `redelivered_window_refuses_for_additive_keyed`).
+#[derive(Debug, Clone)]
+pub struct KeyedRunWindow {
+    pub start: chrono::NaiveDate,
+    pub end: chrono::NaiveDate,
+    pub rows: Vec<crate::schedule_gen::GenRow>,
+}
+
+/// A generated sequence of [`KeyedRunWindow`]s.
+#[derive(Debug, Clone)]
+pub struct KeyedSchedule(pub Vec<KeyedRunWindow>);
+
+/// The key every generated window deliberately re-touches (design §5
+/// "Key-recurrence control": "keyed recipes generate schedules with
+/// deliberate key re-touch across windows — the interesting case for
+/// merges").
+const KEYED_SHARED_KEY_ID: i64 = 1;
+
+/// Schema-generic keyed-pool schedule generator: 2-3 disjoint one-day
+/// windows; every window contributes one row keyed on
+/// [`KEYED_SHARED_KEY_ID`] (guaranteeing key re-touch across windows) plus
+/// 1-2 rows keyed on fresh ids (variety). Never re-runs a window — a
+/// re-delivered window is the dedicated probe's own hand-built schedule, not
+/// a generated shape here.
+pub fn arb_keyed_schedule() -> impl Strategy<Value = KeyedSchedule> {
+    let base = chrono::NaiveDate::from_ymd_opt(2024, 1, 1).expect("valid base date");
+    (2_usize..=3).prop_flat_map(move |n_windows| {
+        proptest::collection::vec(
+            proptest::collection::vec(arb_payload_value(), 1..=2),
+            n_windows,
+        )
+        .prop_map(move |extra_vals| build_keyed_schedule(base, &extra_vals))
+    })
+}
+
+fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> KeyedSchedule {
+    use crate::schedule_gen::GenRow;
+
+    let mut windows = Vec::new();
+    let mut next_id = 100_i64;
+    for (i, vals) in extra_vals.iter().enumerate() {
+        let start = base + chrono::Duration::days(i as i64);
+        let end = start + chrono::Duration::days(1);
+
+        let mut rows = vec![GenRow {
+            d: start,
+            id: KEYED_SHARED_KEY_ID,
+            val: 1 + i as i64,
+        }];
+        for val in vals {
+            rows.push(GenRow {
+                d: start,
+                id: next_id,
+                val: *val,
+            });
+            next_id += 1;
+        }
+        windows.push(KeyedRunWindow { start, end, rows });
+    }
+    KeyedSchedule(windows)
+}
+
+/// A `Strategy` producing `n` pairwise-distinct `i64` ordering-key values by
+/// construction (design §5 "Key-recurrence control": "where ordering-
+/// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
+/// made unique by construction so the documented ties carve-out cannot fire
+/// spuriously" — `keyed_models.md` §"Ordering ties"). The order-monotone
+/// overwrite combiner family this discipline targets is not yet an admitted
+/// technique (`keyed_models.md` Known Divergences: "the classifier union
+/// (overwrite, once-write, and plain-overwrite families) ... are unbuilt"),
+/// so this generator is not wired into [`KeyedCombiner`] today — but the
+/// discipline it must uphold once that family lands is independently
+/// testable now: a strictly increasing sequence can never collide, by
+/// construction rather than by (unprovable) statistical luck.
+pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
+    (0..1_000_000_i64).prop_map(move |base| (0..n as i64).map(|i| base + i).collect())
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::render;
+    use proptest::strategy::{Strategy, ValueTree};
+    use proptest::test_runner::TestRunner;
+    use std::collections::HashSet;
+
+    /// `payloads_are_integer_valued_and_bounded` (plan Phase 1 TDD list):
+    /// generated payload literals (today: `Filter`'s threshold) are
+    /// integer-valued and bounded by `PAYLOAD_BOUND` (design §5).
+    #[test]
+    fn payloads_are_integer_valued_and_bounded() {
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_recipe(RecipePool::partition_append_only());
+        let mut saw_filter = false;
+        for _ in 0..500 {
+            let recipe = strat.new_tree(&mut runner).unwrap().current();
+            if let BodyConstruct::Filter { threshold } = recipe.construct {
+                saw_filter = true;
+                assert!(
+                    (-PAYLOAD_BOUND..=PAYLOAD_BOUND).contains(&threshold),
+                    "filter threshold {threshold} exceeds the documented bound \
+                     ±{PAYLOAD_BOUND} (design §5's numeric-payload discipline)"
+                );
+            }
+        }
+        assert!(saw_filter, "sample never generated a Filter recipe");
+    }
+
+    /// `reachability_sample_inhabits_every_pool_construct` (plan Phase 1 TDD
+    /// list): a deterministic `TestRunner` sample of N=200 recipes inhabits
+    /// every `BodyConstruct` variant in the pool and both clocked-source key
+    /// shapes (pattern: `crates/smelt-db/tests/type_property_tests.rs::reachability`).
+    #[test]
+    fn reachability_sample_inhabits_every_pool_construct() {
+        const N: usize = 200;
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_recipe(RecipePool::partition_append_only());
+
+        let mut seen_kinds: HashSet<&'static str> = HashSet::new();
+        let mut seen_key_shapes: HashSet<KeyShape> = HashSet::new();
+        for _ in 0..N {
+            let recipe = strat.new_tree(&mut runner).unwrap().current();
+            seen_kinds.insert(construct_kind_name(recipe.construct));
+            seen_key_shapes.insert(recipe.source.key_shape);
+        }
+
+        for kind in [
+            "pass_through",
+            "filter",
+            "additive_agg",
+            "idempotent_agg",
+            "decomposed_agg",
+            "holistic_agg",
+        ] {
+            assert!(
+                seen_kinds.contains(kind),
+                "N={N} sample never generated construct {kind:?} — generator regression"
+            );
+        }
+        assert!(
+            seen_key_shapes.contains(&KeyShape::Single),
+            "N={N} sample never generated KeyShape::Single"
+        );
+        assert!(
+            seen_key_shapes.contains(&KeyShape::Composite),
+            "N={N} sample never generated KeyShape::Composite"
+        );
+    }
+
+    /// `recipe_names_its_matrix_cells` (plan Phase 1 TDD list): each pool
+    /// construct maps to at least one coverage-matrix `(construct ×
+    /// source-property)` cell id.
+    #[test]
+    fn recipe_names_its_matrix_cells() {
+        let representatives = [
+            BodyConstruct::PassThrough,
+            BodyConstruct::Filter { threshold: 1 },
+            BodyConstruct::AdditiveAgg,
+            BodyConstruct::IdempotentAgg,
+            BodyConstruct::DecomposedAgg,
+            BodyConstruct::HolisticAgg,
+        ];
+        for construct in representatives {
+            let cells = construct.matrix_cell_ids();
+            assert!(
+                !cells.is_empty(),
+                "{construct:?} maps to zero coverage-matrix cells"
+            );
+            for cell in &cells {
+                assert!(
+                    cell.contains('×'),
+                    "cell id {cell:?} is not of the form `construct × source-property`"
+                );
+            }
+        }
+    }
+
+    /// `oracle_sql_is_model_body_with_sources_swapped` (plan Phase 1 TDD
+    /// list): the rendered oracle query equals the model body with each
+    /// `smelt.sources.<x>` replaced by its physical table name, nothing else
+    /// changed.
+    #[test]
+    fn oracle_sql_is_model_body_with_sources_swapped() {
+        let mut runner = TestRunner::deterministic();
+        let strat = arb_recipe(RecipePool::partition_append_only());
+        for _ in 0..50 {
+            let recipe = strat.new_tree(&mut runner).unwrap().current();
+            let body = render::render_model_body(&recipe);
+            let oracle = render::render_oracle_sql(&recipe);
+            let smelt_ref = format!("smelt.sources.{}", recipe.source.name);
+            let physical_ref = format!("main.sources_{}", recipe.source.name);
+
+            // Independent, round-trip check rather than re-deriving `expected`
+            // via the same `.replace()` call `render_oracle_sql` itself uses
+            // internally (which would only ever agree with its own logic):
+            // the source-ref occurrence counts must match, the physical name
+            // must appear in the oracle and never in the body, the smelt ref
+            // must appear in the body and never survive into the oracle, and
+            // substituting the physical name back to the smelt ref in the
+            // oracle must reproduce the body exactly.
+            assert!(
+                body.contains(&smelt_ref),
+                "model body must reference smelt.sources.{}",
+                recipe.source.name
+            );
+            assert!(
+                !body.contains(&physical_ref),
+                "model body must not already contain the physical table name"
+            );
+            assert!(
+                oracle.contains(&physical_ref),
+                "oracle SQL must reference the physical table main.sources_{}",
+                recipe.source.name
+            );
+            assert!(
+                !oracle.contains(&smelt_ref),
+                "oracle SQL must not retain the smelt.sources reference"
+            );
+            assert_eq!(
+                body.matches(&smelt_ref).count(),
+                oracle.matches(&physical_ref).count(),
+                "every smelt.sources occurrence in the body must become exactly \
+                 one physical-table occurrence in the oracle"
+            );
+            assert_eq!(
+                oracle.replace(&physical_ref, &smelt_ref),
+                body,
+                "reversing the physical-table substitution must reproduce the \
+                 model body exactly, with nothing else changed"
+            );
+        }
+    }
+
+    /// `ordering_keys_are_unique_by_construction` (plan Phase 5 TDD list):
+    /// generator discipline for order-monotone combiners — a sample of
+    /// generated ordering-key vectors of every sampled length is always
+    /// pairwise distinct, so the documented ties carve-out
+    /// (`keyed_models.md` §"Ordering ties") can never fire spuriously
+    /// against generated data.
+    #[test]
+    fn ordering_keys_are_unique_by_construction() {
+        let mut runner = TestRunner::deterministic();
+        for n in 1..=8_usize {
+            let strat = arb_unique_ordering_keys(n);
+            for _ in 0..20 {
+                let keys = strat.new_tree(&mut runner).unwrap().current();
+                assert_eq!(keys.len(), n, "generator must produce exactly n keys");
+                let unique: HashSet<i64> = keys.iter().copied().collect();
+                assert_eq!(
+                    unique.len(),
+                    keys.len(),
+                    "ordering keys must be pairwise distinct by construction, got {keys:?}"
+                );
+            }
+        }
+    }
+
+    /// `keyed_pool_recipes_render_both_combiner_families` — a basic sanity
+    /// check that [`KeyedRecipe::new_window_forward`] produces a distinct
+    /// model per [`KeyedCombiner`] and its body names the expected
+    /// aggregate.
+    #[test]
+    fn keyed_pool_recipes_render_both_combiner_families() {
+        let additive = KeyedRecipe::new_window_forward(KeyedCombiner::Additive);
+        let idempotent = KeyedRecipe::new_window_forward(KeyedCombiner::Idempotent);
+        assert_ne!(additive.model_name, idempotent.model_name);
+
+        let additive_body = render::render_keyed_model_body(&additive);
+        let idempotent_body = render::render_keyed_model_body(&idempotent);
+        assert!(additive_body.contains("SUM("));
+        assert!(idempotent_body.contains("MAX("));
+    }
+}

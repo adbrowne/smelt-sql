@@ -311,7 +311,57 @@ fn per_delta_grade_lives_in_warehouse() {
 #[test]
 fn fold_then_recompute_schedule_over_real_duckdb_model_matches_full_refresh() {
     use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
-    use smelt_maintenance_testkit::model_shapes::{additive_agg_append_only, ModelShape};
+
+    /// A minimal local stand-in for the retired
+    /// `smelt_maintenance_testkit::model_shapes::{ModelShape, SourceColumn}` —
+    /// this test only ever stages one shape (the additive `SUM` group-by,
+    /// append-only control cell), so the struct + constructor are inlined
+    /// here rather than reintroducing a shared catalogue module for a single
+    /// caller.
+    struct SourceColumn {
+        name: &'static str,
+        ty: &'static str,
+    }
+
+    struct ModelShape {
+        name: &'static str,
+        sql: &'static str,
+        source: &'static str,
+        source_columns: &'static [SourceColumn],
+    }
+
+    fn additive_agg_append_only() -> ModelShape {
+        ModelShape {
+            name: "events_daily_total_append_only",
+            sql: r#"---
+timeseries:
+  event_time_column: d
+  partition_column: d
+  granularity: day
+refresh: incremental
+grain: partition
+batched:
+  unique_key: [d]
+---
+SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
+"#,
+            source: "events",
+            source_columns: &[
+                SourceColumn {
+                    name: "d",
+                    ty: "DATE",
+                },
+                SourceColumn {
+                    name: "id",
+                    ty: "INTEGER",
+                },
+                SourceColumn {
+                    name: "val",
+                    ty: "DOUBLE",
+                },
+            ],
+        }
+    }
 
     fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {
         std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();

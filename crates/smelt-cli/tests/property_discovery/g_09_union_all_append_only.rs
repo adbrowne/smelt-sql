@@ -23,8 +23,8 @@
 
 use std::path::Path;
 
+use crate::shapes::{union_all_two_append_only, MultiSourceModelShape};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
-use smelt_maintenance_testkit::model_shapes::{union_all_two_append_only, MultiSourceModelShape};
 use smelt_maintenance_testkit::oracle::multiset_equal;
 
 fn stage_project(shape: &MultiSourceModelShape, project_dir: &Path, db_path: &Path) {

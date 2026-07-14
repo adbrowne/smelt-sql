@@ -21,14 +21,55 @@
 //!
 //! - [`link_c_harness`] — drives smelt's real run pipeline
 //!   (`smelt_runtime::execute_project`) in-process over a temp DuckDB.
-//! - [`model_shapes`] — the single readable catalogue of model shapes the
-//!   equivalence suite exercises.
 //! - [`oracle`] — the Link-C multiset-equality oracle (`EXCEPT ALL` both
 //!   directions).
-//! - [`run_schedule`] — the run-schedule generator + driver, including
-//!   between-run source mutation (append/update/delete).
+//! - [`recipe`] — `ModelRecipe`, the typed proptest value generating models
+//!   as data over the partition-grain append-only construct pool
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 1).
+//! - [`render`] — renders a `ModelRecipe` into model/source/oracle SQL and a
+//!   staged project.
+//! - [`verdict`] — classifies a staged recipe through the *real* maintenance
+//!   derivation (`smelt_db::maintenance_plan_report` + `file_diagnostics`)
+//!   into `Admitted`/`Refused`, plus the adversarial leaf pool and the
+//!   over-refusal ledger
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 2).
+//! - [`schedule_gen`] — schema-generic row/schedule generation over a
+//!   [`recipe::ModelRecipe`]'s own source shape
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 3).
+//! - [`s_tracker`] — the S-tracker: records `(window, source snapshot)` per
+//!   run and derives `S_k`, the append-only pool's S-restricted oracle
+//!   baseline (`docs/plans/20260712-generative-maintenance-conformance.md`
+//!   Phase 3); Phase 4 extends it with per-window outstanding-dimension-
+//!   mutation bookkeeping for mixed (fact + mutable dimension) models.
+//! - [`oracle_modes`] — the `OracleMode` enum a mixed model selects between
+//!   (S-restricted vs settled-point,
+//!   `docs/plans/20260712-generative-maintenance-conformance.md` Phase 4).
+//! - [`probes`] — plan-claim probes: `CaseContext`/`ProbeOutcome`, the
+//!   direct runtime checks that a derived plan claim actually holds beyond
+//!   end-state equivalence alone (scan-clamp/compiled-SQL consistency,
+//!   write-window containment, technique interchangeability), plus the
+//!   skip-accounting `ReachabilityReport` fold
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 7).
+//! - [`dag`] — generated 2-3 node DAGs (chain, diamond, payload-leak pair)
+//!   wiring [`recipe::ModelRecipe`]-style nodes together via `smelt.ref()`,
+//!   for the propagation-sufficiency/backward-resolution suite in
+//!   `smelt-cli`'s `tests/maintenance_conformance/dags.rs`
+//!   (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 10).
+//! - [`feed`] — the `SimulatedChangeFeed` step family for `change_feed`-
+//!   declared sources: base-table mutation + staged `(op, key, payload,
+//!   seq)` feed-table bookkeeping, gated retraction/tombstone steps, and the
+//!   `change_feed` YAML rendering the recompute-only admission gate stages
+//!   against (`docs/plans/20260712-generative-maintenance-conformance.md`
+//!   Phase 8).
 
+pub mod dag;
+pub mod feed;
 pub mod link_c_harness;
-pub mod model_shapes;
 pub mod oracle;
-pub mod run_schedule;
+pub mod oracle_modes;
+pub mod probes;
+pub mod recipe;
+pub mod render;
+pub mod s_tracker;
+pub mod schedule_gen;
+pub mod verdict;

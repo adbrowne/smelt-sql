@@ -879,18 +879,31 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   the sufficiency-vs-full-refresh equivalence check); `crates/smelt-cli/tests/include_upstreams.rs`
   (the CLI-wired backward-resolution suite: resolved-slices-suffice-vs-full-refresh equivalence
   over a two-hop chain, and an unclocked-ancestor-resolves-to-whole-table case);
-  `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the graduated Link-C in-process
-  harness — the real-run-pipeline driver, the model-shape catalogue, the multiset-equality oracle,
-  and the mutation-aware run-schedule generator/driver — wired as a dev-dependency of `smelt-cli`);
-  `cargo test -p smelt-cli --test property_discovery` is the standing equivalence gate: it runs the
-  Link-C schedule suite over the full model-shape catalogue against a real DuckDB backend on every
-  `cargo test`, asserting emitted maintenance output equals a full refresh over adversarial
-  append/lateness/mutation schedules. The per-cell probe modules under
-  `crates/smelt-cli/tests/property_discovery/` that consume the testkit crate remain disposable
-  research probes (see `.claude/scripts/property-experimental-gate.sh`); only the shared harness
-  graduated. `cargo test -p smelt-logical --test maintenance_plan_conformance ::
-  coverage_matrix_is_inhabited` is the standing inventory gate over the research example
-  catalogue's coverage matrix (`docs/research/20260705-refresh-as-maintenance-plan/
+  `crates/smelt-maintenance-testkit` (dev-only, `publish = false`; the Link-C in-process harness —
+  the real-run-pipeline driver, the typed `ModelRecipe` generator (`recipe.rs`), the schema-generic
+  schedule generator (`schedule_gen.rs`), the S-tracked equivalence oracle (`s_tracker.rs`,
+  `oracle_modes.rs`), and the multiset-equality oracle (`oracle.rs`) — wired as a dev-dependency of
+  `smelt-cli`); `cargo test -p smelt-cli --test maintenance_conformance` is the standing generative
+  equivalence gate: on every `cargo test`, a deterministic-seeded sample of typed `ModelRecipe`
+  values (append-only partition-grain, fact+mutable-dimension, `grain: key`, and generated 2-3 node
+  DAGs) is staged, classified through the real maintenance derivation, and driven through
+  `execute_project` against a real DuckDB backend, asserting emitted maintenance output equals a
+  full-refresh oracle after every run step under adversarial append/lateness/mutation/redelivery/
+  definition-change schedules (`SMELT_CONFORMANCE_CASES` scales the sample depth for a deeper local
+  or nightly soak run). A `pinned` module reproduces every construct × posture cell and named hazard
+  schedule the gate subsumes as deterministic, always-reproducible cases (never proptest-drawn
+  alone), and a `registry` module tracks named divergences with a staleness report (entries that
+  never fire over the deterministic sample are reported, never failed — the same governance pattern
+  `crates/smelt-db/tests/prop_helpers/known_unknowns.rs` uses). The per-cell probe modules under
+  `crates/smelt-cli/tests/property_discovery/` cover constructs the typed recipe generator has no
+  vocabulary for yet (self-referential models, `UNION ALL`, `LEFT JOIN`, correlated `EXISTS`,
+  stacked window frames, cross-source column-name collision, a mutable source aggregated directly)
+  and remain disposable research probes (see `.claude/scripts/property-experimental-gate.sh`).
+  `crates/smelt-cli/tests/incremental/` is narrower still: it drives a backend's incremental
+  strategy directly given a hand-supplied filter, proving the strategy executes correctly once
+  handed one, independent of how that filter is derived. `cargo test -p smelt-logical --test
+  maintenance_plan_conformance :: coverage_matrix_is_inhabited` is the standing inventory gate over
+  the research example catalogue's coverage matrix (`docs/research/20260705-refresh-as-maintenance-plan/
   07-example-catalogue.md` §"Coverage matrix", plus one `INTERSECT`/`EXCEPT` row this gate adds):
   it encodes the matrix as data and asserts every inhabited `(construct × source-property)` cell
   is accounted for by exactly one of two explicit, disjoint lists — `CLAIMED` (a grounded,
@@ -901,12 +914,12 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   `CLAIMED`/`KNOWN_GAPS` entry fails the test, by construction (additive-only). `CLAIMED` currently
   lifts 9 catalogue ids (EX-02, EX-08, EX-12, EX-14, EX-18, EX-24, EX-26, EX-27, EX-35, plus the
   added EX-41/EX-42 row); the remainder of the matrix's ~100 inhabited cells are named individually
-  in `KNOWN_GAPS` (most as "plausibly covered by an existing `G-*`/`SC-*` property-discovery probe,
-  not re-verified against this exact catalogue id" — cross-referencing those probes to catalogue
-  ids by name is itself unbuilt; a few, like EX-25's LAG/LEAD footprint reflection and EX-29's
-  as-of-run-contract gating, need production investigation not yet done). Both lists are per-cell,
-  never per-row, so a future change can lift one cell at a time without re-deriving the whole
-  inventory.
+  in `KNOWN_GAPS` (most as "plausibly covered by an existing `maintenance_conformance::pinned`
+  hazard case or `G-*`/`SC-*` property-discovery probe, not re-verified against this exact catalogue
+  id" — cross-referencing those cases to catalogue ids by name is itself unbuilt; a few, like
+  EX-25's LAG/LEAD footprint reflection and EX-29's as-of-run-contract gating, need production
+  investigation not yet done). Both lists are per-cell, never per-row, so a future change can lift
+  one cell at a time without re-deriving the whole inventory.
 - **User docs**: `docs-site/docs/index.md`, `docs-site/docs/guide/{incremental-models,sql-models,materializations}.md`,
   `docs-site/docs/concepts/how-it-works.md`, `docs-site/docs/reference/{timeseries,smelt-yml,cumulative-aggregate,cli}.md`
   describe the trichotomy + grain surface; `docs-site/docs/reference/cli.md` also documents

@@ -102,6 +102,9 @@ jobs:
       - name: Maintenance-plan equivalence gate (Link-C schedule suite)
         run: cargo test -p smelt-cli --no-default-features --features duckdb --test property_discovery
 
+      - name: Maintenance-plan conformance gate (generative regression net)
+        run: cargo test -p smelt-cli --no-default-features --features duckdb --test maintenance_conformance
+
       - name: Run LSP integration tests
         # All integration tests under crates/smelt-lsp/tests/ — completion,
         # diagnostics, e2e, example_workspaces, goto_definition, hover,

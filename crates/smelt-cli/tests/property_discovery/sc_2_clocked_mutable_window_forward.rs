@@ -25,8 +25,8 @@
 
 use std::path::Path;
 
+use crate::shapes::{additive_agg_mutable_source, ModelShape};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
-use smelt_maintenance_testkit::model_shapes::{additive_agg_mutable_source, ModelShape};
 
 fn stage_project(shape: &ModelShape, project_dir: &Path, db_path: &Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
