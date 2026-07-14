@@ -190,6 +190,13 @@ fn spark_type_to_smelt(type_str: &str) -> DataType {
         }
     }
 
+    // ARRAY<element_type> — recurse on the element type.
+    if let Some(inner) = lower.strip_prefix("array<") {
+        if let Some(inner) = inner.strip_suffix('>') {
+            return DataType::Array(Box::new(spark_type_to_smelt(inner)));
+        }
+    }
+
     match lower {
         "boolean" => DataType::Boolean,
         "tinyint" | "byte" => DataType::SmallInt,
@@ -238,6 +245,22 @@ mod tests {
             DataType::Timestamp {
                 with_timezone: false
             }
+        );
+    }
+
+    #[test]
+    fn parse_array_type() {
+        assert_eq!(
+            spark_type_to_smelt("array<boolean>"),
+            DataType::Array(Box::new(DataType::Boolean))
+        );
+        assert_eq!(
+            spark_type_to_smelt("array<int>"),
+            DataType::Array(Box::new(DataType::Integer))
+        );
+        assert_eq!(
+            spark_type_to_smelt("array<array<int>>"),
+            DataType::Array(Box::new(DataType::Array(Box::new(DataType::Integer))))
         );
     }
 
