@@ -31,6 +31,7 @@ mod meta_workspace_e2e;
 mod path_prefix_build;
 mod per_partition_equivalence;
 mod run_command_end_to_end;
+mod schema_evolution_incremental;
 mod schema_roundtrip;
 mod scope_integration;
 mod select_parse_gate;

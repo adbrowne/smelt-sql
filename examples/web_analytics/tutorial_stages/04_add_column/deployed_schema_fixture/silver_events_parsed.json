@@ -1,0 +1,58 @@
+{
+  "model": "silver_events_parsed",
+  "version": 1,
+  "deployed_at": "2026-04-11T00:00:00Z",
+  "model_hash": "sha256:0c3546c6fc7fb8fde24a4bc07397569494e4dce1de4b3e204004871fee900a8e",
+  "columns": [
+    {
+      "name": "event_id",
+      "type": "BIGINT",
+      "nullable": false
+    },
+    {
+      "name": "device_id",
+      "type": "INTEGER",
+      "nullable": false
+    },
+    {
+      "name": "user_id",
+      "type": "INTEGER",
+      "nullable": false
+    },
+    {
+      "name": "amplitude_id",
+      "type": "TEXT",
+      "nullable": true
+    },
+    {
+      "name": "event_ts",
+      "type": "TIMESTAMP",
+      "nullable": false
+    },
+    {
+      "name": "event_date",
+      "type": "DATE",
+      "nullable": false
+    },
+    {
+      "name": "utm_campaign",
+      "type": "VARCHAR",
+      "nullable": false
+    },
+    {
+      "name": "event_name",
+      "type": "TEXT",
+      "nullable": true
+    },
+    {
+      "name": "platform",
+      "type": "TEXT",
+      "nullable": true
+    },
+    {
+      "name": "url",
+      "type": "TEXT",
+      "nullable": true
+    }
+  ]
+}

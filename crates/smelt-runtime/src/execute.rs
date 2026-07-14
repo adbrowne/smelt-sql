@@ -1741,6 +1741,42 @@ pub async fn execute_project(
             return Err(e);
         }
 
+        // ── First-deployment schema baseline (incremental models) ────────
+        // The schema-evolution gate above can only diff against a stored
+        // deployed schema. Full-refresh models save theirs inside their own
+        // execution branch, but the incremental branch never did — leaving
+        // the gate permanently on `FirstDeployment`: `smelt diff` reported
+        // the model as new forever, and an added column crashed the next
+        // incremental INSERT instead of being ALTERed in. Save a baseline
+        // (best-effort, like the full-refresh save) the first time an
+        // incremental model executes successfully; `check_and_migrate`
+        // takes over versioning from then on.
+        if plan.incremental.is_some() {
+            let db_table_name = plan.model_file.db_name_owned();
+            let already_stored = file_store
+                .load_schema(&db_table_name)
+                .ok()
+                .flatten()
+                .is_some();
+            if !already_stored {
+                let inferred_columns = {
+                    let db_guard = db.lock().await;
+                    crate::schema_evolution::infer_deployed_columns(&db_guard, &plan.model_file)
+                };
+                if !inferred_columns.is_empty() {
+                    if let Err(e) = crate::schema_evolution::save_deployed_schema(
+                        &file_store,
+                        &db_table_name,
+                        &plan.sql,
+                        &inferred_columns,
+                        None,
+                    ) {
+                        tracing::warn!("Failed to save deployed schema for '{}': {}", plan.name, e);
+                    }
+                }
+            }
+        }
+
         let model_duration = model_start.elapsed();
         reporter.model_completed(&run_id, &plan.name, total_rows, model_duration);
         // ── Check seam B: incremental / full-refresh arm ─────────────────────
