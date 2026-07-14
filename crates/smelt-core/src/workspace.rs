@@ -193,6 +193,46 @@ mod tests {
     }
 
     #[test]
+    fn load_workspace_excludes_nested_project_files() {
+        // A parent project's walk must not claim files belonging to a nested
+        // smelt project (one with its own smelt.yml) — see the "Project
+        // isolation rule". Without this exclusion, a nested project's file
+        // gets registered under both projects, corrupting workspace-wide
+        // checks that key on file identity (e.g. duplicate-function-name
+        // detection).
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("models")).unwrap();
+        std::fs::write(
+            dir.path().join("smelt.yml"),
+            "name: parent\nversion: 1\npaths:\n  - models\n",
+        )
+        .unwrap();
+        std::fs::write(dir.path().join("models").join("a.sql"), "SELECT 1 AS x").unwrap();
+
+        let nested = dir.path().join("nested");
+        std::fs::create_dir_all(nested.join("functions")).unwrap();
+        std::fs::write(
+            nested.join("smelt.yml"),
+            "name: nested\nversion: 1\npaths:\n  - models\n",
+        )
+        .unwrap();
+        std::fs::write(
+            nested.join("functions").join("inc.sql"),
+            "smelt.define inc(x: Expr<Integer>) -> Expr<Integer> AS (x + 1)\n",
+        )
+        .unwrap();
+
+        let loaded = load_workspace(dir.path());
+        assert!(loaded.errors.is_empty(), "got errors: {:?}", loaded.errors);
+        let names: Vec<&str> = loaded.sql_files.iter().map(|m| m.name.as_str()).collect();
+        assert_eq!(
+            names,
+            vec!["a"],
+            "parent project must not claim the nested project's files: {names:?}"
+        );
+    }
+
+    #[test]
     fn load_workspace_finds_test_models_in_tests_dir() {
         let dir = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(dir.path().join("models")).unwrap();

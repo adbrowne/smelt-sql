@@ -134,6 +134,13 @@ impl ModelFile {
 /// Excluded (fixed skip-list, per spec architecture.md §"Resolution"):
 /// - Any directory whose name starts with `.` (`.git`, `.smelt`, etc.)
 /// - Any directory named `target` (Cargo / smelt build output)
+/// - Any subdirectory that is itself the root of another smelt project (i.e.
+///   contains its own `smelt.yml`/`smelt.yaml`). Project isolation
+///   (architecture.md §"Project isolation rule") means a nested project owns
+///   its own files exclusively; without this prune, a parent project's walk
+///   would also claim a nested project's files, registering the same path
+///   under two projects and corrupting workspace-wide checks that key on
+///   file identity (e.g. duplicate-function-name detection).
 ///
 /// Returns a list of `(dir, files_in_dir)` pairs where `files_in_dir` contains
 /// all files found directly inside `dir`. The sibling list is used by callers
@@ -147,14 +154,18 @@ pub fn project_root_files_by_dir(project_root: &Path) -> Vec<(PathBuf, Vec<PathB
         .into_iter()
         .filter_entry(|e| {
             // Never prune the root itself (depth 0 — the project root may be in
-            // a path component that starts with `.`, e.g. a hidden parent dir).
+            // a path component that starts with `.`, e.g. a hidden parent dir,
+            // or may itself contain a smelt.yml, which is expected).
             // Only prune *subdirectories* whose names match the exclusion list.
             if e.depth() == 0 {
                 return true;
             }
             if e.file_type().is_dir() {
                 let name = e.file_name().to_str().unwrap_or("");
-                !name.starts_with('.') && name != "target"
+                if name.starts_with('.') || name == "target" {
+                    return false;
+                }
+                !(e.path().join("smelt.yml").exists() || e.path().join("smelt.yaml").exists())
             } else {
                 true
             }
