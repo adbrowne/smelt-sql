@@ -37,6 +37,30 @@ versioning: interval        # optional; key-grain only — keep every version wi
 
 The `refresh:` axis itself (including `full`, `materialized_view`, and the `grain: key_per_partition` value) and the declaration law are owned by `models.md` §"Refresh axis"; this spec covers the `incremental` shapes above. The declarations name **output shape only** — which technique realizes which part of the output is a property of `(column-group × trigger)` cells (§"The plan (derived, reported)"), never of the model as a whole, and the machinery validates the declared shape rather than choosing one (§"Validator, not chooser").
 
+#### The two axes are orthogonal — "partitioned or keyed" is a category error
+
+`grain:` declares **addressing**: how stored rows are located for update (whole-partition rewrite
+vs keyed `merge_into`). Whether the output **carries a time axis** — a partition column consumers
+can window over — is a separate, composable fact. The inhabited combinations:
+
+| | output has a time axis | output has no time axis |
+|---|---|---|
+| **partition-addressed** | `grain: partition` (the time axis *is* the addressing) | — (not a shape: partition addressing is addressing by the partition column) |
+| **key-addressed** | `grain: key` + admitted `timeseries:` (§"Key temporal locality (the time-partitioned output)"); `grain: key_per_partition` (one row per `(key, partition)`; `timeseries:` required — `models.md` §"Refresh axis") | `grain: key` bare (a lookup, read in full by consumers) |
+
+A model with **both** a key and a partition axis is a first-class shape, not a corner case, and
+several capabilities exist **only** in that composed form
+(§"What the composed shape uniquely enables"). Both axes are also orthogonal to
+**input consumption**: a bare keyed model over a
+clocked source still consumes window-forward; a composed model's *output* clock is a property of
+its own stored shape, not of its sources.
+
+Any text — in this spec, a sibling spec, research, or a plan — that frames "partitioned" and
+"keyed" as mutually exclusive alternatives, or reasons about "the partitioned models" versus
+"the keyed models" as disjoint populations, is wrong and must be corrected against this section.
+The pre-consolidation file split ("batched" vs "keyed" specs) manufactured exactly this error;
+this section exists so it cannot creep back.
+
 ### The composition contract
 
 This section is **system surface**: its callers are the shape profiles — the shape sections of this spec (§"The partition grain (`grain: partition`)", §"The key grain (`grain: key`)", §"Interval versioning (`versioning: interval`)") and `materialized_view.md` — and the planner/analysis layer, not the modeller directly.
@@ -495,7 +519,34 @@ The **horizon**, as a **write-eligibility clamp** (a bound on which keys/partiti
 
 Because the horizon is *derived*, the clamp is the model's own SQL: a genuinely late arrival — one that lands after its natural partition has passed the horizon — is **silently excluded** from the maintenance run, not diagnosed. smelt cannot fail loud on a row it never scans; the invariant's "inputs processed so far" is exactly the scan window bounded by the derived horizon, and rows outside it are outside "so far" by construction. **Surfacing lateness is therefore a model-author concern, not a maintenance guarantee.** The available pattern is to fold the late row into the current partition — re-stamping its partition time — carrying a lateness/validity flag so its *data still flows*, and let a data-quality check raise on the flagged rows while valid data passes through. The maintenance layer clamps; it does not police lateness.
 
-**The key grain has no write-eligibility clamp.** Unlike the partition grain, a `grain: key` run merges **every** delta row it scans, into whatever key it names, however old that key is — there is no bound on which keys a run may touch (§"No write-eligibility clamp"). A **derived forward reach** is still computed and reported (via `smelt explain`) for observability, but it never gates admission and never bounds a write. This is a deliberate difference from the partition-grain horizon above, not an oversight: the keyed write is proportional to delta size regardless of how far back the touched keys live, so a write clamp buys nothing for correctness and would silently drop scanned inputs — the one thing the equivalence invariant forbids. What a keyed clamp would buy (settled-key GC, a bounded working set) is deferred optimisation that, if ever introduced, must ship together with late-fact accounting (`docs/research/20260705-keyed-collapse-application.md` D6). The narrow principle beneath both stances: **only proofs prune; a declared bound is admitted only checked (fail-loud on violation); no unproven bound ever refuses a write.** Target-scan slice pruning under established key temporal locality (§"Key temporal locality") conforms — the derived routes prune by proof, the declared key-recurrence route prunes only under a transactional runtime check, and every scanned delta row still merges. Two `model_transforms.md`-catalogued transforms read a **derived** (never declared) forward reach without being write clamps: the dimension-driven horizon-bounded MERGE (a *scan/recompute* bound on the enrichment recompute, not the write) and the horizon settled-delay/tail-rewrite mechanism, which remains partition-grain forward-reach machinery.
+**The key grain has no write-eligibility clamp.** Unlike the partition grain, a `grain: key` run merges **every** delta row it scans, into whatever key it names, however old that key is — there is no bound on which keys a run may touch (§"No write-eligibility clamp"). A **derived forward reach** is still computed and reported (via `smelt explain`) for observability, but it never gates admission and never bounds a write. This is a deliberate difference from the partition-grain horizon above, not an oversight: the keyed write is proportional to delta size regardless of how far back the touched keys live, so a write clamp buys nothing for correctness and would silently drop scanned inputs — the one thing the equivalence invariant forbids. What a keyed clamp would buy (settled-key GC, a bounded working set) is deferred optimisation that, if ever introduced, must ship together with late-fact accounting (`docs/research/20260705-keyed-collapse-application.md` D6). The narrow principle beneath both stances: **only proofs prune; a declared bound is admitted only checked (fail-loud on violation); no unproven bound ever refuses a write.** Target-scan slice pruning under established key temporal locality (§"Key temporal locality") conforms — the derived routes prune by proof, the declared key-recurrence route prunes only under a transactional runtime check, and every scanned delta row still merges.
+
+**Three pruning categories, one principle.** The only-proofs-prune rule admits exactly three
+categories of narrowing, with sharp boundaries:
+
+1. **Target-scan slice pruning** (read-side) — rows the write provably cannot touch are removed
+   from the merge's *read* of stored state; licensed by the key-temporal-locality proofs or the
+   transactionally-checked recurrence declaration (§"Key temporal locality").
+2. **No-op write elimination** (write-side) — a maintenance write may be skipped **iff** the
+   row's applied effect is proven to be the identity, proven per row *by evaluation*: an exact
+   `IS DISTINCT FROM` comparison over every column that can differ under the cell's trigger (the
+   mutation-sensitive group — comparing only it is sound *because* the other groups are proven
+   insensitive). Suppression may never skip **evaluating** a scanned input — restricting what is
+   *computed* is a separate concern with its own static licence (§Future Extensions,
+   "Conditional maintenance without a change feed"). A compared column must be a pure function
+   of the processed inputs; a column that legitimately varies run to run (`contract: plausible`,
+   run-pinned `NOW()`) is incomparable, and a cell containing one refuses the conditional
+   technique (fail-closed). At a fixed processed-input set `S` the suppressed and unconditional
+   variants produce identical state — interchangeable in the strongest sense of §"Per-cell
+   admission", so choosing between them is squarely a cost-model/`prefer`/`technique` matter.
+3. **Write-eligibility clamps** — forbidden on the key grain, derived-only on the partition
+   grain (the horizon above).
+
+Categories 1–2 preserve the equivalence invariant bit-for-bit at fixed `S`; category 3 is
+different in kind — it bounds which inputs are *in* `S` at all. Naming the middle category
+explicitly keeps the boundary sharp: a suppressed write is the write-side dual of slice pruning
+(the proof is the per-row equality just evaluated), not a clamp, and must never be argued into
+one. Two `model_transforms.md`-catalogued transforms read a **derived** (never declared) forward reach without being write clamps: the dimension-driven horizon-bounded MERGE (a *scan/recompute* bound on the enrichment recompute, not the write) and the horizon settled-delay/tail-rewrite mechanism, which remains partition-grain forward-reach machinery.
 
 ### Validator, not chooser
 
@@ -676,9 +727,13 @@ inverse**: `forward(backward(P)) ⊇ P`.
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic edge
 set; a **self-referential** model (a table-graph cycle that is a DAG only when time-unrolled —
 admissible in principle iff its self-clamp is strictly time-backward, with forward dirt running
-to the frontier and backward resolution reaching the model's basis/checkpoint); a **keyed-grain**
-node (no partition axis for interval dirt — silently treating it as day-axis would be
-wrong-and-quiet).
+to the frontier and backward resolution reaching the model's basis/checkpoint); a **keyed-grain
+node without an admitted time axis** (no partition axis for interval dirt — silently treating it
+as day-axis would be wrong-and-quiet). A **locality-admitted time-partitioned keyed output is
+not refused**: it is a clocked node whose edges use its declared granularity, and whose outbound
+dirt is the key→partition projection of what its runs changed — exact under locality routes 1–2,
+widened backward by `r` plus margins under route 3
+(§"What the composed shape uniquely enables").
 
 ### The partition grain (`grain: partition`)
 
@@ -901,6 +956,39 @@ Any one of three **routes** establishes locality:
 
 **The output as a clocked source.** An admitted block makes the output a clocked, time-partitioned table: downstream partition-grain models receive source-filter pushdown against it, and a downstream keyed model may take it as its clocked driving source — the clock propagates through the DAG instead of stopping at the keyed stage. The output's **settle bound** — how long a written slice may still change — is derived and surfaced by `smelt explain`: under route 1 a slice settles with the source's lateness margin; under route 3 after `r` plus the margins; under route 2 it never settles (a late delta may touch an arbitrarily old slice). A re-written slice is *changed input* to downstream consumers, handled by the ordinary staleness machinery (§"Interaction with `--auto` / staleness").
 
+#### What the composed shape uniquely enables
+
+The composed shape — key-addressed **and** time-partitioned — is not "keyed with an
+optimisation"; it is the only form in which the following hold, which is why treating the axes
+as exclusive (§Surface "The two axes are orthogonal") forecloses real capabilities:
+
+- **Propagation admissibility.** A bare keyed node refuses in the graph layer — it has no
+  partition axis to carry interval dirt. A locality-admitted keyed output *has* one: it
+  participates in forward propagation and backward resolution as a clocked node, its edges at
+  the declared `timeseries.granularity` like any other node (§"The graph layer"). The composed
+  shape is the only way a keyed stage can sit *inside* a propagation chain rather than
+  terminating it.
+- **Exact key→partition dirt projection.** Under locality routes 1–2 a stored row's partition
+  value is a per-key constant, so a key-level change set projects to **exact** partition
+  intervals — the keys' own partitions, no widening. Under route 3 the projection widens
+  backward by `r` plus the derived margins (widen-never-narrow). This is what lets a composed
+  node hand precise interval dirt downstream without any key-level dirt representation in the
+  graph itself.
+- **Slice-bounded no-op write elimination.** The conditional write
+  (§"Windowed maintenance and the horizon", category 2) must read stored rows to compare
+  against candidates. On a bare
+  keyed output that read is the whole key space; on a composed output it is bounded by the
+  pruned target slice — the compare cost is proportional to the slice, which is what makes
+  suppression affordable at volume.
+- **Settle-bound × observed-delta composition.** The settle bound (derived, static: when a
+  written slice can no longer change) composes with the observed output delta (dynamic: which
+  rows a run actually changed — §Future Extensions): consumers skip settled slices
+  unconditionally and skip unsettled slices whose observed delta is empty. Together a stable
+  upstream chain degenerates to empty-delta no-ops with a provable horizon behind it.
+
+The first two bullets bind at the graph layer, the third at statement emission, the fourth
+across both; their implementation status is recorded in §Known Divergences.
+
 #### The maintenance boundary
 
 On the algebraic ladder (§"The algebraic maintenance ladder") the keyed families sit on the **direct-monoid rung**: every catalogued combiner folds `(state, delta)` with no inverse and no history re-read. The additive family is additionally a **group** (invertible), which is what a future subtract-then-add reprocessing path would exploit; the idempotent families are monoids but not groups (a folded contribution cannot be un-seen), which is why reprocessing is refused for them. Rungs 2–4 (decomposed state + presentation view for `AVG`-class aggregates; group-rung retraction; the opt-in bounded-domain multiset for exact holistic aggregates) grow this shape without changing its contract; the transforms are catalogued in `model_transforms.md` and the `bounded_domain:` budget declaration in `model_properties.md`. Beyond the ladder — general-operator retraction over joins, unbounded non-additive state — is delegated to `refresh: materialized_view`.
@@ -1069,6 +1157,18 @@ pruning, a time-partitioned keyed output, and per-slice equivalence. Promoting i
 pole was rejected: it would suggest a different write primitive and identity requirement where
 there is none, and it would misplace a per-model derived/declared fact as a shape property
 (`docs/research/20260705-keyed-time-superset.md`).
+
+**The axes compose; exclusivity is the recurring error.** Because the pre-consolidation specs
+were *named* "batched" and "keyed", text in specs, research, and plans repeatedly slid into
+treating partition and key as rival modes — and each recurrence quietly re-derived designs that
+forgot the composed shape: DAGs whose clock dies at a keyed stage, keyed nodes excluded from
+propagation categorically rather than conditionally, conditional-write costs sized to whole key
+spaces, dedup shapes falling "between the modes". The composed shape is deliberately first-class
+(§Surface "The two axes are orthogonal — \"partitioned or keyed\" is a category error";
+§"What the composed shape uniquely enables"), and it is where several capabilities pay best —
+propagation through keyed stages, exact dirt projection, slice-bounded write suppression.
+Reviewers should treat one-or-the-other phrasing anywhere in this corpus as a defect against
+those sections, not a stylistic nit.
 
 **Scope maps name the per-input dispatch.** Without the name, the run shape reads as a property
 of the *model*, hiding that different inputs changing engage different targeted recomputes (a
@@ -1479,7 +1579,27 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   §"Key temporal locality (the time-partitioned output)" (divergence recorded under §Known
   Divergences → "The key grain" — refused unconditionally today via
   `KeyedForbidsTimeseries`); the per-input `smelt explain` scope-map rows are likewise unbuilt.
-  Design derivation: `docs/research/20260705-keyed-time-superset.md`.
+  Design derivation: `docs/research/20260705-keyed-time-superset.md`. Everything
+  §"What the composed shape uniquely enables" names is gated on this: with no locality route
+  built, no keyed node is propagation-admissible, no key→partition dirt projection exists, and
+  write-suppression compare costs cannot be slice-bounded. Tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **`grain: key_per_partition` is surface-only and collapses silently.** The value parses and
+  passes declaration validation (`unique_key` + `timeseries:` required), but the maintenance
+  derivation maps it to a plain key-grain plan **with an empty `unique_key`**
+  (`crates/smelt-db/src/queries/maintenance.rs`), no executor implements the trajectory shape,
+  and the graph layer would refuse it as an unclocked keyed node. This is a fail-loud-discipline
+  violation: the honest interim behaviour is an explicit not-yet-supported refusal at plan
+  derivation, not a silent collapse to a different grain. Tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md` (phase A0).
+- **No conditional maintenance technique exists.** §"Windowed maintenance and the horizon"
+  category 2 (no-op write elimination) is normative taxonomy with no implementation: every
+  emitted MERGE writes all matched rows unconditionally, every region overwrite rewrites
+  unchanged rows, and no observed output delta is recorded anywhere. The recorded
+  "dispatch fires on every run unconditionally" divergence above is the operational face of
+  this gap. Mechanisms and sequencing:
+  `docs/research/20260715-conditional-maintenance-without-cdf.md`;
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly
   covered.** The `docs-site/` pages consistently describe
   `refresh: full | incremental | materialized_view` and `grain: partition | key |
@@ -1615,6 +1735,31 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   takes directly, so it can layer on top without changing the graph layer or the CLI surface
   described in `§CLI`.
 
+- **Conditional maintenance without a change feed.** Three composable mechanisms
+  (`docs/research/20260715-conditional-maintenance-without-cdf.md`; tracking plan
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`), of which only the first has a
+  normative hook in this spec today (§"Windowed maintenance and the horizon" category 2 —
+  no-op write elimination; technique unbuilt, §Known Divergences):
+  - **M1 — change-suppressed writes**: the emitted MERGE gains an `IS DISTINCT FROM` matched-arm
+    predicate (merge-less backends get a staged-candidate conditional DELETE+INSERT), so an
+    unchanged region writes zero rows and redelivery storms become no-ops.
+  - **M2 — delta-restricted enrichment compute**: where the row skeleton is provably owned by
+    the driving source alone (payload-only 1:1 enrichment joins), the expensive joins run only
+    over rows whose enrichment inputs changed — the classical delta-join algebra, licensed by a
+    new skeleton-source-closure proof plus an exact input delta.
+  - **M3 — derived change feeds**: snapshot-diff made real on both boundaries — a fingerprint
+    sidecar synthesizes a change feed for an external `mutable_snapshot` source, and the
+    conditional write's own changed-row set is recorded as the model's **observed output
+    delta**, turning every maintained model into a change-feed-postured upstream for free. On a
+    composed (key + time) output the observed delta projects to exact partition dirt
+    (§"What the composed shape uniquely enables"), which is what makes M3 propagatable through
+    the interval-based graph without keyed dirt-sets.
+  Each mechanism needs its own spec diff before it is surface: P1–P4 proofs in
+  `model_properties.md`, T1–T5 transform variants in `model_transforms.md`, the
+  referential-integrity world-fact and landed-delta refinement in `sources.md`, capability flags
+  in `multi_backend.md`, and a persistence-fingerprint stance reconciled with
+  `output_fingerprint.md`.
+
 ## References
 
 ### The contract, plan, and graph layer
@@ -1688,6 +1833,9 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,
   `docs/plans/20260704-model-updates-fundamentals.md` (the L1+L2 substrate),
   `docs/plans/20260705-property-discovery-loop.md` (the empirical engine).
+- **Research**: `docs/research/20260715-conditional-maintenance-without-cdf.md` (change-suppressed
+  writes, delta-restricted compute, derived change feeds — the source of the pruning taxonomy's
+  no-op write-elimination category and the composed-shape composition points).
 - **Related specs** (one list for the whole spec): `model_properties.md` (the derived proofs —
   monotonicity trace, bound/reach, partition alignment, determinism, discriminants, anchor
   resolution, once-write and join-contribution proofs, `bounded_domain:`); `model_transforms.md`
