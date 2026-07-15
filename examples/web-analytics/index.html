@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/meta-language/lists/">
+        <link rel="canonical" href="https://smeltsql.com/examples/web-analytics/">
       
       
-        <link rel="prev" href="../">
+        <link rel="prev" href="../../guide/editor-features/">
       
       
-        <link rel="next" href="../hofs/">
+        <link rel="next" href="first-model/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Lists & Spread - smelt</title>
+        <title>Overview - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#lists-spread" class="md-skip">
+        <a href="#building-an-incremental-web-analytics-pipeline" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Lists & Spread
+              Overview
             
           </span>
         </div>
@@ -288,13 +288,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../meta-language/" class="md-tabs__link">
           
   
   
@@ -330,6 +328,8 @@
   
   
   
+    
+  
   
     
     
@@ -337,11 +337,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../examples/web-analytics/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="./" class="md-tabs__link">
           
   
   
@@ -705,31 +707,28 @@
       
   
   
-    
   
   
-  
     
     
     
     
-      
-        
-        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
         
           
-          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
             
   
   
@@ -747,7 +746,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_4">
             <span class="md-nav__icon md-icon"></span>
             
@@ -765,7 +764,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../" class="md-nav__link">
+      <a href="../../meta-language/" class="md-nav__link">
         
   
   
@@ -790,37 +789,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Lists & Spread
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../meta-language/lists/" class="md-nav__link">
         
   
   
@@ -836,92 +808,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#the-listt-type" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        The List&lt;T&gt; type
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#list-literal-syntax-a-b-c" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        List literal syntax [a, b, c]
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#bidirectional-disambiguation" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Bidirectional disambiguation
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#spread-operator-xs" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Spread operator ...xs
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#empty-list-semantics" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Empty-list semantics
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#diagnostic-codes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Diagnostic codes
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -934,7 +820,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../hofs/" class="md-nav__link">
+      <a href="../../meta-language/hofs/" class="md-nav__link">
         
   
   
@@ -962,7 +848,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../lambdas/" class="md-nav__link">
+      <a href="../../meta-language/lambdas/" class="md-nav__link">
         
   
   
@@ -990,7 +876,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../pipes/" class="md-nav__link">
+      <a href="../../meta-language/pipes/" class="md-nav__link">
         
   
   
@@ -1018,7 +904,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../reducers/" class="md-nav__link">
+      <a href="../../meta-language/reducers/" class="md-nav__link">
         
   
   
@@ -1046,7 +932,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../ternary/" class="md-nav__link">
+      <a href="../../meta-language/ternary/" class="md-nav__link">
         
   
   
@@ -1074,7 +960,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../records/" class="md-nav__link">
+      <a href="../../meta-language/records/" class="md-nav__link">
         
   
   
@@ -1102,7 +988,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../maps/" class="md-nav__link">
+      <a href="../../meta-language/maps/" class="md-nav__link">
         
   
   
@@ -1130,7 +1016,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../reflection/" class="md-nav__link">
+      <a href="../../meta-language/reflection/" class="md-nav__link">
         
   
   
@@ -1158,7 +1044,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../config-loaders/" class="md-nav__link">
+      <a href="../../meta-language/config-loaders/" class="md-nav__link">
         
   
   
@@ -1186,7 +1072,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../config-vars/" class="md-nav__link">
+      <a href="../../meta-language/config-vars/" class="md-nav__link">
         
   
   
@@ -1214,7 +1100,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../generators/" class="md-nav__link">
+      <a href="../../meta-language/generators/" class="md-nav__link">
         
   
   
@@ -1242,7 +1128,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../reference/" class="md-nav__link">
+      <a href="../../meta-language/reference/" class="md-nav__link">
         
   
   
@@ -1783,28 +1669,31 @@
       
   
   
+    
   
   
+  
     
     
     
     
+      
+        
+        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
-        
-          
-          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
             
   
   
@@ -1822,7 +1711,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_6">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1837,28 +1726,31 @@
                 
   
   
+    
   
   
+  
     
     
     
     
       
       
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
         
           
+          
         
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6_1" >
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_1" checked>
         
           
-          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="">
             
   
   
@@ -1876,7 +1768,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_6_1">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1891,10 +1783,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Overview
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1910,6 +1829,70 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-problem" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The problem
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-we-build" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What we build
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-pages" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The pages
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-it-locally" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run it locally
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1922,7 +1905,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/first-model/" class="md-nav__link">
+      <a href="first-model/" class="md-nav__link">
         
   
   
@@ -1950,7 +1933,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/late-data/" class="md-nav__link">
+      <a href="late-data/" class="md-nav__link">
         
   
   
@@ -1978,7 +1961,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
+      <a href="sessions/" class="md-nav__link">
         
   
   
@@ -2006,7 +1989,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/ordered-sessions/" class="md-nav__link">
+      <a href="ordered-sessions/" class="md-nav__link">
         
   
   
@@ -2034,7 +2017,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/changing-things/" class="md-nav__link">
+      <a href="changing-things/" class="md-nav__link">
         
   
   
@@ -2062,7 +2045,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/taking-stock/" class="md-nav__link">
+      <a href="taking-stock/" class="md-nav__link">
         
   
   
@@ -2098,7 +2081,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web_analytics/" class="md-nav__link">
+      <a href="../web_analytics/" class="md-nav__link">
         
   
   
@@ -2499,10 +2482,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#the-listt-type" class="md-nav__link">
+  <a href="#the-problem" class="md-nav__link">
     <span class="md-ellipsis">
       
-        The List&lt;T&gt; type
+        The problem
       
     </span>
   </a>
@@ -2510,10 +2493,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#list-literal-syntax-a-b-c" class="md-nav__link">
+  <a href="#what-we-build" class="md-nav__link">
     <span class="md-ellipsis">
       
-        List literal syntax [a, b, c]
+        What we build
       
     </span>
   </a>
@@ -2521,10 +2504,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#bidirectional-disambiguation" class="md-nav__link">
+  <a href="#the-pages" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Bidirectional disambiguation
+        The pages
       
     </span>
   </a>
@@ -2532,32 +2515,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#spread-operator-xs" class="md-nav__link">
+  <a href="#run-it-locally" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Spread operator ...xs
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#empty-list-semantics" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Empty-list semantics
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#diagnostic-codes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Diagnostic codes
+        Run it locally
       
     </span>
   </a>
@@ -2581,7 +2542,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/meta-language/lists.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/examples/web-analytics/index.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2589,219 +2550,108 @@
   
 
 
-<h1 id="lists-spread">Lists &amp; Spread<a class="headerlink" href="#lists-spread" title="Permanent link">&para;</a></h1>
-<p>The meta-language provides two constructs for working with compile-time lists: <strong>list literals</strong> for building compile-time lists of SQL fragments, and the <strong>spread operator</strong> for splicing those lists into SELECT lists and other comma-separated grammar positions.</p>
-<p>See also: <a href="../hofs/">Higher-Order Functions</a> for <code>map</code>, <code>filter</code>, and <code>reduce</code> that transform lists; <a href="../pipes/">Pipe Operator</a> for chaining list operations left-to-right; <a href="../reducers/">Reducers</a> for folding a list into a single SQL fragment; <a href="../reference/">Reference</a> for the complete alphabetical construct index.</p>
-<h2 id="the-listt-type">The <code>List&lt;T&gt;</code> type<a class="headerlink" href="#the-listt-type" title="Permanent link">&para;</a></h2>
-<p><code>List&lt;T&gt;</code> is a meta-only type. A <code>List&lt;T&gt;</code> value is:</p>
+<!-- GENERATED FILE — edit examples/web_analytics/tutorial_pages/index.md and run python3 examples/web_analytics/generate_tutorial.py -->
+
+<h1 id="building-an-incremental-web-analytics-pipeline">Building an incremental web-analytics pipeline<a class="headerlink" href="#building-an-incremental-web-analytics-pipeline" title="Permanent link">&para;</a></h1>
+<p>This is a worked example, start to finish, of building event analytics on
+smelt: an event feed with duplicates and multi-day late arrivals, sessions
+that cross midnight, and first-touch campaign attribution. It is written
+for someone who has never used smelt. You need SQL; you do not need dbt,
+SQLMesh, or Spark experience — where a step replaces something you would
+do in those tools, the text says so.</p>
+<h2 id="the-problem">The problem<a class="headerlink" href="#the-problem" title="Permanent link">&para;</a></h2>
+<p>You run product analytics. Events stream in from web and mobile clients,
+and you want daily tables — parsed events, sessions, attributed campaigns —
+that stay correct as data keeps arriving. Three facts about the feed make
+"stay correct" harder than it sounds:</p>
 <ul>
-<li><strong>Finite</strong> — length is fixed at construction.</li>
-<li><strong>Ordered</strong> — elements are in declaration order.</li>
-<li><strong>Immutable</strong> — no element can be added, removed, or replaced after construction.</li>
-<li><strong>Compile-time-only</strong> — no <code>List&lt;T&gt;</code> value ever reaches the database engine.</li>
+<li><strong>Duplicates.</strong> Delivery is at-least-once: about 2% of events arrive
+  twice, identical except for their arrival time.</li>
+<li><strong>Late data.</strong> An event that happened on Monday can arrive on Thursday —
+  ingestion trails occurrence by up to three days.</li>
+<li><strong>Sessions.</strong> Your headline metrics are defined over sessions (runs of
+  activity separated by 30-minute gaps), and a session that starts at
+  23:47 doesn't care that your tables are organized in day-sized slices.</li>
 </ul>
-<p><code>T</code> is a fragment sort: <code>Expr&lt;U&gt;</code> for expression elements, <code>OrderSpec</code> for order items, or a data type lifted as a meta literal (<code>Text</code>, <code>Integer</code>, …). <code>List&lt;T&gt;</code> is <strong>covariant</strong> in <code>T</code>: if <code>S</code> is a subtype of <code>T</code>, then <code>List&lt;S&gt;</code> is a subtype of <code>List&lt;T&gt;</code>. Immutability makes this sound.</p>
-<h2 id="list-literal-syntax-a-b-c">List literal syntax <code>[a, b, c]</code><a class="headerlink" href="#list-literal-syntax-a-b-c" title="Permanent link">&para;</a></h2>
-<p>A comma-separated, square-bracketed expression list constructs a <code>List&lt;T&gt;</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">-- List&lt;Expr&lt;INTEGER&gt;&gt;: three integer expressions</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>
-<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="c1">-- List&lt;Expr&lt;…&gt;&gt;: column reference expressions (element type depends on source schema)</span>
-<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="p">...[</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">]</span>
-<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
-<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="c1">-- Trailing comma is allowed</span>
-<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="p">...[</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">,]</span>
-<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">-- Singleton list</span>
-<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="p">...[</span><span class="n">id</span><span class="p">]</span>
+<p>Teams usually build this one of two ways:</p>
+<ol>
+<li><strong>Rebuild everything, every night.</strong> Correct by construction and easy
+   to reason about, but the cost grows with history: a year in, you are
+   rescanning twelve months of events to update one day.</li>
+<li><strong>Hand-built incremental jobs.</strong> <code>MERGE</code> statements, or jobs that
+   re-replace a trailing slice of the table ("reprocess the last 3
+   days"), with the window widths
+   encoded in orchestration config, Jinja macros, or job code. Fast and
+   cheap, but every one of those numbers is a promise someone made once.
+   Change the session rule and the 3 stops being right, and nothing tells
+   you. (Declarative tools soften this — SQLMesh makes the lookback a
+   first-class config key — but the number is still declared rather than
+   derived; the <a href="late-data/">late-data page</a> takes this up properly.)</li>
+</ol>
+<p>smelt's position is that the numbers should not be promises. You write the
+plain, full-history query, and where incremental maintenance depends on a
+fact about the data — how late events can be, how long a session can span —
+you state that fact <strong>in the SQL itself</strong>, as an ordinary filter or window
+frame. smelt reads the query, derives the maintenance plan from it (what to
+read, what to rewrite, in what order), and shows you the exact SQL it will
+run before it runs it. When it cannot prove a model is safe to maintain
+incrementally, it refuses and says why, rather than guessing.</p>
+<p>Every SQL block in these pages is real CLI output, captured by a
+<a href="https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/generate_tutorial.py">generator script</a>
+and re-verified by a CI test — the pages cannot drift from what smelt
+actually emits.</p>
+<h2 id="what-we-build">What we build<a class="headerlink" href="#what-we-build" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>raw.events  (source: at-least-once feed, up to 3 days late)
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a>    │
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a>bronze.raw_events        typed passthrough
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a>    │
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a>silver.events_parsed     dedup + late-arrival window
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>    │
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a>silver.sessions          30-min sessionization
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a>    │
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>silver.events_enriched   session identity joined back
 </code></pre></div>
-<p>The inferred element type is the <strong>least upper bound (LUB)</strong> of all element types. Numeric promotion applies: <code>[1, 2.5]</code> infers <code>List&lt;Expr&lt;DECIMAL&gt;&gt;</code>.</p>
-<p><strong>Example — spread a list of columns into a SELECT list:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">-- examples/meta_lists/models/select_with_spread.sql</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1">-- [name, email] is a List&lt;Expr&lt;…&gt;&gt; meta-literal (element type from source schema).</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="c1">-- After compilation: SELECT id, name, email FROM smelt.sources.raw.users</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="k">SELECT</span>
-<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a><span class="w">    </span><span class="p">...[</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">]</span>
-<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
+<p>(The <code>bronze</code>/<code>silver</code> names are this example's layering convention —
+raw, then cleaned — not smelt keywords.)</p>
+<p>The <a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics">complete example</a>
+also carries a gold identity-resolution layer, covered separately in
+<a href="../web_analytics/">the identity-stitching example</a>. These pages build
+the pipeline up in stages — each stage is a small, runnable smelt project
+under
+<a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages"><code>tutorial_stages/</code></a>,
+so you can run every command yourself.</p>
+<h2 id="the-pages">The pages<a class="headerlink" href="#the-pages" title="Permanent link">&para;</a></h2>
+<ol>
+<li><strong><a href="first-model/">A first incremental model</a></strong> — partitions, run
+   windows, and reading the exact SQL a run will execute.</li>
+<li><strong><a href="late-data/">Duplicates and late data</a></strong> — a deduplication that
+   smelt refuses until you justify it, and a lateness rule smelt turns
+   into derived read windows.</li>
+<li><strong><a href="sessions/">Sessions and the cross-midnight backfill</a></strong> — why any
+   incrementally-maintained sessionizer must cut somewhere, and how a run
+   for today correctly rewrites yesterday's partition. (An optional
+   <a href="ordered-sessions/">deep dive</a> covers the session table that has to
+   read its own history.)</li>
+<li><strong><a href="changing-things/">Backfills, new columns, and late updates</a></strong> —
+   the three ways a live pipeline changes, and what smelt does for each.</li>
+<li><strong><a href="taking-stock/">Taking stock</a></strong> — what you wrote versus what smelt
+   derived, and an honest comparison with the alternatives.</li>
+</ol>
+<h2 id="run-it-locally">Run it locally<a class="headerlink" href="#run-it-locally" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>pip<span class="w"> </span>install<span class="w"> </span>smelt-sql
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>git<span class="w"> </span>clone<span class="w"> </span>https://github.com/adbrowne/smelt-sql.git
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="nb">cd</span><span class="w"> </span>smelt-sql/examples/web_analytics
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a><span class="c1"># Generate the synthetic feed (1M events at scale 1.0; 0.01 is plenty)</span>
+<a id="__codelineno-1-6" name="__codelineno-1-6" href="#__codelineno-1-6"></a>smelt-datagen<span class="w"> </span>--config<span class="w"> </span>datagen.yaml<span class="w"> </span>--scale-factor<span class="w"> </span><span class="m">0</span>.01
+<a id="__codelineno-1-7" name="__codelineno-1-7" href="#__codelineno-1-7"></a>duckdb<span class="w"> </span>target/dev.duckdb<span class="w"> </span>&lt;<span class="w"> </span>setup_sources.sql
+<a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a>
+<a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a>smelt<span class="w"> </span>build
 </code></pre></div>
-<p><strong>Example — multiple spreads in one SELECT list:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">-- examples/meta_lists/models/multi_spread.sql</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="c1">-- Two separate spreads expand inline.</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="c1">-- After compilation: SELECT id, name, email, created_at FROM ...</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="k">SELECT</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">    </span><span class="p">...[</span><span class="n">name</span><span class="p">,</span><span class="w"> </span><span class="n">email</span><span class="p">],</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="n">created_at</span>
-<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div>
-<p><strong>Example — list of integer literals:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">-- examples/meta_lists/models/list_literal.sql</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="c1">-- [1, 2, 3] is List&lt;Expr&lt;INTEGER&gt;&gt;.</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="c1">-- After compilation: SELECT id, 1, 2, 3 FROM ...</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="k">SELECT</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div>
-<h2 id="bidirectional-disambiguation">Bidirectional disambiguation<a class="headerlink" href="#bidirectional-disambiguation" title="Permanent link">&para;</a></h2>
-<p>The parser produces a single <code>LIST_LITERAL</code> CST node for <code>[…]</code>. The type checker decides whether it is a meta list or a data-world array, based on the surrounding context:</p>
-<table>
-<thead>
-<tr>
-<th>Surrounding context</th>
-<th>Result</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Target sort is <code>List&lt;T&gt;</code> (meta position — e.g. a spread, a meta parameter)</td>
-<td>Meta list <code>List&lt;T&gt;</code></td>
-</tr>
-<tr>
-<td>Target sort is <code>Expr&lt;Array&lt;U&gt;&gt;</code> (data-world array position)</td>
-<td>Data-world <code>Array&lt;U&gt;</code></td>
-</tr>
-<tr>
-<td>Both meta and data-world readings are valid</td>
-<td><strong>Meta wins</strong></td>
-</tr>
-<tr>
-<td>Neither reading is valid</td>
-<td>Type error; literal is <code>List&lt;Unknown&gt;</code></td>
-</tr>
-</tbody>
-</table>
-<p><strong>Meta context</strong> — SELECT-list splice point, spread a list into a SELECT:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1">-- Meta context: ...xs splices List&lt;Expr&lt;INTEGER&gt;&gt; into SELECT</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="c1">-- Engine sees: SELECT 1, 2, 3 FROM ...</span>
-</code></pre></div>
-<p><strong>Data-world context</strong> — a bare list literal in a SELECT-item position (no spread) where the column type resolves to <code>Array&lt;U&gt;</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">-- Data-world context: [1, 2, 3] as a standalone SELECT item is an Array&lt;INTEGER&gt; column.</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1">-- No spread → the list literal is treated as a runtime array value, not a meta splice.</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">scores</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="c1">-- Engine sees: SELECT id, [1, 2, 3] AS scores FROM ...</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="c1">-- Column `scores` has type Array&lt;INTEGER&gt;.</span>
-</code></pre></div>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>Bidirectional disambiguation is currently wired at SELECT-list positions. IN-list positions (<code>WHERE id IN ([1, 2, 3])</code>) are not yet type-checked — the literal passes through unprocessed. Full disambiguation for IN-lists and other positions is planned but not yet implemented.</p>
-</div>
-<h2 id="spread-operator-xs">Spread operator <code>...xs</code><a class="headerlink" href="#spread-operator-xs" title="Permanent link">&para;</a></h2>
-<p><code>...xs</code> splices the elements of a <code>List&lt;T&gt;</code> into the surrounding comma-separated grammar position. Each element is emitted at the spread's source span and validated against the surrounding position's type rules.</p>
-<p><strong>Where spread works:</strong></p>
-<ul>
-<li>SELECT lists — fully type-checked.</li>
-</ul>
-<p><strong>Planned but not yet supported</strong> — spread in the following positions is planned but not yet wired:</p>
-<ul>
-<li>GROUP BY clauses.</li>
-<li>ORDER BY clauses (list element type must be <code>OrderSpec</code>).</li>
-<li>Positional argument positions of function calls.</li>
-<li>IN-lists (<code>x IN (...vs)</code>).</li>
-<li>VALUES rows.</li>
-<li>Inside other list literals (<code>[a, ...xs, b]</code>).</li>
-</ul>
-<p><strong>Hover</strong> — when your editor's cursor is on a spread operator, hover shows the source list type. For example, <code>...[1, 2, 3]</code> shows <code>List&lt;Expr&lt;INTEGER&gt;&gt;</code>.</p>
-<h2 id="empty-list-semantics">Empty-list semantics<a class="headerlink" href="#empty-list-semantics" title="Permanent link">&para;</a></h2>
-<p>An empty list literal <code>[]</code> requires a surrounding context that supplies a target sort. In a SELECT-list splice point without a target, the type checker cannot infer the element type and emits <code>MetaListEmptyTypeUnknown</code>.</p>
-<p>An empty spread <code>...[]</code> is <strong>silently elided</strong> — it disappears along with its adjacent commas. This is not an error.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1">-- examples/meta_lists/models/empty_spread.sql</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1">-- ...[] elides itself and its adjacent commas.</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="c1">-- After compilation: SELECT id, created_at FROM ...</span>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="k">SELECT</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">    </span><span class="p">...[],</span>
-<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">    </span><span class="n">created_at</span>
-<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>If you want an empty list that causes a diagnostic (for testing), use <code>[]</code> as a bare SELECT item without a spread. If you want silent elision, use <code>...[]</code>.</p>
-</div>
-<h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
-<p>The list and spread surface introduces four diagnostic codes. All are anchored at the offending CST span in your editor.</p>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">MetaListEmptyTypeUnknown</p>
-<p><strong>When it fires:</strong> A bare <code>[]</code> list literal appears in a position where the type checker cannot infer the element type.</p>
-<p><strong>Message:</strong> <code>cannot infer element type for empty list literal</code></p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">-- examples/meta_lists_broken_empty_unknown/models/empty_unknown.sql</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">SELECT</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="w">    </span><span class="p">[]</span><span class="w">       </span><span class="c1">-- ← MetaListEmptyTypeUnknown: no target sort here</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Either provide elements so the type can be inferred, or use <code>...[]</code> (spread of an empty list) if your intent is to emit nothing. If you are building the list in a <code>smelt.define</code> parameter, annotate the parameter with the expected <code>List&lt;T&gt;</code> type.</p>
-</div>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">MetaListHeterogeneous</p>
-<p><strong>When it fires:</strong> The elements of a list literal do not share a common type under LUB.</p>
-<p><strong>Message:</strong> <code>list elements have incompatible types: {T0}, {Tk}</code></p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">-- examples/meta_lists_broken_heterogeneous/models/heterogeneous.sql</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="k">SELECT</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="w">    </span><span class="p">...[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span><span class="p">]</span><span class="w">  </span><span class="c1">-- ← MetaListHeterogeneous: INTEGER and TEXT don&#39;t unify</span>
-<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Ensure all list elements have compatible types. For numeric mixed precision (<code>[1, 2.5]</code>), smelt promotes to the wider type automatically. For truly mixed types (integer and text), split into separate lists or cast all elements to a common type:
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1">-- Cast to a common type</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="p">...[</span><span class="k">CAST</span><span class="p">(</span><span class="mi">1</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;hello&#39;</span><span class="p">]</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div></p>
-</div>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">MetaSpreadInForbiddenPosition</p>
-<p><strong>When it fires:</strong> A spread operator <code>...xs</code> appears in a position that does not support spread.</p>
-<p><strong>Message:</strong> <code>spread is not allowed in {position name}</code></p>
-<p><strong>Forbidden positions:</strong>
-- WHERE clauses — no comma-separated grammar; use the <a href="../reducers/#and_all"><code>and_all</code></a> reducer.
-- FROM clauses without an explicit reducer — no default join semantics for <code>List&lt;TableExpr&gt;</code>.
-- Boolean-composition contexts (<code>x AND ...preds</code>, <code>y OR ...preds</code>).
-- Named-argument positions — spread cannot stand on the left of <code>=&gt;</code>.</p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1">-- examples/meta_lists_broken_spread_forbidden/models/spread_forbidden.sql</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="p">...</span><span class="n">preds</span><span class="w">  </span><span class="c1">-- ← MetaSpreadInForbiddenPosition</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Move the spread to a SELECT list. To combine a list of predicates in a WHERE clause, use the <code>and_all</code> reducer. If the intent is to filter by a list of values, use <code>IN (...vs)</code> with a spread (planned but not yet implemented):
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="c1">-- Planned syntax (not yet implemented):</span>
-<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">id</span><span class="w"> </span><span class="k">IN</span><span class="w"> </span><span class="p">(...</span><span class="n">id_list</span><span class="p">)</span>
-</code></pre></div></p>
-<div class="admonition note">
-<p class="admonition-title">Note</p>
-<p>Forbidden positions other than WHERE clauses may currently produce parse errors rather than the <code>MetaSpreadInForbiddenPosition</code> diagnostic. The friendly diagnostic for all forbidden positions is planned but not yet wired everywhere.</p>
-</div>
-</div>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">MetaSpreadOnNonList</p>
-<p><strong>When it fires:</strong> The <code>...</code> operator is applied to a value that is not a <code>List&lt;T&gt;</code>.</p>
-<p><strong>Message:</strong> <code>spread expects List&lt;T&gt;; found {actual type}</code></p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="k">SELECT</span>
-<a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="w">    </span><span class="n">id</span><span class="p">,</span>
-<a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="w">    </span><span class="p">...</span><span class="n">some_integer</span><span class="w">   </span><span class="c1">-- ← MetaSpreadOnNonList: INTEGER is not a List&lt;T&gt;</span>
-<a id="__codelineno-12-4" name="__codelineno-12-4" href="#__codelineno-12-4"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Wrap the value in a list literal if you want to splice a single element: <code>...[some_integer]</code>. Or, if the variable is supposed to be a list, check the type of the binding that supplies it.</p>
-</div>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">MetaListInScalarPosition</p>
-<p><strong>When it fires:</strong> A <code>List&lt;T&gt;</code> reaches a scalar / SELECT-item position without being consumed — by a spread, a higher-order function, a reducer, a record, a map, or a generator. A list cannot become a scalar value on its own, and there is no implicit auto-spread.</p>
-<p><strong>Message:</strong> <code>a List&lt;T&gt; cannot be used as a scalar value here; consume it with a spread (...xs), a reducer (reduce(xs, …)), or a HOF before splicing</code></p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w">                       </span><span class="c1">-- ← MetaListInScalarPosition (bare list)</span>
-<a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">xs</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span><span class="w">        </span><span class="c1">-- ← MetaListInScalarPosition (map result left bare)</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Consume the list. Spread it into columns (<code>SELECT ...[1, 2, 3]</code>), or fold it to a scalar with a reducer (<code>SELECT reduce([1, 2, 3], plus_chain)</code>). This check runs in every model, including a model with no <code>FROM</code> clause.</p>
-</div>
+<p>Every <code>smelt explain</code> and <code>--dry-run</code> command in these pages works with
+no data at all — they print what <em>would</em> run. To execute real runs inside
+a stage project, copy <code>datagen.yaml</code> and <code>setup_sources.sql</code> into the
+stage directory and repeat the two data steps there.</p>
 
 
 

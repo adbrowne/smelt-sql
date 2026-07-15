@@ -10,31 +10,31 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/meta-language/lambdas/">
+        <link rel="canonical" href="https://smeltsql.com/examples/web-analytics/first-model/">
       
       
-        <link rel="prev" href="../hofs/">
+        <link rel="prev" href="../">
       
       
-        <link rel="next" href="../pipes/">
+        <link rel="next" href="../late-data/">
       
       
         
       
       
-      <link rel="icon" href="../../assets/favicon.svg">
+      <link rel="icon" href="../../../assets/favicon.svg">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
     
     
       
-        <title>Lambdas - smelt</title>
+        <title>A First Incremental Model - smelt</title>
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.484c7ddc.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
       
       
 
@@ -53,9 +53,9 @@
       
     
     
-      <link rel="stylesheet" href="../../stylesheets/extra.css">
+      <link rel="stylesheet" href="../../../stylesheets/extra.css">
     
-    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
       
 
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#lambdas" class="md-skip">
+        <a href="#a-first-incremental-model" class="md-skip">
           Skip to content
         </a>
       
@@ -94,9 +94,9 @@
 
 <header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href="../.." title="smelt" class="md-header__button md-logo" aria-label="smelt" data-md-component="logo">
+    <a href="../../.." title="smelt" class="md-header__button md-logo" aria-label="smelt" data-md-component="logo">
       
-  <img src="../../assets/logo-mark.svg" alt="logo">
+  <img src="../../../assets/logo-mark.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Lambdas
+              A First Incremental Model
             
           </span>
         </div>
@@ -231,7 +231,7 @@
   
   
     <li class="md-tabs__item">
-      <a href="../.." class="md-tabs__link">
+      <a href="../../.." class="md-tabs__link">
         
   
   
@@ -252,7 +252,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../getting-started/installation/" class="md-tabs__link">
+        <a href="../../../getting-started/installation/" class="md-tabs__link">
           
   
   
@@ -272,7 +272,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../concepts/how-it-works/" class="md-tabs__link">
+        <a href="../../../concepts/how-it-works/" class="md-tabs__link">
           
   
   
@@ -288,13 +288,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../../meta-language/" class="md-tabs__link">
           
   
   
@@ -314,7 +312,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../guide/sql-models/" class="md-tabs__link">
+        <a href="../../../guide/sql-models/" class="md-tabs__link">
           
   
   
@@ -330,6 +328,8 @@
   
   
   
+    
+  
   
     
     
@@ -337,11 +337,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../examples/web-analytics/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
           
   
   
@@ -364,7 +366,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../reference/cli/" class="md-tabs__link">
+        <a href="../../../reference/cli/" class="md-tabs__link">
           
   
   
@@ -384,7 +386,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../developing/architecture/" class="md-tabs__link">
+        <a href="../../../developing/architecture/" class="md-tabs__link">
           
   
   
@@ -418,9 +420,9 @@
 
 <nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href="../.." title="smelt" class="md-nav__button md-logo" aria-label="smelt" data-md-component="logo">
+    <a href="../../.." title="smelt" class="md-nav__button md-logo" aria-label="smelt" data-md-component="logo">
       
-  <img src="../../assets/logo-mark.svg" alt="logo">
+  <img src="../../../assets/logo-mark.svg" alt="logo">
 
     </a>
     smelt
@@ -447,7 +449,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../.." class="md-nav__link">
+      <a href="../../.." class="md-nav__link">
         
   
   
@@ -528,7 +530,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../getting-started/installation/" class="md-nav__link">
+      <a href="../../../getting-started/installation/" class="md-nav__link">
         
   
   
@@ -556,7 +558,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../getting-started/quickstart/" class="md-nav__link">
+      <a href="../../../getting-started/quickstart/" class="md-nav__link">
         
   
   
@@ -645,7 +647,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/how-it-works/" class="md-nav__link">
+      <a href="../../../concepts/how-it-works/" class="md-nav__link">
         
   
   
@@ -673,7 +675,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/project-structure/" class="md-nav__link">
+      <a href="../../../concepts/project-structure/" class="md-nav__link">
         
   
   
@@ -705,31 +707,28 @@
       
   
   
-    
   
   
-  
     
     
     
     
-      
-        
-        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_4" checked>
         
           
-          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="">
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_4" >
+        
+          
+          <label class="md-nav__link" for="__nav_4" id="__nav_4_label" tabindex="0">
             
   
   
@@ -747,7 +746,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_4_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_4">
             <span class="md-nav__icon md-icon"></span>
             
@@ -765,7 +764,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../" class="md-nav__link">
+      <a href="../../../meta-language/" class="md-nav__link">
         
   
   
@@ -793,7 +792,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../lists/" class="md-nav__link">
+      <a href="../../../meta-language/lists/" class="md-nav__link">
         
   
   
@@ -821,7 +820,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../hofs/" class="md-nav__link">
+      <a href="../../../meta-language/hofs/" class="md-nav__link">
         
   
   
@@ -846,37 +845,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Lambdas
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../../meta-language/lambdas/" class="md-nav__link">
         
   
   
@@ -892,103 +864,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#syntax-fn-x-body" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Syntax: fn x =&gt; body
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#multiple-parameters" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple parameters
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#where-lambdas-are-allowed" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Where lambdas are allowed
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#parameter-scoping" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Parameter scoping
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#what-a-lambda-body-can-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What a lambda body can reference
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#lsp-support" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        LSP support
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#diagnostic-codes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Diagnostic codes
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1001,7 +876,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../pipes/" class="md-nav__link">
+      <a href="../../../meta-language/pipes/" class="md-nav__link">
         
   
   
@@ -1029,7 +904,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../reducers/" class="md-nav__link">
+      <a href="../../../meta-language/reducers/" class="md-nav__link">
         
   
   
@@ -1057,7 +932,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../ternary/" class="md-nav__link">
+      <a href="../../../meta-language/ternary/" class="md-nav__link">
         
   
   
@@ -1085,7 +960,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../records/" class="md-nav__link">
+      <a href="../../../meta-language/records/" class="md-nav__link">
         
   
   
@@ -1113,7 +988,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../maps/" class="md-nav__link">
+      <a href="../../../meta-language/maps/" class="md-nav__link">
         
   
   
@@ -1141,7 +1016,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../reflection/" class="md-nav__link">
+      <a href="../../../meta-language/reflection/" class="md-nav__link">
         
   
   
@@ -1169,7 +1044,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../config-loaders/" class="md-nav__link">
+      <a href="../../../meta-language/config-loaders/" class="md-nav__link">
         
   
   
@@ -1197,7 +1072,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../config-vars/" class="md-nav__link">
+      <a href="../../../meta-language/config-vars/" class="md-nav__link">
         
   
   
@@ -1225,7 +1100,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../generators/" class="md-nav__link">
+      <a href="../../../meta-language/generators/" class="md-nav__link">
         
   
   
@@ -1253,7 +1128,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../reference/" class="md-nav__link">
+      <a href="../../../meta-language/reference/" class="md-nav__link">
         
   
   
@@ -1342,7 +1217,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/sql-models/" class="md-nav__link">
+      <a href="../../../guide/sql-models/" class="md-nav__link">
         
   
   
@@ -1370,7 +1245,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/pipe-syntax/" class="md-nav__link">
+      <a href="../../../guide/pipe-syntax/" class="md-nav__link">
         
   
   
@@ -1398,7 +1273,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/sources/" class="md-nav__link">
+      <a href="../../../guide/sources/" class="md-nav__link">
         
   
   
@@ -1426,7 +1301,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/materializations/" class="md-nav__link">
+      <a href="../../../guide/materializations/" class="md-nav__link">
         
   
   
@@ -1454,7 +1329,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/incremental-models/" class="md-nav__link">
+      <a href="../../../guide/incremental-models/" class="md-nav__link">
         
   
   
@@ -1482,7 +1357,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/schema-evolution/" class="md-nav__link">
+      <a href="../../../guide/schema-evolution/" class="md-nav__link">
         
   
   
@@ -1510,7 +1385,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/seeds/" class="md-nav__link">
+      <a href="../../../guide/seeds/" class="md-nav__link">
         
   
   
@@ -1538,7 +1413,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/datagen/" class="md-nav__link">
+      <a href="../../../guide/datagen/" class="md-nav__link">
         
   
   
@@ -1566,7 +1441,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/model-selection/" class="md-nav__link">
+      <a href="../../../guide/model-selection/" class="md-nav__link">
         
   
   
@@ -1594,7 +1469,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/python-models/" class="md-nav__link">
+      <a href="../../../guide/python-models/" class="md-nav__link">
         
   
   
@@ -1622,7 +1497,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/functions/" class="md-nav__link">
+      <a href="../../../guide/functions/" class="md-nav__link">
         
   
   
@@ -1650,7 +1525,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/testing/" class="md-nav__link">
+      <a href="../../../guide/testing/" class="md-nav__link">
         
   
   
@@ -1678,7 +1553,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/targets/" class="md-nav__link">
+      <a href="../../../guide/targets/" class="md-nav__link">
         
   
   
@@ -1706,7 +1581,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/web-ui/" class="md-nav__link">
+      <a href="../../../guide/web-ui/" class="md-nav__link">
         
   
   
@@ -1734,7 +1609,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/editor-setup/" class="md-nav__link">
+      <a href="../../../guide/editor-setup/" class="md-nav__link">
         
   
   
@@ -1762,7 +1637,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../guide/editor-features/" class="md-nav__link">
+      <a href="../../../guide/editor-features/" class="md-nav__link">
         
   
   
@@ -1794,28 +1669,31 @@
       
   
   
+    
   
   
+  
     
     
     
     
+      
+        
+        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
-        
-          
-          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
             
   
   
@@ -1833,7 +1711,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_6">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1848,28 +1726,31 @@
                 
   
   
+    
   
   
+  
     
     
     
     
       
       
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
         
           
+          
         
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6_1" >
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_1" checked>
         
           
-          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="">
             
   
   
@@ -1887,7 +1768,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_6_1">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1905,7 +1786,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/" class="md-nav__link">
+      <a href="../" class="md-nav__link">
         
   
   
@@ -1930,10 +1811,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/first-model/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    A First Incremental Model
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1949,6 +1857,70 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#the-source-and-the-bronze-layer" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The source and the bronze layer
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-model" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The model
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#running-it" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Running it
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-actually-runs" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What actually runs
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1961,7 +1933,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/late-data/" class="md-nav__link">
+      <a href="../late-data/" class="md-nav__link">
         
   
   
@@ -1989,7 +1961,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
+      <a href="../sessions/" class="md-nav__link">
         
   
   
@@ -2017,7 +1989,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/ordered-sessions/" class="md-nav__link">
+      <a href="../ordered-sessions/" class="md-nav__link">
         
   
   
@@ -2045,7 +2017,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/changing-things/" class="md-nav__link">
+      <a href="../changing-things/" class="md-nav__link">
         
   
   
@@ -2073,7 +2045,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/taking-stock/" class="md-nav__link">
+      <a href="../taking-stock/" class="md-nav__link">
         
   
   
@@ -2109,7 +2081,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web_analytics/" class="md-nav__link">
+      <a href="../../web_analytics/" class="md-nav__link">
         
   
   
@@ -2198,7 +2170,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/cli/" class="md-nav__link">
+      <a href="../../../reference/cli/" class="md-nav__link">
         
   
   
@@ -2226,7 +2198,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/smelt-yml/" class="md-nav__link">
+      <a href="../../../reference/smelt-yml/" class="md-nav__link">
         
   
   
@@ -2254,7 +2226,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/sources-yml/" class="md-nav__link">
+      <a href="../../../reference/sources-yml/" class="md-nav__link">
         
   
   
@@ -2282,7 +2254,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/timeseries/" class="md-nav__link">
+      <a href="../../../reference/timeseries/" class="md-nav__link">
         
   
   
@@ -2310,7 +2282,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/cumulative-aggregate/" class="md-nav__link">
+      <a href="../../../reference/cumulative-aggregate/" class="md-nav__link">
         
   
   
@@ -2338,7 +2310,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/language/" class="md-nav__link">
+      <a href="../../../reference/language/" class="md-nav__link">
         
   
   
@@ -2427,7 +2399,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../developing/architecture/" class="md-nav__link">
+      <a href="../../../developing/architecture/" class="md-nav__link">
         
   
   
@@ -2455,7 +2427,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../developing/contributing/" class="md-nav__link">
+      <a href="../../../developing/contributing/" class="md-nav__link">
         
   
   
@@ -2510,10 +2482,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#syntax-fn-x-body" class="md-nav__link">
+  <a href="#the-source-and-the-bronze-layer" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Syntax: fn x =&gt; body
+        The source and the bronze layer
       
     </span>
   </a>
@@ -2521,10 +2493,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#multiple-parameters" class="md-nav__link">
+  <a href="#the-model" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Multiple parameters
+        The model
       
     </span>
   </a>
@@ -2532,10 +2504,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#where-lambdas-are-allowed" class="md-nav__link">
+  <a href="#running-it" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Where lambdas are allowed
+        Running it
       
     </span>
   </a>
@@ -2543,43 +2515,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#parameter-scoping" class="md-nav__link">
+  <a href="#what-actually-runs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Parameter scoping
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#what-a-lambda-body-can-reference" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        What a lambda body can reference
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#lsp-support" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        LSP support
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#diagnostic-codes" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Diagnostic codes
+        What actually runs
       
     </span>
   </a>
@@ -2603,7 +2542,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/meta-language/lambdas.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/examples/web-analytics/first-model.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2611,204 +2550,141 @@
   
 
 
-<h1 id="lambdas">Lambdas<a class="headerlink" href="#lambdas" title="Permanent link">&para;</a></h1>
-<p>The meta-language provides <strong>lambda expressions</strong> — anonymous single-argument functions written inline as arguments to <a href="../hofs/"><code>map</code> or <code>filter</code></a>. (<code>reduce</code>'s second argument is a bare reducer identifier, not a lambda — see <a href="../reducers/">Reducers</a>.) A lambda lets you describe a per-element transformation or predicate without declaring a named <code>smelt.define</code>. Lambdas chain naturally with the <a href="../pipes/">pipe operator <code>|&gt;</code></a>.</p>
-<p>Lambdas are a meta-world construct. They are evaluated entirely at compile time and never reach the database engine.</p>
-<h2 id="syntax-fn-x-body">Syntax: <code>fn x =&gt; body</code><a class="headerlink" href="#syntax-fn-x-body" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>fn IDENT =&gt; EXPR
+<!-- GENERATED FILE — edit examples/web_analytics/tutorial_pages/first-model.md and run python3 examples/web_analytics/generate_tutorial.py -->
+
+<h1 id="a-first-incremental-model">A first incremental model<a class="headerlink" href="#a-first-incremental-model" title="Permanent link">&para;</a></h1>
+<p>The pipeline starts as small as possible: one source, one typed
+passthrough, and one incremental model that parses events into columns.
+No dedup, no lateness handling yet — this page is about the mental model
+you'll reuse everywhere else: <strong>partitions, run windows, and reading the
+exact SQL a run will execute.</strong></p>
+<p>This stage is a complete project at
+<a href="https://github.com/adbrowne/smelt-sql/tree/main/examples/web_analytics/tutorial_stages/01_first_model"><code>tutorial_stages/01_first_model/</code></a>.</p>
+<h2 id="the-source-and-the-bronze-layer">The source and the bronze layer<a class="headerlink" href="#the-source-and-the-bronze-layer" title="Permanent link">&para;</a></h2>
+<p>The feed lands as a raw table with string-typed timestamps and a JSON
+payload. A source declaration
+(<a href="https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/tutorial_stages/01_first_model/models/sources/raw/events.yml"><code>models/sources/raw/events.yml</code></a>)
+names it and pins its columns, and a one-line bronze model casts the
+clocks and the partition value to real types so everything downstream is
+typed. (If you're coming from dbt: sources and staging models, same idea.)</p>
+<h2 id="the-model">The model<a class="headerlink" href="#the-model" title="Permanent link">&para;</a></h2>
+<p><code>silver.events_parsed</code>, first version — a plain SELECT plus a frontmatter
+block:</p>
+<!-- smelt-include: tutorial_stages/01_first_model/models/silver/events_parsed.sql -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">---</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="n">timeseries</span><span class="p">:</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a><span class="c1">---</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="k">SELECT</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="w">    </span><span class="n">event_id</span><span class="p">,</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">    </span><span class="n">device_id</span><span class="p">,</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">    </span><span class="k">CASE</span><span class="w"> </span><span class="k">WHEN</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a><span class="w">         </span><span class="k">THEN</span><span class="w"> </span><span class="s1">&#39;u:&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">user_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">         </span><span class="k">ELSE</span><span class="w"> </span><span class="s1">&#39;d:&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">device_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="w">    </span><span class="k">END</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amplitude_id</span><span class="p">,</span>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a><span class="w">    </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_ts</span><span class="p">,</span>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="w">    </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_date</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">DATE</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="w">    </span><span class="n">utm_campaign</span><span class="p">,</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">    </span><span class="n">json_extract_string</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;$.event_name&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_name</span><span class="p">,</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">    </span><span class="n">json_extract_string</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;$.platform&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">platform</span><span class="p">,</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="w">    </span><span class="n">json_extract_string</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;$.url&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">url</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">bronze</span><span class="p">.</span><span class="n">raw_events</span>
 </code></pre></div>
+<p>The SQL is ordinary: cast the clocks, pull three payload fields out of the
+JSON, and synthesise <code>amplitude_id</code>, a never-NULL identifier that prefers
+the signed-in <code>user_id</code> and falls back to the device (the <a href="../../web_analytics/">identity
+example</a> builds on it; here it's just a column).</p>
+<p>The frontmatter is where smelt learns how this table lives in time:</p>
 <ul>
-<li><code>fn</code> is a reserved keyword that introduces the lambda.</li>
-<li><code>IDENT</code> is the single parameter name, bound for use inside <code>EXPR</code>.</li>
-<li><code>=&gt;</code> is the lambda arrow (distinct from the <code>name =&gt; value</code> named-argument separator that appears outside <code>fn</code> bodies).</li>
-<li><code>EXPR</code> is any meta-evaluable expression: a <code>smelt.&lt;path&gt;(...)</code> call, a HOF call, a pipe chain, a list literal, or an arithmetic/comparison expression involving the bound name.</li>
+<li><code>materialization: table</code> — a real table, rather than the default view.</li>
+<li><code>refresh: incremental</code> with <code>grain: partition</code> — maintain this table in
+  partition-sized pieces rather than rebuilding it whole. (The other
+  grain, <code>key</code>, maintains one merged row per key instead — see
+  <a href="../../../reference/cumulative-aggregate/">key-grain patterns</a>.)</li>
+<li>The <code>timeseries:</code> block names the clock: every row belongs to a day, by
+  <code>event_date</code>. <strong>A day of this table is the unit smelt reads, writes, and
+  reasons about.</strong> If you're coming from Spark, this is the column you'd
+  pass to <code>partitionBy</code>; from dbt, the <code>partition_by</code> of an
+  insert-overwrite incremental model. (Full key reference:
+  <a href="../../../reference/timeseries/">timeseries</a>; the narrative version is in
+  the <a href="../../../guide/incremental-models/#configuration">incremental models guide</a>.)</li>
 </ul>
-<p><strong>Example — double each element:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">-- examples/meta_hofs/models/pipe_rewrite.sql</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="c1">-- fn c =&gt; c * 2 transforms every element of the list.</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">[</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">]</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="n">filter</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="o">|&gt;</span><span class="w"> </span><span class="k">map</span><span class="p">(</span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
-<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1">-- Engine sees the meta-evaluated result: SELECT 2, 4, 6</span>
+<h2 id="running-it">Running it<a class="headerlink" href="#running-it" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1"># First build: load sources&#39; dependents and materialize everything</span>
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>smelt<span class="w"> </span>build
+<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a>
+<a id="__codelineno-1-4" name="__codelineno-1-4" href="#__codelineno-1-4"></a><span class="c1"># A daily run: process one day&#39;s window</span>
+<a id="__codelineno-1-5" name="__codelineno-1-5" href="#__codelineno-1-5"></a>smelt<span class="w"> </span>run<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2026</span>-04-10<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2026</span>-04-11
 </code></pre></div>
-<p><strong>Example — compose with <code>and_all</code>:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">-- reduce([true, false, true], and_all) reduces a Boolean list.</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="c1">-- The lambda here is inside the filter:</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="k">SELECT</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="n">reduce</span><span class="p">(</span>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">        </span><span class="n">filter</span><span class="p">([</span><span class="k">true</span><span class="p">,</span><span class="w"> </span><span class="k">false</span><span class="p">,</span><span class="w"> </span><span class="k">true</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">b</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">b</span><span class="p">),</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">        </span><span class="n">and_all</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="p">)</span>
+<p>The <code>--event-time-start</code>/<code>--event-time-end</code> pair is the <strong>run window</strong> —
+the slice of time you're asking smelt to bring up to date. Windows are
+half-open (<code>[start, end)</code>), and nothing requires them to be one day: a
+30-day window is one run.</p>
+<h2 id="what-actually-runs">What actually runs<a class="headerlink" href="#what-actually-runs" title="Permanent link">&para;</a></h2>
+<p>Before trusting any of this, look at it. <code>smelt explain</code> prints the exact
+maintenance statements a run over a given window would execute:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>silver.events_parsed<span class="w"> </span>--show-sql<span class="w"> </span>--period<span class="w"> </span><span class="m">2026</span>-04-10..2026-04-11
 </code></pre></div>
-<h2 id="multiple-parameters">Multiple parameters<a class="headerlink" href="#multiple-parameters" title="Permanent link">&para;</a></h2>
-<p>The parenthesised form <code>fn (a, b, …) =&gt; body</code> declares a lambda with two or more parameters:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>fn ( IDENT_1 , IDENT_2 , … , IDENT_k ) =&gt; EXPR
+<!-- smelt-generate: @cwd=tutorial_stages/01_first_model explain silver.events_parsed --show-sql --json --period 2026-04-10..2026-04-11 -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">-- trigger: Backfill</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">BEGIN</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_events_parsed</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-10&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_events_parsed</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">device_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">user_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">amplitude_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amplitude_id</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_ts</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_ts</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_date</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">DATE</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">utm_campaign</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">utm_campaign</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_name</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_name</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">platform</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">platform</span><span class="p">,</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">url</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">url</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">  </span><span class="k">SELECT</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">      </span><span class="n">event_id</span><span class="p">,</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">      </span><span class="n">device_id</span><span class="p">,</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">      </span><span class="n">user_id</span><span class="p">,</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">      </span><span class="k">CASE</span><span class="w"> </span><span class="k">WHEN</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
+<a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a><span class="w">           </span><span class="k">THEN</span><span class="w"> </span><span class="s1">&#39;u:&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">user_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span>
+<a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a><span class="w">           </span><span class="k">ELSE</span><span class="w"> </span><span class="s1">&#39;d:&#39;</span><span class="w"> </span><span class="o">||</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">device_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">VARCHAR</span><span class="p">)</span>
+<a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a><span class="w">      </span><span class="k">END</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amplitude_id</span><span class="p">,</span>
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a><span class="w">      </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="k">TIMESTAMP</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_ts</span><span class="p">,</span>
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a><span class="w">      </span><span class="k">CAST</span><span class="p">(</span><span class="n">event_date</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">DATE</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span>
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a><span class="w">      </span><span class="n">utm_campaign</span><span class="p">,</span>
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a><span class="w">      </span><span class="n">json_extract_string</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;$.event_name&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_name</span><span class="p">,</span>
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a><span class="w">      </span><span class="n">json_extract_string</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;$.platform&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">platform</span><span class="p">,</span>
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a><span class="w">      </span><span class="n">json_extract_string</span><span class="p">(</span><span class="n">payload</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;$.url&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">url</span>
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a><span class="w">  </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">bronze_raw_events</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-10&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span><span class="p">)</span>
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a><span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="n">_smelt_typed</span>
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a><span class="k">COMMIT</span>
 </code></pre></div>
-<ul>
-<li>The parameter list is parenthesised and comma-separated; trailing commas are permitted.</li>
-<li><code>k = 0</code> is rejected with <code>LambdaZeroParameters</code> — a zero-parameter lambda has no use case in the closed HOF surface.</li>
-<li>All <code>k</code> parameter names must be distinct within the lambda; a duplicate emits <code>LambdaDuplicateParameter</code> at the second occurrence.</li>
-<li>The parenthesised form is also accepted for arity <code>k = 1</code> (<code>fn (x) =&gt; body</code>); the two single-arg surfaces are equivalent.</li>
-<li><code>fn a, b =&gt; body</code> (no parens, comma between parameters) is a parse error at the first comma.</li>
-</ul>
-<p>The lambda's type is <code>Lambda&lt;(T_1, …, T_k), U&gt;</code> where <code>T_1 … T_k</code> are the parameter types inferred from the HOF call site and <code>U</code> is the body's synthesised return type.</p>
-<p><strong>Multi-arg lambdas and the v1 HOF surface.</strong> <code>map</code> and <code>filter</code> require arity-1 lambdas (<code>Lambda&lt;T, Boolean&gt;</code> and <code>Lambda&lt;T, U&gt;</code> respectively). Passing a multi-arg lambda to either emits <code>LambdaArityMismatch</code>. No v1 HOF accepts a multi-arg lambda yet — multi-arg lambdas parse and type-check but become useful only when a multi-list HOF such as <code>zip_with</code> is added in a future version.</p>
-<p><strong>Example — correct (arity 1):</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="mi">2</span><span class="p">)</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="c1">-- fn (x) =&gt; x * 2 is equivalent to fn x =&gt; x * 2</span>
-</code></pre></div>
-<p><strong>Example — arity mismatch (emits <code>LambdaArityMismatch</code>):</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">-- map requires a Lambda&lt;T, U&gt; of arity 1; (a, b) is arity 2</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1">-- ← LambdaArityMismatch: map expects arity 1; found arity 2</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">)</span>
-</code></pre></div>
-<h2 id="where-lambdas-are-allowed">Where lambdas are allowed<a class="headerlink" href="#where-lambdas-are-allowed" title="Permanent link">&para;</a></h2>
-<p>A lambda is only valid as a <strong>positional argument to a HOF</strong> (<code>map</code>, <code>filter</code>). Writing a lambda anywhere else emits <code>LambdaInForbiddenPosition</code> anchored at the <code>fn</code> keyword:</p>
-<table>
-<thead>
-<tr>
-<th>Position</th>
-<th>Allowed?</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Second argument to <code>map(xs, fn x =&gt; ...)</code></td>
-<td>Yes</td>
-</tr>
-<tr>
-<td>Second argument to <code>filter(xs, fn x =&gt; ...)</code></td>
-<td>Yes</td>
-</tr>
-<tr>
-<td>List element <code>[fn x =&gt; x, ...]</code></td>
-<td>No — <code>LambdaInForbiddenPosition</code></td>
-</tr>
-<tr>
-<td>Named-argument value <code>p =&gt; fn x =&gt; x</code></td>
-<td>No — <code>LambdaInForbiddenPosition</code></td>
-</tr>
-<tr>
-<td><code>smelt.define</code> parameter or return type</td>
-<td>No — <code>Lambda&lt;T, U&gt;</code> is not a user-writable annotation</td>
-</tr>
-<tr>
-<td>Top-level expression</td>
-<td>No — <code>LambdaInForbiddenPosition</code></td>
-</tr>
-</tbody>
-</table>
-<h2 id="parameter-scoping">Parameter scoping<a class="headerlink" href="#parameter-scoping" title="Permanent link">&para;</a></h2>
-<p>Inside the lambda body, the bound name resolves <strong>before any wider scope</strong>. The resolution order (from <code>scoping.md</code>) is:</p>
+<p>Three things to notice, because every later page builds on them:</p>
 <ol>
-<li>Lambda parameter — wins over everything inside the body.</li>
-<li><code>smelt.define</code> function parameters.</li>
-<li>CTE columns visible at the reference site.</li>
-<li>FROM-scope columns from <code>TableExpr</code> parameters.</li>
+<li><strong>It's a <code>DELETE</code> + <code>INSERT</code> pair over literal bounds,</strong> wrapped in a
+   transaction: throw away the partitions in the window, recompute them,
+   commit both together. No merge machinery, no hidden state; a
+   partition is either the full output of its query or absent. (The
+   <code>_smelt_typed</code> wrapper is smelt pinning each column to its inferred
+   type, so the table's schema cannot drift from what the type checker
+   proved.)</li>
+<li><strong>The read matches the write.</strong> The inner <code>SELECT</code> reads
+   <code>bronze_raw_events</code> filtered to exactly the same <code>[2026-04-10,
+   2026-04-11)</code> window it is rebuilding. For this simple model there is
+   nothing to widen yet; the next page gives the derivation real work.</li>
+<li><strong>Every statement group is headed by a <code>-- trigger:</code> label</strong> — <em>why</em>
+   smelt would run it. <code>Backfill</code> is the explicit kind: you asked for
+   this window. Later pages add <code>NewData</code> triggers, statements smelt runs
+   when changed upstream data forces a partition to refresh. File the
+   term away; it recurs in every <code>explain</code> from here on.</li>
+<li><strong>What you see is what runs.</strong> The statements above are not a
+   simplified rendering; they are the statements. dbt can show you
+   compiled SQL too (<code>dbt compile</code>), but the incremental window
+   arithmetic stays inside materialization macros, and a Spark job keeps
+   it in writer options and job code. Here the full maintenance
+   statement, window math included, is the primary artifact.</li>
 </ol>
-<p>A lambda parameter may shadow a same-named <code>smelt.define</code> parameter or column. The shadow is intentional (lexical scoping); the inner binding wins. To reach a shadowed outer name, assign it to an intermediate variable before the lambda, or use a qualified reference.</p>
-<p><strong>Example — lambda parameter shadows outer binding:</strong></p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1">-- `c` inside the lambda refers to the element, not any outer `c`.</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">10</span><span class="p">)</span>
-</code></pre></div>
-<h2 id="what-a-lambda-body-can-reference">What a lambda body can reference<a class="headerlink" href="#what-a-lambda-body-can-reference" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>What</th>
-<th>Allowed?</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>The lambda's own parameter</td>
-<td>Yes</td>
-</tr>
-<tr>
-<td>Enclosing <code>smelt.define</code> parameters</td>
-<td>Yes</td>
-</tr>
-<tr>
-<td>Meta-only outer-scope values (<code>List&lt;T&gt;</code>, <code>smelt.config.var('x')</code> results)</td>
-<td>Yes</td>
-</tr>
-<tr>
-<td>SQL columns only available at Data-World runtime</td>
-<td>No — <code>UnknownIdentifier</code> at the bare reference</td>
-</tr>
-</tbody>
-</table>
-<p>Lambdas capture the compile-time meta-world. Runtime SQL columns do not exist at meta-evaluation time and cannot be referenced inside a lambda body.</p>
-<h2 id="lsp-support">LSP support<a class="headerlink" href="#lsp-support" title="Permanent link">&para;</a></h2>
-<ul>
-<li><strong>Hover</strong> on the lambda parameter inside the body shows the parameter's bound type (supplied by the surrounding HOF's <code>T</code>).</li>
-<li><strong>Goto-definition</strong> on the lambda parameter inside the body resolves to the parameter's binding occurrence in the lambda head (<code>fn</code> token).</li>
-<li><strong>Completion</strong> inside a lambda body offers the bound parameter as the first identifier completion.</li>
-</ul>
-<h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">LambdaInForbiddenPosition</p>
-<p><strong>When it fires:</strong> A <code>fn x =&gt; body</code> lambda appears outside a HOF positional argument position.</p>
-<p><strong>Message:</strong> <code>lambda is only valid as an argument to a higher-order function</code></p>
-<p><strong>Fires at:</strong> the <code>fn</code> keyword.</p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">-- ← LambdaInForbiddenPosition: lambda is not a HOF argument here</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">x</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">users</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Move the lambda inside a call to <code>map</code> or <code>filter</code>. If you want to apply a transformation to every element of a list, use <code>map(xs, fn x =&gt; ...)</code>. If you need a named transformation, define it with <code>smelt.define</code>.</p>
-</div>
-<hr />
-<p><a id="lambdaaritymismatch"></a></p>
-<div class="admonition warning">
-<p class="admonition-title">LambdaArityMismatch</p>
-<p><strong>When it fires:</strong> The lambda's parameter count does not match the arity required by the surrounding HOF call site. For example, <code>map</code> and <code>filter</code> require arity 1; passing a two-parameter lambda emits this diagnostic.</p>
-<p><strong>Message:</strong> <code>{hof} expects a lambda of arity {expected}; found arity {actual}</code></p>
-<p><strong>Fires at:</strong> the lambda's parameter list.</p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">-- map requires arity 1; fn (a, b) =&gt; a + b is arity 2</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="c1">-- ← LambdaArityMismatch: map expects arity 1; found arity 2</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="p">(</span><span class="n">a</span><span class="p">,</span><span class="w"> </span><span class="n">b</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="n">b</span><span class="p">)</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Match the lambda's parameter count to what the HOF requires. <code>map</code> and <code>filter</code> take an arity-1 lambda. If you need a multi-arg lambda, you need a HOF that accepts one — no v1 HOF does this yet.</p>
-</div>
-<hr />
-<p><a id="lambdazeroparameters"></a></p>
-<div class="admonition warning">
-<p class="admonition-title">LambdaZeroParameters</p>
-<p><strong>When it fires:</strong> A lambda's parameter list is empty: <code>fn () =&gt; body</code>.</p>
-<p><strong>Message:</strong> <code>lambda must declare at least one parameter</code></p>
-<p><strong>Fires at:</strong> the empty parameter list <code>()</code>.</p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1">-- ← LambdaZeroParameters: lambda must declare at least one parameter</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="p">()</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="mi">42</span><span class="p">)</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Add at least one parameter. If the body does not use the parameter, name it <code>_</code> by convention: <code>fn _ =&gt; 42</code>.</p>
-</div>
-<hr />
-<p><a id="lambdaduplicateparameter"></a></p>
-<div class="admonition warning">
-<p class="admonition-title">LambdaDuplicateParameter</p>
-<p><strong>When it fires:</strong> The same parameter name appears more than once in a single lambda's parameter list.</p>
-<p><strong>Message:</strong> <code>parameter '{name}' already appears in this lambda's parameter list</code></p>
-<p><strong>Fires at:</strong> the second (duplicate) occurrence of the parameter name.</p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1">-- ← LambdaDuplicateParameter: &#39;x&#39; already appears in this lambda&#39;s parameter list</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="k">map</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="p">(</span><span class="n">x</span><span class="p">,</span><span class="w"> </span><span class="n">x</span><span class="p">)</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">x</span><span class="p">)</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Give each parameter a distinct name. If you intended two separate bindings, choose different identifiers for each slot.</p>
-</div>
-<hr />
-<div class="admonition warning">
-<p class="admonition-title">LambdaResultTypeMismatch</p>
-<p><strong>When it fires:</strong> The lambda body's synthesised type is incompatible with what the surrounding HOF requires.</p>
-<p><strong>Message:</strong> <code>{hof} requires lambda result {expected}; found {actual}</code></p>
-<p><strong>Fires at:</strong> the body expression.</p>
-<p><strong>Example:</strong>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="c1">-- filter requires Lambda&lt;T, Boolean&gt;; returning an integer instead</span>
-<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="c1">-- ← LambdaResultTypeMismatch: filter requires Boolean; found INTEGER</span>
-<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">filter</span><span class="p">([</span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span><span class="p">,</span><span class="w"> </span><span class="mi">3</span><span class="p">],</span><span class="w"> </span><span class="n">fn</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="mi">1</span><span class="p">)</span>
-</code></pre></div></p>
-<p><strong>What to fix:</strong> Adjust the body expression to match the HOF's required return type. For <code>filter</code>, the body must evaluate to a <code>Boolean</code> predicate (e.g. <code>c &gt; 0</code>, <code>c IS NOT NULL</code>). For <code>map</code>, the body may return any type, but all elements must share the same result type.</p>
-</div>
+<p>One honest caveat while it's cheap to say: <code>DELETE</code>+<code>INSERT</code> per partition
+is a <em>recompute</em> strategy. It buys idempotence — re-running any window is
+always safe — at the cost of rewriting a whole partition to change one
+row. Everything smelt derives in the following pages is about keeping the
+set of partitions it must rewrite as small as it can prove correct.</p>
 
 
 
@@ -2866,10 +2742,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "navigation.tabs", "navigation.tracking", "navigation.instant", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tabs.link", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "navigation.tabs", "navigation.tracking", "navigation.instant", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tabs.link", "content.action.edit"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.79ae519e.min.js"></script>
       
     
   </body>

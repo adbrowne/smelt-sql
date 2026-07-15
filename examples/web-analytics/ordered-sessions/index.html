@@ -10,31 +10,31 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/web-ui/">
+        <link rel="canonical" href="https://smeltsql.com/examples/web-analytics/ordered-sessions/">
       
       
-        <link rel="prev" href="../targets/">
+        <link rel="prev" href="../sessions/">
       
       
-        <link rel="next" href="../editor-setup/">
+        <link rel="next" href="../changing-things/">
       
       
         
       
       
-      <link rel="icon" href="../../assets/favicon.svg">
+      <link rel="icon" href="../../../assets/favicon.svg">
       <meta name="generator" content="mkdocs-1.6.1, mkdocs-material-9.7.6">
     
     
       
-        <title>Web UI - smelt</title>
+        <title>Deep Dive: The Ordered Sessionizer - smelt</title>
       
     
     
-      <link rel="stylesheet" href="../../assets/stylesheets/main.484c7ddc.min.css">
+      <link rel="stylesheet" href="../../../assets/stylesheets/main.484c7ddc.min.css">
       
         
-        <link rel="stylesheet" href="../../assets/stylesheets/palette.ab4e12ef.min.css">
+        <link rel="stylesheet" href="../../../assets/stylesheets/palette.ab4e12ef.min.css">
       
       
 
@@ -53,9 +53,9 @@
       
     
     
-      <link rel="stylesheet" href="../../stylesheets/extra.css">
+      <link rel="stylesheet" href="../../../stylesheets/extra.css">
     
-    <script>__md_scope=new URL("../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
+    <script>__md_scope=new URL("../../..",location),__md_hash=e=>[...e].reduce(((e,_)=>(e<<5)-e+_.charCodeAt(0)),0),__md_get=(e,_=localStorage,t=__md_scope)=>JSON.parse(_.getItem(t.pathname+"."+e)),__md_set=(e,_,t=localStorage,a=__md_scope)=>{try{t.setItem(a.pathname+"."+e,JSON.stringify(_))}catch(e){}}</script>
     
       
 
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#web-ui" class="md-skip">
+        <a href="#deep-dive-the-session-table-that-reads-itself" class="md-skip">
           Skip to content
         </a>
       
@@ -94,9 +94,9 @@
 
 <header class="md-header" data-md-component="header">
   <nav class="md-header__inner md-grid" aria-label="Header">
-    <a href="../.." title="smelt" class="md-header__button md-logo" aria-label="smelt" data-md-component="logo">
+    <a href="../../.." title="smelt" class="md-header__button md-logo" aria-label="smelt" data-md-component="logo">
       
-  <img src="../../assets/logo-mark.svg" alt="logo">
+  <img src="../../../assets/logo-mark.svg" alt="logo">
 
     </a>
     <label class="md-header__button md-icon" for="__drawer">
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Web UI
+              Deep Dive: The Ordered Sessionizer
             
           </span>
         </div>
@@ -231,7 +231,7 @@
   
   
     <li class="md-tabs__item">
-      <a href="../.." class="md-tabs__link">
+      <a href="../../.." class="md-tabs__link">
         
   
   
@@ -252,7 +252,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../getting-started/installation/" class="md-tabs__link">
+        <a href="../../../getting-started/installation/" class="md-tabs__link">
           
   
   
@@ -272,7 +272,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../concepts/how-it-works/" class="md-tabs__link">
+        <a href="../../../concepts/how-it-works/" class="md-tabs__link">
           
   
   
@@ -292,7 +292,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../meta-language/" class="md-tabs__link">
+        <a href="../../../meta-language/" class="md-tabs__link">
           
   
   
@@ -308,13 +308,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../sql-models/" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../../guide/sql-models/" class="md-tabs__link">
           
   
   
@@ -330,6 +328,8 @@
   
   
   
+    
+  
   
     
     
@@ -337,11 +337,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../examples/web-analytics/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../" class="md-tabs__link">
           
   
   
@@ -364,7 +366,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../reference/cli/" class="md-tabs__link">
+        <a href="../../../reference/cli/" class="md-tabs__link">
           
   
   
@@ -384,7 +386,7 @@
     
     
       <li class="md-tabs__item">
-        <a href="../../developing/architecture/" class="md-tabs__link">
+        <a href="../../../developing/architecture/" class="md-tabs__link">
           
   
   
@@ -418,9 +420,9 @@
 
 <nav class="md-nav md-nav--primary md-nav--lifted" aria-label="Navigation" data-md-level="0">
   <label class="md-nav__title" for="__drawer">
-    <a href="../.." title="smelt" class="md-nav__button md-logo" aria-label="smelt" data-md-component="logo">
+    <a href="../../.." title="smelt" class="md-nav__button md-logo" aria-label="smelt" data-md-component="logo">
       
-  <img src="../../assets/logo-mark.svg" alt="logo">
+  <img src="../../../assets/logo-mark.svg" alt="logo">
 
     </a>
     smelt
@@ -447,7 +449,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../.." class="md-nav__link">
+      <a href="../../.." class="md-nav__link">
         
   
   
@@ -528,7 +530,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../getting-started/installation/" class="md-nav__link">
+      <a href="../../../getting-started/installation/" class="md-nav__link">
         
   
   
@@ -556,7 +558,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../getting-started/quickstart/" class="md-nav__link">
+      <a href="../../../getting-started/quickstart/" class="md-nav__link">
         
   
   
@@ -645,7 +647,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/how-it-works/" class="md-nav__link">
+      <a href="../../../concepts/how-it-works/" class="md-nav__link">
         
   
   
@@ -673,7 +675,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../concepts/project-structure/" class="md-nav__link">
+      <a href="../../../concepts/project-structure/" class="md-nav__link">
         
   
   
@@ -762,7 +764,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/" class="md-nav__link">
+      <a href="../../../meta-language/" class="md-nav__link">
         
   
   
@@ -790,7 +792,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/lists/" class="md-nav__link">
+      <a href="../../../meta-language/lists/" class="md-nav__link">
         
   
   
@@ -818,7 +820,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/hofs/" class="md-nav__link">
+      <a href="../../../meta-language/hofs/" class="md-nav__link">
         
   
   
@@ -846,7 +848,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/lambdas/" class="md-nav__link">
+      <a href="../../../meta-language/lambdas/" class="md-nav__link">
         
   
   
@@ -874,7 +876,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/pipes/" class="md-nav__link">
+      <a href="../../../meta-language/pipes/" class="md-nav__link">
         
   
   
@@ -902,7 +904,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/reducers/" class="md-nav__link">
+      <a href="../../../meta-language/reducers/" class="md-nav__link">
         
   
   
@@ -930,7 +932,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/ternary/" class="md-nav__link">
+      <a href="../../../meta-language/ternary/" class="md-nav__link">
         
   
   
@@ -958,7 +960,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/records/" class="md-nav__link">
+      <a href="../../../meta-language/records/" class="md-nav__link">
         
   
   
@@ -986,7 +988,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/maps/" class="md-nav__link">
+      <a href="../../../meta-language/maps/" class="md-nav__link">
         
   
   
@@ -1014,7 +1016,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/reflection/" class="md-nav__link">
+      <a href="../../../meta-language/reflection/" class="md-nav__link">
         
   
   
@@ -1042,7 +1044,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/config-loaders/" class="md-nav__link">
+      <a href="../../../meta-language/config-loaders/" class="md-nav__link">
         
   
   
@@ -1070,7 +1072,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/config-vars/" class="md-nav__link">
+      <a href="../../../meta-language/config-vars/" class="md-nav__link">
         
   
   
@@ -1098,7 +1100,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/generators/" class="md-nav__link">
+      <a href="../../../meta-language/generators/" class="md-nav__link">
         
   
   
@@ -1126,7 +1128,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../meta-language/reference/" class="md-nav__link">
+      <a href="../../../meta-language/reference/" class="md-nav__link">
         
   
   
@@ -1134,6 +1136,515 @@
     
   
     Reference
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+    
+      
+      
+  
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Guide
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_5">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Guide
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/sql-models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    SQL Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/pipe-syntax/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Pipe Syntax
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/sources/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sources
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/materializations/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Materializations
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/incremental-models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Incremental Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/schema-evolution/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Schema Evolution
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/seeds/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Seeds
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/datagen/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Data Generation
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/model-selection/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Selection
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/python-models/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Python Models
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/functions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Functions
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/testing/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Testing
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/targets/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Targets & Backends
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/web-ui/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web UI
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/editor-setup/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Setup
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../../guide/editor-features/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Editor Features
   
 
     
@@ -1179,17 +1690,17 @@
       
         
         
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6" checked>
         
           
-          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="">
             
   
   
   <span class="md-ellipsis">
     
   
-    Guide
+    Examples
   
 
     
@@ -1200,12 +1711,69 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
-          <label class="md-nav__title" for="__nav_5">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6">
             <span class="md-nav__icon md-icon"></span>
             
   
-    Guide
+    Examples
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+    
+  
+  
+  
+    
+    
+    
+    
+      
+      
+        
+          
+          
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+      
+        
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_6_1" checked>
+        
+          
+          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Analytics Pipeline (tutorial)
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="true">
+          <label class="md-nav__title" for="__nav_6_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Web Analytics Pipeline (tutorial)
   
 
           </label>
@@ -1218,14 +1786,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../sql-models/" class="md-nav__link">
+      <a href="../" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    SQL Models
+    Overview
   
 
     
@@ -1246,14 +1814,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../pipe-syntax/" class="md-nav__link">
+      <a href="../first-model/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Pipe Syntax
+    A First Incremental Model
   
 
     
@@ -1274,14 +1842,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../sources/" class="md-nav__link">
+      <a href="../late-data/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Sources
+    Duplicates & Late Data
   
 
     
@@ -1302,266 +1870,14 @@
   
   
     <li class="md-nav__item">
-      <a href="../materializations/" class="md-nav__link">
+      <a href="../sessions/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Materializations
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../incremental-models/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Incremental Models
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../schema-evolution/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Schema Evolution
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../seeds/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Seeds
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../datagen/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Data Generation
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../model-selection/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Model Selection
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../python-models/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Python Models
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../functions/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Functions
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../testing/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Testing
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../targets/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Targets & Backends
+    Sessions & Cross-Midnight Backfills
   
 
     
@@ -1598,7 +1914,7 @@
   <span class="md-ellipsis">
     
   
-    Web UI
+    Deep Dive: The Ordered Sessionizer
   
 
     
@@ -1616,7 +1932,7 @@
   <span class="md-ellipsis">
     
   
-    Web UI
+    Deep Dive: The Ordered Sessionizer
   
 
     
@@ -1642,10 +1958,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#launching-the-ui" class="md-nav__link">
+  <a href="#the-rule-and-why-bounded-reads-cant-implement-it" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Launching the UI
+        The rule, and why bounded reads can't implement it
       
     </span>
   </a>
@@ -1653,10 +1969,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#options" class="md-nav__link">
+  <a href="#the-self-reference" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Options
+        The self-reference
       
     </span>
   </a>
@@ -1664,82 +1980,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#features" class="md-nav__link">
+  <a href="#what-ordering-costs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Features
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Features">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#dependency-graph" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Dependency graph
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#model-detail-panel" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Model detail panel
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-planner" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run planner
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-execution-and-monitoring" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run execution and monitoring
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#live-file-watching" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Live file watching
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Further reading
+        What ordering costs
       
     </span>
   </a>
@@ -1762,318 +2006,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../editor-setup/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Editor Setup
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../editor-features/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Editor Features
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-          </ul>
-        </nav>
-      
-    </li>
-  
-
-    
-      
-      
-  
-  
-  
-  
-    
-    
-    
-    
-      
-      
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
-        
-          
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6" >
-        
-          
-          <label class="md-nav__link" for="__nav_6" id="__nav_6_label" tabindex="0">
-            
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Examples
-  
-
-    
-  </span>
-  
-  
-
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_6_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_6">
-            <span class="md-nav__icon md-icon"></span>
-            
-  
-    Examples
-  
-
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    
-    
-    
-    
-      
-      
-        
-      
-    
-    
-    <li class="md-nav__item md-nav__item--nested">
-      
-        
-        
-          
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6_1" >
-        
-          
-          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="0">
-            
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Web Analytics Pipeline (tutorial)
-  
-
-    
-  </span>
-  
-  
-
-            <span class="md-nav__icon md-icon"></span>
-          </label>
-        
-        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="false">
-          <label class="md-nav__title" for="__nav_6_1">
-            <span class="md-nav__icon md-icon"></span>
-            
-  
-    Web Analytics Pipeline (tutorial)
-  
-
-          </label>
-          <ul class="md-nav__list" data-md-scrollfix>
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Overview
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/first-model/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    A First Incremental Model
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/late-data/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Duplicates & Late Data
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Sessions & Cross-Midnight Backfills
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/ordered-sessions/" class="md-nav__link">
-        
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Deep Dive: The Ordered Sessionizer
-  
-
-    
-  </span>
-  
-  
-
-      </a>
-    </li>
-  
-
-              
-            
-              
-                
-  
-  
-  
-  
-    <li class="md-nav__item">
-      <a href="../../examples/web-analytics/changing-things/" class="md-nav__link">
+      <a href="../changing-things/" class="md-nav__link">
         
   
   
@@ -2101,7 +2034,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics/taking-stock/" class="md-nav__link">
+      <a href="../taking-stock/" class="md-nav__link">
         
   
   
@@ -2137,7 +2070,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web_analytics/" class="md-nav__link">
+      <a href="../../web_analytics/" class="md-nav__link">
         
   
   
@@ -2226,7 +2159,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/cli/" class="md-nav__link">
+      <a href="../../../reference/cli/" class="md-nav__link">
         
   
   
@@ -2254,7 +2187,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/smelt-yml/" class="md-nav__link">
+      <a href="../../../reference/smelt-yml/" class="md-nav__link">
         
   
   
@@ -2282,7 +2215,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/sources-yml/" class="md-nav__link">
+      <a href="../../../reference/sources-yml/" class="md-nav__link">
         
   
   
@@ -2310,7 +2243,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/timeseries/" class="md-nav__link">
+      <a href="../../../reference/timeseries/" class="md-nav__link">
         
   
   
@@ -2338,7 +2271,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/cumulative-aggregate/" class="md-nav__link">
+      <a href="../../../reference/cumulative-aggregate/" class="md-nav__link">
         
   
   
@@ -2366,7 +2299,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/language/" class="md-nav__link">
+      <a href="../../../reference/language/" class="md-nav__link">
         
   
   
@@ -2455,7 +2388,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../developing/architecture/" class="md-nav__link">
+      <a href="../../../developing/architecture/" class="md-nav__link">
         
   
   
@@ -2483,7 +2416,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../developing/contributing/" class="md-nav__link">
+      <a href="../../../developing/contributing/" class="md-nav__link">
         
   
   
@@ -2538,10 +2471,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#launching-the-ui" class="md-nav__link">
+  <a href="#the-rule-and-why-bounded-reads-cant-implement-it" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Launching the UI
+        The rule, and why bounded reads can't implement it
       
     </span>
   </a>
@@ -2549,10 +2482,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#options" class="md-nav__link">
+  <a href="#the-self-reference" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Options
+        The self-reference
       
     </span>
   </a>
@@ -2560,82 +2493,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#features" class="md-nav__link">
+  <a href="#what-ordering-costs" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Features
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Features">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#dependency-graph" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Dependency graph
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#model-detail-panel" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Model detail panel
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-planner" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run planner
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-execution-and-monitoring" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run execution and monitoring
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#live-file-watching" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Live file watching
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Further reading
+        What ordering costs
       
     </span>
   </a>
@@ -2659,7 +2520,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/web-ui.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/examples/web-analytics/ordered-sessions.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2667,79 +2528,100 @@
   
 
 
-<h1 id="web-ui">Web UI<a class="headerlink" href="#web-ui" title="Permanent link">&para;</a></h1>
-<p>smelt includes a built-in web interface for visualizing your model dependency graph and triggering runs.</p>
-<h2 id="launching-the-ui">Launching the UI<a class="headerlink" href="#launching-the-ui" title="Permanent link">&para;</a></h2>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>ui
+<!-- GENERATED FILE — edit examples/web_analytics/tutorial_pages/ordered-sessions.md and run python3 examples/web_analytics/generate_tutorial.py -->
+
+<h1 id="deep-dive-the-session-table-that-reads-itself">Deep dive: the session table that reads itself<a class="headerlink" href="#deep-dive-the-session-table-that-reads-itself" title="Permanent link">&para;</a></h1>
+<p><em>Optional. This page expands the closing section of
+<a href="../sessions/">Sessions and the cross-midnight backfill</a>: the root-anchored
+sessionizer, why it must read its own history, and what that costs
+operationally. Skip it on a first pass; nothing later depends on it.</em></p>
+<h2 id="the-rule-and-why-bounded-reads-cant-implement-it">The rule, and why bounded reads can't implement it<a class="headerlink" href="#the-rule-and-why-bounded-reads-cant-implement-it" title="Permanent link">&para;</a></h2>
+<p><code>silver.sessions_chained</code> keeps the 30-minute gap rule and the 5-minute
+attribution window of <code>silver.sessions</code>, but replaces the midnight
+deadline with a root-anchored one: a new event continues an open session
+only if that session started less than two calendar days ago; otherwise
+it starts a new one.</p>
+<p>The clock-anchored table never needs to remember anything: its deadline
+is computable from any event's own timestamp. The root-anchored deadline
+is not. To decide whether a day-D event continues a session, you must
+know <em>when the open session started</em> — and for a device that has been
+active continuously, that start recedes arbitrarily far into the past.
+No fixed-width read of recent events can recover it. The information
+lives in exactly one bounded place: the session table's own previous
+output.</p>
+<h2 id="the-self-reference">The self-reference<a class="headerlink" href="#the-self-reference" title="Permanent link">&para;</a></h2>
+<p>So the model reads it. For each candidate chain of new events, the SQL
+looks up — in <code>silver.sessions_chained</code> itself — the most recent session
+it already wrote for that device within the previous two days, and
+continues it if the gap from that session's last event is under 30
+minutes (<a href="https://github.com/adbrowne/smelt-sql/blob/main/examples/web_analytics/models/silver/sessions_chained.sql">model source</a>;
+the lookup is a set of correlated subqueries against the model's own
+table, bounded to a two-day reach backward and none forward).</p>
+<p>That bounded, backward-only self-reference is what smelt's analyzer keys
+on. A table that consumes its own output converges to the same answer as
+a from-scratch build only if partitions are produced in time order — each
+partition must be able to trust that everything before it is final. smelt
+proves the self-read is backward-bounded, classifies the model as
+<strong>ordered</strong>, and enforces the consequence itself: partitions build
+oldest-first, one at a time, in every run and backfill. You run the same
+commands as for any other model; the ordering is not your job.</p>
+<p><code>explain</code> makes the classification visible. Alongside the <code>Backfill</code> and
+upstream <code>NewData</code> triggers every incremental model has, this table gets
+a third: a <code>NewData</code> trigger on <em>itself</em> — the self-edge, surfaced as
+part of the plan:</p>
+<!-- smelt-generate: @render=skeleton explain silver.sessions_chained --show-sql --json --period 2026-04-10..2026-04-11 -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">-- trigger: Backfill</span>
+<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">BEGIN</span>
+<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-0-4" name="__codelineno-0-4" href="#__codelineno-0-4"></a><span class="w">  </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-0-5" name="__codelineno-0-5" href="#__codelineno-0-5"></a><span class="w">  </span><span class="c1">-- … model SELECT body (see the full SQL below) …</span>
+<a id="__codelineno-0-6" name="__codelineno-0-6" href="#__codelineno-0-6"></a>
+<a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">_smelt_output_clamp</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">COMMIT</span>
+<a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">-- trigger: NewData { source: &quot;silver.events_parsed&quot; }</span>
+<a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="k">BEGIN</span>
+<a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">  </span><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">  </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-0-14" name="__codelineno-0-14" href="#__codelineno-0-14"></a><span class="w">  </span><span class="c1">-- … model SELECT body (see the full SQL below) …</span>
+<a id="__codelineno-0-15" name="__codelineno-0-15" href="#__codelineno-0-15"></a>
+<a id="__codelineno-0-16" name="__codelineno-0-16" href="#__codelineno-0-16"></a><span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">_smelt_output_clamp</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-0-17" name="__codelineno-0-17" href="#__codelineno-0-17"></a><span class="k">COMMIT</span>
+<a id="__codelineno-0-18" name="__codelineno-0-18" href="#__codelineno-0-18"></a>
+<a id="__codelineno-0-19" name="__codelineno-0-19" href="#__codelineno-0-19"></a><span class="c1">-- trigger: NewData { source: &quot;silver.sessions_chained&quot; }</span>
+<a id="__codelineno-0-20" name="__codelineno-0-20" href="#__codelineno-0-20"></a><span class="k">BEGIN</span>
+<a id="__codelineno-0-21" name="__codelineno-0-21" href="#__codelineno-0-21"></a><span class="w">  </span><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-0-22" name="__codelineno-0-22" href="#__codelineno-0-22"></a><span class="w">  </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-0-23" name="__codelineno-0-23" href="#__codelineno-0-23"></a><span class="w">  </span><span class="c1">-- … model SELECT body (see the full SQL below) …</span>
+<a id="__codelineno-0-24" name="__codelineno-0-24" href="#__codelineno-0-24"></a>
+<a id="__codelineno-0-25" name="__codelineno-0-25" href="#__codelineno-0-25"></a><span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">_smelt_output_clamp</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
+<a id="__codelineno-0-26" name="__codelineno-0-26" href="#__codelineno-0-26"></a><span class="k">COMMIT</span>
 </code></pre></div>
-<p>By default, the UI is served at <code>http://127.0.0.1:3000</code>.</p>
-<h2 id="options">Options<a class="headerlink" href="#options" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>Flag</th>
-<th>Default</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>--host</code></td>
-<td><code>127.0.0.1</code></td>
-<td>Host address to bind to.</td>
-</tr>
-<tr>
-<td><code>--port</code></td>
-<td><code>3000</code></td>
-<td>Port to serve the UI on.</td>
-</tr>
-<tr>
-<td><code>--project-dir</code></td>
-<td><code>.</code></td>
-<td>Path to the smelt project root.</td>
-</tr>
-</tbody>
-</table>
-<p>Example with custom host and port:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>smelt<span class="w"> </span>ui<span class="w"> </span>--host<span class="w"> </span><span class="m">0</span>.0.0.0<span class="w"> </span>--port<span class="w"> </span><span class="m">8080</span>
-</code></pre></div>
-<h2 id="features">Features<a class="headerlink" href="#features" title="Permanent link">&para;</a></h2>
-<h3 id="dependency-graph">Dependency graph<a class="headerlink" href="#dependency-graph" title="Permanent link">&para;</a></h3>
-<p>Interactive visualization of your model DAG using React Flow. See how models connect and identify upstream/downstream relationships at a glance. Click a model node to open its detail panel.</p>
-<h3 id="model-detail-panel">Model detail panel<a class="headerlink" href="#model-detail-panel" title="Permanent link">&para;</a></h3>
-<p>Click any model in the graph to see:</p>
+<h2 id="what-ordering-costs">What ordering costs<a class="headerlink" href="#what-ordering-costs" title="Permanent link">&para;</a></h2>
 <ul>
-<li><strong>Columns</strong> with inferred types and nullability</li>
-<li><strong>Upstream and downstream</strong> dependencies</li>
-<li><strong>Incremental configuration</strong> (granularity, partition column, etc.)</li>
-<li><strong>Batch safety</strong> indicators (green/yellow/red badges)</li>
-<li><strong>Diagnostics</strong> -- parse errors, type errors, and undeclared column warnings</li>
+<li><strong>Backfills serialize.</strong> An 18-month rebuild of the clock-anchored
+  table can proceed in any order, chunk by chunk. The same rebuild here
+  runs strictly oldest-first, one partition per step.</li>
+<li><strong>No automatic change propagation.</strong> <code>smelt run --since-upstream</code>
+  (<a href="../changing-things/">changing-things page</a>) refuses graphs containing
+  self-referential nodes rather than guessing at them; a pipeline that
+  includes this table falls back to explicit window re-runs.</li>
+<li><strong>First-run seeding matters.</strong> The earliest partition has no prior
+  output to consult; the model's bounded lookback defines what "no open
+  session" means there. (See the
+  <a href="../../../guide/incremental-models/#self-referential-ordered-models">incremental models guide</a>
+  for the general rules.)</li>
 </ul>
-<h3 id="run-planner">Run planner<a class="headerlink" href="#run-planner" title="Permanent link">&para;</a></h3>
-<p>Plan runs interactively before executing:</p>
-<ul>
-<li>Select models to include (with tag filtering)</li>
-<li>Set time range for incremental models</li>
-<li>Configure batch size and per-partition execution</li>
-<li>Preview the execution plan with per-batch detail before committing</li>
-</ul>
-<h3 id="run-execution-and-monitoring">Run execution and monitoring<a class="headerlink" href="#run-execution-and-monitoring" title="Permanent link">&para;</a></h3>
-<p>Execute runs directly from the UI with real-time progress:</p>
-<ul>
-<li><strong>Progress bars</strong> for each model and batch</li>
-<li><strong>Live event log</strong> streamed via WebSocket</li>
-<li><strong>Cancellation</strong> -- stop a running pipeline between batches</li>
-<li><strong>Run history</strong> -- browse past runs with expandable details</li>
-</ul>
-<p>Only one run can execute at a time.</p>
-<h3 id="live-file-watching">Live file watching<a class="headerlink" href="#live-file-watching" title="Permanent link">&para;</a></h3>
-<p>The UI watches your project files for changes. When you save a model or configuration file, the UI automatically recompiles and updates the graph, diagnostics, and model details -- no manual refresh needed.</p>
-<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
-<ul>
-<li><a href="../model-selection/">Model Selection</a> for filtering which models appear in the graph</li>
-<li><a href="../incremental-models/">Incremental Models</a> for monitoring incremental processing status via the CLI</li>
-<li><a href="../../reference/cli/#smelt-ui">CLI Commands</a> for all <code>smelt ui</code> flags</li>
-</ul>
+<p>If you're mapping this to other stacks: this is loosely the batch analog
+of stateful stream processing — with the difference that the "state" is
+the table's own committed output rather than a mutable state store, and
+the checkpoint discipline is the derived ordering constraint.</p>
+<p>None of this is a defect — the root-anchored semantics genuinely require
+memory, and smelt's contribution is proving <em>which</em> execution discipline
+makes those semantics converge, then enforcing it, instead of letting a
+parallel backfill quietly corrupt the table. But the costs are real,
+which is why the main page's advice stands: order only what needs
+ordering.</p>
 
 
 
@@ -2797,10 +2679,10 @@
     
       
       
-      <script id="__config" type="application/json">{"annotate": null, "base": "../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "navigation.tabs", "navigation.tracking", "navigation.instant", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tabs.link", "content.action.edit"], "search": "../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
+      <script id="__config" type="application/json">{"annotate": null, "base": "../../..", "features": ["navigation.sections", "navigation.expand", "navigation.top", "navigation.tabs", "navigation.tracking", "navigation.instant", "search.suggest", "search.highlight", "search.share", "content.code.copy", "content.tabs.link", "content.action.edit"], "search": "../../../assets/javascripts/workers/search.2c215733.min.js", "tags": null, "translations": {"clipboard.copied": "Copied to clipboard", "clipboard.copy": "Copy to clipboard", "search.result.more.one": "1 more on this page", "search.result.more.other": "# more on this page", "search.result.none": "No matching documents", "search.result.one": "1 matching document", "search.result.other": "# matching documents", "search.result.placeholder": "Type to start searching", "search.result.term.missing": "Missing", "select.version": "Select version"}, "version": null}</script>
     
     
-      <script src="../../assets/javascripts/bundle.79ae519e.min.js"></script>
+      <script src="../../../assets/javascripts/bundle.79ae519e.min.js"></script>
       
     
   </body>

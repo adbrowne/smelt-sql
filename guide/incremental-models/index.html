@@ -333,8 +333,15 @@
   
     
     
+      
+  
+  
+  
+  
+    
+    
       <li class="md-tabs__item">
-        <a href="../../examples/web_analytics/" class="md-tabs__link">
+        <a href="../../examples/web-analytics/" class="md-tabs__link">
           
   
   
@@ -342,6 +349,9 @@
 
         </a>
       </li>
+    
+  
+
     
   
 
@@ -2272,15 +2282,69 @@
   
   
   
+    
+    
+    
+    
+      
+      
+        
+      
+    
+    
+    <li class="md-nav__item md-nav__item--nested">
+      
+        
+        
+          
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_6_1" >
+        
+          
+          <label class="md-nav__link" for="__nav_6_1" id="__nav_6_1_label" tabindex="0">
+            
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Analytics Pipeline (tutorial)
+  
+
+    
+  </span>
+  
+  
+
+            <span class="md-nav__icon md-icon"></span>
+          </label>
+        
+        <nav class="md-nav" data-md-level="2" aria-labelledby="__nav_6_1_label" aria-expanded="false">
+          <label class="md-nav__title" for="__nav_6_1">
+            <span class="md-nav__icon md-icon"></span>
+            
+  
+    Web Analytics Pipeline (tutorial)
+  
+
+          </label>
+          <ul class="md-nav__list" data-md-scrollfix>
+            
+              
+                
+  
+  
+  
+  
     <li class="md-nav__item">
-      <a href="../../examples/web_analytics/" class="md-nav__link">
+      <a href="../../examples/web-analytics/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Web Analytics
+    Overview
   
 
     
@@ -2301,14 +2365,190 @@
   
   
     <li class="md-nav__item">
-      <a href="../../examples/web-analytics-maintenance/" class="md-nav__link">
+      <a href="../../examples/web-analytics/first-model/" class="md-nav__link">
         
   
   
   <span class="md-ellipsis">
     
   
-    Web Analytics Maintenance Demo
+    A First Incremental Model
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/web-analytics/late-data/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Duplicates & Late Data
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Sessions & Cross-Midnight Backfills
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/web-analytics/ordered-sessions/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deep Dive: The Ordered Sessionizer
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/web-analytics/changing-things/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Backfills, New Columns, Late Updates
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/web-analytics/taking-stock/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Taking Stock
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+          </ul>
+        </nav>
+      
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../examples/web_analytics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Web Analytics Identity
   
 
     
@@ -3720,7 +3960,7 @@
 <li><strong>A self-edge that provably converges partition-by-partition</strong> (a backward-bounded read of the model's own prior output, e.g. <code>WHERE bal.d &gt;= t.d - INTERVAL '1 day' AND bal.d &lt; t.d</code>) forces the backfill to build <strong>one partition per batch, strictly in temporal order</strong> — regardless of the model's batch-safety class or any <code>--batch-size</code>/<code>--per-partition</code> override. A wide, multi-partition batch would read rows the self-reference expects but that have not been written yet.</li>
 <li><strong>A self-edge that does not provably converge</strong> (a forward read, or an unbounded/whole-history scan) is refused at planning time with a diagnostic naming the non-convergent self-reference — never silently built with the wrong ordering.</li>
 </ul>
-<p>A self-referential model still gets the <a href="#the-derived-output-window">derived output window</a> when its <code>partition_column</code> is itself derived and skews away from the driving date column — a run requesting a single day also rewrites the skew-reached neighbouring partitions, exactly as it would for a model with no self-edge. Ordering then applies over the <em>rebased</em> range: every partition in it still builds strictly sequentially, one partition per batch. The self-edge's own bounding relation is never read as the skew declaration, even when the self-referenced table's column happens to share the model's own <code>partition_column</code> name — only a genuine relation anchored on another source counts. See the <a href="../../examples/web-analytics-maintenance/#the-root-anchored-cut-silversessions_chained">web-analytics example's root-anchored <code>silver.sessions_chained</code> table</a> for a real self-referential model whose partition column derives and rebases this way, contrasted directly against a window-independent sibling table built from the same source rule.</p>
+<p>A self-referential model still gets the <a href="#the-derived-output-window">derived output window</a> when its <code>partition_column</code> is itself derived and skews away from the driving date column — a run requesting a single day also rewrites the skew-reached neighbouring partitions, exactly as it would for a model with no self-edge. Ordering then applies over the <em>rebased</em> range: every partition in it still builds strictly sequentially, one partition per batch. The self-edge's own bounding relation is never read as the skew declaration, even when the self-referenced table's column happens to share the model's own <code>partition_column</code> name — only a genuine relation anchored on another source counts. See the <a href="../../examples/web-analytics/ordered-sessions/">web-analytics tutorial's root-anchored <code>silver.sessions_chained</code> table</a> for a real self-referential model whose partition column derives and rebases this way, contrasted directly against a window-independent sibling table built from the same source rule.</p>
 <p>A self-referential model's first run needs no manual seeding. Its very first partition can't be created via <code>CREATE TABLE ... AS SELECT ...</code> — that statement can't resolve a reference to the table it is in the middle of creating — so when the target table doesn't exist yet, smelt first creates it empty, with the model's inferred output schema, then runs every batch (including the first) as the ordinary partition DELETE+INSERT. The self-read over the empty table sees no prior state, exactly as if the table had been seeded with zero rows by hand.</p>
 <h2 id="monitoring">Monitoring<a class="headerlink" href="#monitoring" title="Permanent link">&para;</a></h2>
 <h3 id="interval-coverage">Interval coverage<a class="headerlink" href="#interval-coverage" title="Permanent link">&para;</a></h3>
