@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784112669564,
+  "lastUpdate": 1784112672097,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 23.98140624652167,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "6a103bca0b6b7031d9e49f2d9fec6709adb25d4a",
+          "message": "fix(ci): install DuckDB system lib in gap-report job\n\nThe gap-report job builds smelt-parser-compat, which links libduckdb,\nbut was missing the setup-duckdb action and DUCKDB_LIB_DIR env that\nevery other job in this workflow has, causing a linker failure\n(unable to find -lduckdb).",
+          "timestamp": "2026-07-15T20:47:47+10:00",
+          "tree_id": "4d4b6a1329a14f02bf021905230d637f816cd11a",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/6a103bca0b6b7031d9e49f2d9fec6709adb25d4a"
+        },
+        "date": 1784112671273,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 32.22985040661991,
             "unit": "MB/s"
           }
         ]
