@@ -94,7 +94,7 @@ pub enum Offset {
     /// Sign is preserved (`batch_id - 5` folds to `Integer(-5)`); unlike
     /// `Seconds` (an unsigned duration), this variant is signed because an
     /// integer key has no inherent "always forward" direction the way a
-    /// temporal interval literal does. See `docs/specs/batched_models.md`
+    /// temporal interval literal does. See `docs/specs/incremental_models.md`
     /// §Surface "`partition_column` must be monotone".
     Integer(i64),
 }
@@ -986,7 +986,7 @@ fn extract_form_b_bounds(upper_sql: &str, partition_col_upper: &str) -> Vec<(Sec
     // Also check >= ... - <int> / < ... + <int> patterns — the bare-integer
     // sibling of the INTERVAL-literal form above, for monotone non-temporal
     // partition keys (sequence id / offset / watermark). See
-    // `docs/specs/batched_models.md` §Surface "`partition_column` must be
+    // `docs/specs/incremental_models.md` §Surface "`partition_column` must be
     // monotone".
     let bare_integer_bounds = extract_gte_lt_bare_integer_bounds(upper_sql, partition_col_upper);
     bounds.extend(bare_integer_bounds);
@@ -1648,7 +1648,7 @@ pub fn resolve_single_anchor<T>(
 }
 
 /// Resolve the "driving fact" among a join's inputs for a traced
-/// `event_time_expr` (Join relaxation, `batched_models.md` §"Event-time
+/// `event_time_expr` (Join relaxation, `model_properties.md` §"Event-time
 /// monotonicity trace").
 ///
 /// `alias_sources` is the FROM/JOIN alias→source map (`from_clause_alias_sources`);

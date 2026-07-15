@@ -1,6 +1,6 @@
 //! Classifier for the `refresh: keyed` mode.
 //!
-//! See `docs/specs/keyed_models.md` for the normative spec. This module is
+//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module is
 //! the mode's built seed: the direct-monoid families (additive fold,
 //! extremal/lattice fold) — the overwrite, once-write, and plain-overwrite
 //! families are not yet classified here.
@@ -108,7 +108,7 @@ pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
 
 /// A diagnostic code emitted by the keyed classifier.
 ///
-/// Mirrors `keyed_models.md` §"Diagnostic codes" (owned by this spec).
+/// Mirrors `incremental_models.md` §"Key-grain diagnostic codes".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum KeyedDiagnostic {
     KeyedRequiresGroupBy,
@@ -125,7 +125,7 @@ pub enum KeyedDiagnostic {
     },
     /// Interim not-yet-supported refusal: no clocked driving source was
     /// found, and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/keyed_models.md` §Known Divergences). This is a
+    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain"). This is a
     /// fail-loud "not yet" refusal, not a model error.
     KeyedSnapshotPostureUnsupported,
     KeyedMultipleDrivingSources {

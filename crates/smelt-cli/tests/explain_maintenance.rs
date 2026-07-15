@@ -1,5 +1,5 @@
 //! MP7 (`docs/plans/20260707-maintenance-plan-impl.md`): `smelt explain
-//! <model>` — the maintenance-plan report (`maintenance_plan.md` §Surface
+//! <model>` — the maintenance-plan report (`incremental_models.md` §Surface
 //! "CLI"). Covers the pure report-string builder directly (fast) plus one
 //! full CLI-argument-parsing path (spawns the real `smelt` binary) so the
 //! wiring itself is exercised.

@@ -1,5 +1,5 @@
 //! Real-fixture, DuckDB-backed coverage for BL5's `g_run >= g_part` run-window
-//! validation (`docs/specs/batched_models.md` §"Run window vs partition
+//! validation (`docs/specs/incremental_models.md` §"Run window vs partition
 //! granularity"), exercised through the genuine `execute_project` path — the
 //! single shared entry point both `smelt-cli` and `smelt-ui` call (root
 //! `CLAUDE.md` §Architectural invariants, "Run pipeline parity rule").

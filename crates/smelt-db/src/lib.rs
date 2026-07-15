@@ -1211,7 +1211,7 @@ fn ref_source_info(
 }
 
 /// Resolve `ref_str` to an upstream **maintained-model edge**
-/// (`maintenance_plan.md` §"Upstream model edges") when it addresses another
+/// (`incremental_models.md` §"Upstream model edges") when it addresses another
 /// maintained (non-`full`, non-view) model in this project — `None` when the
 /// ref doesn't resolve, resolves to a source/seed/function, or resolves to a
 /// `full`-mode or view model (which delivers no incremental delta and so
@@ -1264,7 +1264,7 @@ fn ref_model_edge(
 
 /// Thin Salsa wrapper around
 /// `smelt_logical::maintenance::derive::derive_maintenance_plan`
-/// (`maintenance_plan.md` §Surface "The plan (derived, reported)"): gathers
+/// (`incremental_models.md` §Surface "The plan (derived, reported)"): gathers
 /// `file`'s referenced sources and declared `maintenance:`/`grain:`
 /// frontmatter, then calls
 /// [`crate::queries::maintenance::maintenance_plan_diagnostics`] (pure) to
@@ -1338,7 +1338,7 @@ pub fn maintenance_plan(
 /// Plain (non-Salsa-tracked) counterpart of [`maintenance_plan`] that returns
 /// the *full* derived plan — cells, clamps, locality verdicts — rather than
 /// the Salsa-safe refusals-only projection. Used by `smelt explain <model>`
-/// (`maintenance_plan.md` §Surface "CLI"), a one-shot CLI report that has no
+/// (`incremental_models.md` §Surface "CLI"), a one-shot CLI report that has no
 /// need for Salsa's incremental caching and cannot use the tracked query
 /// because [`smelt_logical::maintenance::MaintenancePlan`] does not implement
 /// `PartialEq`/`Eq` (the Salsa tracked-return-value requirement the
@@ -1386,7 +1386,7 @@ pub fn maintenance_plan_report(
         })
         .collect();
 
-    // Upstream maintained-model edges (`maintenance_plan.md` §"Upstream model
+    // Upstream maintained-model edges (`incremental_models.md` §"Upstream model
     // edges"): the model refs that resolve to another maintained model in
     // this project, each carrying that upstream's own validated clock.
     let model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = refs
@@ -1911,7 +1911,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
-        // Maintenance-plan diagnostics (`maintenance_plan.md` §Diagnostics):
+        // Maintenance-plan diagnostics (`incremental_models.md` §Diagnostics):
         // fold the derived plan's admission refusals and the
         // `maintenance.cells[]` column-group-span check onto the
         // `Maintenance*` codes. `maintenance_plan` is the thin Salsa query —

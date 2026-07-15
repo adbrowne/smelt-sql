@@ -8,7 +8,7 @@
 //! by interval-diffing a clocked source's landings, and a declared
 //! `mutation_profile: change_feed` collapses to the stricter
 //! `MutableSnapshot` posture for admission purposes only
-//! (`maintenance_plan.md` §Known Divergences — the `change_feed`-scoping
+//! (`incremental_models.md` §Known Divergences — the `change_feed`-scoping
 //! entry). This module readies generative coverage for the day a
 //! feed-consuming fold lands (offset-based delta detection, retraction-
 //! carrying deltas into invertible combiners) without waiting for it: every
@@ -222,7 +222,7 @@ pub fn stage_feed_keyed(
 /// ([`stage_feed_keyed`]'s pool), this shape builds WITHOUT any refusal:
 /// the trigger-list builder only ever constructs an `UpstreamMutation`
 /// trigger for a source whose OWN declared posture literally reads
-/// `mutable_snapshot` (`maintenance_plan.md` §Known Divergences'
+/// `mutable_snapshot` (`incremental_models.md` §Known Divergences'
 /// `change_feed`-scoping entry) — a `change_feed`-declared dimension gets
 /// no mutation cell constructed for it AT ALL, so there is nothing to
 /// refuse; the fact's own creation cell is untouched. This is the shape

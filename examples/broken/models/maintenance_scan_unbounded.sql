@@ -10,7 +10,7 @@ timeseries:
 -- The `maintenance_enrichment` join has no clock and no `allow_full_scan`
 -- acceptance, so the mutation-sensitive `enrichment_category` group cannot
 -- be partition-bounded: refuses with `MaintenanceScanUnbounded`
--- (`docs/specs/maintenance_plan.md` §Semantics "Partition-local maintenance
+-- (`docs/specs/incremental_models.md` §Semantics "Partition-local maintenance
 -- (the K8 guardrail)").
 SELECT
     o.order_id,

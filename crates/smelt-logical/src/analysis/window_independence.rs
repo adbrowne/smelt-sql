@@ -2,7 +2,7 @@
 //! model DAG.
 //!
 //! See `docs/specs/model_properties.md` §"Derived proofs" →
-//! "Window-independence / ordered-execution" and `docs/specs/batched_models.md`
+//! "Window-independence / ordered-execution" and `docs/specs/incremental_models.md`
 //! §"Window independence and self-referential models". A model that reads
 //! only external sources is parallelisable across its windows/partitions
 //! (`WindowIndependent`). A model with a self-edge — it reads its own prior

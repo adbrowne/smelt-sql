@@ -85,7 +85,7 @@ pub fn driving_steps(
 }
 
 /// The reconciliation ledger's whole-row group key for the keyed
-/// windowed-maintenance driver (`docs/specs/maintenance_plan.md` §"The
+/// windowed-maintenance driver (`docs/specs/incremental_models.md` §"The
 /// reconciliation ledger"). Per-column-group ledger grading for this driver
 /// is future narrowing, not correctness-required for MP12: grading the
 /// whole cell `Additive` whenever *any* aggregator column is additive is
@@ -108,7 +108,7 @@ pub trait WindowedKeyedRule: Send + Sync {
     fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String;
 
     /// The reconciliation ledger's storage grading for this rule's cell
-    /// (`docs/specs/maintenance_plan.md` §"The reconciliation ledger" —
+    /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
     /// "Storage is graded by algebra"). `Grade::Additive` requires
     /// warehouse-resident delta-identity tracking and never-fold-twice
     /// refusal (MP12); `Grade::Idempotent` needs neither — re-folding a
@@ -138,13 +138,13 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// **Never-fold-twice (MP12).** When `rule.ledger_grade()` is
 /// `Grade::Additive`, every step's create-or-merge action is guarded by the
 /// warehouse-resident reconciliation ledger
-/// (`docs/specs/maintenance_plan.md` §"The reconciliation ledger" and
+/// (`docs/specs/incremental_models.md` §"The reconciliation ledger" and
 /// §Constraints "Never fold a delta already reflected in the state"): the
 /// step's own partition value is its delta identity, folded transactionally
 /// with the action via [`Backend::fold_ledger_delta`]. A step whose delta is
 /// already reflected — a reprocessed window — refuses the run with a
 /// `KeyedReprocessedWindow`-shaped error
-/// (`docs/specs/keyed_models.md` §"Reprocessing") instead of silently
+/// (`docs/specs/incremental_models.md` §"Reprocessing") instead of silently
 /// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
 /// warehouse table is ever created for them.
 pub async fn run_windowed_keyed_maintenance(
@@ -176,7 +176,7 @@ pub async fn run_windowed_keyed_maintenance(
 
         // The first-run `CREATE TABLE … AS` and the merge both come from
         // the single-owner emitters in `smelt-logical::maintenance::emit`
-        // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+        // (`docs/specs/incremental_models.md` §"Statement emission (single
         // owner)") — this driver builds no maintenance-statement text of
         // its own.
         let create_group = if !table_exists {
@@ -237,7 +237,7 @@ pub async fn run_windowed_keyed_maintenance(
                         bail!(
                             "windowed-keyed-maintenance driver refused model '{}': partition \
                              {} from input '{}' is already reflected in the reconciliation \
-                             ledger (never-fold-twice — docs/specs/keyed_models.md \
+                             ledger (never-fold-twice — docs/specs/incremental_models.md \
                              §Reprocessing). {}. Mitigations: drop the target table and re-run \
                              for a full rebuild, or perform a manual cascade rebuild.",
                             model_name,
@@ -260,7 +260,7 @@ pub async fn run_windowed_keyed_maintenance(
                 // Both the first-run CREATE and the merge route through
                 // `Backend::execute_statement_group` — the single point
                 // every emitted maintenance statement flows through
-                // (`docs/specs/maintenance_plan.md` §"Statement emission
+                // (`docs/specs/incremental_models.md` §"Statement emission
                 // (single owner)"). The `Additive` branch above is the
                 // documented exception: its action statement is interleaved
                 // with the reconciliation ledger's own DDL/DML via
@@ -311,7 +311,7 @@ pub async fn run_windowed_keyed_maintenance(
 /// Resolve the `IncrementalStrategy` a model's creation trigger (region
 /// recompute over a partition-grain model) should actually execute, by
 /// reading the technique the derived `MaintenancePlan` admitted instead of
-/// a hardcoded constant (MP11, `docs/specs/maintenance_plan.md` §"Per-cell
+/// a hardcoded constant (MP11, `docs/specs/incremental_models.md` §"Per-cell
 /// admission"). Per the "Maintenance-plan purity" invariant (root
 /// `CLAUDE.md`), the plan itself is derived exactly once by
 /// `smelt-db`'s pure `derive_model_maintenance_plan` — this function calls
@@ -377,7 +377,7 @@ pub enum ResolvedTechnique {
 }
 
 /// Resolve which technique executes for `trigger`, mirroring
-/// `maintenance_plan.md` §"Per-cell admission": a `technique:` pin bypasses
+/// `incremental_models.md` §"Per-cell admission": a `technique:` pin bypasses
 /// the cost model, **never** admission — pinning `rederive_columns` for a
 /// cell the plan did not admit (or that a capability-gapped backend cannot
 /// run) is a hard, fail-loud error, not a silent fallback to
@@ -408,7 +408,7 @@ pub fn resolve_cell_technique(
         Some(CellTechnique::RederiveColumns) => bail!(
             "MaintenanceUnboundedFootprint: pinned technique 'rederive_columns' for {trigger:?} \
              names a cell the derived plan did not admit — a technique pin bypasses the cost \
-             model, never admission (`maintenance_plan.md` §\"Per-cell admission\"); refusing \
+             model, never admission (`incremental_models.md` §\"Per-cell admission\"); refusing \
              rather than lowering an unbounded-footprint targeted write at runtime"
         ),
         _ if live => Ok(ResolvedTechnique::ColumnScopedMerge),
@@ -473,7 +473,7 @@ pub fn resolve_live_column_scoped_cell(
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an
 /// accepted full scan (`PartitionLocal::No { .. }` with `allow_full_scan`,
-/// `maintenance_plan.md` §"Per-cell admission") — the only shape
+/// `incremental_models.md` §"Per-cell admission") — the only shape
 /// `derive_model_maintenance_plan` currently derives for an
 /// `UpstreamMutation` trigger (a clocked mutable source's own scan-bound
 /// derivation is deferred; see that function's doc comment). Unlike
@@ -523,7 +523,7 @@ pub async fn execute_column_scoped_merge_full(
 /// group through unchanged from the existing target state. `Backend::
 /// merge_into`'s default implementation issues the `MERGE`
 /// `smelt_logical::maintenance::emit::emit_column_scoped_merge` emits
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"),
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)"),
 /// `UPDATE SET *`, which requires the source and target column sets to
 /// agree exactly (a column-count mismatch is a hard backend error, not a
 /// silent by-name subset) — see that emitter's doc comment for the full
@@ -655,7 +655,7 @@ fn find_join_alias(sql: &str, dimension_source: &str) -> Option<String> {
 }
 
 /// Which physical column-scoped-MERGE corner (MP11,
-/// `docs/specs/maintenance_plan.md` §"Per-cell admission") a live
+/// `docs/specs/incremental_models.md` §"Per-cell admission") a live
 /// `UpstreamMutation` cell dispatches through, mirroring the two shapes
 /// `derive_model_maintenance_plan` derives for `Corner::ColumnMerge`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1011,7 +1011,7 @@ mod tests {
         // fallback routes through `execute_sql`, since `RecordingBackend`
         // does not override `execute_statement_group`) — no more
         // `Backend::create_table_as` call for this family
-        // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+        // (`docs/specs/incremental_models.md` §"Statement emission (single
         // owner)").
         assert!(calls[0].starts_with("execute_sql: CREATE TABLE main.t AS"));
         assert!(calls[0].contains("2024-01-01"));

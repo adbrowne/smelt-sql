@@ -40,13 +40,13 @@
 //! vacuously true for every case, since the pin never changes execution, or
 //! require production wiring outside this phase's Critical files). Instead
 //! it exercises the two REAL, wired execution paths that stand in for the
-//! same spec claim (`maintenance_plan.md` §"Per-cell admission"
+//! same spec claim (`incremental_models.md` §"Per-cell admission"
 //! "Interchangeability and choice") on the one pool where a genuine
 //! fold-vs-recompute choice actually exists end-to-end: a `grain: key`
 //! model's windowed `KeyedFold` runs (the fold family) versus its no-window
 //! full-table recompute (`smelt_runtime::execute`'s "single-shot full
 //! refresh of the keyed SELECT" arm — the always-available recompute family,
-//! `maintenance_plan.md` §"The plan matrix": "a whole-table recompute is
+//! `incremental_models.md` §"The plan matrix": "a whole-table recompute is
 //! exactly a region taken to its limit"). This is recorded as a finding in
 //! `docs/plans/20260712-generative-maintenance-conformance.md`'s "Deferred
 //! during implementation" section; wiring the pin into execution is
@@ -248,7 +248,7 @@ async fn insert_row(project: &LinkCProject, source_name: &str, row: &GenRow) -> 
 ///
 /// Applies only to [`CaseRecipe::Partition`] cases with an admitted `NewData`
 /// scan clamp on the driving source — `grain: key` has no write-eligibility
-/// clamp at all (`keyed_models.md` §"No write-eligibility clamp").
+/// clamp at all (`incremental_models.md` §"No write-eligibility clamp").
 pub async fn compiled_sql_matches_derived_clamp(ctx: &CaseContext) -> ProbeOutcome {
     let CaseRecipe::Partition(recipe) = &ctx.recipe else {
         return ProbeOutcome::Skipped(
@@ -363,7 +363,7 @@ fn read_region_as_text(
 
 /// Plan claim (design §7 row 2): "Write window = output window" — output
 /// rows outside the write window are byte-unchanged across a run
-/// (`maintenance_plan.md` §Constraints "Write window = output window, per
+/// (`incremental_models.md` §Constraints "Write window = output window, per
 /// cell: the DELETE/merge target and the output clamp range over the same
 /// output-axis column and the same window, by construction"). Snapshots the
 /// complement region (every row outside the SECOND window) before that

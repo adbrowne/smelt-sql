@@ -218,7 +218,7 @@ pub enum Refusal {
     /// No technique survives admission for this trigger — fail loud, never
     /// silently fall back (`06-proof-obligations.md` §1.1).
     NoAdmissibleTechnique { trigger: String, why: String },
-    /// An upstream maintained-model edge (`maintenance_plan.md` §"Upstream
+    /// An upstream maintained-model edge (`incremental_models.md` §"Upstream
     /// model edges") whose event-time clock cannot be derived — the upstream
     /// declares no `timeseries:` and none is inferable — so its
     /// creation-trigger cell cannot be clamped. Recorded (never a silent

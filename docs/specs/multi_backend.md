@@ -12,7 +12,7 @@ owners: [andrew]
 > them: the `BackendCapabilities` matrix, how the dialect printer lowers logical SQL to each
 > backend's valid physical SQL, and the cross-engine data-exchange rules. Out of scope: the
 > `Backend` trait method surface itself (see `architecture.md` §"Backend trait surface"); how
-> the batched-refresh strategy is *chosen* (see `batched_models.md`); how schema changes are
+> the batched-refresh strategy is *chosen* (see `incremental_models.md`); how schema changes are
 > *classified* (see `schema_evolution.md`); target YAML shape (see `smelt_yml.md`). This spec
 > owns the **parity contract** that ties those together.
 >
@@ -117,7 +117,7 @@ suite is the executable list):
 Two flags describe a backend's participation in maintaining a keyed refresh mode's state; both are `false` on every backend today.
 
 - **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. It is *not* consulted for the smelt-driven keyed modes (`keyed`, `versioned`), which maintain their own state with `merge_into` + views on any backend.
-- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `keyed` model can retract is a *per-model* property of its column families' algebra (the group rung, `keyed_models.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
+- **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `keyed` model can retract is a *per-model* property of its column families' algebra (the group rung, `incremental_models.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
 
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may
@@ -153,7 +153,7 @@ referenced Spark model to be `materialization: table` and the Spark target to de
 No explicit copy step exists; Spark writes Parquet, DuckDB reads it natively.
 
 ### Incremental & schema evolution per backend
-Strategy *resolution* (`batched_models.md`) and change *classification*
+Strategy *resolution* (`incremental_models.md`) and change *classification*
 (`schema_evolution.md`) consult the capability matrix but are specified in those documents.
 This spec only requires that the resolved strategy and migration plan are expressible in the
 target backend's physical SQL via the lowering rules above — e.g. a backend without native
@@ -249,5 +249,5 @@ resolves nested widening to a table rewrite.
 - **Plans (history)**: `docs/plans/20260328-multi-engine-example.md`,
   `docs/plans/20260628-spark-parity.md`.
 - **Related specs**: `architecture.md` (§"Backend trait surface"), `smelt_yml.md`
-  (§"Target shape"), `batched_models.md`, `schema_evolution.md`, `testing.md`,
+  (§"Target shape"), `incremental_models.md`, `schema_evolution.md`, `testing.md`,
   `types.md`.

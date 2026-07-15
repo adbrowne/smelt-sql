@@ -29,7 +29,7 @@ use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundRes
 /// `ChangeFeed` source in the plan layer yet — `sources.md`'s structured
 /// `mutation_profile` kind is consumed at the `MutationProfile::AppendOnly`/
 /// `MutableSnapshot` granularity here; a `change_feed` source is out of scope
-/// for this phase, per `maintenance_plan.md` §Known Divergences).
+/// for this phase, per `incremental_models.md` §Known Divergences).
 fn source_shape(facts: &SourceFacts) -> SourceShape {
     SourceShape {
         has_clock: facts.partition_col.is_some(),
@@ -49,7 +49,7 @@ pub struct FoldSpec {
     pub combiner: SqlFunction,
 }
 
-/// One upstream **maintained-model** edge (`maintenance_plan.md` §"Upstream
+/// One upstream **maintained-model** edge (`incremental_models.md` §"Upstream
 /// model edges"): a downstream maintained model's ref to another maintained
 /// model in the same project. Built by the caller from the upstream's own
 /// already-validated metadata — the derivation never re-resolves the ref.
@@ -67,7 +67,7 @@ pub struct ModelEdge {
 }
 
 /// Append the creation-trigger cells (and refusals) for `model_edges` to an
-/// already-derived `plan` (`maintenance_plan.md` §"Upstream model edges").
+/// already-derived `plan` (`incremental_models.md` §"Upstream model edges").
 ///
 /// Kept separate from [`derive_maintenance_plan`] so every existing
 /// source-only caller is unaffected: the assembler calls both and merges the
@@ -323,7 +323,7 @@ fn derive_new_data(
                 });
                 return;
             };
-            // Per-cell admission obligation 2 (`maintenance_plan.md`
+            // Per-cell admission obligation 2 (`incremental_models.md`
             // §"Per-cell admission"): the faithful fold's two INDEPENDENT
             // conditions — source posture (does the delta stream partition
             // the input, i.e. is it retraction-free) and combiner algebra

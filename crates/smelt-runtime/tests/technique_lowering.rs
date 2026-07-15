@@ -81,7 +81,7 @@ fn unadmitted_cell_never_lowers_targeted_write() {
 
     // Pinning `rederive_columns` names a cell the plan never admitted — a
     // pin bypasses the cost model, never admission
-    // (`maintenance_plan.md` §"Per-cell admission"). This must refuse at
+    // (`incremental_models.md` §"Per-cell admission"). This must refuse at
     // plan-resolution time, not silently execute a targeted write with an
     // unbounded footprint.
     let err = resolve_cell_technique(&plan, &trigger, Some(CellTechnique::RederiveColumns), true)

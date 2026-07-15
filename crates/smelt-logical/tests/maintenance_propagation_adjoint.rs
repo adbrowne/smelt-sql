@@ -1,6 +1,6 @@
 //! Phase MP16 (`docs/plans/20260707-maintenance-plan-impl.md`): the
 //! adjointness law between the graph layer's two directions
-//! (`maintenance_plan.md` §"Backward resolution — what must exist": "The two
+//! (`incremental_models.md` §"Backward resolution — what must exist": "The two
 //! directions are **adjoint, not inverse**: `forward(backward(P)) ⊇ P`").
 //!
 //! Pure math only — no CLI, no runtime, no on-disk workspace. Exercises

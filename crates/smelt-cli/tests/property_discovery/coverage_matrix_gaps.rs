@@ -1,6 +1,6 @@
 //! Coverage-matrix conformance sweep (`docs/plans/20260707-maintenance-plan-impl.md`
 //! phase MP17): the two named gap-pinning cells this phase's own Known
-//! Divergences entries in `docs/specs/maintenance_plan.md` promise by exact
+//! Divergences entries in `docs/specs/incremental_models.md` promise by exact
 //! path (`crates/smelt-cli/tests/property_discovery/coverage_matrix_gaps.rs`).
 //! These use the pure `smelt_logical::maintenance` derivation directly (no
 //! `LinkCProject`/DuckDB execution needed — both cells are refusal-shaped,
@@ -28,7 +28,7 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 // lookup-dim" and "inner-join enrichment / change feed" matrix cells).
 // UNSUPPORTED-TODAY per the catalogue.
 //
-// `maintenance_plan.md` §Known Divergences ("The trigger-list builder's
+// `incremental_models.md` §Known Divergences ("The trigger-list builder's
 // `explicitly_mutable` scoping misses `change_feed`-declared sources
 // entirely"): the PRODUCTION query builder
 // (`smelt-db::queries::maintenance::derive_model_maintenance_plan`) never
@@ -106,7 +106,7 @@ fn ex08_unclocked_change_feed_dimension_scan_unbounded() {
 // ---------------------------------------------------------------------------
 // EX-41/EX-42 — `INTERSECT`/`EXCEPT` set operations
 // (`docs/specs/model_properties.md` §Known Divergences: set-op distribution
-// classifies `UNION ALL` only; `maintenance_plan.md` §Known Divergences
+// classifies `UNION ALL` only; `incremental_models.md` §Known Divergences
 // records the maintenance-plan-level consequence directly). Not a matrix
 // row in `07-example-catalogue.md` today — added here to pin exactly the
 // gap the spec names.
@@ -118,7 +118,7 @@ fn ex08_unclocked_change_feed_dimension_scan_unbounded() {
 // group. This test proves that collapse directly, then shows its
 // consequence for the plan: because the production query builder only
 // ever constructs `NewData`/`Backfill` triggers for a clocked source
-// (`maintenance_plan.md`'s trigger-list-builder divergence entry — an
+// (`incremental_models.md`'s trigger-list-builder divergence entry — an
 // `UpstreamMutation` trigger is never built for a clocked append-only
 // source regardless of column grouping), every reachable cell for a
 // typical `INTERSECT`/`EXCEPT` model (two clocked, append-only arms) is

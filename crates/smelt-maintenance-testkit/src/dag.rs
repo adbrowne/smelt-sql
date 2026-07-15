@@ -83,7 +83,7 @@ pub enum NodeGrain {
     /// `batched.unique_key`.
     Partition { unique_key: Vec<String> },
     /// `refresh: incremental` + `grain: key` — no `timeseries:` block, no
-    /// `unique_key` (`keyed_models.md` Known Divergences: "every
+    /// `unique_key` (`incremental_models.md` §Known Divergences "The key grain": "every
     /// `timeseries:` block on a keyed model is refused unconditionally").
     Key,
 }

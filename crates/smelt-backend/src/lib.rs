@@ -42,7 +42,7 @@ pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
 /// an incremental batch — the single call site every `Backend` impl's
 /// `delete_and_insert_transactional` routes through, so the emitted text is
 /// the only text a backend ever executes for this family
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn build_delete_insert_group(
     schema: &str,
     name: &str,
@@ -67,7 +67,7 @@ fn build_delete_insert_group(
 /// Build the column-scoped `MERGE` [`StatementGroup`] for `Backend::
 /// merge_into`'s default implementation — the single call site every
 /// `Backend` impl routes through unless it overrides `merge_into` itself
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn build_column_scoped_merge_group(
     schema: &str,
     table: &str,
@@ -347,13 +347,13 @@ pub trait Backend: Send + Sync {
     ) -> Result<(), BackendError>;
 
     /// Delete a partition range and insert the replacement rows as **one**
-    /// backend transaction (`docs/specs/batched_models.md` §"First-run and
+    /// backend transaction (`docs/specs/incremental_models.md` §"First-run and
     /// backfill" — "Each chunk's DELETE+INSERT is one backend transaction.
     /// INSERT failure rolls back the chunk's DELETE; earlier committed
     /// chunks do not roll back.").
     ///
     /// The statement text comes from `smelt_logical::maintenance::emit`
-    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
     /// owner)") — this method builds the [`StatementGroup`] and hands it to
     /// [`Backend::execute_statement_group`], never authoring `DELETE`/
     /// `INSERT` text itself. Override `execute_statement_group`, not this
@@ -372,7 +372,7 @@ pub trait Backend: Send + Sync {
 
     /// Execute an emitted [`StatementGroup`] — the single point every
     /// `smelt_logical::maintenance::emit` consumer routes through
-    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
     /// owner)"). Backends execute; they never author the statement text.
     ///
     /// Default implementation runs each statement sequentially via
@@ -393,7 +393,7 @@ pub trait Backend: Send + Sync {
     ///
     /// Matched rows are updated, unmatched rows are inserted. The statement
     /// text comes from `smelt_logical::maintenance::emit::
-    /// emit_column_scoped_merge` (`docs/specs/maintenance_plan.md`
+    /// emit_column_scoped_merge` (`docs/specs/incremental_models.md`
     /// §"Statement emission (single owner)") — this method builds the
     /// [`StatementGroup`] and hands it to [`Backend::execute_statement_group`],
     /// never authoring `MERGE` text itself. `source_sql` must project the
@@ -432,7 +432,7 @@ pub trait Backend: Send + Sync {
     /// reconciliation ledger and run `action_sql` (a `CREATE TABLE ... AS`
     /// or `MERGE INTO` statement), refusing — without running `action_sql`
     /// — if the delta is already reflected
-    /// (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    /// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
     /// already reflected in the state").
     ///
     /// `ensure_sql` creates the ledger table if it does not already exist

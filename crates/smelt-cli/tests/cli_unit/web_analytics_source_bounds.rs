@@ -137,7 +137,7 @@ fn test_explain_json_exposes_bounds() {
 /// AND CAST(arrival_time AS DATE)`. The planner reads that filter as a
 /// derived `Bounded(event_date, before=3d, after=0)` reach on
 /// `bronze.raw_events` — this is the observable clamp
-/// `docs/specs/batched_models.md` §"Observing the per-source clamp"
+/// `docs/specs/incremental_models.md` §"Observing the per-source clamp"
 /// describes.
 #[test]
 fn test_explain_json_events_parsed_late_window_bound() {

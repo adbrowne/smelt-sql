@@ -1,7 +1,7 @@
 //! Per-source landed-delta recording — P10 v1 (`docs/specs/sources.md`
 //! §"World-facts admission consumes"): what landed, per source, as
 //! partition intervals on that source's own axis. This is the input to
-//! cross-model forward propagation (`docs/specs/maintenance_plan.md`
+//! cross-model forward propagation (`docs/specs/incremental_models.md`
 //! §"The graph layer": "Runs are driven by **what landed**, per source, as
 //! partition intervals on that source's own axis").
 //!
@@ -38,7 +38,7 @@ impl LandedDelta {
     /// already covered). Always `false` for `WholeTable` — a mutable
     /// snapshot's delta is never treated as empty, since it is a declared
     /// cost of the conservative posture, not an optimisation to skip
-    /// (`maintenance_plan.md` §"Forward propagation": "A delta on an
+    /// (`incremental_models.md` §"Forward propagation": "A delta on an
     /// unclocked source dirties the whole model ... never a silent
     /// no-op").
     pub fn is_empty(&self) -> bool {

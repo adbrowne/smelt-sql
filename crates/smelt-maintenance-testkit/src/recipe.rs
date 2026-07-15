@@ -85,7 +85,7 @@ pub enum BodyConstruct {
     /// `payloads_are_integer_valued_and_bounded` checks.
     Filter { threshold: i64 },
     /// `SUM(val) GROUP BY d` — a commutative-group combiner (maintenance
-    /// ladder rung 1/3, `maintenance_plan.md` §"The algebraic maintenance
+    /// ladder rung 1/3, `incremental_models.md` §"The algebraic maintenance
     /// ladder").
     AdditiveAgg,
     /// `MAX(val) GROUP BY d` — an idempotent, non-invertible monoid combiner
@@ -267,7 +267,7 @@ pub struct GrainDecl {
 /// (`crate::schedule_gen::ConformanceStep::RewriteModel`) can apply to an
 /// already-staged recipe's model body
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-/// `maintenance_plan.md` §"The definition-change trigger"). Both variants
+/// `incremental_models.md` §"The definition-change trigger"). Both variants
 /// are deliberately narrow, hand-picked shapes — not a generated construct
 /// pool — since Phase 9's scope is asserting TODAY's contract (model-hash
 /// change invalidates the interval store; the run pipeline always compiles
@@ -286,7 +286,7 @@ pub enum ModelEdit {
     AddPayloadColumn,
     /// Adds the source's row-key column into the aggregate's `GROUP BY` (a
     /// skeleton/identity position) — a grain change:
-    /// `maintenance_plan.md`'s `SkeletonAdd` territory. Only meaningful for
+    /// `incremental_models.md`'s `SkeletonAdd` territory. Only meaningful for
     /// the aggregate constructs (`AdditiveAgg`/`IdempotentAgg`/
     /// `DecomposedAgg`/`HolisticAgg`), which have a `GROUP BY` skeleton to
     /// widen; the row-shaped constructs (`PassThrough`/`Filter`) already
@@ -390,7 +390,7 @@ pub enum AdversarialLeaf {
     /// `model_properties.md` §Known Divergences: set-operation distribution
     /// covers `UNION ALL` only; `derive_column_groups` fails closed on any
     /// other set operation, collapsing every payload column into one group
-    /// sensitive to every declared source (`maintenance_plan.md` §Known
+    /// sensitive to every declared source (`incremental_models.md` §Known
     /// Divergences' `INTERSECT`/`EXCEPT` entry).
     IntersectBody,
     /// `RANDOM()` occupies a skeleton (identity/dedup-key) position — a
@@ -655,8 +655,8 @@ impl MutableEnrichedRecipe {
 
 /// A source's declared `batched.unique_key`/source-YAML rendering, factored
 /// out of [`SourceRecipe`] so [`KeyedRecipe`] (which has no `GrainDecl` —
-/// keyed output declares no `timeseries:`/`unique_key`, `keyed_models.md`
-/// Known Divergences) can render its driving source's YAML the same way
+/// keyed output declares no `timeseries:`/`unique_key`, `incremental_models.md`
+/// §Known Divergences "The key grain") can render its driving source's YAML the same way
 /// [`crate::render::render_source_yaml`] does for a [`ModelRecipe`], without
 /// requiring a `GrainDecl` to exist.
 impl SourceRecipe {
@@ -679,17 +679,17 @@ impl SourceRecipe {
 
 /// The `grain: key` pool's combiner family
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
-/// `maintenance_plan.md` §"The algebraic maintenance ladder"): both are
+/// `incremental_models.md` §"The algebraic maintenance ladder"): both are
 /// direct-monoid, admitted by the built classifier seed
 /// (`crates/smelt-logical/src/rules/cumulative.rs`'s aggregator allowlist —
-/// `keyed_models.md` Known Divergences "the classifier covers only the
+/// `incremental_models.md` §Known Divergences "The key grain": "the classifier covers only the
 /// direct-monoid families").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyedCombiner {
     /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
     /// `Grade::Additive` reconciliation-ledger family: entries record delta
     /// identities and a repeat fold of an already-processed window is
-    /// refused (`KeyedReprocessedWindow`, `keyed_models.md` §"Reprocessing").
+    /// refused (`KeyedReprocessedWindow`, `incremental_models.md` §"Reprocessing").
     Additive,
     /// `MAX(val)` — an idempotent, non-invertible monoid (ladder rung 1,
     /// not a group). The `Grade::Idempotent` family: entries record only a
@@ -726,10 +726,10 @@ pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
 /// FROM smelt.sources.<name> GROUP BY <key>` over one [`SourceRecipe`].
 /// [`Self::new_window_forward`] uses the clocked append-only `events` shape
 /// (the run-shape derivation's window-forward posture,
-/// `keyed_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
+/// `incremental_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
 /// uses the unclocked `mutable_snapshot` dimension shape (selecting the
-/// snapshot-reconcile posture, refused today — `keyed_models.md` Known
-/// Divergences "the snapshot-reconcile executor is unbuilt").
+/// snapshot-reconcile posture, refused today — `incremental_models.md` §Known
+/// Divergences "The key grain": "the snapshot-reconcile executor is unbuilt").
 #[derive(Debug, Clone)]
 pub struct KeyedRecipe {
     pub model_name: String,
@@ -826,9 +826,9 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction (design §5 "Key-recurrence control": "where ordering-
 /// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
 /// made unique by construction so the documented ties carve-out cannot fire
-/// spuriously" — `keyed_models.md` §"Ordering ties"). The order-monotone
+/// spuriously" — `incremental_models.md` §"Ordering ties"). The order-monotone
 /// overwrite combiner family this discipline targets is not yet an admitted
-/// technique (`keyed_models.md` Known Divergences: "the classifier union
+/// technique (`incremental_models.md` §Known Divergences "The key grain": "the classifier union
 /// (overwrite, once-write, and plain-overwrite families) ... are unbuilt"),
 /// so this generator is not wired into [`KeyedCombiner`] today — but the
 /// discipline it must uphold once that family lands is independently
@@ -997,7 +997,7 @@ mod tests {
     /// generator discipline for order-monotone combiners — a sample of
     /// generated ordering-key vectors of every sampled length is always
     /// pairwise distinct, so the documented ties carve-out
-    /// (`keyed_models.md` §"Ordering ties") can never fire spuriously
+    /// (`incremental_models.md` §"Ordering ties") can never fire spuriously
     /// against generated data.
     #[test]
     fn ordering_keys_are_unique_by_construction() {

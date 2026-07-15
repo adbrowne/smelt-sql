@@ -1,7 +1,7 @@
 #![cfg(feature = "duckdb")]
 //! Phase MP16 (`docs/plans/20260707-maintenance-plan-impl.md`): backward
 //! resolution — `smelt build <model> --period <start>..<end>
-//! --include-upstreams` (`maintenance_plan.md` §CLI, §"Backward resolution —
+//! --include-upstreams` (`incremental_models.md` §CLI, §"Backward resolution —
 //! what must exist"). Given a target model and a requested output period,
 //! walk the ancestor sub-DAG backward through the SAME per-workspace `Edge`
 //! graph `--since-upstream` assembles (`smelt_runtime::propagation::
@@ -136,7 +136,7 @@ fn table_dates(db_path: &Path, table: &str) -> Vec<String> {
 /// 2026-01-04 and 2026-01-05, for gold's requested 2026-01-05..2026-01-06
 /// output period) and building bottom-up (silver, then gold) reproduces a
 /// build over complete history for the same target period — the driving use
-/// case for the bounded test/validation build (`maintenance_plan.md`
+/// case for the bounded test/validation build (`incremental_models.md`
 /// §"Backward resolution — what must exist"). Seeding bronze with ONLY the
 /// resolved slice (not the full 10-day history) is what actually exercises
 /// "the resolved slice suffices": if `resolve_build_plan` under-computed the
@@ -276,7 +276,7 @@ fn resolved_slices_suffice() {
 /// An ancestor whose partition grain can't be sliced (an unclocked
 /// dim/lookup source, no `timeseries:` declared) must be staged/built whole
 /// — the required slice is the whole table, never a bounded interval
-/// (`maintenance_plan.md` §"Backward resolution — what must exist": "The
+/// (`incremental_models.md` §"Backward resolution — what must exist": "The
 /// required slice of an unclocked source is the whole table").
 #[test]
 fn unclocked_ancestor_requires_whole_table() {

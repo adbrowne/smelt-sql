@@ -1,5 +1,5 @@
 //! Cross-model dirty-partition propagation — the graph layer
-//! (`maintenance_plan.md` §"The graph layer").
+//! (`incremental_models.md` §"The graph layer").
 //!
 //! Runs start from *what changed upstream*, not from a cron tick: given the
 //! partition intervals that landed on each source, this module computes
@@ -20,7 +20,7 @@
 //! model's merged dirt across its inbound edges is then the delta its own
 //! consumers see, recursively (topological order).
 //!
-//! Known boundaries (`maintenance_plan.md` §Known Divergences):
+//! Known boundaries (`incremental_models.md` §Known Divergences):
 //! - **Day-ordinal intervals, Day/Month grains**: intervals are whole days
 //!   (clamp seconds ceiled *outward* — a 36h lookback dirties 2 whole
 //!   partitions; widening is safe, narrowing never is), anchored to the

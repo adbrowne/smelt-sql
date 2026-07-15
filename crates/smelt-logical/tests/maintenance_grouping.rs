@@ -1,6 +1,6 @@
 //! TDD tests for `smelt_logical::maintenance::grouping` — the
 //! mutation-sensitivity column-grouping derivation
-//! (`docs/specs/maintenance_plan.md` §Design "Factoring by
+//! (`docs/specs/incremental_models.md` §Design "Factoring by
 //! mutation-sensitivity"; `docs/specs/model_properties.md` §"Per-column
 //! mutation-sensitivity / column provenance").
 
@@ -28,7 +28,7 @@ fn source(
     }
 }
 
-/// The load-bearing append-only case (`maintenance_plan.md` §Design
+/// The load-bearing append-only case (`incremental_models.md` §Design
 /// "Factoring by mutation-sensitivity"): a column that reads only an
 /// append-only source, without aggregating over it, is immutable at
 /// creation — the source can only ever add new rows, never revise the one

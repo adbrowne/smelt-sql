@@ -311,7 +311,7 @@ fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String 
 
 // ── Warehouse-resident per-delta reconciliation ledger (MP12) ──────────────
 //
-// `docs/specs/maintenance_plan.md` §"The reconciliation ledger": an
+// `docs/specs/incremental_models.md` §"The reconciliation ledger": an
 // **additive**-graded group's storage must record delta identities, not just
 // a frontier watermark, because re-folding one double-counts. The ledger
 // table generated here is that storage for the keyed `merge_into` fold path
@@ -326,7 +326,7 @@ fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String 
 //
 // Idempotent-graded groups never call any of these — a warehouse ledger
 // table only exists for a project once an additive-fold cell has actually
-// folded (`docs/specs/maintenance_plan.md` §Constraints; review checklist
+// folded (`docs/specs/incremental_models.md` §Constraints; review checklist
 // "no warehouse tables for idempotent-only plans").
 
 /// Table name for the warehouse-resident per-delta reconciliation ledger.

@@ -164,7 +164,7 @@ async fn dimension_mutation_touches_only_sensitive_groups() {
 
 /// `redelivered_window_refuses_for_additive_keyed` (plan Phase 5 TDD list):
 /// re-running a folded window refuses (`KeyedReprocessedWindow`) before the
-/// action re-runs (`keyed_models.md` §"Reprocessing"; `maintenance_plan.md`
+/// action re-runs (`incremental_models.md` §"Reprocessing"; `incremental_models.md`
 /// §"The reconciliation ledger" — never-fold-twice).
 #[tokio::test]
 async fn redelivered_window_refuses_for_additive_keyed() {
@@ -343,7 +343,7 @@ fn read_full_output_as_text(
 /// orderings of the same generated append-only schedule (same recipe, same
 /// windows/rows, only the running ORDER differs) converge to identical final
 /// maintained-table states — the order/set-determinacy corollary
-/// (`maintenance_plan.md` §"The equivalence invariant": "the right-hand side
+/// (`incremental_models.md` §"The equivalence invariant": "the right-hand side
 /// depends only on the SET S, never the order it was processed"). Restricted
 /// to schedules with no `AppendLateRow` step
 /// (`schedule_gen::is_permutable`) — a late row's catch-up rerun has a
@@ -444,7 +444,7 @@ async fn compiled_sql_filter_matches_derived_clamp() {
 
 /// `rows_outside_write_window_are_byte_unchanged` (plan Phase 7 TDD list;
 /// design §7 row 2): output rows outside a run's write window are
-/// byte-unchanged across that run — `maintenance_plan.md` §Constraints
+/// byte-unchanged across that run — `incremental_models.md` §Constraints
 /// "Write window = output window".
 #[tokio::test]
 async fn rows_outside_write_window_are_byte_unchanged() {
@@ -467,7 +467,7 @@ async fn rows_outside_write_window_are_byte_unchanged() {
 /// "Technique interchangeability"): for the `grain: key` additive-combiner
 /// recipe, the fold family (windowed `KeyedFold` runs) and the recompute
 /// family (a no-window full-table rebuild) reach identical final states over
-/// the SAME seed data — `maintenance_plan.md` §"Per-cell admission"
+/// the SAME seed data — `incremental_models.md` §"Per-cell admission"
 /// "Interchangeability and choice". Also asserts a pin naming an unadmitted
 /// technique for this cell refuses rather than silently resolving (review
 /// checklist). See `smelt_maintenance_testkit::probes`'s module doc comment

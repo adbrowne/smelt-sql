@@ -3,7 +3,7 @@
 //! admission refusals, plus the `maintenance.cells[]` column-group-span
 //! check, into `file_diagnostics()`.
 //!
-//! Spec: `docs/specs/maintenance_plan.md` §Diagnostics, §Semantics
+//! Spec: `docs/specs/incremental_models.md` §Diagnostics, §Semantics
 //! "Partition-local maintenance (the K8 guardrail)"; `docs/specs/models.md`
 //! "Declared grain contradicted by the derived plan" (Constraint violations
 //! table).

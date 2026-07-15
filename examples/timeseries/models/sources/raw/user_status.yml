@@ -24,7 +24,7 @@ timeseries:
 unique_key: [user_id]
 # A dimension: rows may be corrected in place after creation. Declared
 # explicitly (not the fail-closed default) so `daily_events_status`'s
-# `UpstreamMutation` cell derives (`maintenance_plan.md` §"Per-cell
+# `UpstreamMutation` cell derives (`incremental_models.md` §"Per-cell
 # admission").
 mutation_profile:
   kind: mutable_snapshot

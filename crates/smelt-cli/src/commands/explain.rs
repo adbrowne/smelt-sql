@@ -354,7 +354,7 @@ fn build_physical_section(
 }
 
 /// `smelt explain <model>` — the maintenance-plan report
-/// (`maintenance_plan.md` §Surface "CLI"). Read-only: consumes
+/// (`incremental_models.md` §Surface "CLI"). Read-only: consumes
 /// `smelt_db::maintenance_plan_report` (itself a thin wrapper over the pure
 /// derivation in `smelt-logical`) rather than re-deriving admission,
 /// locality, or ledger logic (maintenance-plan-purity invariant,
@@ -433,7 +433,7 @@ async fn explain_maintenance_plan(
 
     // `--show-sql`: print, after the report, the maintenance statements
     // each cell executes — built from the same pure emitters a run
-    // executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    // executes (`docs/specs/incremental_models.md` §"Statement emission
     // (single owner)"). Never connects to a backend: `CompilerRegistry`
     // only needs `smelt.yml` target metadata, not a live connection.
     let default_target = config.targets.keys().next().cloned().unwrap_or_default();

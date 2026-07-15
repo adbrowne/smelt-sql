@@ -39,12 +39,12 @@ pub struct KeyedOracleRow {
 
 /// The snapshot-reconcile carve-out
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
-/// `maintenance_plan.md` §"Two named carve-outs"; `keyed_models.md`
+/// `incremental_models.md` §"Two named carve-outs"; `incremental_models.md`
 /// §"End-state equivalence": "Keys absent from the snapshot are retained (a
 /// named divergence from the oracle relation — the stored table is the
 /// oracle's rows plus retained departed keys)"). Pure data adjustment, no
 /// I/O, so it is directly unit-testable independent of whether the
-/// snapshot-reconcile executor exists (`keyed_models.md` Known Divergences:
+/// snapshot-reconcile executor exists (`incremental_models.md` §Known Divergences "The key grain":
 /// "The snapshot-reconcile executor is unbuilt").
 ///
 /// `retained_departed_keys` are keys present in stored state but absent from

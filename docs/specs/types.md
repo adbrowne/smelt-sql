@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Types
 
-> **What this is.** Normative spec for smelt's type system. Covers the concrete `DataType` vocabulary, the strict-by-default doctrine, type constraints, fragment sorts (`Expr<T>`, `TableExpr`, …), promotion rules, and how all of this applies equally to model schemas and `smelt.define` function signatures. Adjacent: `architecture.md`, `batched_models.md`.
+> **What this is.** Normative spec for smelt's type system. Covers the concrete `DataType` vocabulary, the strict-by-default doctrine, type constraints, fragment sorts (`Expr<T>`, `TableExpr`, …), promotion rules, and how all of this applies equally to model schemas and `smelt.define` function signatures. Adjacent: `architecture.md`, `incremental_models.md`.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -446,7 +446,7 @@ This section captures the load-bearing rationale behind the type system's shape 
   - `docs/plans/20260613-collation-axis.md`
 - **Related specs**:
   - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
-  - `docs/specs/batched_models.md` — downstream consumer of `ModelSchema`.
+  - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
   - `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; `ModelDef` field rules, generator-file body semantics, and construction restrictions; this spec registers the type vocabulary entries, the meta-language spec owns the rules.
   - `docs/specs/function_schema_inference.md` — how `smelt.functions.*` calls contribute columns/types to a caller's schema; owns the `ColumnTypeUnresolved` schema-propagation rules; this spec owns the `Unknown` reason-discriminant and the no-silent-`Unknown` doctrine it consumes.
 

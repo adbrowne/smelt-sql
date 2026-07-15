@@ -23,7 +23,7 @@ timeseries:
 -- root-anchored pair is additive, for direct per-event comparison.
 -- `smelt explain silver.events_enriched` shows a creation cell for each of
 -- the three upstreams, each clamped by that upstream's own derived reach
--- (`docs/specs/maintenance_plan.md` §"Upstream model edges") — so a run
+-- (`docs/specs/incremental_models.md` §"Upstream model edges") — so a run
 -- touching one `event_date` partition only ever re-touches the
 -- corresponding `event_date` partition here, never the whole table.
 --

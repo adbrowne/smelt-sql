@@ -7,7 +7,7 @@ use smelt_logical::maintenance::skeleton::{skeleton_columns, skeleton_roles, Ske
 /// `GROUP BY` keys and `SELECT DISTINCT` dedup keys occupy a
 /// row-membership position — they must classify as skeleton (not
 /// `Payload`), because a field added there is a grain change, never a
-/// column backfill (`maintenance_plan.md` §"The definition-change
+/// column backfill (`incremental_models.md` §"The definition-change
 /// trigger").
 #[test]
 fn group_by_and_dedup_columns_are_skeleton() {

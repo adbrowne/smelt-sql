@@ -6,7 +6,7 @@
 //! and by [`render_oracle_sql`] (source refs swapped for physical table
 //! names) — the model SQL and the oracle SQL are, by construction, the exact
 //! same text apart from that one substitution, which is the equivalence
-//! invariant's own statement (`maintenance_plan.md` §"The equivalence
+//! invariant's own statement (`incremental_models.md` §"The equivalence
 //! invariant": same SQL body, full inputs).
 //!
 //! No execution-path code lives here — Phase 1's scope stops at "stages
@@ -182,7 +182,7 @@ pub fn render_model_file(recipe: &ModelRecipe) -> String {
     )
 }
 
-/// The oracle query (`maintenance_plan.md` §"The equivalence invariant";
+/// The oracle query (`incremental_models.md` §"The equivalence invariant";
 /// design §6 "Oracle query"): the model body with `smelt.sources.<x>`
 /// replaced by its physical table name (`main.sources_<x>`), evaluated
 /// directly on a `duckdb::Connection` — independent of smelt's own
@@ -324,8 +324,8 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
 }
 
 /// The full `grain: key` model file: `refresh: incremental` + `grain: key`
-/// frontmatter — deliberately no `timeseries:` block (`keyed_models.md`
-/// Known Divergences: "every `timeseries:` block on a keyed model is refused
+/// frontmatter — deliberately no `timeseries:` block (`incremental_models.md`
+/// §Known Divergences "The key grain": "every `timeseries:` block on a keyed model is refused
 /// unconditionally") and no `batched.unique_key` (keyed output has no
 /// partition column) — followed by [`render_keyed_model_body`].
 pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
@@ -398,7 +398,7 @@ pub fn stage_keyed(
 }
 
 /// Every `DiagnosticCode` variant in the `Maintenance*` family
-/// (`maintenance_plan.md` §Diagnostics) — permitted on a staged recipe's
+/// (`incremental_models.md` §Diagnostics) — permitted on a staged recipe's
 /// diagnostics, since Phase 1 does not yet constrain which techniques a
 /// recipe's cell admits. Any other diagnostic on a valid-by-construction
 /// recipe is a generator bug.

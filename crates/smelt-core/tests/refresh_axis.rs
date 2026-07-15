@@ -1,7 +1,7 @@
 //! Tests for the `refresh:` frontmatter axis.
 //!
 //! Spec oracle: `docs/specs/models.md` §"YAML frontmatter keys" and
-//! `docs/specs/keyed_models.md` §Surface.
+//! `docs/specs/incremental_models.md` §Surface.
 
 use smelt_core::config::{Grain, Materialization, RefreshStrategy};
 use smelt_core::metadata::{

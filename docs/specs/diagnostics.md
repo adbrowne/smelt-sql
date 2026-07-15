@@ -119,7 +119,7 @@ Owned by `docs/specs/timeseries.md`.
 
 ### Batched
 
-Owned by `docs/specs/batched_models.md`.
+Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
@@ -130,17 +130,17 @@ Owned by `docs/specs/batched_models.md`.
 
 ### Keyed refresh mode
 
-Owned by `docs/specs/keyed_models.md`. This family replaces the retired `Cumulative*` and
+Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
 unchanged; `CumulativeNoDrivingSource` and `AccumulatingSnapshotUnboundedHorizon` are
 **retired outright, not renamed** (an unclocked model is a legitimate snapshot-reconcile
 posture under `keyed`, not an error, and there is no write-eligibility horizon to bound —
-`keyed_models.md` §Known Divergences).
+`incremental_models.md` §Known Divergences "The key grain").
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
-| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`keyed_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
 | `KeyedForbidsBatched` | Error | A `grain: key` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
@@ -153,7 +153,7 @@ posture under `keyed`, not an error, and there is no write-eligibility horizon t
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
-| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`keyed_models.md` §Known Divergences). Retired once snapshot-reconcile ships. |
+| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`incremental_models.md` §Known Divergences "The key grain"). Retired once snapshot-reconcile ships. |
 
 ---
 
@@ -451,7 +451,7 @@ Owned by `docs/specs/virtual_environments.md`.
 
 ### Maintenance plan
 
-Owned by `docs/specs/maintenance_plan.md`.
+Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|

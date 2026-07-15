@@ -49,7 +49,7 @@ fn set(items: &[&str]) -> BTreeSet<String> {
 // (factoring degenerates)" — a *definitional* fact about column-group
 // provenance, not a runtime behaviour to falsify (probe-status:
 // not-probe-worthy). What IS falsifiable, and what this test pins, is the
-// concrete divergence recorded in `maintenance_plan.md` §Known Divergences
+// concrete divergence recorded in `incremental_models.md` §Known Divergences
 // ("A group merged across two mutable inputs has no group-merge-provenance
 // policy"): today's shipped code does NOT force a whole-row `DeleteInsert`
 // recompute for this merged group — it treats it exactly like a
@@ -145,7 +145,7 @@ fn ex12_multi_input_merge_degenerates_to_recompute() {
 // probe what `change_feed` does today (likely re-scan or refusal)".
 //
 // `change_feed` maps to the stricter `MutationProfile::MutableSnapshot`
-// posture for admission purposes (`maintenance_plan.md` §Known Divergences,
+// posture for admission purposes (`incremental_models.md` §Known Divergences,
 // `derive.rs::source_shape`'s own doc comment). A `NewData` fold over a
 // `MutableSnapshot` source always fails the faithful-fold source-posture
 // condition (obligation 2) regardless of the combiner's algebra — SUM is a
@@ -260,7 +260,7 @@ fn ex18_group_by_coarser_write_window_rounds_up() {
 // EX-26 — MAX_BY latest-status over a change feed (`07-example-catalogue.md`
 // EX-26; candidate probe cell). Catalogue hypothesis: "HOLDS" under the
 // proposed framework's order-monotone overwrite fold — but that fold
-// mechanism does not exist today (`maintenance_plan.md` §Known Divergences:
+// mechanism does not exist today (`incremental_models.md` §Known Divergences:
 // "no live fold machinery consumes a change feed's delta shape yet"). Same
 // source-posture refusal as EX-14 applies regardless of combiner algebra:
 // only the recompute family is reachable — this test pins that "recompute
@@ -330,7 +330,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
 // No `FoldSpec` exists that expresses "keep the latest row per key" for a
 // `ROW_NUMBER() OVER (PARTITION BY key ORDER BY ts DESC) = 1` dedup — there
 // is no locality-pruned windowed-merge technique in this v0 tracer at all
-// (`maintenance_plan.md` §Known Divergences: "keyed dirt-sets ... designed
+// (`incremental_models.md` §Known Divergences: "keyed dirt-sets ... designed
 // ... and unbuilt"). A caller for this construct has nothing honest to
 // supply for `fold`, so the keyed-grain creation trigger refuses outright.
 // ---------------------------------------------------------------------------

@@ -12,7 +12,7 @@
 //! `derive_maintenance_plan`'s keyed-fold admission
 //! (`crates/smelt-logical/src/maintenance/derive.rs::derive_new_data`) calls
 //! `input_delta_discovery` as the source-posture half of the faithful-fold
-//! obligation (`maintenance_plan.md` §"Per-cell admission" obligation 2), and
+//! obligation (`incremental_models.md` §"Per-cell admission" obligation 2), and
 //! the verdict it returns actually *selects between two distinguishable
 //! refusal reasons* — not merely appearing inside an interpolated string.
 //!

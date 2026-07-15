@@ -1,5 +1,5 @@
 //! Phase MP13 (`docs/plans/20260707-maintenance-plan-impl.md`) — the
-//! technique choice ladder (`maintenance_plan.md` §Surface "Frontmatter":
+//! technique choice ladder (`incremental_models.md` §Surface "Frontmatter":
 //! `defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
 //! scope winning; a hard pin bypasses the cost model, never admission).
 //!

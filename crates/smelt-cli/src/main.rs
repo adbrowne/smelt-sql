@@ -159,7 +159,7 @@ struct RunArgs {
     /// Forward propagation: run exactly the partitions dirtied by the
     /// caller-declared per-source deltas (`--source`/`--landed`), computed
     /// through the maintenance-plan propagation graph
-    /// (`maintenance_plan.md` §"The graph layer"). Requires at least one
+    /// (`incremental_models.md` §"The graph layer"). Requires at least one
     /// `--source`/`--landed` pair.
     #[arg(long = "since-upstream")]
     since_upstream: bool,
@@ -338,7 +338,7 @@ struct BuildArgs {
     /// argument) and this period, resolve the per-ancestor required
     /// upstream slices and the ancestor-first/target-last build order
     /// through the same propagation graph `--since-upstream` assembles
-    /// (`maintenance_plan.md` §"Backward resolution — what must exist"),
+    /// (`incremental_models.md` §"Backward resolution — what must exist"),
     /// print them, and build exactly that bounded set. Requires
     /// `--include-upstreams`.
     #[arg(long = "period", requires = "include_upstreams")]
@@ -415,7 +415,7 @@ struct ExplainArgs {
 
     /// Print, after each cell's report block, the maintenance statements
     /// that cell executes — the output of the same pure emitters a run
-    /// executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    /// executes (`docs/specs/incremental_models.md` §"Statement emission
     /// (single owner)"). Only meaningful with a positional model-name
     /// argument. Never connects to a backend.
     #[arg(long = "show-sql")]

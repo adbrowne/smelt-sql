@@ -1,7 +1,7 @@
 //! Technique choice among admissible alternatives — the override ladder
 //! (`defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
 //! scope winning) plus the cost-model hook `smelt bakeoff` measures into
-//! (`maintenance_plan.md` §Surface "Frontmatter", §Semantics
+//! (`incremental_models.md` §Surface "Frontmatter", §Semantics
 //! "Interchangeability and choice", §Design "Offline cost measurement is
 //! first-class").
 //!
@@ -13,7 +13,7 @@
 //! re-derivation) is the always-admissible whole-region recompute
 //! (`Technique::DeleteInsert`): a recompute is contract-agnostic and
 //! unconditionally valid over replayable input
-//! (`maintenance_plan.md` §Semantics "The plan matrix"). This module treats
+//! (`incremental_models.md` §Semantics "The plan matrix"). This module treats
 //! `{the cell's own admitted technique, RegionRecompute}` as the resolvable
 //! set and applies the override ladder over it — pure data in, pure data
 //! out, per the "Maintenance-plan purity" invariant (root `CLAUDE.md`).
@@ -44,7 +44,7 @@ pub enum ChosenTechnique {
 /// (or a soft `prefer`, when it disagrees with every resolvable member) names
 /// a technique outside `{the cell's own admitted technique, RegionRecompute}`
 /// — a pin bypasses the cost model, never admission
-/// (`maintenance_plan.md` §Surface "Frontmatter").
+/// (`incremental_models.md` §Surface "Frontmatter").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceRefusal {
     pub trigger: String,
@@ -66,7 +66,7 @@ impl std::fmt::Display for ChoiceRefusal {
 /// The effective per-cell override once the ladder narrows: `cells[].technique`
 /// (a hard pin) if present, else `cells[].prefer` if present, else
 /// `defaults.prefer` — narrower scope always wins over broader
-/// (`maintenance_plan.md` §Surface "Frontmatter": "The override ladder is
+/// (`incremental_models.md` §Surface "Frontmatter": "The override ladder is
 /// `defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
 /// scope winning").
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -145,7 +145,7 @@ fn admits(
 /// effective override (already narrowed by [`effective_override`]), and
 /// whether the target backend can run a column-scoped `MERGE` at all.
 ///
-/// Mirrors `maintenance_plan.md` §"Per-cell admission": a `technique:` pin
+/// Mirrors `incremental_models.md` §"Per-cell admission": a `technique:` pin
 /// bypasses the cost model, **never** admission — pinning a technique the
 /// resolvable set does not contain is a hard, fail-loud [`ChoiceRefusal`],
 /// not a silent fallback to `RegionRecompute`. A soft `prefer` never

@@ -1,5 +1,5 @@
 //! Forward propagation — `smelt run --since-upstream`
-//! (`maintenance_plan.md` §"The graph layer", §CLI).
+//! (`incremental_models.md` §"The graph layer", §CLI).
 //!
 //! This module assembles the real per-workspace propagation graph from
 //! every model's derived [`MaintenancePlan`](smelt_logical::maintenance::MaintenancePlan)
@@ -115,7 +115,7 @@ pub fn pair_source_deltas(sources: &[String], landed: &[String]) -> Result<Vec<S
 
 /// Map a declared `timeseries.granularity` to the propagation graph's own
 /// grain axis. Only `day`/`month` have a graph axis today — sub-day and
-/// coarser-than-month axes are deferred (`maintenance_plan.md` §Known
+/// coarser-than-month axes are deferred (`incremental_models.md` §Known
 /// Divergences: "Hour granularity is declared surface... the propagation
 /// layer is day-ordinal; sub-day axes are deferred"). Fails loud
 /// (`MaintenanceGraphUnsupportedNode`) rather than silently mis-widening a
@@ -158,7 +158,7 @@ fn model_grain(model: &ModelFile) -> Result<PartitionGrain> {
 /// Build the real per-workspace propagation graph: one [`Edge`] per
 /// `(upstream, downstream)` pair a model's derived `MaintenancePlan` admits
 /// a `ScanClamp` for, widened to the maximum clamp margin across every cell
-/// that derives one for that pair (widen-never-narrow, `maintenance_plan.md`
+/// that derives one for that pair (widen-never-narrow, `incremental_models.md`
 /// §"The graph layer"). `upstream` is either a raw source (a `sources.*`
 /// ref) or another model in `models`. Both resolve through the same
 /// `derive_model_maintenance_plan_with_edges` call `smelt explain` uses: a
@@ -166,7 +166,7 @@ fn model_grain(model: &ModelFile) -> Result<PartitionGrain> {
 /// becomes a `ModelEdge`, so a maintained-model edge's clamp equals the
 /// creation cell's clamp `smelt explain` reports and an underivable upstream
 /// clock is a refusal (no walkable edge) rather than a silently permissive
-/// whole-table synthesis (`maintenance_plan.md` §"Upstream model edges"). A
+/// whole-table synthesis (`incremental_models.md` §"Upstream model edges"). A
 /// `full`-mode / view upstream carries no incremental delta, so it stays on
 /// the plain source path as an unclocked whole-table dependency the
 /// backward-resolution graph must still stage.
@@ -237,7 +237,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
                     up_meta.map(|m| m.refresh == Some(RefreshStrategy::Incremental)) == Some(true);
                 if is_maintained {
                     // A maintained-model upstream is a plan edge of the same
-                    // standing as a `sources.*` ref (`maintenance_plan.md`
+                    // standing as a `sources.*` ref (`incremental_models.md`
                     // §"Upstream model edges"): route it through the SAME
                     // edge-aware derivation `smelt explain` uses
                     // (`derive_model_maintenance_plan_with_edges` →
@@ -256,7 +256,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
                     });
                 } else {
                     // A `full`-mode or view upstream delivers no incremental
-                    // delta (`maintenance_plan.md` §"Upstream model edges":
+                    // delta (`incremental_models.md` §"Upstream model edges":
                     // "participates in mutation/backfill triggers only") — it
                     // has no creation cell in `smelt explain` either. It is
                     // still a real dependency the backward-resolution graph
@@ -308,7 +308,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             // `model_grain` below) is what actually widens every dirty/
             // required interval through it to `DayInterval::WHOLE` via
             // `PartitionGrain::align_outward`, never this margin.
-            // `maintenance_plan.md` §"Backward resolution — what must
+            // `incremental_models.md` §"Backward resolution — what must
             // exist": "The required slice of an unclocked source is the
             // whole table."
             if let PartitionLocal::No { source, .. } = &cell.partition_local {
@@ -349,7 +349,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
 
 /// One propagated run: `model` must run over `[start, end)` (ISO dates), or
 /// the whole table when `start`/`end` are `None` (an unclocked source's
-/// delta — `maintenance_plan.md` §"The graph layer": "A delta on an
+/// delta — `incremental_models.md` §"The graph layer": "A delta on an
 /// unclocked source dirties the whole model... the full-table run is a
 /// declared cost").
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -362,7 +362,7 @@ pub struct PropagatedRun {
 /// The full `--since-upstream` plan: the propagated per-model runs (in
 /// dependency order) plus a human-readable rendering of the dirty set
 /// (per-edge and per-model) to print **before** any run executes
-/// (`maintenance_plan.md` §CLI: "Prints the dirty set before acting").
+/// (`incremental_models.md` §CLI: "Prints the dirty set before acting").
 #[derive(Debug, Clone, Default)]
 pub struct SinceUpstreamPlan {
     pub runs: Vec<PropagatedRun>,
@@ -418,7 +418,7 @@ pub fn plan_since_upstream(
     // origin is its own "dirty" entry before any edge reflects it). A raw
     // *source* origin is filtered by `order_set` (sources are never in the
     // topological model order); a *maintained-model* origin (a `--source
-    // <model-address>` delta, `maintenance_plan.md` §"Upstream model edges":
+    // <model-address>` delta, `incremental_models.md` §"Upstream model edges":
     // "a model's landed delta is the output window a completed run wrote for
     // it") IS in `order`, but its run already happened — it must propagate to
     // its downstreams without being re-run itself. `origin_names` excludes
@@ -483,7 +483,7 @@ pub struct ResolvedBuildPlan {
 /// `period`, over the SAME real per-workspace graph
 /// [`build_forward_graph`] assembles for `--since-upstream` — the graph
 /// layer's two directions share one edge object
-/// (`maintenance_plan.md` §"The clamp both directions"). Delegates the
+/// (`incremental_models.md` §"The clamp both directions"). Delegates the
 /// actual reverse-topological resolution to
 /// [`smelt_logical::maintenance::propagate::required_inputs`]; this
 /// function only assembles the graph, renders the report, and shapes the

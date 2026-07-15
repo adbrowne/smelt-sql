@@ -1233,7 +1233,7 @@ use crate::analysis::source_bounds::{derive_partition_skew, Skew};
 ///
 /// `exclude_source` names the model's own source path (dotted, as it appears
 /// in a `smelt.<path>` self-reference) for a self-referential model
-/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// (`docs/specs/incremental_models.md` §"Window independence and self-referential
 /// models": the self-edge is never a skew anchor). When set, each scope's
 /// region text is filtered by [`own_region_text_excluding_self_relations`]
 /// before the leaf classifier runs: the scope's own alias→source map
@@ -1310,7 +1310,7 @@ fn scope_self_qualifiers(cx: &NodeCx, self_name: &str) -> Vec<String> {
 /// `qual.`-qualified column of the self source, per this scope's own alias
 /// resolution) is omitted from the returned text, so the skew leaf classifier
 /// never reads the self-edge's bound as a partition-column skew anchor
-/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// (`docs/specs/incremental_models.md` §"Window independence and self-referential
 /// models"). Conditions that do not reference a self qualifier — including a
 /// genuine Form B relation sharing the same `WHERE` clause — survive
 /// verbatim. A condition containing an `OR` anywhere within it is never
@@ -1467,7 +1467,7 @@ pub fn model_partition_skew(sql: &str, partition_column: &str) -> Skew {
 /// [`model_partition_skew`] with an optional self-source exclusion for
 /// self-referential models: relations arising from a reference to
 /// `self_name` (the model's own dotted path) never contribute skew anchors
-/// (`docs/specs/batched_models.md` §"Window independence and self-referential
+/// (`docs/specs/incremental_models.md` §"Window independence and self-referential
 /// models" — the self-edge is never a skew anchor). Exclusion is resolved
 /// per scope by the shared walk (see [`SkewTransfer`]), so an unrelated
 /// scope reusing the self-edge's alias text for a different source keeps its

@@ -1,6 +1,6 @@
 //! Per-partition execution loop for `refresh: keyed` table models.
 //!
-//! See `docs/specs/keyed_models.md` for the normative spec. This module is
+//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module is
 //! the mode's built seed: it only drives the direct-monoid (additive +
 //! extremal/lattice) column families.
 //!
@@ -53,7 +53,7 @@ impl WindowedKeyedRule for CumulativeClassification {
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
     /// combiner is `Sum` — an additive fold double-counts on a repeat merge
-    /// (`docs/specs/maintenance_plan.md` §"The reconciliation ledger" —
+    /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
     /// "Storage is graded by algebra"). The remaining catalogued combiners
     /// (`Min`/`Max`/`BoolAnd`/`BoolOr`/`BitAnd`/`BitOr`/`BitXor`) are the
     /// extremal/lattice family and grade `Idempotent`. Mixing an additive
@@ -118,11 +118,11 @@ pub async fn execute_cumulative_aggregate(
     //    `WindowedKeyedRule::ledger_grade` above. For an `Additive`-graded
     //    cell — at least one `SUM`-family aggregator column — every step's
     //    create-or-merge action is folded through the warehouse-resident
-    //    reconciliation ledger (`docs/specs/maintenance_plan.md` §"The
+    //    reconciliation ledger (`docs/specs/incremental_models.md` §"The
     //    reconciliation ledger"), transactionally with the write
     //    (`Backend::fold_ledger_delta`); a step whose delta identity (its
     //    own partition value) is already reflected refuses the run instead
-    //    of double-counting (`docs/specs/keyed_models.md` §"Reprocessing" —
+    //    of double-counting (`docs/specs/incremental_models.md` §"Reprocessing" —
     //    `KeyedReprocessedWindow`). An `Idempotent`-graded cell (no
     //    additive column) needs no ledger — re-merging a window is
     //    harmless — and no warehouse ledger table is ever created for it.
@@ -196,7 +196,7 @@ pub async fn execute_cumulative_aggregate(
 ///
 /// Thin wrapper over the single-owner emitter
 /// (`smelt_logical::maintenance::emit::emit_keyed_fold`,
-/// `docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+/// `docs/specs/incremental_models.md` §"Statement emission (single owner)"):
 /// this function's only remaining job is rendering each aggregator column's
 /// `CrossPartitionCombiner` to a plain SQL expression string — the emitter
 /// itself never depends on `smelt-planner`
@@ -259,7 +259,7 @@ fn collect_refs_from_sql(sql: &str) -> Vec<String> {
 /// This is the single entry point both run-pipeline paths use to enforce the
 /// classifier — including the **no-window full-refresh** path. A classifier
 /// rejection must refuse the model rather than silently materialise forbidden
-/// SQL (`keyed_models.md` Constraint #4 — "The catalogue is closed and the
+/// SQL (`incremental_models.md` §"Key-grain constraints" #4 — "The catalogue is closed and the
 /// classifier is fail-closed").
 pub fn classify_cumulative_sql(
     model_name: &str,
@@ -298,7 +298,7 @@ mod tests {
     }
 
     /// `build_cumulative_merge_sql` is a thin wrapper over the single-owner
-    /// `emit_keyed_fold` emitter (`docs/specs/maintenance_plan.md`
+    /// `emit_keyed_fold` emitter (`docs/specs/incremental_models.md`
     /// §"Statement emission (single owner)"): this test asserts its output
     /// is byte-identical to a direct emitter call over the same rendered
     /// combiner expressions, not merely emitter-*shaped* (contains checks

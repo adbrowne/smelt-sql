@@ -1,5 +1,5 @@
 //! `smelt explain <model>` over a real fixture with **model-to-model** edges
-//! (`maintenance_plan.md` §"Upstream model edges"): a maintained model's ref
+//! (`incremental_models.md` §"Upstream model edges"): a maintained model's ref
 //! to another maintained model derives a creation-trigger cell clocked by the
 //! upstream's own `timeseries:` declaration.
 
@@ -95,7 +95,7 @@ fn eventstream_shows_creation_cell_for_silver_upstream() {
 /// session boundary via the 1-day session-cap Form B filter). The
 /// maintenance-plan report must show a creation cell — each with its own
 /// derived scan clamp — for BOTH upstreams, demonstrating that the
-/// model-upstream edge derivation (`maintenance_plan.md` §"Upstream model
+/// model-upstream edge derivation (`incremental_models.md` §"Upstream model
 /// edges") composes across more than one model-to-model ref.
 #[test]
 fn events_enriched_shows_creation_cells_for_both_model_upstreams() {

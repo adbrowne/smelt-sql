@@ -11,7 +11,7 @@
 //! branches; a model shaped that way is outside v0's supported scope and the
 //! caller falls back to a hand-declared `skeleton_columns` set, exactly as
 //! today's tracer already does for every model shape it cannot classify
-//! (`docs/specs/maintenance_plan.md` §Known Divergences).
+//! (`docs/specs/incremental_models.md` §Known Divergences).
 //!
 //! Fail-closed by construction: a column this classifier cannot place in
 //! `Identity`/`Grouping`/`Dedup`/`Ordering` is `Payload` only when the SQL

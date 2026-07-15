@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Sources
 
-> **What this is.** Normative spec for source declarations: externally-managed tables that smelt does not load but can type-check, route in `FROM` positions, and — through the declared **world-facts** (mutation profile, lateness, keys, retention) — admit maintenance techniques for (`maintenance_plan.md` consumes these facts; this spec owns their declaration surface and trust rules). Sources share their YAML grammar with seed sidecars (`seeds.md`); this spec owns that shared grammar and the source-only semantics.
+> **What this is.** Normative spec for source declarations: externally-managed tables that smelt does not load but can type-check, route in `FROM` positions, and — through the declared **world-facts** (mutation profile, lateness, keys, retention) — admit maintenance techniques for (`incremental_models.md` consumes these facts; this spec owns their declaration surface and trust rules). Sources share their YAML grammar with seed sidecars (`seeds.md`); this spec owns that shared grammar and the source-only semantics.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -19,7 +19,7 @@ owners: [andrew]
 
 A **source** is an external table that already exists in the target database, populated by some pipeline outside smelt. Smelt declares the source's schema, type-checks references, surfaces the columns in the LSP, and routes `smelt.<path>` references to the underlying `<schema>.<table>` — but it never runs `CREATE TABLE` or `INSERT` for the source. `smelt seed` does not touch sources.
 
-Beyond the schema, a source YAML declares the source's **world-facts** — delivery-contract properties of the feed (how rows change, how late they arrive, what identifies them) that no analysis of consumer SQL can derive. These facts are what license the cheaper maintenance techniques (`maintenance_plan.md` §"Per-cell admission"); they are declared once on the source and shared by every consumer, never per model.
+Beyond the schema, a source YAML declares the source's **world-facts** — delivery-contract properties of the feed (how rows change, how late they arrive, what identifies them) that no analysis of consumer SQL can derive. These facts are what license the cheaper maintenance techniques (`incremental_models.md` §"Per-cell admission"); they are declared once on the source and shared by every consumer, never per model.
 
 ### Filesystem layout
 
@@ -64,7 +64,7 @@ retention: '400 days'
 | `columns[].nullable` | no | `true` | Whether the column may contain NULL in the upstream database. Type-checking respects this. |
 | `columns[].description` | no | absent | Free-text description, surfaced in LSP hover. |
 | `name` | no | derived | Override the database-side name. **Target-aware** (see §"Target-aware `name:` override"). |
-| `timeseries` | no | absent | Declares the source's clock (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Presence makes the source **clocked** (window-forward consumption, clampable reads); absence makes it an **unclocked lookup**, read in full on every recompute — a structural contract, not an accident. `granularity` is also the source's partition-axis grain for cross-model propagation (`maintenance_plan.md` §"The graph layer"). The named columns must appear in `columns:` with date/timestamp-compatible types. |
+| `timeseries` | no | absent | Declares the source's clock (`event_time_column`, `partition_column`, `granularity`). See `timeseries.md`. Presence makes the source **clocked** (window-forward consumption, clampable reads); absence makes it an **unclocked lookup**, read in full on every recompute — a structural contract, not an accident. `granularity` is also the source's partition-axis grain for cross-model propagation (`incremental_models.md` §"The graph layer"). The named columns must appear in `columns:` with date/timestamp-compatible types. |
 | `mutation_profile` | no | absent (undeclared — strictest) | The structured mutation block (see §"`mutation_profile` — the structured block"). The bare string form `mutation_profile: append_only` (or `mutable_snapshot` / `change_feed`) is shorthand for `{ kind: <value> }`. |
 | `source_lateness` | no | absent (zero) | Alias for `mutation_profile.lateness` (the standalone key is retained as shorthand). Declaring both is a `MalformedSource` error. |
 | `watermark` | no | absent (derived) | Where the source's pipeline publishes a completeness marker: `watermark: { complete_through: <schema.table.column or column> }`. When absent, the derived watermark is `max(partition_column)` processed so far, and settle bounds stay watermark-relative. |
@@ -94,10 +94,10 @@ mutation_profile:
 
 - `kind: append_only` — rows are only ever appended; an existing row never changes or disappears. `redelivery: at_least_once` (the conservative default) states a delivered row may arrive again; `none` states each row arrives exactly once.
 - `kind: mutable_snapshot` — rows may be updated or deleted in place; only a full re-scan sees every change.
-- `kind: change_feed` — the source itself reports what changed (CDC/CDF). `retractions` states whether delete/update events appear; `delta_identity` names the column(s) forming a stable identity per delivered delta (e.g. Delta CDF's commit version + row offset, Kafka's partition + offset) — required for any additive fold over a redeliverable or feed source, since it is the dedup key of the ledger's never-fold-twice obligation (`maintenance_plan.md` §"The reconciliation ledger"). The named columns must exist, be `NOT NULL`, and be unique per delivered row (probed).
-- `key_recurrence` — the delivery-contract recurrence bound (e.g. an at-least-once feed whose redeliveries land within three days). It lives inside the block because it is delivery-contract metadata of the same species as the other sub-facts. Consumed by key temporal locality (`keyed_models.md` §"Key temporal locality") when a consuming model's `unique_key` resolves exactly to the declared columns; **always runtime-checked, never trusted** (`KeyedRecurrenceBoundViolated`).
+- `kind: change_feed` — the source itself reports what changed (CDC/CDF). `retractions` states whether delete/update events appear; `delta_identity` names the column(s) forming a stable identity per delivered delta (e.g. Delta CDF's commit version + row offset, Kafka's partition + offset) — required for any additive fold over a redeliverable or feed source, since it is the dedup key of the ledger's never-fold-twice obligation (`incremental_models.md` §"The reconciliation ledger"). The named columns must exist, be `NOT NULL`, and be unique per delivered row (probed).
+- `key_recurrence` — the delivery-contract recurrence bound (e.g. an at-least-once feed whose redeliveries land within three days). It lives inside the block because it is delivery-contract metadata of the same species as the other sub-facts. Consumed by key temporal locality (`incremental_models.md` §"Key temporal locality") when a consuming model's `unique_key` resolves exactly to the declared columns; **always runtime-checked, never trusted** (`KeyedRecurrenceBoundViolated`).
 
-What each posture licenses (the mapping consumed by per-cell admission, `maintenance_plan.md`):
+What each posture licenses (the mapping consumed by per-cell admission, `incremental_models.md`):
 
 | kind + sub-facts | Replayable at current `S`? | Faithful fold? | Techniques licensed |
 |---|---|---|---|
@@ -112,7 +112,7 @@ Every undeclared/default row is the strictest: a lazy declaration gets correct-b
 
 ### Landed-delta intervals (derived, recorded)
 
-For every source a maintenance run consumes, smelt records **which partition intervals of that source landed** — the per-source delta, on the source's own partition axis. This is the input to cross-model forward propagation (`maintenance_plan.md` §"The graph layer": what landed decides which downstream partitions run). The recording is derived, never declared: for an append-only clocked source it is the interval diff of processed partitions; a change feed's deltas come from the feed's offsets; a `mutable_snapshot` source has no interval representation — its delta is "the whole table" (which propagates as whole-model dirt downstream). The record lives in smelt's run state (`run_state.md`), keyed by source address.
+For every source a maintenance run consumes, smelt records **which partition intervals of that source landed** — the per-source delta, on the source's own partition axis. This is the input to cross-model forward propagation (`incremental_models.md` §"The graph layer": what landed decides which downstream partitions run). The recording is derived, never declared: for an append-only clocked source it is the interval diff of processed partitions; a change feed's deltas come from the feed's offsets; a `mutable_snapshot` source has no interval representation — its delta is "the whole table" (which propagates as whole-model dirt downstream). The record lives in smelt's run state (`run_state.md`), keyed by source address.
 
 ### Source with `timeseries:` declaration
 
@@ -172,7 +172,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 | `SourceWatermarkViolated` | Error (fails the consuming run) | A row arrived with event time before the source's published `watermark.complete_through`. |
 | `SourceUniqueKeyViolated` | Error (fails the consuming run) | The uniqueness probe found duplicate rows for the declared `unique_key` within the consuming run's scan window (or on `smelt verify`). |
 | `SourceRetentionExceeded` | Error (plan-time refusal) | A backfill window reaches past the declared `retention:` — the recompute would silently rebuild from partial input; points at the declaration and the stored-state provenance. |
-| `KeyedRecurrenceBoundViolated` | Error (fails the consuming run, transactionally) | The `key_recurrence` bound was disproved by the consuming run's check (`keyed_models.md`). |
+| `KeyedRecurrenceBoundViolated` | Error (fails the consuming run, transactionally) | The `key_recurrence` bound was disproved by the consuming run's check (`incremental_models.md`). |
 
 ## Semantics
 
@@ -227,7 +227,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 ## Known Divergences / Open Questions
 
 - **The structured `mutation_profile` block parses; licensing and runtime tripwires remain unbuilt.** `crates/smelt-core/src/sources.rs` parses both the bare-string shorthand and the structured block (`kind` + `lateness`/`redelivery`/`retractions`/`ordered`/`delta_identity`/`key_recurrence`), the `mutable_snapshot` wire name, `watermark:`, composite `unique_key:`, and `retention:`. A sub-fact declared for the wrong `kind`, and the `source_lateness`/`mutation_profile.lateness` double-declare, are `MalformedSource` errors. What remains open: cross-referencing `delta_identity`/`key_recurrence.key` column names against `columns:` is not yet validated at parse time (surfaces later, at admission or runtime); the per-cell admission that reads these facts and the runtime verification mechanisms below are still unbuilt.
-- **Declared profiles license almost nothing yet.** `mutation_profile` reaches only the input-delta classifier (whose only wired consumer distinction is `change_feed`) — every partition-grain cell is served by unconditional recompute regardless of profile, and the fold/ledger techniques the licence table describes are the unbuilt machinery of `maintenance_plan.md` §Known Divergences. None of the verification tripwires (`SourceMutationProfileViolated`, `SourceWatermarkViolated`, `SourceUniqueKeyViolated`, `SourceRetentionExceeded`) exist; `smelt verify` does not exist.
+- **Declared profiles license almost nothing yet.** `mutation_profile` reaches only the input-delta classifier (whose only wired consumer distinction is `change_feed`) — every partition-grain cell is served by unconditional recompute regardless of profile, and the fold/ledger techniques the licence table describes are the unbuilt machinery of `incremental_models.md` §Known Divergences. None of the verification tripwires (`SourceMutationProfileViolated`, `SourceWatermarkViolated`, `SourceUniqueKeyViolated`, `SourceRetentionExceeded`) exist; `smelt verify` does not exist.
 - **Landed-delta recording is v1 (append-only interval diff only).** The per-source delta intervals the graph layer consumes are recorded per source address in the run state (`smelt_state::landed_deltas`), no longer model-only: an append-only clocked source's landing is interval-diffed against prior coverage; a `mutable_snapshot` or unclocked source always resolves to the whole-table delta. `change_feed` offset-based delta detection and snapshot diffing are not yet built — every source still resolves through the append-only-or-whole-table path regardless of a declared `change_feed` profile.
 - **Aggregate `sources.yml` presence is not yet a migration error (Constraint 6).** Still parsed as a legacy type-information fallback when a project declares no per-entity sources. Tracked as BUG-078 in `docs/bug-hunt/2026-05-30-findings.md`.
 - **Backend-derived source facts are a Known Divergence by decision** (`09-spec-readiness.md` decision 10): a backend capability (Delta CDF presence, Iceberg snapshots) could *derive* `change_feed` + `delta_identity` instead of requiring declaration — a `multi_backend.md` capability-flag question, tracked separately.
@@ -253,9 +253,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
   - `seeds.md` — shares the YAML grammar; the load-side complement of this spec.
   - `smelt_yml.md` — `paths:` key the discovery layer consumes.
   - `timeseries.md` — the `timeseries:` block grammar this spec hosts on external sources.
-  - `maintenance_plan.md` — the per-cell admission and graph layer these world-facts license and feed.
+  - `incremental_models.md` — the per-cell admission and graph layer these world-facts license and feed; consumer of `timeseries:` on sources via source-filter pushdown, and of `mutation_profile`/`key_recurrence` (key temporal locality).
   - `models.md` — the input-consumption axis these declarations decide.
-  - `batched_models.md` — consumer of `timeseries:` on sources via source-filter pushdown.
-  - `keyed_models.md` — consumer of `mutation_profile` and `key_recurrence` (key temporal locality).
   - `run_state.md` — where landed-delta intervals and probe records live.
   - `types.md` — `DataType` vocabulary used by `columns[].type`.

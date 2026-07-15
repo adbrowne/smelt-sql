@@ -1,4 +1,4 @@
-//! Upstream model edges (`maintenance_plan.md` §"Upstream model edges"): a
+//! Upstream model edges (`incremental_models.md` §"Upstream model edges"): a
 //! maintained model's ref to **another maintained model in the same project**
 //! is a plan edge of the same standing as a `sources.*` ref. The upstream's
 //! own `timeseries:` clock supplies the creation-trigger cell's clamp; an

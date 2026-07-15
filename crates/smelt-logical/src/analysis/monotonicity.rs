@@ -102,7 +102,7 @@ pub struct Monotonicity {
     /// unrecognised `DATE_TRUNC` unit string) — undecided, not a positive
     /// disproof. Set by the outermost grid-truncating layer, overwriting any
     /// inner value, since the outermost transform governs the expression's
-    /// final partition grid. See `docs/specs/batched_models.md`
+    /// final partition grid. See `docs/specs/incremental_models.md`
     /// §"Run window vs partition granularity".
     pub grid_unit: Option<Granularity>,
 }
@@ -704,7 +704,7 @@ fn classify_binary(bin: &BinaryExpr, declared_monotonic: bool) -> Classification
     // or `batch_id - 1`. The column side must still independently classify
     // as a monotone chain (`classify` below); only the constant shift itself
     // is being admitted here, mirroring the INTERVAL case above. See
-    // `docs/specs/batched_models.md` §Surface "`partition_column` must be
+    // `docs/specs/incremental_models.md` §Surface "`partition_column` must be
     // monotone".
     if let Some(n) = parse_bare_integer_literal(&const_side) {
         let signed = if op == "-" { -n } else { n };

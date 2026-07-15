@@ -102,7 +102,7 @@ fn is_self_origin(origins: &[String]) -> bool {
 }
 
 /// Build the plain-text `smelt explain <model>` maintenance-plan report
-/// (`maintenance_plan.md` §Surface "CLI": "prints the plan (cells, clamps,
+/// (`incremental_models.md` §Surface "CLI": "prints the plan (cells, clamps,
 /// locality, guarantee ledger, edges)"). Pure string-builder — no I/O — so it
 /// is directly unit-testable; the caller only `println!`s the result.
 ///
@@ -285,7 +285,7 @@ pub struct CellStatements {
 
 /// Build the [`StatementGroup`] a plan cell would execute, using the same
 /// pure emitters a run executes
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)"):
 /// this is the CLI-side "same inputs, same emitter" observation path —
 /// `--show-sql` never connects to a backend or executes anything, so every
 /// SELECT body here is compiled through the sanctioned
@@ -298,7 +298,7 @@ pub struct CellStatements {
 /// technique-specific inputs (unique key, keyed-fold driving-source
 /// classification) cannot be assembled from the discovered project, or when
 /// the technique has no production consumer yet (`Technique::InPlaceUpdate`,
-/// `maintenance_plan.md` — no live plan cell lowers to it).
+/// `incremental_models.md` — no live plan cell lowers to it).
 ///
 /// `resolver` must be built from the *actual* discovered project (the same
 /// way `smelt-runtime`'s dry-run compile path in `execute.rs` builds it —
@@ -491,7 +491,7 @@ pub fn build_cell_statement_group(
             ))
         }
         Technique::InPlaceUpdate => Err("Technique::InPlaceUpdate has no production consumer yet \
-             (docs/specs/maintenance_plan.md § Known Divergences)"
+             (docs/specs/incremental_models.md § Known Divergences)"
             .to_string()),
     }
 }

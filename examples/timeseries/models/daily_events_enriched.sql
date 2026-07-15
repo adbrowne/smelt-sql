@@ -23,7 +23,7 @@ maintenance:
 ---
 -- Fact (events) enriched with the dimension (users) — the fact+dimension
 -- enrichment shape MP11 wires a live column-scoped MERGE for
--- (docs/specs/maintenance_plan.md §"Per-cell admission"; the
+-- (docs/specs/incremental_models.md §"Per-cell admission"; the
 -- `smelt-runtime::maintenance_driver` "first live cell" story). `raw.users`
 -- is an unclocked, explicitly `mutation_profile: mutable_snapshot`
 -- dimension: renaming a user broadcasts to every fact row that references

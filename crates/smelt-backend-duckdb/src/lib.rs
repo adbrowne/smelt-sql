@@ -620,7 +620,7 @@ impl Backend for DuckDbBackend {
     /// Real transactional override: executes the emitted [`StatementGroup`]
     /// (`smelt_logical::maintenance::emit`) inside one `duckdb::Transaction`
     /// when `group.transactional` — e.g. a paired region `DELETE`+`INSERT`
-    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
     /// owner)"). `Transaction` rolls back on `Drop` unless explicitly
     /// committed (`duckdb::transaction::DropBehavior::Rollback` is the
     /// default), so a later statement's failure — the `?` returns before
@@ -709,7 +709,7 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
-    /// Real transactional override (`docs/specs/maintenance_plan.md`
+    /// Real transactional override (`docs/specs/incremental_models.md`
     /// §Constraints "Never fold a delta already reflected in the state"):
     /// `insert_sql` (the ledger's `PRIMARY KEY`-guarded record of this
     /// delta identity) and `action_sql` (the fold itself) run inside one
@@ -1075,7 +1075,7 @@ mod tests {
     }
 
     // ── delete_and_insert_transactional: per-chunk transaction boundary ─────────
-    // (`batched_models.md` §"First-run and backfill": "Each chunk's
+    // (`incremental_models.md` §"First-run and backfill": "Each chunk's
     // DELETE+INSERT is one backend transaction. INSERT failure rolls back
     // the chunk's DELETE.")
 
@@ -1192,7 +1192,7 @@ mod tests {
     }
 
     // ── fold_ledger_delta: warehouse-resident per-delta ledger (MP12) ────
-    // (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    // (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
     // already reflected in the state" — the DuckDB override must run the
     // ledger insert and the paired fold action as one transaction.)
 

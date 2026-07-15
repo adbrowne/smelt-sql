@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Materialized-View Refresh Mode
 
-> **What this is.** A normative spec for `refresh: materialized_view` — the keyed-output refresh mode whose freshness is owned by the **execution engine**, not by smelt. It is the **delegation target** where the algebraic maintenance ladder ends: smelt runs no combiner and keeps no maintenance state, handing the model's logical SQL to the backend's native incremental-view-maintenance (IVM) runtime (Databricks Enzyme, Snowflake Dynamic Tables, …), which keeps the result current continuously. Covers the composition of the mode, the frontmatter selector, the freshness contract that distinguishes it from `keyed`, the no-silent-fallback rule, and the local machinery unique to delegated maintenance. Out of scope, with their own homes: the equivalence invariant, the algebraic ladder, and the composition contract (`maintenance_plan.md`); the backend capability flags (`multi_backend.md`); the delegate-to-native-IVM transform mechanism (`model_transforms.md`); the smelt-owned keyed modes (`keyed_models.md`, `versioned_models.md`); the storage/refresh axes (`models.md`).
+> **What this is.** A normative spec for `refresh: materialized_view` — the keyed-output refresh mode whose freshness is owned by the **execution engine**, not by smelt. It is the **delegation target** where the algebraic maintenance ladder ends: smelt runs no combiner and keeps no maintenance state, handing the model's logical SQL to the backend's native incremental-view-maintenance (IVM) runtime (Databricks Enzyme, Snowflake Dynamic Tables, …), which keeps the result current continuously. Covers the composition of the mode, the frontmatter selector, the freshness contract that distinguishes it from `keyed`, the no-silent-fallback rule, and the local machinery unique to delegated maintenance. Out of scope, with their own homes: the equivalence invariant, the algebraic ladder, and the composition contract (`incremental_models.md`); the backend capability flags (`multi_backend.md`); the delegate-to-native-IVM transform mechanism (`model_transforms.md`); the smelt-owned keyed modes (`incremental_models.md` §"The key grain (`grain: key`)" and §"Interval versioning (`versioning: interval`)"); the storage/refresh axes (`models.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -17,7 +17,7 @@ owners: [andrew]
 
 ### Composition
 
-Per the composition contract (`maintenance_plan.md` §"The composition contract"), this mode is a composition of the capabilities below. It is the extreme case: it requires **essentially no smelt-side property** — it runs no combiner, does no eligibility analysis of its own, and keeps no maintenance state. Its one input is a backend world-fact.
+Per the composition contract (`incremental_models.md` §"The composition contract"), this mode is a composition of the capabilities below. It is the extreme case: it requires **essentially no smelt-side property** — it runs no combiner, does no eligibility analysis of its own, and keeps no maintenance state. Its one input is a backend world-fact.
 
 | Facet | Value |
 |---|---|
@@ -26,9 +26,9 @@ Per the composition contract (`maintenance_plan.md` §"The composition contract"
 | Transform driven | **delegate-to-native-IVM** (`model_transforms.md`) — emit the backend's own maintained object; hard-error if the engine rejects the query |
 | Output shape | **engine-defined** — whatever shape the delegated query produces (no smelt-imposed key or `partition_column`; `models.md` §"Refresh axis") |
 | Freshness owner | **the engine (push)** — the engine keeps it current continuously between runs (§Semantics → *Freshness owner*) |
-| Equivalence discharged by | the **engine's native IVM**, not the smelt oracle — smelt runs no combiner for this mode (`maintenance_plan.md` §"The equivalence invariant") |
+| Equivalence discharged by | the **engine's native IVM**, not the smelt oracle — smelt runs no combiner for this mode (`incremental_models.md` §"The equivalence invariant") |
 
-This is where **smelt-driven maintenance ends and delegation begins**: rungs 1–4 of the algebraic ladder are what smelt maintains itself; beyond the ladder — general-operator retraction over joins, unbounded non-additive state — is delegated to the engine via this mode (`maintenance_plan.md` §"The algebraic maintenance ladder").
+This is where **smelt-driven maintenance ends and delegation begins**: rungs 1–4 of the algebraic ladder are what smelt maintains itself; beyond the ladder — general-operator retraction over joins, unbounded non-additive state — is delegated to the engine via this mode (`incremental_models.md` §"The algebraic maintenance ladder").
 
 ### YAML frontmatter (in `.sql` files)
 
@@ -59,7 +59,7 @@ A `refresh: materialized_view` model is created and handed to the engine by `sme
 
 ### Freshness owner: the engine (push)
 
-`refresh: materialized_view` and `refresh: incremental` + `grain: key` both uphold **end-state equivalence** (`maintenance_plan.md` §"The equivalence invariant") over the inputs processed so far, though `materialized_view`'s output shape is engine-defined rather than smelt's specific one-row-per-key contract (§"Output shape"). They differ in **who discharges the invariant** and in **who owns freshness**:
+`refresh: materialized_view` and `refresh: incremental` + `grain: key` both uphold **end-state equivalence** (`incremental_models.md` §"The equivalence invariant") over the inputs processed so far, though `materialized_view`'s output shape is engine-defined rather than smelt's specific one-row-per-key contract (§"Output shape"). They differ in **who discharges the invariant** and in **who owns freshness**:
 
 | | `grain: key` | `materialized_view` |
 |---|---|---|
@@ -80,7 +80,7 @@ smelt performs **no** native-IVM eligibility analysis of its own. It does not at
 
 ### No silent fallback
 
-Because the refresh modes are peers and smelt never chooses a mode for the user (`maintenance_plan.md` §"Validator, not chooser"; `models.md` §Design), `refresh: materialized_view` cannot silently degrade to another mode:
+Because the refresh modes are peers and smelt never chooses a mode for the user (`incremental_models.md` §"Validator, not chooser"; `models.md` §Design), `refresh: materialized_view` cannot silently degrade to another mode:
 
 1. **Backend has no native IVM** (e.g. DuckDB; `supports_native_ivm = false`) → **hard error**: *"`refresh: materialized_view` requires native incremental-view maintenance; this engine has none — use `refresh: incremental` with `grain: key` for smelt-driven maintenance."* smelt does **not** quietly substitute `grain: key` (that would swap the declared freshness contract) and does **not** fall back to a full-refresh table. This is the one carve-out from the backend's lower-don't-reject rule (`multi_backend.md` §Semantics).
 2. **Backend has native IVM but rejects the query** → **hard error** carrying the engine's own reason (e.g. Enzyme's `MATERIALIZED_VIEW_NOT_INCREMENTALIZABLE`). smelt surfaces the backend's message rather than masking it.
@@ -89,7 +89,7 @@ The inability to rescue the user into a different mode is the honest price of pe
 
 ### Output shape
 
-The output shape is **engine-defined**: whatever the delegated SQL and the engine's native maintenance produce, with no smelt-imposed key or partition column. This differs from the smelt-owned keyed modes (`keyed_models.md`, `versioned_models.md`), whose output shape is a specific, smelt-defined contract (one row per `unique_key`, or a validity-interval-keyed table) — here smelt does not shape the output at all, because it neither classifies nor combines the SQL. Downstream models reference it as an ordinary relation; no partition filter is pushed into it. Adding a consumer-facing `timeseries:` declaration on this output (so downstream pushdown could target a partitioned engine-maintained view) is accepted as a future direction, deferred pending pushdown wiring (§Known Divergences).
+The output shape is **engine-defined**: whatever the delegated SQL and the engine's native maintenance produce, with no smelt-imposed key or partition column. This differs from the smelt-owned keyed modes (`incremental_models.md` §"The key grain" and §"Interval versioning"), whose output shape is a specific, smelt-defined contract (one row per `unique_key`, or a validity-interval-keyed table) — here smelt does not shape the output at all, because it neither classifies nor combines the SQL. Downstream models reference it as an ordinary relation; no partition filter is pushed into it. Adding a consumer-facing `timeseries:` declaration on this output (so downstream pushdown could target a partitioned engine-maintained view) is accepted as a future direction, deferred pending pushdown wiring (§Known Divergences).
 
 ## Design
 
@@ -121,12 +121,10 @@ The output shape is **engine-defined**: whatever the delegated SQL and the engin
 - **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy::MaterializedView`, parsing); `crates/smelt-runtime/src/compile.rs` (the `supports_native_ivm` hard-error gate); `crates/smelt-backend/src/lib.rs` (`create_materialized_view_as` / `drop_materialized_view_if_exists` — today defaulting to a table fallback).
 - **Tests**: `test_materialized_view_hard_errors_without_native_ivm` (`smelt-runtime/src/compile.rs`); the `materialized_view` storage-value-rejected and default-materialization-rejected tests (`smelt-core/src/config.rs`).
 - **Related specs**:
-  - [`maintenance_plan.md`](maintenance_plan.md) — the equivalence invariant (discharged here by the engine), the algebraic ladder (this mode is where smelt-driven maintenance ends and delegation begins), the composition contract, validator-not-chooser
+  - [`incremental_models.md`](incremental_models.md) — the equivalence invariant (discharged here by the engine), the algebraic ladder (this mode is where smelt-driven maintenance ends and delegation begins), the composition contract, validator-not-chooser; also the smelt-owned keyed peers: §"The key grain (`grain: key`)" (a specific smelt-defined output shape and different discharger, vs this mode's engine-defined shape) and §"Interval versioning (`versioning: interval`)" (engine-owned SCD is hand-written SQL under this mode instead)
   - [`model_transforms.md`](model_transforms.md) — the delegate-to-native-IVM transform this mode drives, and backend lowering/emulation
   - [`multi_backend.md`](multi_backend.md) — the `supports_native_ivm` / `supports_retraction` capability flags this mode gates on
   - [`models.md`](models.md) — the refresh axis; why `materialized_view` is an engine-owned freshness peer, not a storage mode; the three-state law
-  - [`keyed_models.md`](keyed_models.md) — the smelt-owned keyed peer (a specific smelt-defined output shape and different discharger, vs this mode's engine-defined shape)
-  - [`versioned_models.md`](versioned_models.md) — the smelt-owned SCD Type-2 pattern (engine-owned SCD is hand-written SQL under this mode instead)
 - **Research**:
   - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — Parts 13–17 (keyed/stateful refresh modes, emulation vs delegation, the user surface)
 - **Plans (history)**:

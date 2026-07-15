@@ -410,7 +410,7 @@ pub async fn execute_project(
                 // ── Maintenance statements this invocation would execute ────
                 // Real window literals, one `StatementGroup` per chunk — the
                 // output of the same single-owner emitters a real run consumes
-                // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+                // (`docs/specs/incremental_models.md` §"Statement emission (single
                 // owner)"), not just the compiled SELECT body. A `grain:
                 // partition` creation trigger lowers to the region-recompute
                 // (DELETE+INSERT) technique; the chunk windows are the SAME
@@ -822,7 +822,7 @@ pub async fn execute_project(
         // Keyed dispatch — handled separately from the incremental /
         // full-refresh branches because it has its own per-partition merge
         // loop (see `smelt_runtime::cumulative` and
-        // `docs/specs/keyed_models.md`).
+        // `docs/specs/incremental_models.md`).
         let plan_is_keyed = plan
             .model_file
             .metadata
@@ -861,7 +861,7 @@ pub async fn execute_project(
                     let clean_sql = smelt_parser::strip_frontmatter(&plan.sql);
                     // Classify even on the no-window full-refresh path: a
                     // classifier rejection must REFUSE the model
-                    // (keyed_models.md Constraint #4 — "The catalogue is
+                    // (incremental_models.md §"Key-grain constraints" #4 — "The catalogue is
                     // closed and the classifier is fail-closed"). Without
                     // this, forbidden keyed SQL (e.g. a non-allowlisted
                     // aggregator) would be silently materialised as a plain
@@ -976,7 +976,7 @@ pub async fn execute_project(
                     .collect();
                 let sql_for_bounds = smelt_parser::strip_frontmatter(&plan.sql);
 
-                // MP11 (`maintenance_plan.md` §"Per-cell admission"): read the
+                // MP11 (`incremental_models.md` §"Per-cell admission"): read the
                 // creation trigger's write strategy off the derived
                 // `MaintenancePlan` rather than a hardcoded constant.
                 // `SourceFacts` are assembled with the same bare-name
@@ -1065,7 +1065,7 @@ pub async fn execute_project(
                     None => backend_default_strategy,
                 };
 
-                // MP11 (`maintenance_plan.md` §"Per-cell admission"): consult
+                // MP11 (`incremental_models.md` §"Per-cell admission"): consult
                 // the SAME derived `MaintenancePlan` for a live
                 // `ColumnScopedMerge` cell on one of the model's
                 // explicitly-mutable dimension sources. When one resolves
@@ -1123,7 +1123,7 @@ pub async fn execute_project(
                 // `Corner::ColumnMerge` is "full-input read, targeted write";
                 // `derive_model_maintenance_plan` derives two distinct shapes
                 // of it for an `UpstreamMutation` trigger
-                // (`maintenance_plan.md` §"Per-cell admission"):
+                // (`incremental_models.md` §"Per-cell admission"):
                 // - `PartitionLocal::No` (accepted full scan, the operator
                 //   declared `allow_full_scan`): no horizon to clamp the
                 //   WRITE to, so it stays targeted by the run's own batch
@@ -1199,7 +1199,7 @@ pub async fn execute_project(
                     };
 
                 // First-run bootstrap for a self-referential model
-                // (`docs/specs/batched_models.md` §"First-run and backfill"
+                // (`docs/specs/incremental_models.md` §"First-run and backfill"
                 // — "First-run bootstrap for a self-referential model"):
                 // when the target doesn't exist yet, `CREATE TABLE … AS
                 // SELECT …` over the first batch cannot resolve the
@@ -1328,7 +1328,7 @@ pub async fn execute_project(
                     };
 
                     let exec_result = if let Some(dispatch) = column_merge_dispatch.as_ref() {
-                        // MP11 (`maintenance_plan.md` §"Per-cell admission"):
+                        // MP11 (`incremental_models.md` §"Per-cell admission"):
                         // the live `UpstreamMutation` cell resolved to
                         // `Technique::ColumnScopedMerge` — `compiled.sql` is
                         // ALREADY filtered to this batch's `run_range`
@@ -1392,7 +1392,7 @@ pub async fn execute_project(
                         // group this batch is about to execute — the same
                         // emitter call `Backend::delete_and_insert_transactional`
                         // makes to build what it actually executes
-                        // (`docs/specs/maintenance_plan.md` §"Statement
+                        // (`docs/specs/incremental_models.md` §"Statement
                         // emission (single owner)"). Pure function, same
                         // inputs, so the reported text cannot drift from the
                         // executed text.
@@ -1527,7 +1527,7 @@ pub async fn execute_project(
                 // snapshot or unclocked source (`partition_col: None`) has
                 // no interval representation and always resolves to
                 // `LandedDelta::WholeTable` — never a silent no-op
-                // (`maintenance_plan.md` §"Forward propagation").
+                // (`incremental_models.md` §"Forward propagation").
                 if !start_str.is_empty() && !end_str.is_empty() {
                     if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
                         for sf in &maint_source_facts {
@@ -1562,7 +1562,7 @@ pub async fn execute_project(
                 // SAME window's freshly-recomputed rows in by `unique_key` —
                 // the row VALUES are still a from-scratch recompute of the
                 // window, only the physical write op differs).
-                // `docs/specs/maintenance_plan.md` §"The reconciliation
+                // `docs/specs/incremental_models.md` §"The reconciliation
                 // ledger": a region recompute resets every intersecting
                 // entry to exactly the input it read. This records the
                 // whole-row group `{*}` (matching
@@ -1573,7 +1573,7 @@ pub async fn execute_project(
                 // shape without regressing it — both stores are written
                 // side by side. Per-cell (not whole-row) ledger grading for
                 // the column-scoped-merge technique is MP12's job
-                // (`maintenance_plan.md` §"The reconciliation ledger").
+                // (`incremental_models.md` §"The reconciliation ledger").
                 if !start_str.is_empty() && !end_str.is_empty() {
                     if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
                         let region = Region::new(start_str.clone(), end_str.clone());
@@ -1618,7 +1618,7 @@ pub async fn execute_project(
                 // the very prior state the SELECT reads before the SELECT
                 // ever runs. This arm is the unwindowed sibling of the
                 // incremental path's own first-run bootstrap
-                // (`docs/specs/batched_models.md` §"First-run and
+                // (`docs/specs/incremental_models.md` §"First-run and
                 // backfill" — "First-run bootstrap for a self-referential
                 // model"): drop, bootstrap an EMPTY target from the
                 // resolved output schema, then `INSERT` the compiled
@@ -1957,7 +1957,7 @@ fn build_model_plans(
                     request.per_partition,
                 )
                 .map_err(|diag| {
-                    // Fail-closed last line of defense (`batched_models.md` Constraint 10):
+                    // Fail-closed last line of defense (`incremental_models.md` §"Partition-grain constraints" #10):
                     // even under `--allow-downgrade` (which only warns at the earlier
                     // `check_bound_derivation` gate), the batch-safety roll-up here must
                     // still refuse rather than silently approximate a chunk shape —
@@ -2028,7 +2028,7 @@ fn build_model_plans(
 }
 
 /// Create the EMPTY target table for a **self-referential** model's first
-/// run (`docs/specs/batched_models.md` §"First-run and backfill" —
+/// run (`docs/specs/incremental_models.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"). Shared by both
 /// dispatch arms in `execute_project` — the windowed incremental batch loop
 /// (bootstrap-then-DELETE+INSERT) and the unwindowed full-refresh arm

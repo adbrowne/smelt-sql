@@ -65,7 +65,7 @@ fn batch_group(conn: &Connection, group: &StatementGroup) {
 /// (`smelt-runtime/src/transformer.rs`): the single-owner emitter contract
 /// requires the caller to fold the region predicate into the body it hands
 /// `emit_delete_insert` — the emitter itself no longer adds one
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn clamped(body: &str, col: &str, region: &Region) -> String {
     format!(
         "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
@@ -171,7 +171,7 @@ fn ex07_dimension_churn_column_merge_equals_full_refresh() {
         .expect("churn");
     // `body` already projects the full target row (order_id, user_id,
     // order_date, amount, tier) — the caller-side full-row-projection
-    // contract `UPDATE SET *` relies on (`docs/specs/maintenance_plan.md`
+    // contract `UPDATE SET *` relies on (`docs/specs/incremental_models.md`
     // §"Statement emission (single owner)").
     batch_group(
         &conn,

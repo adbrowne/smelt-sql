@@ -1,7 +1,7 @@
 #![cfg(feature = "duckdb")]
 //! MP15 (`docs/plans/20260707-maintenance-plan-impl.md`): `smelt run
 //! --since-upstream` — forward propagation from caller-declared per-source
-//! deltas (`maintenance_plan.md` §CLI, §"The graph layer"). Per the ratified
+//! deltas (`incremental_models.md` §CLI, §"The graph layer"). Per the ratified
 //! decision (2026-07-10, "Blocked phases"), the delta source is explicit
 //! (`--source <address> --landed <start>..<end>`, repeatable) — no
 //! `smelt-state` watermark, no automatic recorded-state diffing.
@@ -217,7 +217,7 @@ fn source_without_landed_flag_propagates_nothing() {
 
 /// Running `--since-upstream` over the propagated regions must leave those
 /// regions equal to what a full refresh over complete history would have
-/// computed for the same partitions (`maintenance_plan.md` §"The graph
+/// computed for the same partitions (`incremental_models.md` §"The graph
 /// layer": "must leave every model equal to a full refresh"). Compared via
 /// row-level equality on the dirtied dates between a since-upstream run and
 /// an independent full-refresh run of the same fixture.
@@ -462,7 +462,7 @@ fn gold_dates(db_path: &Path) -> Vec<String> {
 }
 
 /// `--source <model-address>` accepts an upstream **maintained model** as the
-/// delta origin (`maintenance_plan.md` §"Upstream model edges"): a landed
+/// delta origin (`incremental_models.md` §"Upstream model edges"): a landed
 /// window declared on `silver` dirties only its downstream `gold`, the origin
 /// model is never re-run, and `gold` materializes exactly the propagated
 /// region.

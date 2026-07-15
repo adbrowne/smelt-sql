@@ -111,7 +111,7 @@ pub enum Redelivery {
 /// lies within `window` of each other on the event-time axis. Valid under
 /// any `mutation_profile.kind` (`sources.md` §"`mutation_profile` — the
 /// structured block"). Consumed by key temporal locality
-/// (`keyed_models.md`); always runtime-checked, never trusted
+/// (`incremental_models.md`); always runtime-checked, never trusted
 /// (`KeyedRecurrenceBoundViolated`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRecurrence {

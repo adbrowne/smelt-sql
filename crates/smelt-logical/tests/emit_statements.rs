@@ -1,5 +1,5 @@
 //! Correctness oracle for `smelt_logical::maintenance::emit`
-//! (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+//! (`docs/specs/incremental_models.md` §"Statement emission (single owner)"):
 //! the emitters are the *single author* of every maintenance statement a
 //! run executes. This file asserts each emitter's output shape directly
 //! (byte-parity against production text is asserted from the execution side

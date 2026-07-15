@@ -31,7 +31,7 @@ use crate::fn_bodies::FnBodyMap;
 ///   `(address_segments, partition_column)`. Address segments give the full smelt path
 ///   (e.g., `["silver", "events_parsed"]`).
 /// * `horizon_ceiling` — The model's declared `horizon_ceiling:` warning ceiling, if any.
-///   Never narrows or widens the derived bound (see `docs/specs/maintenance_plan.md`
+///   Never narrows or widens the derived bound (see `docs/specs/incremental_models.md`
 ///   §"Windowed maintenance and the horizon") — it only licenses a warning message in the
 ///   returned `Vec<String>` when a source's derived reach exceeds it.
 ///
@@ -111,7 +111,7 @@ pub fn build_source_bound_map(
 /// This is the batched-local consumer of the same `BoundContext` /
 /// `derive_and_classify_bounds` walk `build_source_bound_map` uses — there is
 /// no second, independent bound derivation. `Err` means a source's bound is
-/// `NotDerivable` (fail-closed, `batched_models.md` Constraint 10): the
+/// `NotDerivable` (fail-closed, `incremental_models.md` §"Partition-grain constraints" #10): the
 /// caller must surface this as a hard refusal, never approximate a chunk
 /// shape from it.
 ///
@@ -448,7 +448,7 @@ pub fn resolve_refs_in_sql(sql: &str, schema: &str) -> String {
 }
 
 /// Whether `model` is **self-referential** — it reads its own prior output
-/// via `smelt.<self>` (`docs/specs/batched_models.md` §"Window independence
+/// via `smelt.<self>` (`docs/specs/incremental_models.md` §"Window independence
 /// and self-referential models"). The single shared predicate for every
 /// runtime consumer (the first-run bootstrap dispatch in `execute.rs`, both
 /// windowed and unwindowed arms, and the output-schema fixpoint in
@@ -764,7 +764,7 @@ impl UpstreamSchemas {
         let per_entity_sources = smelt_core::discover_source_infos(project_dir, &paths);
 
         // Self-referential models: refine `model_schemas`'s own self-entry by
-        // a bounded local fixpoint (`docs/specs/batched_models.md` §"First-run
+        // a bounded local fixpoint (`docs/specs/incremental_models.md` §"First-run
         // and backfill" — "First-run bootstrap for a self-referential
         // model"). `resolved_model_schema` (Salsa) cannot help here: its
         // `cycle_initial` BREAKS a genuine self-referential cycle with an

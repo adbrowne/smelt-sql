@@ -1,5 +1,5 @@
 //! Statement-parity CI gate (`docs/specs/architecture.md` §"Constraints &
-//! Invariants" item 12; `docs/specs/maintenance_plan.md` §"Statement
+//! Invariants" item 12; `docs/specs/incremental_models.md` §"Statement
 //! emission (single owner)"): the SQL text a run actually executes must be
 //! byte-identical to the single-owner emitters' output. This file proves
 //! it by capturing the real statements sent to a live DuckDB connection
@@ -52,7 +52,7 @@ use tokio_util::sync::CancellationToken;
 /// Wraps a real [`DuckDbBackend`], delegating every call, but recording the
 /// [`StatementGroup`] passed to `execute_statement_group` — the single
 /// point every emitted maintenance statement flows through on its way to
-/// the connection (`docs/specs/maintenance_plan.md` §"Statement emission
+/// the connection (`docs/specs/incremental_models.md` §"Statement emission
 /// (single owner)"). Recording here, rather than trusting the emitter was
 /// called with the "right" inputs, is what proves *executed* SQL, not just
 /// *constructed* SQL, matches the emitter's output.
@@ -562,7 +562,7 @@ async fn region_recompute_statements_come_from_the_emitter() {
     // Result-equivalence: the region DELETE+INSERT statements the run
     // actually executed must leave `daily_events` multiset-equal to a full
     // refresh of the model's own SQL — the technique the plan describes
-    // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    // (`docs/specs/incremental_models.md` §"Statement emission (single
     // owner)") reproduces a full refresh, not merely emitter-shaped text.
     let full_refresh_sql = "SELECT * FROM (VALUES (DATE '2024-01-01', 10), \
                              (DATE '2024-01-02', 20)) AS t(event_date, amount)";
@@ -578,7 +578,7 @@ async fn region_recompute_statements_come_from_the_emitter() {
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/batched_models.md` §"First-run and backfill" — "First-run
+/// (`docs/specs/incremental_models.md` §"First-run and backfill" — "First-run
 /// bootstrap for a self-referential model"): building from scratch (no
 /// pre-seeded target table) must emit exactly ONE statement group before
 /// any region `DELETE`+`INSERT` — a plain `CREATE TABLE main.running_balance
@@ -1170,7 +1170,7 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
 
 // =============================================================================
 // Structural gate: no maintenance-statement authoring outside the emitter
-// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)";
+// (`docs/specs/incremental_models.md` §"Statement emission (single owner)";
 // `docs/plans/20260710-emit-unification.md` Phase 4). Same `rg`-over-sources
 // style as `crates/smelt-core/tests/hardening_budget.rs`: a source scan, not
 // a runtime assertion, so it catches a regression at review time rather than
@@ -1204,7 +1204,7 @@ struct StatementAuthoringHit {
 /// Every entry here belongs to `Backend::delete_partitions`/
 /// `Backend::insert_overwrite`, serving `IncrementalStrategy::
 /// InsertOverwrite` — a per-partition materialization strategy that
-/// predates `maintenance_plan.md`'s single-owner emitters entirely and
+/// predates `incremental_models.md`'s single-owner emitters entirely and
 /// that no live derivation selects today: `smelt_runtime::
 /// maintenance_driver::resolve_incremental_strategy` and the batch loop's
 /// own dispatch (`crates/smelt-runtime/src/execute.rs`) only ever resolve
@@ -1309,7 +1309,7 @@ fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit
 /// — it is not a `smelt-backend*` or `smelt-runtime` crate). Backends
 /// execute emitted `StatementGroup`s (`Backend::execute_statement_group`);
 /// they never author maintenance-statement text of their own
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 #[test]
 fn no_maintenance_statement_authoring_outside_the_emitter() {
     let crates_dir = repo_root().join("crates");
@@ -1326,7 +1326,7 @@ fn no_maintenance_statement_authoring_outside_the_emitter() {
     assert!(
         hits.is_empty(),
         "maintenance-statement text constructed outside smelt-logical's single-owner emitters \
-         (docs/specs/maintenance_plan.md §\"Statement emission (single owner)\") — backends must \
+         (docs/specs/incremental_models.md §\"Statement emission (single owner)\") — backends must \
          execute an emitted StatementGroup, never author their own SQL text:\n{}",
         hits.iter()
             .map(|h| format!("  {}:{}: {}", h.file.display(), h.line_no, h.text))

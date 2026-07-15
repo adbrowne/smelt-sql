@@ -80,7 +80,7 @@ fn single_clocked_source_derives_a_real_edge_and_propagates() {
 
 /// A source nothing in the workspace declares a delta for contributes no
 /// dirt — no implicit whole-table or recorded-state fallback
-/// (`maintenance_plan.md` §CLI: "a source named without a matching
+/// (`incremental_models.md` §CLI: "a source named without a matching
 /// `--landed` delta propagates nothing for that invocation").
 #[test]
 fn source_without_a_delta_propagates_nothing() {
@@ -112,7 +112,7 @@ fn source_without_a_delta_propagates_nothing() {
 }
 
 /// A maintained model is a delta origin of the same standing as a source
-/// (`maintenance_plan.md` §"Upstream model edges"): a `--source
+/// (`incremental_models.md` §"Upstream model edges"): a `--source
 /// <model-address>` landed delta propagates to that model's downstreams,
 /// and the origin model itself is **not** re-run (its landed delta is the
 /// window a completed run already wrote for it). The `silver -> gold` edge
@@ -197,7 +197,7 @@ fn model_delta_origin_propagates_to_downstreams_without_rerunning_origin() {
 
 /// A self-referential model (a ref to its own address) refuses fail-loud
 /// before any interval math runs — `MaintenanceGraphUnsupportedNode`
-/// (`maintenance_plan.md` §"The graph layer" — refusals).
+/// (`incremental_models.md` §"The graph layer" — refusals).
 #[test]
 fn self_referential_model_refuses() {
     let tmp = tempfile::TempDir::new().unwrap();

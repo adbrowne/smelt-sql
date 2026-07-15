@@ -1,5 +1,5 @@
 //! TDD tests for the reconciliation ledger
-//! (`docs/specs/maintenance_plan.md` §"The reconciliation ledger"):
+//! (`docs/specs/incremental_models.md` §"The reconciliation ledger"):
 //! `(output-region × column-group)` entries, graded storage, and the two
 //! operations — fold-precondition + recompute-reset.
 
@@ -289,7 +289,7 @@ fn per_delta_grade_lives_in_warehouse() {
 }
 
 /// Testkit leg (real-fixture): the safe direction of the interchangeability
-/// theorem (`docs/specs/maintenance_plan.md` §"The reconciliation ledger")
+/// theorem (`docs/specs/incremental_models.md` §"The reconciliation ledger")
 /// exercised over a real DuckDB model through
 /// `smelt_runtime::execute_project` (`smelt-maintenance-testkit`'s Link-C
 /// harness — dev-only dependency, see `Cargo.toml`). Two disjoint

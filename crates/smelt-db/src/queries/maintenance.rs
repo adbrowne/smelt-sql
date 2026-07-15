@@ -1,5 +1,5 @@
 //! Thin Salsa wrapper around `smelt_logical::maintenance::derive::derive_maintenance_plan`
-//! (`maintenance_plan.md` §Surface "The plan (derived, reported)").
+//! (`incremental_models.md` §Surface "The plan (derived, reported)").
 //!
 //! Per the Salsa purity rule (`architecture.md` §"Salsa purity rule
 //! (analysis)"), this module only *assembles inputs* — resolved source
@@ -62,7 +62,7 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
     {
         Some(SourceMutationKind::AppendOnly) => PlanMutationProfile::AppendOnly,
         // `ChangeFeed` has no plan-layer representation yet
-        // (`maintenance_plan.md` §Known Divergences); undeclared and
+        // (`incremental_models.md` §Known Divergences); undeclared and
         // `Mutable` both fail closed to the stricter posture rather than
         // assume append-only.
         _ => PlanMutationProfile::MutableSnapshot,
@@ -78,12 +78,12 @@ pub fn source_facts(name: &str, info: Option<&SourceInfo>, allow_full_scan: bool
 
 /// Resolve the effective `maintenance.scan_bounds` for `source_address`:
 /// the model's own block wins over the project baseline in `smelt.yml`
-/// (`maintenance_plan.md` §Surface "Frontmatter": "A project-level default
+/// (`incremental_models.md` §Surface "Frontmatter": "A project-level default
 /// in `smelt.yml` sets the baseline; per-model blocks refine it").
 ///
 /// Returns `(allow_full_scan, require)`. `on_violation` severity mapping is
 /// not yet consumed here — every refusal maps to an Error diagnostic today
-/// (`docs/specs/maintenance_plan.md` §Known Divergences narrows this once a
+/// (`docs/specs/incremental_models.md` §Known Divergences narrows this once a
 /// consumer needs the Warning path).
 pub fn effective_scan_bounds(
     source_address: &str,
@@ -153,7 +153,7 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
 /// `allow_full_scan` instead of just `timeseries`).
 ///
 /// Returns `None` when the model has no maintenance plan to derive: only
-/// `refresh: incremental` models carry one (`maintenance_plan.md` §Surface
+/// `refresh: incremental` models carry one (`incremental_models.md` §Surface
 /// "The plan (derived, reported)": "Every non-`full` model has a
 /// maintenance plan").
 pub fn derive_model_maintenance_plan(
@@ -227,7 +227,7 @@ pub fn derive_model_maintenance_plan(
         //     (the normal, correct shape for a window-forward incremental
         //     model). Scoping this trigger to unclocked, explicitly-mutable
         //     sources only is this phase's deliberately narrow slice of
-        //     obligation 4 (`maintenance_plan.md` §"Per-cell admission"); a
+        //     obligation 4 (`incremental_models.md` §"Per-cell admission"); a
         //     clocked enrichment join's own scan-bound derivation is
         //     deferred.
         if s.partition_col.is_none()
@@ -252,7 +252,7 @@ pub fn derive_model_maintenance_plan(
 /// Like [`derive_model_maintenance_plan`], but additionally folds the
 /// creation-trigger cells (and `MaintenanceReachNotDerivable` refusals) for
 /// the model's **upstream maintained-model edges** into the plan
-/// (`maintenance_plan.md` §"Upstream model edges").
+/// (`incremental_models.md` §"Upstream model edges").
 ///
 /// `model_edges` is assembled by the caller from each upstream model's own
 /// already-validated metadata (the leading `smelt.` stripped from the ref
@@ -294,7 +294,7 @@ pub fn derive_model_maintenance_plan_with_edges(
 
 /// A `maintenance.cells[]` entry whose declared `columns` span more than one
 /// derived column group — an error, since it would silently re-partition
-/// the plan (`maintenance_plan.md` §Surface "Frontmatter"). Returns one
+/// the plan (`incremental_models.md` §Surface "Frontmatter"). Returns one
 /// message per offending cell, naming the cell's `on:` trigger and the
 /// distinct group names its columns land in.
 pub fn cell_column_group_violations(
@@ -368,7 +368,7 @@ pub struct MaintenancePlanDiagnostics {
     pub refusals: Vec<MaintenanceRefusal>,
     pub cell_column_group_violations: Vec<String>,
     /// The declared-`timeseries.granularity`-vs-derived-grouping check
-    /// (`maintenance_plan.md` §Design "Grain is declared"), when the model
+    /// (`incremental_models.md` §Design "Grain is declared"), when the model
     /// declares a `timeseries:` block and a mismatch was positively
     /// derived. `None` when the model has no `timeseries:` block, the
     /// projection couldn't be located, or its shape didn't resolve to a

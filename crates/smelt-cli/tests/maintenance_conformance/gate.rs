@@ -751,7 +751,7 @@ pub fn classify_keyed(
 }
 
 /// The end-state equivalence assertion for a [`KeyedRecipe`] (design §6
-/// "Keyed-grain carve-outs"; `keyed_models.md` §"End-state equivalence"):
+/// "Keyed-grain carve-outs"; `incremental_models.md` §"End-state equivalence"):
 /// materialize `S_k` (the union, across every run so far, of that run's own
 /// window's rows — exactly [`STracker::s_at`]'s definition, which coincides
 /// with "every delta row a window-forward keyed run has folded so far" since
@@ -861,17 +861,17 @@ fn keyed_pool_upholds_end_state_equivalence() {
 
 /// `retained_departed_keys_adjusts_the_oracle` (plan Phase 5 TDD list):
 /// snapshot-reconcile schedules generating deletes compare against oracle
-/// rows ∪ retained departed keys (`keyed_models.md` §"End-state
+/// rows ∪ retained departed keys (`incremental_models.md` §"End-state
 /// equivalence"). Two halves: (1) today's real contract — an unclocked
 /// (zero-clocked-driving-source) keyed model selects the snapshot-reconcile
-/// run shape (`keyed_models.md` §"The two run shapes"), and the *targeted*
+/// run shape (`incremental_models.md` §"The two run shapes"), and the *targeted*
 /// keyed-fold cell for it is refused fail-loud
 /// (`Refusal::NoAdmissibleTechnique`/`Refusal::ScanUnbounded`, named on the
 /// plan itself — `maintenance-plan purity`: consumed, not re-derived) rather
 /// than silently treated as window-forward, since the snapshot-reconcile
-/// executor is unbuilt (`keyed_models.md` Known Divergences); the universal
+/// executor is unbuilt (`incremental_models.md` §Known Divergences "The key grain"); the universal
 /// `Trigger::Backfill`/whole-table-recompute cell every model admits
-/// (`maintenance_plan.md` §"Per-cell admission" — "a recompute is the
+/// (`incremental_models.md` §"Per-cell admission" — "a recompute is the
 /// universal ground-truth reset") stays available as the escape hatch, but
 /// no `Trigger::NewData` cell is ever admitted for this source; (2) the pure
 /// oracle adjustment that refusal defers to is independently pinned as data
@@ -1163,7 +1163,7 @@ fn boundary_rows_within_reach_are_reflected() {
 // Phase 8: the `SimulatedChangeFeed` step family — recompute-only
 // admission for `change_feed`-declared sources
 // (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 8;
-// `maintenance_plan.md` §Known Divergences' `change_feed`-scoping entry).
+// `incremental_models.md` §Known Divergences' `change_feed`-scoping entry).
 // ---------------------------------------------------------------------
 
 /// Default deterministic case count for `change_feed_source_admits_recompute_only`.
@@ -1178,7 +1178,7 @@ fn feed_admission_case_count() -> usize {
 
 /// `change_feed_source_admits_recompute_only` (plan Phase 8 TDD list): a
 /// `change_feed`-declared source's admitted cells are all full-input
-/// re-derivation, never a fold (`maintenance_plan.md` §Known Divergences:
+/// re-derivation, never a fold (`incremental_models.md` §Known Divergences:
 /// "no live fold machinery consumes a change feed's delta shape yet" —
 /// mirrors `crates/smelt-logical/tests/maintenance_coverage_matrix.rs`'s
 /// `ex14_change_feed_sum_recompute_only`/`ex26_change_feed_latest_writer_recompute_only`,
@@ -1230,7 +1230,7 @@ fn change_feed_source_admits_recompute_only() {
                 Trigger::NewData { source } if source == &recipe.source.name
             )),
             "case {i}: a change_feed source must never admit a targeted NewData fold cell \
-             today (maintenance_plan.md §Known Divergences' change_feed-scoping entry): \
+             today (incremental_models.md §Known Divergences' change_feed-scoping entry): \
              {plan:#?}"
         );
         checked += 1;
@@ -1281,7 +1281,7 @@ fn restrict_to_day(sql: &str, day: chrono::NaiveDate, day_col: &str) -> String {
 /// refused), so it can never actually be driven through `execute_project`
 /// — only the classify-level admission surface is checkable there. The
 /// mixed shape builds cleanly (no `UpstreamMutation` cell is EVER
-/// constructed for a `change_feed`-declared dimension — `maintenance_plan.md`
+/// constructed for a `change_feed`-declared dimension — `incremental_models.md`
 /// §Known Divergences' `change_feed`-scoping entry — so there is nothing to
 /// refuse).
 ///
@@ -1298,7 +1298,7 @@ fn restrict_to_day(sql: &str, day: chrono::NaiveDate, day_col: &str) -> String {
 /// the documented staleness itself — the FIRST window, once materialized,
 /// is provably never revisited by any later incremental run (the
 /// `change_feed`-scoping divergence), so it diverges from a live recompute
-/// after the schedule's mutations land, exactly the `maintenance_plan.md`
+/// after the schedule's mutations land, exactly the `incremental_models.md`
 /// §Known Divergences contract. A final `full_refresh: true` run must then
 /// settle the WHOLE table back to equivalence — that is the "via recompute"
 /// half of this test's name, now actually exercised after a real
@@ -1449,7 +1449,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 );
             }
 
-            // Documented current behavior (`maintenance_plan.md` §Known
+            // Documented current behavior (`incremental_models.md` §Known
             // Divergences, `change_feed`-scoping entry): no incremental run
             // ever revisits day0 once materialized, so it stays frozen at
             // its original computation-time snapshot even though the
@@ -1507,7 +1507,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
 // ---------------------------------------------------------------------
 // Phase 9: definition-change steps — `ConformanceStep::RewriteModel`
 // (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-// `maintenance_plan.md` §"The definition-change trigger"). Asserts TODAY's
+// `incremental_models.md` §"The definition-change trigger"). Asserts TODAY's
 // contract only: whatever technique executes for a window always compiles
 // and runs the model's CURRENT on-disk SQL (`link_c_harness::LinkCProject`'s
 // per-run re-discovery), so a rewrite followed by a re-run of the affected
@@ -1666,7 +1666,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
     assert_equivalence(&project, &recipe, &tracker, k0).expect("pre-rewrite equivalence");
 
     // Rewrite: add the source's row-key column into the GROUP BY — a
-    // grain/skeleton change, `maintenance_plan.md`'s `SkeletonAdd`
+    // grain/skeleton change, `incremental_models.md`'s `SkeletonAdd`
     // territory.
     std::fs::write(
         project

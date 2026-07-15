@@ -711,7 +711,7 @@ pub enum DiagnosticCode {
     KeyedForbidsNondeterministic,
     /// Interim not-yet-supported refusal: a `refresh: keyed` model has no
     /// clocked driving source and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/keyed_models.md` §Known Divergences).
+    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain").
     KeyedSnapshotPostureUnsupported,
     /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
     /// (v1 supports exactly one driving source).
@@ -833,7 +833,7 @@ pub enum DiagnosticCode {
     /// Anchored at the stage span.
     PipeStageMalformed,
     /// Emitted when no maintenance technique survives a plan cell's
-    /// admission (`maintenance_plan.md` §"Per-cell admission"). Names the
+    /// admission (`incremental_models.md` §"Per-cell admission"). Names the
     /// cell's trigger and why every candidate technique was refused —
     /// includes the `maintenance.cells[]` two-group column-span error (a
     /// cell whose declared `columns` span more than one derived column
@@ -842,7 +842,7 @@ pub enum DiagnosticCode {
     MaintenanceNoAdmissibleTechnique,
     /// Emitted (the K8 guardrail) when a derived scan or write footprint
     /// cannot be partition-bounded and no `allow_full_scan` acceptance was
-    /// declared for that source (`maintenance_plan.md` §"Partition-local
+    /// declared for that source (`incremental_models.md` §"Partition-local
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
@@ -850,7 +850,7 @@ pub enum DiagnosticCode {
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`
     /// while the SQL groups on `date_trunc('hour', …)`) —
-    /// (`maintenance_plan.md` §Design "Grain is declared": the graph
+    /// (`incremental_models.md` §Design "Grain is declared": the graph
     /// layer's edge grain is the declaration, never derived, but the
     /// classifier checks the declaration against the SQL's own grouping).
     /// Anchored at the model SQL body start.

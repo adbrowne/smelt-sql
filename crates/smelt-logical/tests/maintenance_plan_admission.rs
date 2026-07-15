@@ -1,4 +1,4 @@
-//! Per-cell admission obligations 2 and 3 (`maintenance_plan.md`
+//! Per-cell admission obligations 2 and 3 (`incremental_models.md`
 //! §"Per-cell admission") for the keyed-fold family: the faithful-fold
 //! obligation composes two INDEPENDENT conditions — source posture (does the
 //! delta stream partition the input, i.e. is it retraction-free) and

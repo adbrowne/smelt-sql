@@ -67,25 +67,25 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
             "batched" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'batched'. `refresh: batched` is now \
                  `refresh: incremental` with `grain: partition` — {} \
-                 (see docs/specs/batched_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             "keyed" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'keyed'. `refresh: keyed` is now \
                  `refresh: incremental` with `grain: key` — {} \
-                 (see docs/specs/keyed_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             "cumulative" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'cumulative'. `refresh: cumulative` is now \
                  `refresh: incremental` with `grain: key` — {} \
-                 (see docs/specs/keyed_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             "versioned" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'versioned'. `refresh: versioned` is now \
                  `refresh: incremental` with `grain: key` (+ `versioning: interval`) — {} \
-                 (see docs/specs/versioned_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             _ => Err(serde::de::Error::custom(format!(
@@ -124,7 +124,7 @@ pub enum Grain {
     Partition,
     /// A stored row is the end-state per key. `unique_key` is required
     /// (composite-valued); `timeseries:` is admitted only when key temporal
-    /// locality is established (`docs/specs/keyed_models.md` §"Key temporal
+    /// locality is established (`docs/specs/incremental_models.md` §"Key temporal
     /// locality").
     Key,
     /// A stored row is the trajectory: one row per `(key, partition)`.
@@ -535,7 +535,7 @@ impl<'de> Deserialize<'de> for DataLatency {
 ///
 /// Variant declaration order is increasing coarseness (`Hour` finest, `Year`
 /// coarsest) and derives `PartialOrd`/`Ord` on that basis — `g_run >= g_part`
-/// comparisons (`batched_models.md` §"Run window vs partition granularity")
+/// comparisons (`incremental_models.md` §"Run window vs partition granularity")
 /// read this as a plain enum comparison rather than a bespoke arithmetic
 /// table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -576,7 +576,7 @@ pub struct BatchedSafetyOverrides {
 ///
 /// UPSERT (`MERGE`) is **not** an incremental strategy — it is the physical
 /// primitive used by the `refresh: incremental` + `grain: key` merge loop
-/// (`docs/specs/keyed_models.md`), which is a separate sibling rule
+/// (`docs/specs/incremental_models.md`), which is a separate sibling rule
 /// with a different equivalence contract. `Backend::merge_into` remains on
 /// the backend trait for that caller; it is not reachable from this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -680,8 +680,8 @@ pub struct BatchedConfig {
     /// Output columns exempt from the determinism requirement — audit stamps
     /// and surrogates the modeller accepts may vary (e.g. `inserted_at =
     /// NOW()`, `batch_id = UUID()`). A non-deterministic value is admitted
-    /// only when it flows exclusively into a listed column (`batched_models.md`
-    /// §"Non-determinism and the equivalence contract"). Listing
+    /// only when it flows exclusively into a listed column (`incremental_models.md`
+    /// §"Non-determinism and the payload rule"). Listing
     /// `timeseries.event_time_column`, `timeseries.partition_column`, or a
     /// `unique_key` column here is a configuration error — validated in
     /// `smelt-core::metadata::validate_timeseries`.
@@ -692,7 +692,7 @@ pub struct BatchedConfig {
     pub safety_overrides: BatchedSafetyOverrides,
 }
 
-/// The `maintenance:` block (`maintenance_plan.md` §Surface "Frontmatter"):
+/// The `maintenance:` block (`incremental_models.md` §Surface "Frontmatter"):
 /// per-cell technique preferences/pins and the scan-locality guardrail.
 /// Almost every model sets none of it — the plan derives cells, clamps, and
 /// locality verdicts on its own; this block only *constrains* the derived
@@ -737,7 +737,7 @@ pub enum TechniquePreference {
 /// One `maintenance.cells[]` entry: a per-`(columns × trigger)` override.
 /// `columns` naming members of more than one derived column group is an
 /// error — it would silently re-partition the plan
-/// (`maintenance_plan.md` §Surface "Frontmatter").
+/// (`incremental_models.md` §Surface "Frontmatter").
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceCellConfig {
@@ -767,7 +767,7 @@ pub enum CellTechnique {
     RederiveColumns,
 }
 
-/// The partition-locality guardrail (`maintenance_plan.md` §Semantics "The
+/// The partition-locality guardrail (`incremental_models.md` §Semantics "The
 /// K8 guardrail"). A project-level block in `smelt.yml` sets the baseline;
 /// a per-model block refines it (narrower wins, exactly like the technique
 /// ladder). Check-only: never modifies a derived clamp, only refuses (or
@@ -804,7 +804,7 @@ pub enum ScanBoundsViolation {
 #[serde(deny_unknown_fields)]
 pub struct PerSourceScanBounds {
     /// Ceiling on the derived scan span for this source. Parsed but not yet
-    /// checked against the derived clamp (`maintenance_plan.md` §Known
+    /// checked against the derived clamp (`incremental_models.md` §Known
     /// Divergences) — reserved for a future phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_lookback: Option<String>,
@@ -828,7 +828,7 @@ impl ScanBoundsConfig {
 }
 
 /// Project-level `maintenance:` block in `smelt.yml` — today only the
-/// `scan_bounds` baseline (`maintenance_plan.md` §Surface "Frontmatter":
+/// `scan_bounds` baseline (`incremental_models.md` §Surface "Frontmatter":
 /// "A project-level default in `smelt.yml` sets the baseline; per-model
 /// blocks refine it").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]

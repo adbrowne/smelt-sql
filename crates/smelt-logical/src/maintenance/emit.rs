@@ -1,6 +1,6 @@
 //! Physical maintenance SQL emission — the single author of every
 //! maintenance statement a run executes
-//! (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+//! (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 //!
 //! One emitter per [`Technique`](super::Technique), following the
 //! physical-maintenance notation of
@@ -39,7 +39,7 @@ impl MaintenanceStatement {
 /// An ordered group of [`MaintenanceStatement`]s produced by one emitter
 /// call, plus whether they must run inside a single backend transaction. A
 /// paired region `DELETE`+`INSERT` is transactional: a failed `INSERT` must
-/// roll back its `DELETE` (`docs/specs/maintenance_plan.md` §"Statement
+/// roll back its `DELETE` (`docs/specs/incremental_models.md` §"Statement
 /// emission (single owner)").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementGroup {
@@ -201,7 +201,7 @@ pub fn emit_in_place_update(
 }
 
 /// Fold-a-delta into keyed end-state (top-left): the combiner-aware `MERGE`
-/// production actually executes for `refresh: keyed` (`keyed_models.md`,
+/// production actually executes for `refresh: keyed` (`incremental_models.md`,
 /// `crate::cumulative::execute_cumulative_aggregate`'s `WindowedKeyedRule`
 /// impl) — combine every aggregator column on matched keys via its own
 /// cross-partition combiner, insert unseen keys wholesale.
@@ -271,7 +271,7 @@ pub fn emit_create_table_as(
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/batched_models.md` §"First-run and backfill" —
+/// (`docs/specs/incremental_models.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"): the target does not
 /// exist yet, and the model's own first-batch SELECT reads that same target
 /// via `smelt.<self>`, so `CREATE TABLE … AS SELECT …` cannot resolve it —

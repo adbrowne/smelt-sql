@@ -1,5 +1,5 @@
 //! Generated DAGs (`docs/plans/20260712-generative-maintenance-conformance.md`
-//! Phase 10; `docs/specs/maintenance_plan.md` §"The equivalence invariant").
+//! Phase 10; `docs/specs/incremental_models.md` §"The equivalence invariant").
 //!
 //! Extends the single-model conformance gate (`gate.rs`) to small generated
 //! graphs of models: a two-hop chain, a diamond (fan-out + confluence), and

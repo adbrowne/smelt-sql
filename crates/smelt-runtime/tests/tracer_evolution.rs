@@ -51,7 +51,7 @@ fn batch_group(conn: &Connection, group: &StatementGroup) {
 /// (`smelt-runtime/src/transformer.rs`): the single-owner emitter contract
 /// requires the caller to fold the region predicate into the body it hands
 /// `emit_delete_insert` — the emitter itself no longer adds one
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn clamped(body: &str, col: &str, region: &Region) -> String {
     format!(
         "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",

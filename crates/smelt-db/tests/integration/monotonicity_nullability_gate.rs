@@ -2,8 +2,8 @@
 //! `smelt_logical::trace_event_time` with smelt-db's inferred schema
 //! (docs/plans/20260702-monotonicity-primitive-tested.md Phase 3).
 //!
-//! Spec: `docs/specs/incremental_models.md` §"Event-time monotonicity trace",
-//! Constraint 12 — a `Traceable` verdict whose leaf source column can be
+//! Spec: `docs/specs/model_properties.md` §"Event-time monotonicity trace"
+//! and the column-nullability-gate row — a `Traceable` verdict whose leaf source column can be
 //! `NULL` is unsound to push down (a full refresh keeps NULL-event-time
 //! rows; a pushed window filter silently drops them).
 
@@ -106,7 +106,7 @@ fn non_null_leaf_stays_traceable() {
     }
 }
 
-/// Phase B1 (`batched_models.md` §"Event-time monotonicity trace") wires
+/// Phase B1 (`model_properties.md` §"Event-time monotonicity trace") wires
 /// `trace_event_time`/`trace_event_time_checked` into join-input
 /// driving-fact resolution (`smelt_logical::analysis::source_bounds::resolve_join_driving_fact`)
 /// and UNION-branch/subquery-body classification — all of which can trace a

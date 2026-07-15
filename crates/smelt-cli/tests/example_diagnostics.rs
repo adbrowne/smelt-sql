@@ -1139,7 +1139,7 @@ fn broken_workspace_diagnostics_still_fire() {
 /// `MaintenanceScanUnbounded`/`MaintenanceNoAdmissibleTechnique` diagnostic
 /// fires from any other file in the shared `examples/broken/` workspace.
 ///
-/// Spec: `docs/specs/maintenance_plan.md` §Semantics "Partition-local
+/// Spec: `docs/specs/incremental_models.md` §Semantics "Partition-local
 /// maintenance (the K8 guardrail)".
 #[test]
 fn broken_workspace_maintenance_scan_unbounded() {
@@ -1252,7 +1252,7 @@ fn broken_workspace_maintenance_scan_unbounded() {
 /// `MaintenanceGranularityMismatch` and no other maintenance diagnostic
 /// firing anywhere else in the shared `examples/broken/` workspace.
 ///
-/// Spec: `docs/specs/maintenance_plan.md` §Design "Grain is declared" /
+/// Spec: `docs/specs/incremental_models.md` §Design "Grain is declared" /
 /// "Widen-never-narrow".
 #[test]
 fn broken_workspace_maintenance_granularity_mismatch() {
@@ -2693,7 +2693,7 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
 /// Before the fix, `validate_timeseries` returned `KeyedForbidsTimeseries`
 /// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
 /// so the LSP showed no error even though keyed models must not declare
-/// `timeseries:` without key temporal locality (`keyed_models.md` §"Output shape").
+/// `timeseries:` without key temporal locality (`incremental_models.md` §"Key-grain output shape").
 #[test]
 fn timeseries_broken_cumulative_with_timeseries() {
     check_workspace_emits_keyed_frontmatter_diagnostic(
@@ -2709,8 +2709,8 @@ fn timeseries_broken_cumulative_with_timeseries() {
 ///
 /// Before the fix, `validate_timeseries` returned `KeyedForbidsBatched`
 /// but `file_diagnostics` silently dropped it, so the LSP showed no error even
-/// though keyed models must not declare `batched:` (`keyed_models.md`
-/// §"Constraints & Invariants" #2).
+/// though keyed models must not declare `batched:` (`incremental_models.md`
+/// §"Key-grain constraints" #1 — "No config block").
 #[test]
 fn timeseries_broken_cumulative_with_incremental() {
     check_workspace_emits_keyed_frontmatter_diagnostic(

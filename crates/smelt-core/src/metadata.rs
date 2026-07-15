@@ -132,7 +132,7 @@ pub struct ColumnMetadata {
     /// admits non-determinism in a payload column; barred from every
     /// skeleton position, with cross-model fail-loud propagation. See
     /// `docs/specs/models.md` §"`columns:` — column metadata" and
-    /// `docs/specs/maintenance_plan.md` §Surface "The plan (derived,
+    /// `docs/specs/incremental_models.md` §Surface "The plan (derived,
     /// reported)" (the guarantee ledger's equivalence-contract axis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<Contract>,
@@ -269,7 +269,7 @@ pub struct ModelMetadata {
     /// `grain: key` (the former `refresh: keyed`).
     ///
     /// See `docs/specs/models.md` §"Refresh axis" and
-    /// `docs/specs/keyed_models.md` §Surface.
+    /// `docs/specs/incremental_models.md` §Surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
 
@@ -303,7 +303,7 @@ pub struct ModelMetadata {
     /// contribution); this declaration never relaxes or narrows the derived
     /// clamp. It only licenses a compile-time warning when the derived
     /// horizon would exceed the declared ceiling. See
-    /// `docs/specs/maintenance_plan.md` §"Windowed maintenance and the
+    /// `docs/specs/incremental_models.md` §"Windowed maintenance and the
     /// horizon". Reuses `crate::config::DataLatency`'s existing fail-loud
     /// interval parser — no new interval grammar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,7 +311,7 @@ pub struct ModelMetadata {
 
     /// Per-cell technique preferences/pins and the scan-locality guardrail
     /// (`defaults.prefer`, `cells[]`, `scan_bounds`). See
-    /// `docs/specs/maintenance_plan.md` §Surface "Frontmatter".
+    /// `docs/specs/incremental_models.md` §Surface "Frontmatter".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<crate::config::MaintenanceConfig>,
 }
@@ -447,13 +447,13 @@ pub enum MetadataError {
     /// key temporal locality being established. Keyed outputs are not
     /// themselves timeseries by default — the rule reads the partition
     /// shape from the driving source instead (see
-    /// `docs/specs/keyed_models.md` §"Output shape").
+    /// `docs/specs/incremental_models.md` §"Key-grain output shape").
     #[error("KeyedForbidsTimeseries: keyed models must not declare a `timeseries:` block — the keyed output has no partition column; the rule reads the partition shape from the driving source")]
     KeyedForbidsTimeseries,
 
     /// A model declares `refresh: incremental` + `grain: key` (or another
     /// keyed-output mode) and a `batched:` block.
-    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/keyed_models.md)")]
+    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/incremental_models.md)")]
     KeyedForbidsBatched,
 
     /// A model declares a `batched:` block without `refresh: incremental` +
@@ -563,7 +563,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
 
     // Rule: keyed forbids timeseries: — the keyed output has no
     // partition column by default (key temporal locality establishment
-    // is not yet built; see docs/specs/keyed_models.md §Known Divergences).
+    // is not yet built; see docs/specs/incremental_models.md §Known Divergences "The key grain").
     if metadata.is_keyed() && metadata.timeseries.is_some() {
         return Err(MetadataError::KeyedForbidsTimeseries);
     }
@@ -675,8 +675,9 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
 
     // Rule: `batched.nondeterministic_columns` must not name a column that
     // governs windowing, partition placement, or dedup identity — those
-    // roles must stay deterministic regardless of any opt-in (Constraint 13;
-    // `batched_models.md` §"Non-determinism and the equivalence contract").
+    // roles must stay deterministic regardless of any opt-in
+    // (`incremental_models.md` §"Partition-grain constraints" #12;
+    // §"Non-determinism and the payload rule").
     if let Some(batched) = &metadata.batched {
         for col in &batched.nondeterministic_columns {
             if col == &ts.event_time_column {
@@ -1110,7 +1111,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                     "the `incremental:` block has been removed — use `refresh: incremental` + \
                      `grain: partition` + an optional `batched:` block instead (see \
-                     docs/specs/batched_models.md)",
+                     docs/specs/incremental_models.md)",
                 )));
             // `refresh: cumulative` is a hard error pointing at the renamed
             // value, not a silently-stripped unknown value — the resilient
@@ -1234,7 +1235,7 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                         "the `incremental:` block has been removed — use `refresh: incremental` + \
                          `grain: partition` + an optional `batched:` block instead (see \
-                         docs/specs/batched_models.md)",
+                         docs/specs/incremental_models.md)",
                     )));
                 }
             }
@@ -1956,7 +1957,7 @@ FROM smelt.orders_raw"#;
     }
 
     /// Listing `event_time_column` in `batched.nondeterministic_columns` is a
-    /// configuration error (Constraint 13; `batched_models.md` §Surface) — that
+    /// configuration error (`incremental_models.md` §"Partition-grain constraints" #12) — that
     /// column governs windowing and can never tolerate non-determinism.
     #[test]
     fn test_nondeterministic_columns_rejects_event_time_column() {

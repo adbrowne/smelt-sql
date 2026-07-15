@@ -1,5 +1,5 @@
 //! Real-fixture, DuckDB-backed coverage for BL7's window-independence /
-//! ordered-execution composition (`docs/specs/batched_models.md`
+//! ordered-execution composition (`docs/specs/incremental_models.md`
 //! §"Window independence and self-referential models"), exercised through
 //! the genuine `execute_project` path — the single shared entry point both
 //! `smelt-cli` and `smelt-ui` call (root `CLAUDE.md` §Architectural

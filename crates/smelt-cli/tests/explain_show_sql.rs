@@ -4,7 +4,7 @@
 //! Oracle: `docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
 //! report" — `--show-sql` prints, after each cell's block, the maintenance
 //! statements that cell executes: the output of the same pure emitters a
-//! run executes (`docs/specs/maintenance_plan.md` §"Statement emission
+//! run executes (`docs/specs/incremental_models.md` §"Statement emission
 //! (single owner)"). Region literals come from `--period <start>..<end>`
 //! when given; without `--period` the symbolic placeholders
 //! `{{window_start}}`/`{{window_end}}` stand in. `--show-sql` never
