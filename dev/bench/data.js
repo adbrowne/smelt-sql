@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784301922575,
+  "lastUpdate": 1784301925125,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -341,6 +341,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 32.22985040661991,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "7ba0e99de870fac0678496d089c5f9c212401b3a",
+          "message": "fix(test): register ROW_NUMBER/RANK Spark type divergence\n\nDuckDB's ROW_NUMBER() etc. return BIGINT (matches smelt's inference),\nbut Spark returns INT. The type-property Spark oracle was failing on\nthis genuine backend difference; register it in divergences.rs per\nthe type-oracle strictness gate instead of silently tolerating it.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-18T01:20:50+10:00",
+          "tree_id": "022a3ad0400b63e30e8bcbde15154246cd990c49",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/7ba0e99de870fac0678496d089c5f9c212401b3a"
+        },
+        "date": 1784301924479,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.313618837962686,
             "unit": "MB/s"
           }
         ]
