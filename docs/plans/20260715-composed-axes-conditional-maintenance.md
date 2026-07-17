@@ -71,7 +71,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 
 | Phase | Description | Status |
 |---|---|---|
-| A0 | `key_per_partition` fail-loud refusal (stop the silent collapse) | pending |
+| A0 | `key_per_partition` fail-loud refusal (stop the silent collapse) | done (2026-07-17) |
 | A1 | Locality gate seam: three-route `KeyedForbidsTimeseries` message; narrowed `KeyedGroupByContainsPartitionColumn`; real `unique_key` threaded into the plan | pending |
 | A2 | Route 1 (key-embedded): admission + slice-pruned merge target scan | pending |
 | A3 | Route 2 (key-determined, once-write provenance) | pending |
