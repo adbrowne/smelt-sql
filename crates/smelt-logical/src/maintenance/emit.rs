@@ -315,6 +315,64 @@ pub fn emit_keyed_fold(
     }
 }
 
+/// The out-of-slice match probe for a **checked** route-3 (recurrence-
+/// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
+/// §"Key temporal locality", route 3): a read-only query the caller
+/// (`smelt-runtime`'s `maintenance_driver`) executes and inspects the
+/// result of *before* running the merge action, so a violation is caught
+/// without ever writing to the target — "the whole transaction rolls
+/// back" trivially, since nothing was written yet.
+///
+/// Returns one row with two columns:
+/// - `violation_count` (`BIGINT`) — the number of distinct keys the step's
+///   own delta shares with a stored target row whose partition column lies
+///   *before* the slice's lower bound (`slice_lower`) — exactly the
+///   "matched (or would duplicate) a stored key outside the slice" check
+///   the spec names.
+/// - `sample_keys` (`VARCHAR`, `NULL` when `violation_count` is `0`) — up
+///   to 5 comma-joined key tuples, for the `KeyedRecurrenceBoundViolated`
+///   diagnostic's "sample keys" obligation.
+///
+/// `slice_lower` is the same concrete lower-bound literal the merge's own
+/// `TargetSlicePredicate::Range` uses (the step's own partition value,
+/// widened backward by the declared `r` plus margins) — this emitter does
+/// no date arithmetic of its own, matching every other emitter in this
+/// module.
+pub fn emit_recurrence_bound_probe(
+    schema_table: &str,
+    key: &[String],
+    partition_column: &str,
+    delta_select: &str,
+    slice_lower: &str,
+) -> MaintenanceStatement {
+    let key_list = key.join(", ");
+    let join_cond = key
+        .iter()
+        .map(|k| format!("target.{k} = delta.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_concat = key
+        .iter()
+        .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+        .collect::<Vec<_>>()
+        .join(" || '|' || ");
+    let safe_lower = slice_lower.replace('\'', "''");
+    let sql = format!(
+        "WITH __recurrence_violations AS (\
+            SELECT DISTINCT {key_concat} AS violation_key \
+            FROM {schema_table} AS target \
+            JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
+            WHERE target.{partition_column} < '{safe_lower}'\
+         ) \
+         SELECT COUNT(*) AS violation_count, \
+                (SELECT STRING_AGG(violation_key, ', ') FROM \
+                 (SELECT violation_key FROM __recurrence_violations LIMIT 5) AS __sample) \
+                 AS sample_keys \
+         FROM __recurrence_violations"
+    );
+    MaintenanceStatement::new(sql)
+}
+
 /// First-run `CREATE TABLE … AS` for a windowed-keyed-maintenance cell
 /// (`maintenance_driver::run_windowed_keyed_maintenance`'s create arm): the
 /// target table does not exist yet, so the first step's delta becomes the

@@ -15,13 +15,14 @@
 //! admissibility"). Structural preconditions are checked first (window-forward
 //! run shape, a provably NOT NULL partition column, matching granularity);
 //! then routes are tried in order. **Route 1** (key-embedded —
-//! `partition_column` is itself a `unique_key` column) and **route 2**
+//! `partition_column` is itself a `unique_key` column), **route 2**
 //! (key-determined — the partition projection is a per-key constant under
 //! the once-write provenance proof, admitted only via a declared
 //! `functional_dependencies:` entry; an extremal-fold combiner such as
 //! `MIN`/`MAX` is a distinct, value-mutating family and is refused even
-//! when declared) are implemented; route 3 (recurrence-bounded) lands in a
-//! later phase behind this same seam.
+//! when declared), and **route 3** (recurrence-bounded — a key-recurrence
+//! bound `r` holds, statically derived where decidable or else declared on
+//! the driving source and admitted only checked) are all implemented.
 //!
 //! Pure module: no I/O, no Salsa. `smelt-db`'s `maintenance_plan` query
 //! (`crates/smelt-db/src/queries/maintenance.rs`) and `smelt-runtime`'s
@@ -43,6 +44,7 @@ use crate::analysis::source_bounds::{
 use crate::analysis::walk::model_property_vector;
 use crate::maintenance::SourceFacts;
 use smelt_core::config::{FunctionalDependency, Granularity};
+use smelt_core::sources::KeyRecurrence;
 
 /// Inputs the locality gate consults.
 ///
@@ -67,8 +69,9 @@ pub struct LocalityInputs<'a> {
     /// structural precondition 2). Supplied by the caller today rather than
     /// derived by a walk-based prover; a caller admitting route 1 derives it
     /// conservatively as "`partition_column` is itself a `unique_key`
-    /// column" (a key component is never meaningfully NULL). Routes 2/3
-    /// (later phases) will need a real non-key nullability proof here.
+    /// column" (a key component is never meaningfully NULL); routes 2 and 3
+    /// both consume the shared non-key nullability prover
+    /// (`analysis::not_null::partition_column_provably_not_null`).
     pub partition_column_not_null: bool,
     /// The driving source's name (its `smelt.<path>` — used for margin
     /// derivation and refusal messages).
@@ -102,6 +105,18 @@ pub struct LocalityInputs<'a> {
     /// (`MIN`/`MAX`) one, so it is never used to auto-admit route 2. Empty
     /// when the model declares none — route 2 then always refuses.
     pub declared_functional_dependencies: &'a [FunctionalDependency],
+    /// The driving source's own declared `key_recurrence` bound
+    /// (`sources.md` §"`mutation_profile` — the structured block"),
+    /// consulted only by **route 3** (recurrence-bounded) as the declared
+    /// fallback when no static bound is derivable from the model's SQL.
+    /// Admitted only when `key_recurrence.key` is exactly the model's own
+    /// `unique_key` (order-independent set comparison) — a recurrence bound
+    /// declared over a different key establishes nothing about this
+    /// model's own key. Always consumed as a **checked** admission
+    /// (`incremental_models.md`: "always runtime-checked, never trusted");
+    /// `None` when the driving source declares none, or when it cannot be
+    /// resolved — route 3's declared sub-route then always refuses.
+    pub driving_source_key_recurrence: Option<&'a KeyRecurrence>,
 }
 
 /// The established locality slice a `merge_into` target scan may be pruned
@@ -123,14 +138,25 @@ pub struct LocalityInputs<'a> {
 ///   The caller resolves this to a `target.<col> IN (SELECT DISTINCT <col>
 ///   FROM (<delta>))` predicate against the step's own already-compiled
 ///   delta relation — no new value discovery, no extra query round trip.
+/// - Route 3 (recurrence-bounded) derives one of two shapes depending on
+///   provenance: a statically-derived `r` (proof-backed) renders as the
+///   *same* [`LocalitySlice::Window`] route 1 uses — a proven bound needs
+///   no runtime check, so it is structurally indistinguishable from route
+///   1's window once established. A **declared** `r` (the driving
+///   source's `key_recurrence`) instead renders as
+///   [`LocalitySlice::RecurrenceBounded`]: the same window shape, plus the
+///   `r` value the caller needs to also emit the out-of-slice match probe
+///   before the merge (`incremental_models.md`: "A declared `r` is
+///   admitted only checked").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum LocalitySlice {
-    /// Route 1: a step-relative window.
+    /// Route 1 (key-embedded), or route 3 with a **statically-derived**
+    /// `r` (proof-backed, never checked): a step-relative window.
     Window {
         /// The output's partition column the slice predicate ranges over.
         partition_column: String,
         /// How far back of a step's own partition value the slice must
-        /// widen (lateness/skew margin).
+        /// widen (lateness/skew margin, plus a derived `r` under route 3).
         margin_before: Seconds,
         /// How far forward of a step's own partition value the slice must
         /// widen.
@@ -141,6 +167,26 @@ pub enum LocalitySlice {
         /// The output's partition column the slice predicate ranges over.
         partition_column: String,
     },
+    /// Route 3 with a **declared** `r` (the driving source's
+    /// `key_recurrence`): the same step-relative window shape as
+    /// [`LocalitySlice::Window`], but admitted only **checked** — the
+    /// caller must run the out-of-slice match probe before the merge and
+    /// fail the run transactionally (`KeyedRecurrenceBoundViolated`) on any
+    /// violation. A declaration can bound work; it can never silently drop
+    /// data (`incremental_models.md` §"Key temporal locality").
+    RecurrenceBounded {
+        /// The output's partition column the slice predicate ranges over.
+        partition_column: String,
+        /// How far back of a step's own partition value the slice must
+        /// widen — the declared `r` plus any derived lateness/skew margin.
+        margin_before: Seconds,
+        /// How far forward of a step's own partition value the slice must
+        /// widen.
+        margin_after: Seconds,
+        /// The declared recurrence bound `r` itself, carried through for
+        /// the `KeyedRecurrenceBoundViolated` diagnostic message.
+        r: Seconds,
+    },
 }
 
 impl LocalitySlice {
@@ -149,6 +195,9 @@ impl LocalitySlice {
     pub fn partition_column(&self) -> &str {
         match self {
             LocalitySlice::Window {
+                partition_column, ..
+            }
+            | LocalitySlice::RecurrenceBounded {
                 partition_column, ..
             }
             | LocalitySlice::DeltaValues { partition_column } => partition_column,
@@ -293,10 +342,15 @@ pub use crate::analysis::not_null::partition_column_provably_not_null;
 /// constant, admitted only via a declared `functional_dependencies:` entry
 /// naming it — and refused outright, even when declared, when the walk's
 /// own discriminants prove the column is an extremal-fold (`MIN`/`MAX`)
-/// combiner, a distinct value-mutating family, not once-write). Route 3 is
-/// not yet implemented (`docs/plans/20260715-composed-axes-conditional-
-/// maintenance.md` phase A4) — every model that clears the preconditions
-/// but does not satisfy routes 1 or 2 refuses with a message naming that.
+/// combiner, a distinct value-mutating family, not once-write), then
+/// **route 3** (recurrence-bounded: a key-recurrence bound `r` holds —
+/// statically derived from the model's own SQL where decidable, in which
+/// case the slice is proof-backed and never checked at runtime; otherwise
+/// the driving source's declared `key_recurrence`, admitted only when its
+/// `key` is exactly the model's own `unique_key`, and always **checked** —
+/// `smelt-runtime` must run the out-of-slice match probe before every
+/// merge). A model satisfying none of the three routes refuses with a
+/// message naming all three and the nearest missing fact.
 pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, LocalityRefusal> {
     // Structural precondition 1: window-forward run shape.
     if !inputs.driving_source_has_clock {
@@ -404,59 +458,161 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
     // walk's own discriminants prove the column is an extremal-fold
     // combiner: a declaration can widen only a genuinely undecidable
     // origin, never override a proven value-mutating combiner.
+    // Route 2's own refusal reasons (extremal-fold family, or a structural
+    // FD disproof) are captured rather than returned immediately: they
+    // disqualify only route 2 — route 3 has an entirely independent
+    // admission criterion (a recurrence bound `r`, static or declared) and
+    // does not depend on once-write provenance at all (an extremal or
+    // overwrite partition projection is exactly what route 3's own "Row
+    // movement" clause licenses — `incremental_models.md` §"Key temporal
+    // locality"). The captured reason is only actually surfaced if route 3
+    // *also* fails to establish locality below, so a genuinely undecidable
+    // model still gets route 2's more specific diagnosis rather than the
+    // generic three-route message.
+    let mut route2_local_refusal: Option<LocalityRefusal> = None;
     if let Some(vector) = model_property_vector(inputs.sql, &JoinContext::new()) {
-        if let Some(discriminant) = vector
+        let extremal = vector
             .discriminants
             .iter()
             .find(|d| d.output.eq_ignore_ascii_case(&inputs.partition_column))
-        {
-            if discriminant.discriminants.monotone == Monotone::Value {
-                return Err(refuse(format!(
-                    "route 2 (key-determined) refused: `{}` is derived from an extremal-fold \
-                     combiner (MIN/MAX) — a later, out-of-order row can still change its value on \
-                     re-merge, so it belongs to the extremal-fold family, distinct from once-write \
-                     provenance (`incremental_models.md` §\"Key temporal locality\")",
-                    inputs.partition_column
-                )));
-            }
-        }
-
-        let verdict = match inputs
-            .declared_functional_dependencies
-            .iter()
-            .find(|fd| fd.determines.eq_ignore_ascii_case(&inputs.partition_column))
-        {
-            Some(fd) => {
-                functional_dependency_verdict_over_vector(&fd.key, &fd.determines, &vector, true)
-            }
-            None => FunctionalDependencyVerdict::NotProven,
-        };
-        match verdict {
-            FunctionalDependencyVerdict::Constant => {
-                return Ok(LocalitySlice::DeltaValues {
-                    partition_column: inputs.partition_column.clone(),
-                });
-            }
-            FunctionalDependencyVerdict::Refused(reason) => {
-                return Err(refuse(format!(
-                    "route 2 (key-determined) refused: `{}` is not a provable per-key constant \
-                     — {reason}",
-                    inputs.partition_column
-                )));
-            }
-            FunctionalDependencyVerdict::NotProven => {
-                // Fall through to the final refusal below — route 3 is not
-                // yet implemented either.
+            .is_some_and(|d| d.discriminants.monotone == Monotone::Value);
+        if extremal {
+            route2_local_refusal = Some(refuse(format!(
+                "route 2 (key-determined) refused: `{}` is derived from an extremal-fold \
+                 combiner (MIN/MAX) — a later, out-of-order row can still change its value on \
+                 re-merge, so it belongs to the extremal-fold family, distinct from once-write \
+                 provenance (`incremental_models.md` §\"Key temporal locality\")",
+                inputs.partition_column
+            )));
+        } else {
+            let verdict = match inputs
+                .declared_functional_dependencies
+                .iter()
+                .find(|fd| fd.determines.eq_ignore_ascii_case(&inputs.partition_column))
+            {
+                Some(fd) => functional_dependency_verdict_over_vector(
+                    &fd.key,
+                    &fd.determines,
+                    &vector,
+                    true,
+                ),
+                None => FunctionalDependencyVerdict::NotProven,
+            };
+            match verdict {
+                FunctionalDependencyVerdict::Constant => {
+                    return Ok(LocalitySlice::DeltaValues {
+                        partition_column: inputs.partition_column.clone(),
+                    });
+                }
+                FunctionalDependencyVerdict::Refused(reason) => {
+                    route2_local_refusal = Some(refuse(format!(
+                        "route 2 (key-determined) refused: `{}` is not a provable per-key \
+                         constant — {reason}",
+                        inputs.partition_column
+                    )));
+                }
+                FunctionalDependencyVerdict::NotProven => {
+                    // Fall through to route 3 below.
+                }
             }
         }
     }
 
+    // Route 3: recurrence-bounded — a key-recurrence bound `r` holds: every
+    // pair of input rows sharing a key lies within `r` of each other on the
+    // event-time axis (`incremental_models.md` §"Key temporal locality",
+    // route 3). Two sub-routes, tried in the order the spec lists them:
+    //
+    // 1. Statically derived from the model's own SQL where decidable. This
+    //    reuses the exact same lookback-margin derivation route 1's window
+    //    slice already uses (`derive_model_bounds`'s Form B: a WHERE filter
+    //    bounding the driving source's own partition column by a fixed
+    //    `INTERVAL` offset against itself): a proven, non-zero lookback
+    //    bound on the driving source's own clock column is exactly a
+    //    recurrence bound — it establishes that no two related rows can lie
+    //    further apart than the bound on the event-time axis. A
+    //    statically-derived `r` is proof-backed, so it renders as an
+    //    ordinary `LocalitySlice::Window` (structurally identical to route
+    //    1's admitted slice) and is never runtime-checked.
+    // 2. A **declared** fallback: the driving source's own `key_recurrence`
+    //    (`sources.md`), admitted only when its `key` is exactly the
+    //    model's own `unique_key` (order-independent set comparison) — a
+    //    bound declared over a different key says nothing about this
+    //    model's own key. Always admitted **checked**
+    //    (`incremental_models.md`: "always runtime-checked, never
+    //    trusted") — `smelt-runtime` must run the out-of-slice match probe
+    //    before every merge and fail the run transactionally
+    //    (`KeyedRecurrenceBoundViolated`) on any violation.
+    let driving_bounds =
+        inputs
+            .driving_source_partition_column
+            .as_deref()
+            .map(|driving_partition_col| {
+                let ctx = BoundContext::new()
+                    .with_source(&inputs.driving_source_name, driving_partition_col);
+                derive_model_bounds(inputs.sql, &ctx)
+            });
+
+    if let Some(bounds) = &driving_bounds {
+        if let Some(BoundResult::Bounded { before, after, .. }) =
+            bounds.get(&inputs.driving_source_name)
+        {
+            if *before > Seconds::ZERO {
+                return Ok(LocalitySlice::Window {
+                    partition_column: inputs.partition_column.clone(),
+                    margin_before: *before,
+                    margin_after: *after,
+                });
+            }
+        }
+    }
+
+    if let Some(kr) = inputs.driving_source_key_recurrence {
+        let declared_key: std::collections::BTreeSet<&str> =
+            kr.key.iter().map(String::as_str).collect();
+        let model_key: std::collections::BTreeSet<&str> =
+            inputs.unique_key.iter().map(String::as_str).collect();
+        if declared_key == model_key {
+            let r = Seconds(kr.window.seconds);
+            let margin_after = driving_bounds
+                .as_ref()
+                .and_then(|b| b.get(&inputs.driving_source_name))
+                .and_then(|b| match b {
+                    BoundResult::Bounded { after, .. } => Some(*after),
+                    _ => None,
+                })
+                .unwrap_or(Seconds::ZERO);
+            return Ok(LocalitySlice::RecurrenceBounded {
+                partition_column: inputs.partition_column.clone(),
+                margin_before: r,
+                margin_after,
+                r,
+            });
+        }
+        return Err(refuse(format!(
+            "route 3 (recurrence-bounded) refused: driving source '{}''s declared \
+             `key_recurrence.key` ({:?}) does not exactly match the model's own `unique_key` \
+             ({:?}) — a recurrence bound declared over a different key establishes nothing \
+             about this model's own key",
+            inputs.driving_source_name, kr.key, inputs.unique_key
+        )));
+    }
+
+    // Route 2's own, more specific refusal (extremal-fold family, or a
+    // structural FD disproof) is the better diagnosis when it fired and
+    // route 3 also failed to admit — surface it instead of the generic
+    // three-route message.
+    if let Some(refusal) = route2_local_refusal {
+        return Err(refusal);
+    }
+
     Err(refuse(format!(
-        "`{}` is not a `unique_key` column (route 1 fails) and is not proven a per-key constant \
-         by a declared `functional_dependencies:` entry (route 2 fails); route 3 \
-         (recurrence-bounded) is not yet implemented \
-         (docs/plans/20260715-composed-axes-conditional-maintenance.md, phase A4)",
-        inputs.partition_column
+        "`{}` is not a `unique_key` column (route 1 fails), is not proven a per-key constant \
+         by a declared `functional_dependencies:` entry (route 2 fails), and no key-recurrence \
+         bound `r` could be established (route 3 fails) — neither statically derivable from \
+         the model's SQL nor declared on driving source '{}' via `key_recurrence` with a \
+         matching `key`",
+        inputs.partition_column, inputs.driving_source_name
     )))
 }
 
@@ -528,6 +684,7 @@ mod tests {
             driving_source_granularity: Some(Granularity::Day),
             driving_source_partition_column: Some("event_date".to_string()),
             declared_functional_dependencies: &[],
+            driving_source_key_recurrence: None,
             sql,
         }
     }
@@ -702,6 +859,7 @@ mod tests {
             driving_source_granularity: Some(Granularity::Day),
             driving_source_partition_column: Some("event_date".to_string()),
             declared_functional_dependencies: &[],
+            driving_source_key_recurrence: None,
             sql,
         }
     }
@@ -837,6 +995,126 @@ mod tests {
         assert!(
             message.contains("NOT NULL"),
             "message must name the NOT NULL precondition: {message}"
+        );
+    }
+
+    // ---- Route 3 -------------------------------------------------------
+
+    /// A route-3-shaped input: `unique_key` is `event_id` alone, and
+    /// `last_seen_date` is an extremal (`MAX`) projection — route 1 fails
+    /// (not a key column) and route 2 fails (extremal-fold family, not
+    /// once-write), so only route 3 can admit.
+    fn route3_inputs(sql: &'_ str) -> LocalityInputs<'_> {
+        LocalityInputs {
+            model_name: "events_last_seen".to_string(),
+            unique_key: vec!["event_id".to_string()],
+            partition_column: "last_seen_date".to_string(),
+            granularity: Granularity::Day,
+            partition_column_not_null: true,
+            driving_source_name: "smelt.sources.raw.events".to_string(),
+            driving_source_has_clock: true,
+            driving_source_granularity: Some(Granularity::Day),
+            driving_source_partition_column: Some("event_date".to_string()),
+            declared_functional_dependencies: &[],
+            driving_source_key_recurrence: None,
+            sql,
+        }
+    }
+
+    const ROUTE3_SQL_NO_LOOKBACK: &str = "SELECT event_id, MAX(event_date) AS last_seen_date, \
+         COUNT(*) AS event_count FROM smelt.sources.raw.events GROUP BY event_id";
+
+    /// A genuine lookback construct in the model SQL (the same Form-B
+    /// WHERE-filter shape route 1's own margin derivation recognises)
+    /// statically proves a recurrence bound: no two rows sharing a key can
+    /// lie further apart than the bound, so route 3 admits **without**
+    /// ever needing a runtime check — the slice renders as an ordinary
+    /// `Window`, structurally identical to route 1's.
+    #[test]
+    fn route3_admits_statically_derived_bound_unchecked() {
+        let sql = "SELECT event_id, MAX(event_date) AS last_seen_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days' \
+                   GROUP BY event_id";
+        let inputs = route3_inputs(sql);
+        let slice = establish_locality(&inputs).expect("route 3 must admit via static derivation");
+        match slice {
+            LocalitySlice::Window { margin_before, .. } => {
+                assert_eq!(margin_before, Seconds::days(3));
+            }
+            other => panic!(
+                "a statically-derived route-3 bound must render as an unchecked Window, got \
+                 {other:?}"
+            ),
+        }
+    }
+
+    /// A declared `key_recurrence` on the driving source, whose `key`
+    /// exactly matches the model's own `unique_key`, admits route 3 —
+    /// always **checked** (`RecurrenceBounded`), never trusted blindly even
+    /// though it is the only fact establishing locality here (no static
+    /// bound in this model's SQL).
+    #[test]
+    fn route3_admits_declared_key_recurrence_checked() {
+        let mut inputs = route3_inputs(ROUTE3_SQL_NO_LOOKBACK);
+        let kr = KeyRecurrence {
+            key: vec!["event_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("3 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let slice =
+            establish_locality(&inputs).expect("declared key_recurrence must admit route 3");
+        match slice {
+            LocalitySlice::RecurrenceBounded {
+                r, margin_before, ..
+            } => {
+                assert_eq!(r, Seconds::days(3));
+                assert_eq!(margin_before, Seconds::days(3));
+            }
+            other => {
+                panic!("a declared route-3 bound must render as RecurrenceBounded, got {other:?}")
+            }
+        }
+    }
+
+    /// A declared `key_recurrence` whose `key` does **not** match the
+    /// model's own `unique_key` establishes nothing — the bound was
+    /// declared over a different key's recurrence, which says nothing
+    /// about this model's key. Route 3 must not admit.
+    #[test]
+    fn route3_refuses_declared_key_recurrence_over_mismatched_key() {
+        let mut inputs = route3_inputs(ROUTE3_SQL_NO_LOOKBACK);
+        let kr = KeyRecurrence {
+            key: vec!["session_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("3 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_last_seen");
+        assert!(
+            message.contains("Nearest missing fact"),
+            "message must name the nearest missing fact: {message}"
+        );
+        assert!(
+            message.to_lowercase().contains("key_recurrence")
+                || message.to_lowercase().contains("does not exactly match"),
+            "message must explain the key mismatch: {message}"
+        );
+    }
+
+    /// With no static bound and no declared `key_recurrence` at all, route
+    /// 3 fails too — the model refuses, and (since this partition column
+    /// is extremal-fold-derived) the message still surfaces route 2's more
+    /// specific "extremal-fold" diagnosis rather than the generic
+    /// three-route fallback.
+    #[test]
+    fn route3_refuses_with_no_bound_at_all_falls_back_to_route2_reason() {
+        let inputs = route3_inputs(ROUTE3_SQL_NO_LOOKBACK);
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_last_seen");
+        assert!(
+            message.to_lowercase().contains("extremal-fold"),
+            "message must surface route 2's more specific reason: {message}"
         );
     }
 }

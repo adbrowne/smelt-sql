@@ -170,6 +170,15 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
 /// admitted); the runtime execution path (`smelt-runtime::cumulative`,
 /// which has the driving source's `TimeseriesConfig` directly from the
 /// classifier) is today's actual consumer of an admitted route.
+/// `key_recurrences` is every referenced source's declared `key_recurrence`
+/// bound (`sources.md` §"`mutation_profile` — the structured block"), keyed
+/// by bare source name (the same convention `SourceFacts::name` and
+/// `resolve_driving_source`'s resolved `driving.name` use) — consulted only
+/// by key temporal locality's route 3 (recurrence-bounded) as the declared
+/// fallback when no bound is statically derivable from the model's own SQL
+/// (`docs/specs/incremental_models.md` §"Key temporal locality"). Build via
+/// [`build_key_recurrences`], the sibling of [`build_source_facts`] over the
+/// same `(ref_string, source_info)` pairs.
 pub fn derive_model_maintenance_plan(
     sql: &str,
     table: &str,
@@ -177,6 +186,7 @@ pub fn derive_model_maintenance_plan(
     sources: &[SourceFacts],
     explicitly_mutable: &std::collections::HashSet<String>,
     driving_source_granularity: Option<Granularity>,
+    key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -251,6 +261,10 @@ pub fn derive_model_maintenance_plan(
                     &own_ts.partition_column,
                     driving_source_partition_column.as_deref(),
                 );
+                let driving_source_key_recurrence = key_recurrences
+                    .iter()
+                    .find(|(name, _)| name == &driving_source_name)
+                    .map(|(_, kr)| kr);
                 let inputs = LocalityInputs {
                     model_name: table.to_string(),
                     unique_key: unique_key.clone(),
@@ -262,6 +276,7 @@ pub fn derive_model_maintenance_plan(
                     driving_source_granularity,
                     driving_source_partition_column,
                     declared_functional_dependencies: &metadata.functional_dependencies,
+                    driving_source_key_recurrence,
                     sql,
                 };
                 if let Err(refusal) = establish_locality(&inputs) {
@@ -379,6 +394,7 @@ pub fn derive_model_maintenance_plan_with_edges(
     explicitly_mutable: &std::collections::HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
     driving_source_granularity: Option<Granularity>,
+    key_recurrences: &[(String, smelt_core::sources::KeyRecurrence)],
 ) -> Option<MaintenancePlanResult> {
     let mut result = derive_model_maintenance_plan(
         sql,
@@ -387,6 +403,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         sources,
         explicitly_mutable,
         driving_source_granularity,
+        key_recurrences,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred).
@@ -479,6 +496,37 @@ pub fn build_source_facts(
     out
 }
 
+/// Build the `(bare source name, key_recurrence)` list for every referenced
+/// source that declares one (`sources.md` §"`mutation_profile` — the
+/// structured block"), over the same `(ref_string, source_info)` pairs
+/// [`build_source_facts`] consumes. Consulted only by key temporal
+/// locality's route 3 (recurrence-bounded) as the declared fallback
+/// (`smelt_logical::maintenance::locality::LocalityInputs::
+/// driving_source_key_recurrence`) — sourced independently of `SourceFacts`
+/// (rather than adding a field there) so the many existing `SourceFacts`
+/// literal-construction call sites across the workspace stay unaffected by
+/// a route this phase alone introduces.
+pub fn build_key_recurrences(
+    refs: &[(String, Option<SourceInfo>)],
+) -> Vec<(String, smelt_core::sources::KeyRecurrence)> {
+    let mut out = Vec::new();
+    let mut seen: HashMap<String, ()> = HashMap::new();
+    for (name, info) in refs {
+        if seen.contains_key(name) {
+            continue;
+        }
+        seen.insert(name.clone(), ());
+        if let Some(kr) = info
+            .as_ref()
+            .and_then(|s| s.mutation_profile.as_ref())
+            .and_then(|m| m.key_recurrence.clone())
+        {
+            out.push((name.clone(), kr));
+        }
+    }
+    out
+}
+
 /// A Salsa-friendly (`PartialEq`) projection of a
 /// [`smelt_logical::maintenance::Refusal`] — the two refusal kinds this
 /// phase maps onto `Maintenance*` diagnostics. Mirrors the pure `Refusal`
@@ -561,6 +609,7 @@ pub fn maintenance_plan_diagnostics(
         .as_ref()
         .and_then(|ts| check_declared_granularity(sql, &ts.partition_column, ts.granularity));
     let driving_source_granularity = single_clocked_source_granularity(source_refs);
+    let key_recurrences = build_key_recurrences(source_refs);
     let Some(result) = derive_model_maintenance_plan(
         sql,
         table,
@@ -568,6 +617,7 @@ pub fn maintenance_plan_diagnostics(
         &sources,
         &explicitly_mutable,
         driving_source_granularity,
+        &key_recurrences,
     ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
@@ -749,6 +799,7 @@ mod tests {
             &[],
             &std::collections::HashSet::new(),
             None,
+            &[],
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -803,6 +854,7 @@ mod tests {
             &[],
             &std::collections::HashSet::new(),
             None,
+            &[],
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -865,6 +917,7 @@ mod tests {
             &sources,
             &std::collections::HashSet::new(),
             Some(Granularity::Day),
+            &[],
         )
         .expect("route 1 must derive a plan");
         assert!(
@@ -942,6 +995,7 @@ mod tests {
             &sources,
             &std::collections::HashSet::new(),
             Some(Granularity::Day),
+            &[],
         )
         .expect("route 1 must derive a plan");
         assert!(

@@ -19,7 +19,9 @@ use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
-use smelt_logical::maintenance::emit::{emit_keyed_fold, MaintenanceDialect, TargetSlicePredicate};
+use smelt_logical::maintenance::emit::{
+    emit_keyed_fold, emit_recurrence_bound_probe, MaintenanceDialect, TargetSlicePredicate,
+};
 use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
 };
@@ -84,6 +86,32 @@ impl WindowedKeyedRule for CumulativeClassification {
     fn ledger_input(&self) -> &str {
         &self.driving_source.name
     }
+
+    /// `keyed`'s own `unique_key` is exactly what
+    /// `emit_recurrence_bound_probe` (`smelt_logical::maintenance::emit`,
+    /// the single-owner emitter for this statement) needs to build the
+    /// route-3 checked-merge probe — this impl supplies it and delegates
+    /// the SQL text construction entirely to that emitter.
+    fn recurrence_probe_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        partition_column: &str,
+        slice_lower: &str,
+    ) -> Option<String> {
+        let schema_table = format!("{schema}.{table}");
+        Some(
+            emit_recurrence_bound_probe(
+                &schema_table,
+                &self.unique_key,
+                partition_column,
+                delta_sql,
+                slice_lower,
+            )
+            .sql,
+        )
+    }
 }
 
 /// Execute a single keyed model over the given run window.
@@ -102,6 +130,7 @@ pub async fn execute_cumulative_aggregate(
     db_table_name: &str,
     time_range: &TimeRange,
     source_timeseries: &SourceTimeseriesMap,
+    source_key_recurrence: &HashMap<String, smelt_core::sources::KeyRecurrence>,
     verbose: bool,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
@@ -168,6 +197,7 @@ pub async fn execute_cumulative_aggregate(
                     driving_source_granularity: Some(driving_ts.granularity),
                     driving_source_partition_column: Some(driving_ts.partition_column.clone()),
                     declared_functional_dependencies,
+                    driving_source_key_recurrence: source_key_recurrence.get(&driving_source_name),
                     sql: &clean_sql,
                 };
                 match establish_locality(&inputs) {

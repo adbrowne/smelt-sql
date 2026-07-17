@@ -495,6 +495,7 @@ fn real_fixture_examples_timeseries_admits_column_scoped_merge_cell() {
         &sources,
         &explicitly_mutable,
         None,
+        &[],
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 

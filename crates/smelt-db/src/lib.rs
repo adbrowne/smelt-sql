@@ -1413,6 +1413,7 @@ pub fn maintenance_plan_report(
         model_scan_bounds,
         project_scan_bounds.as_ref(),
     );
+    let key_recurrences = crate::queries::maintenance::build_key_recurrences(&source_refs);
     let explicitly_mutable: std::collections::HashSet<String> = source_refs
         .iter()
         .filter(|(_, info)| {
@@ -1435,6 +1436,7 @@ pub fn maintenance_plan_report(
         &explicitly_mutable,
         &model_edges,
         driving_source_granularity,
+        &key_recurrences,
     )
 }
 

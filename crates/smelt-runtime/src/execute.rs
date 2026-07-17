@@ -205,6 +205,7 @@ pub async fn execute_project(
     // incremental pushdown.
     let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
     let source_timeseries = build_source_timeseries_map(&graph_lock, &source_infos);
+    let source_key_recurrence = build_source_key_recurrence_map(&source_infos);
 
     let (model_plans, total_batches) = build_model_plans(
         &selected,
@@ -849,6 +850,7 @@ pub async fn execute_project(
                         &db_table_name,
                         &time_range,
                         &source_timeseries,
+                        &source_key_recurrence,
                         false,
                     )
                     .await
@@ -2419,5 +2421,30 @@ pub fn build_source_timeseries_map(
         }
     }
 
+    map
+}
+
+/// Build the project-wide `smelt.<path> → key_recurrence` lookup map —
+/// the sibling of [`build_source_timeseries_map`] over the same
+/// `source_infos`, keyed by the same `smelt.<path>` convention (matching
+/// `crate::cumulative::CumulativeClassification::driving_source.name`'s own
+/// full-address form, not `SourceFacts::name`'s bare form). Consumed only
+/// by key temporal locality's route 3 (recurrence-bounded) as the declared
+/// fallback (`docs/specs/incremental_models.md` §"Key temporal locality") —
+/// `crate::cumulative::execute_cumulative_aggregate` looks up its own
+/// driving source's entry here.
+pub fn build_source_key_recurrence_map(
+    source_infos: &[smelt_core::SourceInfo],
+) -> HashMap<String, smelt_core::sources::KeyRecurrence> {
+    let mut map = HashMap::new();
+    for source in source_infos {
+        if let Some(kr) = source
+            .mutation_profile
+            .as_ref()
+            .and_then(|m| m.key_recurrence.clone())
+        {
+            map.insert(format!("smelt.{}", source.address_segments.join(".")), kr);
+        }
+    }
     map
 }

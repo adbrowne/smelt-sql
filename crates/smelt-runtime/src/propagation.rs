@@ -288,6 +288,12 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             // granularity at this call site — see the analogous comment in
             // `maintenance_driver::resolve_live_column_scoped_cell`.
             None,
+            // Not (yet) plumbed with declared `key_recurrence` bounds at
+            // this call site (the graph-propagation walk does not resolve
+            // route 3's declared fallback today) — a locality-admitted
+            // model here still admits via a statically-derived bound or
+            // routes 1/2; only the declared route 3 sub-route is narrowed.
+            &[],
         ) else {
             continue;
         };

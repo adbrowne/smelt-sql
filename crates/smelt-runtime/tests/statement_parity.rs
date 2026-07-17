@@ -43,9 +43,14 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    MaintenanceDialect, Region, TargetSlicePredicate,
+    emit_recurrence_bound_probe, MaintenanceDialect, Region, TargetSlicePredicate,
+};
+use smelt_logical::maintenance::locality::LocalitySlice;
+use smelt_planner::{
+    AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
+use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
 use smelt_runtime::types::ExecuteRequest;
 use tokio_util::sync::CancellationToken;
 
@@ -59,6 +64,12 @@ use tokio_util::sync::CancellationToken;
 struct RecordingBackend {
     inner: DuckDbBackend,
     groups: Mutex<Vec<StatementGroup>>,
+    /// Every raw SQL string handed to `execute_sql` directly (not via
+    /// `execute_statement_group`) — the checked route-3 out-of-slice match
+    /// probe runs this way (`maintenance_driver::run_windowed_keyed_
+    /// maintenance`'s probe-gate, not a `StatementGroup`), so `groups`
+    /// alone would miss it.
+    sql_log: Mutex<Vec<String>>,
 }
 
 impl RecordingBackend {
@@ -66,17 +77,23 @@ impl RecordingBackend {
         Self {
             inner,
             groups: Mutex::new(Vec::new()),
+            sql_log: Mutex::new(Vec::new()),
         }
     }
 
     fn recorded_groups(&self) -> Vec<StatementGroup> {
         self.groups.lock().unwrap().clone()
     }
+
+    fn recorded_sql(&self) -> Vec<String> {
+        self.sql_log.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl Backend for RecordingBackend {
     async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        self.sql_log.lock().unwrap().push(sql.to_string());
         self.inner.execute_sql(sql).await
     }
 
@@ -1147,6 +1164,178 @@ async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
         .await,
         "the CREATE+slice-predicated-MERGE statements execute_project actually ran must \
          reproduce a full refresh"
+    );
+}
+
+/// Statement-parity leg for the **checked route-3** (recurrence-bounded,
+/// declared `r`) merge (`docs/specs/incremental_models.md` §"Key temporal
+/// locality", route 3; `docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase A4): the out-of-slice match probe and the merge
+/// itself are each byte-identical to a direct call of their single-owner
+/// emitters (`emit_recurrence_bound_probe`, `emit_keyed_fold`).
+///
+/// Driven directly through `maintenance_driver::run_windowed_keyed_
+/// maintenance` (not the full `execute_project` pipeline): route 3's
+/// flagship shape needs an extremal-fold (`MIN`/`MAX`) partition column,
+/// which trips the *unrelated* NOT-NULL diagnostic `execute_project`'s
+/// pre-execution gate enforces regardless of locality admission — the
+/// same pre-existing blocker `docs/specs/incremental_models.md` §Known
+/// Divergences documents for route 2's own real-fixture coverage. Calling
+/// the driver directly still proves the actual SQL a run executes matches
+/// the emitters, the parity gate's whole point; it does not touch the
+/// (separately tracked) nullability gap.
+#[tokio::test]
+async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main;\n\
+             CREATE TABLE main.raw_events (event_id INTEGER, event_ts TIMESTAMP, event_date DATE);",
+        )
+        .expect("create raw_events");
+    }
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open backend");
+    let backend = RecordingBackend::new(inner);
+
+    let classification = CumulativeClassification {
+        unique_key: vec!["event_id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "last_seen_date".to_string(),
+            per_partition_agg: "MAX".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::Max,
+        }],
+        driving_source: DrivingSource {
+            name: "smelt.sources.raw.events".to_string(),
+            timeseries: smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: smelt_core::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            },
+        },
+    };
+    let slice = LocalitySlice::RecurrenceBounded {
+        partition_column: "last_seen_date".to_string(),
+        margin_before: smelt_logical::analysis::source_bounds::Seconds::days(3),
+        margin_after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+        r: smelt_logical::analysis::source_bounds::Seconds::days(3),
+    };
+    let compile_step = |step: &smelt_runtime::maintenance_driver::MaintenanceStep| {
+        Ok(format!(
+            "SELECT event_id, MAX(event_date) AS last_seen_date FROM main.raw_events \
+             WHERE event_date = '{}' GROUP BY event_id",
+            step.partition_value
+        ))
+    };
+
+    backend
+        .execute_sql(
+            "INSERT INTO main.raw_events VALUES (1, TIMESTAMP '2026-02-01 00:00:00', DATE \
+             '2026-02-01')",
+        )
+        .await
+        .expect("insert day 1");
+    let create_steps = driving_steps(
+        "2026-02-01",
+        "2026-02-02",
+        &smelt_core::config::Granularity::Day,
+    )
+    .expect("steps");
+    run_windowed_keyed_maintenance(
+        &backend,
+        "events_last_seen",
+        "main",
+        "events_last_seen",
+        &create_steps,
+        &classification,
+        Some(&slice),
+        compile_step,
+    )
+    .await
+    .expect("day 1 create must succeed");
+
+    // Day 2: an in-bound redelivery — the probe must run, find no
+    // violation, and the merge must apply.
+    backend
+        .execute_sql(
+            "INSERT INTO main.raw_events VALUES (1, TIMESTAMP '2026-02-02 00:00:00', DATE \
+             '2026-02-02')",
+        )
+        .await
+        .expect("insert day 2");
+    let steps = driving_steps(
+        "2026-02-02",
+        "2026-02-03",
+        &smelt_core::config::Granularity::Day,
+    )
+    .expect("steps");
+    run_windowed_keyed_maintenance(
+        &backend,
+        "events_last_seen",
+        "main",
+        "events_last_seen",
+        &steps,
+        &classification,
+        Some(&slice),
+        compile_step,
+    )
+    .await
+    .expect("in-bound redelivery must merge cleanly");
+
+    // The probe: byte-identical to a direct `emit_recurrence_bound_probe`
+    // call over this step's own delta SELECT and slice lower bound
+    // (2026-02-02 widened backward by r=3 days → 2026-01-30).
+    let executed = backend.recorded_sql();
+    let probe_sql = executed
+        .iter()
+        .find(|s| s.contains("__recurrence_violations"))
+        .expect("the checked route must execute the out-of-slice match probe");
+    let delta_select = "SELECT event_id, MAX(event_date) AS last_seen_date FROM main.raw_events \
+                         WHERE event_date = '2026-02-02' GROUP BY event_id";
+    let expected_probe = emit_recurrence_bound_probe(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        "last_seen_date",
+        delta_select,
+        "2026-01-30",
+    );
+    assert_eq!(
+        probe_sql, &expected_probe.sql,
+        "executed probe must be byte-identical to a direct emitter call"
+    );
+
+    // The merge: byte-identical to a direct `emit_keyed_fold` call with the
+    // same `Range` predicate the checked route resolves to (same shape as
+    // route 1's window).
+    let groups = backend.recorded_groups();
+    let merge_group = groups
+        .iter()
+        .find(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .expect("the merge action must have executed via execute_statement_group");
+    let range_slice = TargetSlicePredicate::Range {
+        partition_column: "last_seen_date".to_string(),
+        lower: "2026-01-30".to_string(),
+        upper: "2026-02-02".to_string(),
+    };
+    let expected_merge = emit_keyed_fold(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        &[(
+            "last_seen_date".to_string(),
+            "GREATEST(target.last_seen_date, delta.last_seen_date)".to_string(),
+        )],
+        delta_select,
+        Some(&range_slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        merge_group, &expected_merge,
+        "executed checked-merge group must be byte-identical to a direct emitter call"
     );
 }
 

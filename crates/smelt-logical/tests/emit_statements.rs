@@ -7,7 +7,7 @@
 
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    MaintenanceDialect, Region,
+    emit_recurrence_bound_probe, MaintenanceDialect, Region,
 };
 
 #[test]
@@ -321,4 +321,77 @@ fn column_scoped_merge_dialect_invariant_shape() {
         MaintenanceDialect::Spark,
     );
     assert_eq!(duckdb, spark);
+}
+
+/// The route-3 (recurrence-bounded, declared `r`) out-of-slice match probe
+/// (`docs/specs/incremental_models.md` §"Key temporal locality", route 3):
+/// a single read-only `SELECT` counting keys the delta shares with a
+/// stored target row whose partition column lies before the slice's lower
+/// bound, plus up to 5 sample violating keys.
+#[test]
+fn recurrence_bound_probe_matches_production_shape() {
+    let delta_select = "SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10'";
+    let stmt = emit_recurrence_bound_probe(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        "last_seen_date",
+        delta_select,
+        "2026-01-07",
+    );
+    assert_eq!(
+        stmt.sql,
+        "WITH __recurrence_violations AS (SELECT DISTINCT CAST(target.event_id AS VARCHAR) AS \
+         violation_key FROM main.events_last_seen AS target JOIN (SELECT DISTINCT event_id FROM \
+         (SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10')) AS delta ON \
+         target.event_id = delta.event_id WHERE target.last_seen_date < '2026-01-07') SELECT \
+         COUNT(*) AS violation_count, (SELECT STRING_AGG(violation_key, ', ') FROM (SELECT \
+         violation_key FROM __recurrence_violations LIMIT 5) AS __sample) AS sample_keys FROM \
+         __recurrence_violations"
+    );
+}
+
+/// A composite key concatenates every key column into one violation-key
+/// string (`k1 || '|' || k2 || ...`), and the join condition ANDs every
+/// key column — mirroring `emit_keyed_fold`'s own composite-key handling.
+#[test]
+fn recurrence_bound_probe_composite_key_concatenates_and_ands() {
+    let delta_select = "SELECT tenant_id, event_id, event_date FROM events";
+    let stmt = emit_recurrence_bound_probe(
+        "main.t",
+        &["tenant_id".to_string(), "event_id".to_string()],
+        "last_seen_date",
+        delta_select,
+        "2026-01-01",
+    );
+    assert!(
+        stmt.sql.contains(
+            "CAST(target.tenant_id AS VARCHAR) || '|' || CAST(target.event_id AS VARCHAR)"
+        ),
+        "expected composite key concatenation in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql
+            .contains("target.tenant_id = delta.tenant_id AND target.event_id = delta.event_id"),
+        "expected ANDed composite join condition in: {}",
+        stmt.sql
+    );
+}
+
+/// A single-quote in the slice-lower literal is escaped, matching every
+/// other emitter's literal-escaping convention in this module.
+#[test]
+fn recurrence_bound_probe_escapes_quoted_slice_lower() {
+    let stmt = emit_recurrence_bound_probe(
+        "main.t",
+        &["event_id".to_string()],
+        "last_seen_date",
+        "SELECT event_id, event_date FROM events",
+        "2026-01-0'7",
+    );
+    assert!(
+        stmt.sql.contains("< '2026-01-0''7'"),
+        "expected escaped literal in: {}",
+        stmt.sql
+    );
 }

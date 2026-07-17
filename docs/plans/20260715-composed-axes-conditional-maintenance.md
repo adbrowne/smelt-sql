@@ -75,7 +75,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A1 | Locality gate seam: three-route `KeyedForbidsTimeseries` message; narrowed `KeyedGroupByContainsPartitionColumn`; real `unique_key` threaded into the plan | done (2026-07-17) |
 | A2 | Route 1 (key-embedded): admission + slice-pruned merge target scan | done (2026-07-17) |
 | A3 | Route 2 (key-determined, once-write provenance) | done (2026-07-18) |
-| A4 | Route 3 (recurrence-bounded): consume `key_recurrence` + transactional `KeyedRecurrenceBoundViolated` check | pending |
+| A4 | Route 3 (recurrence-bounded): consume `key_recurrence` + transactional `KeyedRecurrenceBoundViolated` check | done (2026-07-18) |
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | pending |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | pending |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending |

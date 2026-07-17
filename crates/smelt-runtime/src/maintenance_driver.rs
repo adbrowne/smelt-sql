@@ -136,6 +136,30 @@ pub trait WindowedKeyedRule: Send + Sync {
     fn ledger_input(&self) -> &str {
         ""
     }
+
+    /// Build the out-of-slice match probe SQL for a **checked** route-3
+    /// (recurrence-bounded, declared `r`) slice
+    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// 3) — the single-owner emitter is
+    /// `smelt_logical::maintenance::emit::emit_recurrence_bound_probe`;
+    /// this method's only job is supplying it the rule's own `unique_key`
+    /// (which the driver does not otherwise know). `None` refuses the
+    /// checked route fail-closed (the driver never silently skips the
+    /// check for a rule that cannot build a probe) — the default here
+    /// exists only so rules with no keyed shape at all need not implement
+    /// it; `keyed`'s own impl (`crate::cumulative::CumulativeClassification`)
+    /// always returns `Some`.
+    fn recurrence_probe_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        partition_column: &str,
+        slice_lower: &str,
+    ) -> Option<String> {
+        let _ = (schema, table, delta_sql, partition_column, slice_lower);
+        None
+    }
 }
 
 /// Run the windowed-keyed-maintenance loop: `classify` already happened (its
@@ -215,11 +239,22 @@ pub async fn run_windowed_keyed_maintenance(
         //     delta relation's own partition-column values — no date
         //     arithmetic, no widening, since a key-determined column is a
         //     per-key constant regardless of which step reveals it.
+        //   - route 3, declared (`RecurrenceBounded`): the same step-
+        //     relative window shape as route 1's `Window` (the margin
+        //     already folds in the declared `r`), plus — below, before the
+        //     merge actually runs — the out-of-slice match probe a checked
+        //     bound requires.
         let slice_predicate = locality.map(|slice| match slice {
             LocalitySlice::Window {
                 partition_column,
                 margin_before,
                 margin_after,
+            }
+            | LocalitySlice::RecurrenceBounded {
+                partition_column,
+                margin_before,
+                margin_after,
+                ..
             } => TargetSlicePredicate::Range {
                 partition_column: partition_column.clone(),
                 lower: subtract_seconds_from_date(&step.partition_value, margin_before.0),
@@ -234,6 +269,99 @@ pub async fn run_windowed_keyed_maintenance(
             Some(group) => group.statements[0].sql.clone(),
             None => rule.merge_sql(schema, table, &delta_sql, slice_predicate.as_ref()),
         };
+
+        // Route 3's declared sub-route (`LocalitySlice::RecurrenceBounded`)
+        // is admitted only **checked** (`incremental_models.md` §"Key
+        // temporal locality": "A declared `r` is admitted only checked"):
+        // before this step's merge action ever runs, probe the target for
+        // any delta key that also matches a stored row outside the slice —
+        // a violation means the declared bound was wrong, and the run must
+        // refuse rather than silently produce an incomplete merge. The
+        // probe is read-only and runs first, so a violation never reaches
+        // the write path: the target is provably unchanged, satisfying
+        // "the run's transaction rolls back" without needing a second,
+        // hand-rolled transaction wrapper around the merge itself. A
+        // **derived** `r` (`LocalitySlice::Window`) never reaches this
+        // branch at all — the check only exists for the declared route.
+        if create_group.is_none() {
+            if let Some(LocalitySlice::RecurrenceBounded {
+                partition_column,
+                margin_before,
+                ..
+            }) = locality
+            {
+                let slice_lower =
+                    subtract_seconds_from_date(&step.partition_value, margin_before.0);
+                match rule.recurrence_probe_sql(
+                    schema,
+                    table,
+                    &delta_sql,
+                    partition_column,
+                    &slice_lower,
+                ) {
+                    Some(probe_sql) => {
+                        let batches = backend.execute_sql(&probe_sql).await.map_err(|e| {
+                            anyhow::anyhow!(
+                                "Failed to execute recurrence-bound probe for model '{}':\n  \
+                                 SQL: {}\n  Error: {}",
+                                model_name,
+                                probe_sql,
+                                e
+                            )
+                        })?;
+                        let rows = crate::check_runner::batches_to_rows(&batches);
+                        let violation_count: u64 = rows
+                            .first()
+                            .and_then(|r| r.get("violation_count"))
+                            .ok_or_else(|| {
+                                anyhow::anyhow!(
+                                    "recurrence-bound probe for model '{}' returned no \
+                                     `violation_count` row — refusing to trust an unchecked \
+                                     result for a declared key-recurrence bound",
+                                    model_name
+                                )
+                            })?
+                            .parse::<u64>()
+                            .map_err(|e| {
+                                anyhow::anyhow!(
+                                    "recurrence-bound probe for model '{}' returned an \
+                                     unparseable `violation_count`: {}",
+                                    model_name,
+                                    e
+                                )
+                            })?;
+                        if violation_count > 0 {
+                            let sample_keys = rows
+                                .first()
+                                .and_then(|r| r.get("sample_keys"))
+                                .cloned()
+                                .unwrap_or_default();
+                            bail!(
+                                "KeyedRecurrenceBoundViolated: model '{}' declared a \
+                                 key-recurrence bound that {} delta row(s) violate at \
+                                 partition {} — matched (or would duplicate) a stored key \
+                                 outside the recurrence-bound slice. Sample keys: {}. The run \
+                                 is refused before any write (`docs/specs/\
+                                 incremental_models.md` §\"Key temporal locality\", route 3).",
+                                model_name,
+                                violation_count,
+                                step.partition_value,
+                                sample_keys
+                            );
+                        }
+                    }
+                    None => {
+                        bail!(
+                            "windowed-keyed-maintenance driver refused model '{}': a checked \
+                             recurrence-bounded locality slice requires the rule to provide a \
+                             recurrence-bound probe, and none was provided — refusing \
+                             fail-closed rather than silently skipping the check",
+                            model_name
+                        );
+                    }
+                }
+            }
+        }
 
         match grade {
             Grade::Additive => {
@@ -387,6 +515,12 @@ pub fn resolve_incremental_strategy(
         explicitly_mutable,
         // See the analogous call in `resolve_live_column_scoped_cell` above.
         None,
+        // Not (yet) plumbed with declared `key_recurrence` bounds at this
+        // call site — this resolver only reads the creation cell's
+        // `Technique`, which route 3's declared sub-route does not affect
+        // (a locality refusal already yields an empty-cells plan either
+        // way, falling back to `backend_default` below).
+        &[],
     ) else {
         return backend_default;
     };
@@ -500,6 +634,11 @@ pub fn resolve_live_column_scoped_cell(
         // `smelt-runtime::cumulative::execute_cumulative_aggregate`, is
         // this phase's actual slice-pruning consumer).
         None,
+        // Not (yet) plumbed with declared `key_recurrence` bounds at this
+        // call site, for the same reason as the granularity `None` above —
+        // this resolver only inspects mutation-trigger cells, which key
+        // temporal locality's routes do not gate.
+        &[],
     )?;
     explicitly_mutable.iter().find_map(|source| {
         let trigger = Trigger::UpstreamMutation {
