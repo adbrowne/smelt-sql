@@ -1826,6 +1826,27 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   admitted composed output; the runtime execution path always can.
   Design derivation: `docs/research/20260705-keyed-time-superset.md`.
 
+  Route 2's slice-pruned merge (the `IN (SELECT DISTINCT <partition_column> FROM (<delta_select>))`
+  target-scan predicate this section names above) is unexercised against a real backend even in the
+  once-write composed pool recipe family (§"Tests" below): every merge step in that family's
+  route-2 driver runs with the slice predicate omitted (`slice: None`), because passing the real
+  predicate makes DuckDB refuse to bind the `MERGE` at all — `Invalid Input Error: BindMerge -
+  expected to find an operator of type LOGICAL_GET but got FILTER` — for *any* `ON` clause that
+  combines a `USING (<subquery>)` with an `IN (SELECT …)` predicate, independent of whether the
+  delta is a `VALUES` literal or a real table and independent of `DISTINCT`; confirmed directly
+  against the `duckdb` CLI (v1.4.4 and v1.5.4). This is a genuine DuckDB `MERGE` binder limitation,
+  not a defect in the emitted predicate shape or in the test's own construction of it — the identical
+  `ON`-clause subquery form fails to bind even when both sides of the `MERGE` are ordinary tables.
+  The pool's route-2 driver still exercises the real merge mechanics it asserts (write-once
+  `pdate`, additive `total`) against real DuckDB; only the target-scan pruning optimisation itself
+  goes unexercised there (§"Key temporal locality": "pruning is not a write clamp" — every delta
+  row still merges with or without it, so omitting the predicate does not change the asserted
+  equivalence). Lifting this needs either a DuckDB-side fix/workaround upstream of
+  `smelt_logical::maintenance::emit::emit_keyed_fold` (e.g. rewriting the `IN (SELECT …)` predicate
+  to a form DuckDB's `MERGE` binder accepts, such as a pre-materialized semi-join) or a demonstrated
+  DuckDB version where the binder limitation no longer applies; tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+
   **Route 3 (recurrence-bounded)** is built: a statically-derivable `r` (the same lookback-margin
   derivation route 1's window slice uses) admits as an ordinary, unchecked window slice; a
   driving-source-declared `key_recurrence` whose `key` exactly matches the model's own `unique_key`
@@ -2061,7 +2082,17 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   `execute_project` against a real DuckDB backend, asserting emitted maintenance output equals a
   full-refresh oracle after every run step under adversarial append/lateness/mutation/redelivery/
   definition-change schedules (`SMELT_CONFORMANCE_CASES` scales the sample depth for a deeper local
-  or nightly soak run). A `pinned` module reproduces every construct × posture cell and named hazard
+  or nightly soak run). A composed (`grain: key` + `timeseries:`) recipe family exercises all three
+  key-temporal-locality routes — key-embedded (driven through `execute_project`), key-determined,
+  and declared-recurrence-bounded with in-bound redeliveries (both driven directly against a real
+  DuckDB backend, the workaround `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`
+  also uses) — asserting whole-table and per-slice equivalence after every step, gated by its own
+  admission-rate floor (`SMELT_CONFORMANCE_COMPOSED_CASES` scales its sample depth). The
+  key-determined route's merge mechanics (write-once partition, additive fold) are exercised this
+  way against real DuckDB, but its slice-pruned target scan is not — the driver runs every
+  key-determined step with the slice predicate omitted because DuckDB's `MERGE` binder refuses the
+  real predicate shape (§"Key temporal locality" above, the `BindMerge` divergence). A `pinned`
+  module reproduces every construct × posture cell and named hazard
   schedule the gate subsumes as deterministic, always-reproducible cases (never proptest-drawn
   alone), and a `registry` module tracks named divergences with a staleness report (entries that
   never fire over the deterministic sample are reported, never failed — the same governance pattern

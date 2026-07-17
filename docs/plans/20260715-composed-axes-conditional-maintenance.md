@@ -77,7 +77,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A3 | Route 2 (key-determined, once-write provenance) | done (2026-07-18) |
 | A4 | Route 3 (recurrence-bounded): consume `key_recurrence` + transactional `KeyedRecurrenceBoundViolated` check | done (2026-07-18) |
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
-| A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | pending |
+| A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending |
 | W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | pending |

@@ -194,6 +194,25 @@ pub struct SourceRecipe {
     /// [`SourcePosture::AppendOnly`]; only [`SourceRecipe::mutable_dimension`]
     /// produces [`SourcePosture::MutableSnapshot`].
     pub posture: SourcePosture,
+    /// A declared `key_recurrence` bound on this source
+    /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase A6; `sources.md` §"`mutation_profile` — the structured
+    /// block"), rendered under the structured `mutation_profile:` block
+    /// rather than the bare-string shorthand. `None` for every source
+    /// built before Phase A6 (route 3's own declared-recurrence composed
+    /// pool is the only consumer).
+    pub key_recurrence: Option<KeyRecurrenceDecl>,
+}
+
+/// A declared `key_recurrence` bound (`sources.md` §"`mutation_profile` —
+/// the structured block"): every pair of rows sharing `key` lies within
+/// `window` of each other on the event-time axis. `window` is the raw
+/// interval literal text (e.g. `"3 days"`), rendered verbatim into the
+/// YAML.
+#[derive(Debug, Clone)]
+pub struct KeyRecurrenceDecl {
+    pub key: Vec<String>,
+    pub window: String,
 }
 
 impl SourceRecipe {
@@ -211,7 +230,22 @@ impl SourceRecipe {
             payload_column: "val".to_string(),
             key_shape,
             posture: SourcePosture::AppendOnly,
+            key_recurrence: None,
         }
+    }
+
+    /// The append-only, clocked `events(d, id, val)` source ([`Self::events`]),
+    /// additionally declaring a `key_recurrence` bound
+    /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase A6) — route 3's declared fallback
+    /// (`incremental_models.md` §"Key temporal locality", route 3).
+    pub(crate) fn events_with_key_recurrence(key: Vec<String>, window: &str) -> Self {
+        let mut source = Self::events(KeyShape::Single);
+        source.key_recurrence = Some(KeyRecurrenceDecl {
+            key,
+            window: window.to_string(),
+        });
+        source
     }
 
     /// An unclocked `mutable_snapshot` dimension source, keyed on `id` and
@@ -234,6 +268,7 @@ impl SourceRecipe {
             payload_column: "attr".to_string(),
             key_shape: KeyShape::Single,
             posture: SourcePosture::MutableSnapshot,
+            key_recurrence: None,
         }
     }
 
@@ -662,12 +697,25 @@ impl MutableEnrichedRecipe {
 impl SourceRecipe {
     pub fn source_yaml(&self) -> String {
         match self.posture {
-            SourcePosture::AppendOnly => format!(
-                "description: generative-conformance keyed driving source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
-                d = self.clock_column,
-                id = self.key_column,
-                val = self.payload_column,
-            ),
+            SourcePosture::AppendOnly => {
+                let mutation_profile = match &self.key_recurrence {
+                    // Structured block (`sources.md` §"`mutation_profile` —
+                    // the structured block"): the bare-string shorthand has
+                    // no room for a nested `key_recurrence:` sub-fact.
+                    Some(kr) => format!(
+                        "mutation_profile:\n  kind: append_only\n  key_recurrence:\n    key: [{}]\n    window: '{}'\n",
+                        kr.key.join(", "),
+                        kr.window,
+                    ),
+                    None => "mutation_profile: append_only\n".to_string(),
+                };
+                format!(
+                    "description: generative-conformance keyed driving source.\n{mutation_profile}timeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+                    d = self.clock_column,
+                    id = self.key_column,
+                    val = self.payload_column,
+                )
+            }
             SourcePosture::MutableSnapshot => format!(
                 "description: generative-conformance keyed unclocked source.\nmutation_profile: mutable_snapshot\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
                 id = self.key_column,
@@ -836,6 +884,231 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction rather than by (unprovable) statistical luck.
 pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
     (0..1_000_000_i64).prop_map(move |base| (0..n as i64).map(|i| base + i).collect())
+}
+
+// ---------------------------------------------------------------------
+// Phase A6: the composed (`grain: key` + `timeseries:`) recipe family,
+// covering all three key-temporal-locality routes
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6;
+// `incremental_models.md` §"Key temporal locality").
+// ---------------------------------------------------------------------
+
+/// The three key-temporal-locality routes (`incremental_models.md` §"Key
+/// temporal locality") a composed recipe may establish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposedRoute {
+    /// Route 1 (key-embedded): `partition_column` is itself a `unique_key`
+    /// column.
+    KeyEmbedded,
+    /// Route 2 (key-determined): the partition projection is a per-key
+    /// constant under a declared `functional_dependencies:` entry.
+    KeyDetermined,
+    /// Route 3 (recurrence-bounded, declared): a declared `key_recurrence`
+    /// bound `r` on the driving source, admitted checked.
+    RecurrenceBounded,
+}
+
+/// Stable, human-readable identifier for a [`ComposedRoute`] — mirrors
+/// [`construct_kind_name`]'s role for [`BodyConstruct`].
+pub fn composed_route_name(route: ComposedRoute) -> &'static str {
+    match route {
+        ComposedRoute::KeyEmbedded => "key_embedded",
+        ComposedRoute::KeyDetermined => "key_determined",
+        ComposedRoute::RecurrenceBounded => "recurrence_bounded",
+    }
+}
+
+/// A `Strategy` drawing uniformly from the three [`ComposedRoute`]s.
+pub fn arb_composed_route() -> impl Strategy<Value = ComposedRoute> {
+    prop_oneof![
+        Just(ComposedRoute::KeyEmbedded),
+        Just(ComposedRoute::KeyDetermined),
+        Just(ComposedRoute::RecurrenceBounded),
+    ]
+}
+
+/// The declared recurrence-bound window route 3's recipes use — matches
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`'s own
+/// flagship shape (`r = 3 days`).
+pub const ROUTE3_RECURRENCE_WINDOW: &str = "3 days";
+
+/// The shared "storm" key every generated route-3 schedule redelivers
+/// across every window (`arb_composed_route3_schedule`) — the redelivery-
+/// storm hazard the recipe family is scoped to cover.
+pub const ROUTE3_STORM_KEY_ID: i64 = 900;
+
+/// A composed (`grain: key` + `timeseries:`) recipe covering one of the
+/// three key-temporal-locality routes. Every route uses the same clocked,
+/// append-only `events(d, id, val)` source; only the body shape, declared
+/// `unique_key`, and partition-column provenance differ:
+///
+/// - [`ComposedRoute::KeyEmbedded`]: `SELECT id, d, SUM(val) AS total FROM
+///   events GROUP BY id, d` — `partition_column` (`d`) is itself a
+///   `unique_key` column (route 1). Fully executable through the real
+///   `execute_project` pipeline — no extremal aggregate involved, so it
+///   does not hit the nullability blocker described below.
+/// - [`ComposedRoute::KeyDetermined`]: `SELECT id, CAST(d AS DATE) AS
+///   pdate, SUM(val) AS total FROM events GROUP BY id`, with a declared
+///   `functional_dependencies: [{key: [id], determines: pdate}]` — `pdate`
+///   is a direct scalar wrapper of the driving source's own clock column,
+///   the one NOT-NULL-provable, non-extremal shape route 2 admits
+///   (`smelt_logical::analysis::not_null::partition_column_provably_not_null`'s
+///   doc comment).
+/// - [`ComposedRoute::RecurrenceBounded`]: `SELECT id, MAX(d) AS last_seen
+///   FROM events GROUP BY id`, with the driving source declaring
+///   `key_recurrence: {key: [id], window: '3 days'}` — the flagship
+///   extremal-fold shape route 3 exists for.
+///
+/// `KeyDetermined`'s and `RecurrenceBounded`'s rendered model+source files
+/// are admitted by the real key-temporal-locality gate
+/// (`establish_locality`, exercised through `smelt-db`'s real
+/// `maintenance_plan_report` Salsa query over the real staged
+/// frontmatter/YAML) but are **not** executable through the real
+/// `execute_project` pipeline today — a documented, pre-existing gap
+/// independent of this pool (`incremental_models.md` §Known Divergences:
+/// every extremal `MIN`/`MAX`-derived `timeseries.partition_column` trips
+/// the unrelated NOT-NULL diagnostic `execute_project`'s pre-execution gate
+/// enforces, regardless of locality admission; `KeyDetermined`'s own
+/// `pdate` scalar-wrapper projection is likewise not a real GROUP BY key
+/// nor an allowlisted aggregate, so `classify_cumulative`'s runtime
+/// grammar refuses it independently of locality admission). The
+/// conformance gate therefore drives these two routes' actual merge
+/// mechanics through
+/// `smelt_runtime::maintenance_driver::run_windowed_keyed_maintenance`
+/// directly against a real `DuckDbBackend` — the same workaround
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`
+/// already uses for route 3 — rather than through `execute_project`.
+#[derive(Debug, Clone)]
+pub struct ComposedKeyedRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub route: ComposedRoute,
+}
+
+impl ComposedKeyedRecipe {
+    pub fn new(route: ComposedRoute) -> Self {
+        let source = match route {
+            ComposedRoute::KeyEmbedded | ComposedRoute::KeyDetermined => {
+                SourceRecipe::events(KeyShape::Single)
+            }
+            ComposedRoute::RecurrenceBounded => SourceRecipe::events_with_key_recurrence(
+                vec!["id".to_string()],
+                ROUTE3_RECURRENCE_WINDOW,
+            ),
+        };
+        Self {
+            model_name: format!("recipe_composed_{}", composed_route_name(route)),
+            source,
+            route,
+        }
+    }
+
+    /// The model's declared `unique_key` (the GROUP BY columns of its own
+    /// outermost SELECT — matches `derive_group_by_unique_key`'s
+    /// derivation).
+    pub fn unique_key(&self) -> Vec<String> {
+        match self.route {
+            ComposedRoute::KeyEmbedded => vec![
+                self.source.key_column.clone(),
+                self.source.clock_column.clone(),
+            ],
+            ComposedRoute::KeyDetermined | ComposedRoute::RecurrenceBounded => {
+                vec![self.source.key_column.clone()]
+            }
+        }
+    }
+
+    /// The model's declared `timeseries.partition_column`.
+    pub fn partition_column(&self) -> String {
+        match self.route {
+            ComposedRoute::KeyEmbedded => self.source.clock_column.clone(),
+            ComposedRoute::KeyDetermined => "pdate".to_string(),
+            ComposedRoute::RecurrenceBounded => "last_seen".to_string(),
+        }
+    }
+
+    /// The declared `functional_dependencies:` entry (`key`, `determines`)
+    /// route 2 needs to admit — `None` for the other two routes.
+    pub fn functional_dependency(&self) -> Option<(Vec<String>, String)> {
+        match self.route {
+            ComposedRoute::KeyDetermined => Some((
+                vec![self.source.key_column.clone()],
+                self.partition_column(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The coverage-matrix cell id this recipe inhabits (mirrors
+    /// [`BodyConstruct::matrix_cell_ids`]'s convention).
+    pub fn matrix_cell_id(&self) -> String {
+        format!(
+            "composed_keyed_{}×append_only",
+            composed_route_name(self.route)
+        )
+    }
+}
+
+/// One window of a generated route-3 schedule: `run_date` is the single-day
+/// window being driven (always processed in ascending order — the
+/// windowed-keyed-maintenance driver's own contract), `rows` are the source
+/// rows inserted before that window runs. A storm-key row's own `d` need
+/// not equal `run_date` — that mismatch is exactly the "out-of-order
+/// redelivery" hazard this generator is scoped to cover (`incremental_models.md`
+/// §"Key temporal locality", route 3 "Row movement").
+#[derive(Debug, Clone)]
+pub struct ComposedRoute3Window {
+    pub run_date: chrono::NaiveDate,
+    pub rows: Vec<crate::schedule_gen::GenRow>,
+}
+
+/// A generated sequence of [`ComposedRoute3Window`]s.
+#[derive(Debug, Clone)]
+pub struct ComposedRoute3Schedule(pub Vec<ComposedRoute3Window>);
+
+/// Route-3 schedule generator: a fixed 3 disjoint one-day windows, run in
+/// ascending order (`run_date = base, base+1, base+2`); every window
+/// redelivers [`ROUTE3_STORM_KEY_ID`] with an event-time offset drawn
+/// independently per window from `{0, 1}` days off the fixed base date —
+/// decoupled from `run_date` (the driver's per-window delta is built
+/// directly from each window's own row list — `gate.rs`'s
+/// `composed_delta_values_sql` — never filtered off a physical table by
+/// `d`, so a window may legitimately redeliver an event-time value
+/// *earlier* than a prior window's own event-time: the "out-of-order
+/// redelivery, order-independent" adversarial case). The maximum pairwise
+/// spread between any two offsets (≤1) and the maximum run-date span
+/// (`run_date_max - offset_min` ≤ `2 - 0 = 2`) both stay strictly inside
+/// the declared `r = 3` days (`ROUTE3_RECURRENCE_WINDOW`), so every
+/// generated case stays **in-bound** by construction. Each window
+/// additionally contributes one fresh, never-repeated key — variety
+/// alongside the storm. Out-of-bound violation coverage is the dedicated
+/// hand-built probe in
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`, not
+/// this pool's job.
+pub fn arb_composed_route3_schedule() -> impl Strategy<Value = ComposedRoute3Schedule> {
+    const N_WINDOWS: usize = 3;
+    let base = chrono::NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid base date");
+    proptest::collection::vec(0..=1_i64, N_WINDOWS).prop_map(move |storm_offsets| {
+        let mut windows = Vec::new();
+        for (i, offset) in storm_offsets.iter().enumerate() {
+            let run_date = base + chrono::Duration::days(i as i64);
+            let fresh_id = 5_000_i64 + i as i64;
+            let rows = vec![
+                crate::schedule_gen::GenRow {
+                    d: base + chrono::Duration::days(*offset),
+                    id: ROUTE3_STORM_KEY_ID,
+                    val: 10 + i as i64,
+                },
+                crate::schedule_gen::GenRow {
+                    d: run_date,
+                    id: fresh_id,
+                    val: 1 + i as i64,
+                },
+            ];
+            windows.push(ComposedRoute3Window { run_date, rows });
+        }
+        ComposedRoute3Schedule(windows)
+    })
 }
 
 #[cfg(test)]
