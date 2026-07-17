@@ -6821,3 +6821,319 @@ fn derived_table_select_alias_col_list_renames_columns() {
         types[0].data_type
     );
 }
+
+// ── Grouped extremal-aggregate nullability (MIN/MAX) ────────────────────
+//
+// `MIN(x)`/`MAX(x)` over a provably NOT NULL argument, under a GROUP BY, is
+// NOT NULL — every group has at least one row, so the fold can't collapse to
+// NULL. An ungrouped aggregate over possibly-empty input stays nullable: an
+// empty table's `SELECT MIN(x) FROM t` yields exactly one row with a NULL
+// value. See docs/specs/types.md "Aggregate nullability" and
+// docs/plans/20260715-composed-axes-conditional-maintenance.md Phase W0.
+
+fn ctx_with_t_x(x_nullable: bool) -> TypeContext {
+    let mut ctx = TypeContext::new();
+    ctx.add_source_column(
+        "raw",
+        "t",
+        "k",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+    ctx.add_source_column(
+        "raw",
+        "t",
+        "x",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: x_nullable,
+        },
+    );
+    ctx
+}
+
+#[test]
+fn grouped_min_over_not_null_arg_is_not_null() {
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT k, MIN(x) FROM t GROUP BY k", &ctx);
+    assert_eq!(types.len(), 2);
+    assert!(
+        !types[1].nullable,
+        "MIN(x) over a NOT NULL argument under GROUP BY must infer NOT NULL, got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn grouped_max_over_not_null_arg_is_not_null() {
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT k, MAX(x) FROM t GROUP BY k", &ctx);
+    assert_eq!(types.len(), 2);
+    assert!(
+        !types[1].nullable,
+        "MAX(x) over a NOT NULL argument under GROUP BY must infer NOT NULL, got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn grouped_min_over_nullable_arg_stays_nullable() {
+    let ctx = ctx_with_t_x(true);
+    let types = infer_sql_with_ctx("SELECT k, MIN(x) FROM t GROUP BY k", &ctx);
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[1].nullable,
+        "MIN(x) over a nullable argument must stay nullable even under GROUP BY, got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn grouped_max_over_nullable_arg_stays_nullable() {
+    let ctx = ctx_with_t_x(true);
+    let types = infer_sql_with_ctx("SELECT k, MAX(x) FROM t GROUP BY k", &ctx);
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[1].nullable,
+        "MAX(x) over a nullable argument must stay nullable even under GROUP BY, got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn ungrouped_min_over_not_null_arg_stays_nullable() {
+    // Empty-input soundness boundary: a zero-row `t` makes `SELECT MIN(x)
+    // FROM t` produce one row with a NULL value, regardless of `x`'s own
+    // nullability. Without a GROUP BY, the tag must not fire.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT MIN(x) FROM t", &ctx);
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].nullable,
+        "ungrouped MIN(x) must stay nullable even over a NOT NULL argument (empty-input case), got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn ungrouped_max_over_not_null_arg_stays_nullable() {
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT MAX(x) FROM t", &ctx);
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].nullable,
+        "ungrouped MAX(x) must stay nullable even over a NOT NULL argument (empty-input case), got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn grouping_sets_with_empty_set_min_stays_nullable() {
+    // GROUPING SETS ((k), ()) includes an explicit empty grouping set, which
+    // produces a grand-total row that itself collapses to a single NULL row
+    // over an empty input table — the same empty-input soundness boundary as
+    // the plain ungrouped case. A GROUP BY clause containing an empty
+    // grouping set must NOT be treated as safely grouped for extremal
+    // nullability propagation, even though it has a non-empty
+    // GROUP_BY_CLAUSE.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx(
+        "SELECT MIN(x) FROM t GROUP BY GROUPING SETS ((k), ())",
+        &ctx,
+    );
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].nullable,
+        "MIN(x) under GROUPING SETS containing an empty set () must stay nullable, got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn grouping_sets_without_empty_set_min_is_not_null() {
+    // Sanity check on the other side of the fix: a GROUPING SETS list where
+    // every member set is non-empty still gives the "every group has >= 1
+    // row" guarantee and must keep being treated as safely grouped.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT MIN(x) FROM t GROUP BY GROUPING SETS ((k))", &ctx);
+    assert_eq!(types.len(), 1);
+    assert!(
+        !types[0].nullable,
+        "MIN(x) under GROUPING SETS with no empty set must infer NOT NULL, got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn rollup_min_stays_nullable() {
+    // GROUP BY ROLLUP(k) implies an always-present grand-total row, just
+    // like an explicit empty GROUPING SETS member — that row itself
+    // collapses to NULL over a zero-row input table. smelt has no dedicated
+    // ROLLUP grammar; `ROLLUP(k)` parses as an ordinary FUNCTION_CALL in the
+    // GROUP BY list, so the grand-total detection must recognise it there.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT MIN(x) FROM t GROUP BY ROLLUP(k)", &ctx);
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].nullable,
+        "MIN(x) under GROUP BY ROLLUP(k) must stay nullable, got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn cube_min_stays_nullable() {
+    // Same reasoning as `rollup_min_stays_nullable`: CUBE(...) also always
+    // includes the empty (grand-total) grouping in its expansion.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT MIN(x) FROM t GROUP BY CUBE(k)", &ctx);
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].nullable,
+        "MIN(x) under GROUP BY CUBE(k) must stay nullable, got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn grouping_sets_nested_rollup_min_stays_nullable() {
+    // ROLLUP(...) nested inside GROUPING SETS (...) still implies a
+    // grand-total row, per the grammar comment in `parser/select.rs`
+    // (`parse_grouping_set_element`): a nested ROLLUP/CUBE call is just a
+    // plain expression at that grammar position, caught by the same
+    // FUNCTION_CALL scan used for the top-level case.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx(
+        "SELECT MIN(x) FROM t GROUP BY GROUPING SETS (ROLLUP(k))",
+        &ctx,
+    );
+    assert_eq!(types.len(), 1);
+    assert!(
+        types[0].nullable,
+        "MIN(x) under GROUPING SETS (ROLLUP(k)) must stay nullable, got {:?}",
+        types[0]
+    );
+}
+
+#[test]
+fn grouped_min_window_with_bounded_frame_stays_nullable() {
+    // MIN(x) used as a *window function* (OVER (...)) inside a query that
+    // also has a GROUP BY. The grouped-extremal NOT-NULL rule must not fire
+    // here: a bounded window frame (ROWS BETWEEN 2 PRECEDING AND 1
+    // PRECEDING) can be empty at a partition's boundary rows, and DuckDB
+    // genuinely returns NULL for MIN/MAX over an empty window frame — the
+    // "every group has >= 1 row" guarantee that justifies the grouped rule
+    // has nothing to do with per-row window frames within a group.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx(
+        "SELECT k, MIN(x) OVER (PARTITION BY k ORDER BY x ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM t GROUP BY k, x",
+        &ctx,
+    );
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[1].nullable,
+        "windowed MIN(x) OVER (... ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) must stay \
+         nullable even over a NOT NULL argument under GROUP BY (empty-frame boundary rows), \
+         got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn grouped_max_window_with_bounded_frame_stays_nullable() {
+    // Same reasoning as `grouped_min_window_with_bounded_frame_stays_nullable`
+    // for MAX.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx(
+        "SELECT k, MAX(x) OVER (PARTITION BY k ORDER BY x ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) FROM t GROUP BY k, x",
+        &ctx,
+    );
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[1].nullable,
+        "windowed MAX(x) OVER (... ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING) must stay \
+         nullable even over a NOT NULL argument under GROUP BY (empty-frame boundary rows), \
+         got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn grouped_min_with_filter_clause_stays_nullable() {
+    // FILTER (WHERE ...) on the aggregate call itself defeats the "every
+    // group has ≥1 row" guarantee: even under a real GROUP BY, if every row
+    // in a group fails the filter predicate, the aggregate result for that
+    // group is NULL regardless of the argument's own nullability.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx(
+        "SELECT k, MIN(x) FILTER (WHERE k > 0) FROM t GROUP BY k",
+        &ctx,
+    );
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[1].nullable,
+        "MIN(x) FILTER (WHERE ...) under GROUP BY must stay nullable even over a NOT NULL \
+         argument (a group's rows can all fail the filter), got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn grouped_max_with_filter_clause_stays_nullable() {
+    // Same reasoning as `grouped_min_with_filter_clause_stays_nullable` for MAX.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx(
+        "SELECT k, MAX(x) FILTER (WHERE k > 0) FROM t GROUP BY k",
+        &ctx,
+    );
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[1].nullable,
+        "MAX(x) FILTER (WHERE ...) under GROUP BY must stay nullable even over a NOT NULL \
+         argument (a group's rows can all fail the filter), got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn group_by_all_aggregate_only_select_list_min_stays_nullable() {
+    // `GROUP BY ALL` (DuckDB) groups by every non-aggregate select item. When
+    // the select list contains only aggregate items, there are zero actual
+    // grouping keys — this degenerates to the ungrouped case (a zero-row
+    // table folds to a single NULL row), not a real "every group has ≥1
+    // row" guarantee.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT MIN(x), MAX(x) FROM t GROUP BY ALL", &ctx);
+    assert_eq!(types.len(), 2);
+    assert!(
+        types[0].nullable,
+        "MIN(x) under GROUP BY ALL with an all-aggregate select list must stay nullable \
+         (zero actual grouping keys, same as ungrouped), got {:?}",
+        types[0]
+    );
+    assert!(
+        types[1].nullable,
+        "MAX(x) under GROUP BY ALL with an all-aggregate select list must stay nullable \
+         (zero actual grouping keys, same as ungrouped), got {:?}",
+        types[1]
+    );
+}
+
+#[test]
+fn group_by_all_with_non_aggregate_item_min_is_not_null() {
+    // Sanity check on the other side of the fix: when the select list has at
+    // least one non-aggregate item (`k`), `GROUP BY ALL` groups by that
+    // item's distinct values — each group is real and has ≥1 row, so the
+    // grouped-extremal rule applies as normal.
+    let ctx = ctx_with_t_x(false);
+    let types = infer_sql_with_ctx("SELECT k, MIN(x) FROM t GROUP BY ALL", &ctx);
+    assert_eq!(types.len(), 2);
+    assert!(
+        !types[1].nullable,
+        "MIN(x) under GROUP BY ALL with a non-aggregate select item (k) present must infer \
+         NOT NULL, got {:?}",
+        types[1]
+    );
+}

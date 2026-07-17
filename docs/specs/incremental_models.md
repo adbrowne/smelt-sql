@@ -1831,16 +1831,15 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
   Route 2's real-fixture coverage is unit- and driver-level rather than a full
   `execute_project`-driven DuckDB fixture: the keyed classifier's aggregator allowlist
-  (`combiner_for`) admits only the additive-fold and extremal-fold families, and every extremal
-  aggregate (`MIN`/`MAX`) is inferred nullable unconditionally by the type-inference registry's
-  nullability policy regardless of its argument's own nullability — so any `MIN`/`MAX`-derived
-  `timeseries.partition_column` trips the unrelated NOT-NULL diagnostic
-  (`incremental_models.md` §Diagnostics) that gates both `example_diagnostics` and
-  `execute_project`, independent of locality admission (moot for route 2 today in any case, since
-  a `MIN`/`MAX`-derived column is refused by route 2 on family grounds regardless). Building a
-  runnable route-2 fixture end-to-end needs the once-write classifier family (tracked by
-  `docs/plans/20260705-keyed-collapse.md`) to produce a determined column that is both
-  clock-derived-NOT-NULL and genuinely once-write — out of this plan's scope. The derived slice
+  (`combiner_for`) admits only the additive-fold and extremal-fold families (moot for route 2
+  today in any case, since a `MIN`/`MAX`-derived column is refused by route 2 on family grounds
+  regardless — §"Route 2 deliberately does not auto-admit" above). A grouped extremal aggregate
+  (`MIN`/`MAX` under a `GROUP BY`) over a provably NOT NULL argument infers NOT NULL
+  (`types.md` §11 "Nullability"), so a `MIN`/`MAX`-derived `timeseries.partition_column` satisfies
+  the NOT-NULL precondition (`incremental_models.md` §Diagnostics) whenever the folded argument is
+  itself NOT NULL. Building a runnable route-2 fixture end-to-end needs the once-write classifier
+  family (tracked by `docs/plans/20260705-keyed-collapse.md`) to produce a determined column that
+  is both clock-derived-NOT-NULL and genuinely once-write — out of this plan's scope. The derived slice
   and settle bound are folded into `smelt-db`'s own plan-derivation surface (`MaintenancePlan`)
   and printed by `smelt explain`; the broader per-input `smelt explain` scope-map rows
   (§"Scope maps" — the full per-input dispatch table, not just the locality verdict) remain
@@ -1879,13 +1878,15 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   violation count and sample keys) without ever writing to the target; a derived `r` never runs
   the probe. Both the probe and the merge are single-owner-emitted
   (`smelt_logical::maintenance::emit::{emit_recurrence_bound_probe, emit_keyed_fold}`) and covered
-  by the `statement_parity` gate. Route 3's own real-fixture coverage carries the identical
-  blocker route 2's paragraph above documents — its own flagship shape is also an extremal-fold
-  (`MIN`/`MAX`) partition column, which trips the same unrelated NOT-NULL diagnostic — so its
-  real-DuckDB coverage drives the windowed-keyed-maintenance driver directly (a manually-built
-  classification) rather than through the full `execute_project` pipeline; this still exercises
-  the actual emitted SQL against a real database; it does not touch the (separately tracked)
-  nullability gap. The declared-vs-derived precedence order (derived tried first) and the
+  by the `statement_parity` gate. Route 3's own real-fixture coverage is likewise driver-level:
+  its flagship shape is also an extremal-fold (`MIN`/`MAX`) partition column — now NOT NULL under
+  the grouped-extremal rule above — but its real-DuckDB coverage still drives the
+  windowed-keyed-maintenance driver directly (a manually-built classification) rather than
+  through the full `execute_project` pipeline; this exercises the actual emitted SQL against a
+  real database. Landing an `execute_project`-driven route-3 fixture (the web-analytics tracer's
+  composed `events_deduped` model) is tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`. The declared-vs-derived
+  precedence order (derived tried first) and the
   order-independent key-set comparison for the declared fallback are implementation choices this
   plan made where the spec text underdetermines them.
 
