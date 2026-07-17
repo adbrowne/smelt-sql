@@ -78,8 +78,9 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A4 | Route 3 (recurrence-bounded): consume `key_recurrence` + transactional `KeyedRecurrenceBoundViolated` check | done (2026-07-18) |
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
-| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | blocked (2026-07-18) — pre-existing MIN/MAX NOT-NULL inference gap trips at diagnostic time |
-| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | blocked (2026-07-18) — precondition W1 is blocked |
+| W0 | Extremal-aggregate nullability: `MIN`/`MAX` over a NOT NULL argument infers NOT NULL in grouped context (unblocks W1) | pending |
+| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending (reopened 2026-07-18 — was blocked on the MIN/MAX inference gap; W0 resolves it) |
+| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending (reopened 2026-07-18 — precondition W1 reopened) |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | done (2026-07-18) |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | done (2026-07-18) |
@@ -200,6 +201,13 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
   W1's exact fixture (out of scope for this phase — would require a plan edit).
   **Recommendation:** (a) — same as W1's recommendation; no autonomous action fixes this
   faster than resolving the shared blocker.
+
+- **2026-07-18 — RESOLVED (W1, W2): option (a) taken.** Phase **W0** (extremal-aggregate
+  nullability: grouped `MIN`/`MAX` over a NOT NULL argument infers NOT NULL) is scaffolded
+  in Group W and registered `pending` in the Progress table; W1 and W2 are flipped back to
+  `pending` with W0 added to W1's pre-conditions. The two blocked entries above are retained
+  for the record; do not re-block on the same cause — if W0 lands and the repro still fails,
+  that is a new finding.
 
 ---
 
@@ -441,11 +449,44 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 
 ## Group W — the web-analytics tracer (flagship fixture + docs, early)
 
+### Phase W0: Extremal-aggregate nullability inference (unblock the tracer)
+
+**Goal.** Fix the pre-existing inference gap that blocked W1: `MIN`/`MAX` (and the extremal family generally) currently infer **nullable unconditionally**, so an extremal-fold `timeseries.partition_column` (`MIN(event_date) AS first_seen_date`) can never satisfy the `timeseries.md` NOT-NULL precondition. Propagate argument nullability through extremal aggregates **in grouped context only**: `MIN(x)`/`MAX(x)` over a provably NOT NULL argument, under a `GROUP BY`, is NOT NULL (every group has at least one row). A global (ungrouped) aggregate over possibly-empty input stays nullable — that is a soundness boundary, not a limitation.
+
+**Pre-conditions.** None (independent of Groups A–S; scheduled here because W1 consumes it).
+
+**TDD tests to write first.**
+- `crates/smelt-db/src/type_inference/tests.rs` (or the module's inference unit tests) — `SELECT k, MIN(x) FROM t GROUP BY k` with `x` NOT NULL infers the MIN column NOT NULL; with `x` nullable infers nullable; `SELECT MIN(x) FROM t` (no GROUP BY) infers **nullable** even for NOT NULL `x` (empty-input soundness); same matrix for `MAX`.
+- `cargo test -p smelt-db --test nullability_property_tests` — the nullability-soundness oracle stays green (an inferred NOT NULL that DuckDB can make NULL is exactly what this oracle exists to catch; run with the default 256 cases).
+- `cargo test -p smelt-db --test type_property_tests` — the type-oracle strictness gate stays green (no new `known_unknowns`/`divergences` entries needed; if one is, it must be reviewed, not blanket-added).
+- The W1 repro from the Blocked-phases entry — the staged `events_deduped` + source-YAML shape — now passes `example_diagnostics` cleanly when staged locally (assert as a temporary fixture or unit-level admission test; W1 lands the real fixture).
+
+**Implementation shape.** The blanket seam is `crates/smelt-db/src/type_inference/function_call.rs` (~line 130): registry-backed inference wraps every result `TypedColumn::nullable(dt)`. Thread a nullability rule for the extremal aggregates: when the call is classified aggregate, the query scope is grouped, and every argument column is NOT NULL, produce a non-nullable `TypedColumn`. Prefer expressing the rule as registry data (a per-function nullability-propagation tag in `crates/smelt-types/src/signatures.rs::BuiltinRegistry`) over a name-matched special case, honoring the function-registry single-ownership invariant; scope the tag to `MIN`/`MAX` first (the other extremal/lattice aggregates — `BOOL_AND`/`BOOL_OR`/`BIT_AND`/`BIT_OR` — may adopt it in the same change only if the oracle stays green).
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-db/src/type_inference/function_call.rs` — the nullability rule.
+- `crates/smelt-types/src/signatures.rs` — the registry nullability-propagation tag (if taken as registry data).
+- `crates/smelt-db/src/type_inference/` — grouped-scope detection plumbing only.
+
+**Docs touched.**
+- `docs/specs/types.md` (or the type-semantics home) — the aggregate-nullability rule stated (grouped extremal over NOT NULL ⇒ NOT NULL; ungrouped stays nullable), timeless.
+- `docs/specs/incremental_models.md` — Known Divergences: the extremal-fold `partition_column` nullability caveat (~lines 1810–1867 per the W1 block entry) narrows.
+
+**Review checklist** (material findings only):
+- [ ] Ungrouped aggregates stay nullable — the empty-input case is covered by an explicit test, not an assumption.
+- [ ] Nullability-soundness oracle green at default depth; no divergence entries added without review.
+- [ ] Rule lives registry-first (or the hand-match site is counted by the migration ratchet honestly) — function-registry single-ownership honored.
+- [ ] The W1 repro shape passes diagnostics; W1's Blocked entry's candidate option (a) is thereby discharged.
+
+**Commit.** `fix(types): grouped MIN/MAX over a NOT NULL argument infers NOT NULL — unblocks extremal-fold partition columns`
+
+---
+
 ### Phase W1: Composed-shape model in `examples/web_analytics`
 
 **Goal.** Land the flagship composed model in the real web-analytics workspace: `silver/events_deduped.sql` — event-grain dedupe keyed by `event_id`, time-partitioned by `first_seen_date`, over the raw events source's declared `key_recurrence` (the datagen `redelivery:` block already produces the duplicate storms it absorbs). Rewire `events_parsed`'s QUALIFY-dedup consumers to read the composed model, retiring the safety-override workaround where the narrative wants it. This is the tracer: if this model doesn't fall out naturally, Group A got the shape wrong.
 
-**Pre-conditions.** A2–A5 (routes + clocked-source publication; A4 for `key_recurrence`).
+**Pre-conditions.** W0 (extremal-aggregate nullability — the flagship model's `partition_column` is an extremal fold); A2–A5 (routes + clocked-source publication; A4 for `key_recurrence`).
 
 **TDD tests to write first.**
 - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/web_analytics` stays diagnostic-clean with the new model.
