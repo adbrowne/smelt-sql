@@ -1932,6 +1932,17 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     DiagnosticCode::MaintenanceNoAdmissibleTechnique,
                     format!("no maintenance technique admits trigger {trigger}: {why}"),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
+                    grain,
+                    tracking_plan,
+                } => (
+                    DiagnosticCode::MaintenanceUnsupportedGrain,
+                    format!(
+                        "grain: {grain} is not yet supported by maintenance-plan derivation \
+                         (tracked in {tracking_plan}); declare a supported grain \
+                         (partition or key) or use refresh: full",
+                    ),
+                ),
             };
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Error,

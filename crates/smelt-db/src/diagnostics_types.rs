@@ -855,6 +855,14 @@ pub enum DiagnosticCode {
     /// classifier checks the declaration against the SQL's own grouping).
     /// Anchored at the model SQL body start.
     MaintenanceGranularityMismatch,
+    /// Emitted (Error) when a model declares `refresh: incremental` with a
+    /// `grain:` maintenance-plan derivation does not yet support (currently
+    /// `key_per_partition`) — refused fail-loud rather than silently
+    /// collapsed into an ordinary keyed plan with an empty `unique_key`
+    /// (`incremental_models.md` §Known Divergences). Names the grain and the
+    /// plan tracking the missing support. Anchored at the model SQL body
+    /// start.
+    MaintenanceUnsupportedGrain,
 }
 
 /// Structured metadata attached to diagnostics for code actions

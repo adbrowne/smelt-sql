@@ -4054,3 +4054,118 @@ fn check_excluded_from_run_and_explain() {
     // the explain/catalog, and must not cause the workspace to emit warnings).
     check_workspace_no_diagnostics("examples/data_checks");
 }
+
+/// Phase A0 TDD (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// `examples/timeseries_broken_key_per_partition/models/trajectory.sql`
+/// declares `refresh: incremental` + `grain: key_per_partition` — a grain
+/// maintenance-plan derivation does not yet support. It must produce exactly
+/// one `MaintenanceUnsupportedGrain` diagnostic naming the grain and the
+/// tracking plan, not a silently-derived keyed plan with an empty
+/// `unique_key` (`crates/smelt-db/src/queries/maintenance.rs`).
+#[test]
+fn timeseries_broken_key_per_partition_emits_unsupported_grain() {
+    use smelt_cli::{init_db, Config, ModelDiscovery};
+    use smelt_db::{DiagnosticAcc, DiagnosticCode, Workspace};
+
+    let expected_file = "models/trajectory.sql";
+
+    let path = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/timeseries_broken_key_per_partition");
+
+    let config: Config =
+        serde_yaml::from_str(&std::fs::read_to_string(path.join("smelt.yml")).unwrap()).unwrap();
+
+    let discovery = ModelDiscovery::new(path.clone(), config.paths.clone());
+    let mut models = discovery.discover_models().unwrap();
+    let function_files = discovery.discover_function_files().unwrap();
+    models.extend(function_files);
+
+    let db = init_db(&path, &models);
+    let ws = Workspace::try_get(&db).expect("workspace not initialized");
+
+    let mut target: Vec<smelt_db::Diagnostic> = Vec::new();
+    let mut other: Vec<(String, smelt_db::Diagnostic)> = Vec::new();
+
+    let is_target_code = |code: Option<&DiagnosticCode>| -> bool {
+        code == Some(&DiagnosticCode::MaintenanceUnsupportedGrain)
+    };
+
+    for model in &models {
+        let file = match db.source_file(&model.path) {
+            Some(f) => f,
+            None => continue,
+        };
+        let rel = model
+            .path
+            .strip_prefix(&path)
+            .unwrap()
+            .display()
+            .to_string();
+        let is_target = rel.replace('\\', "/").ends_with(expected_file);
+
+        for d in smelt_db::file_diagnostics(&db, ws, file).iter() {
+            if !is_target_code(d.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target.push(d.clone());
+            } else {
+                other.push((rel.clone(), d.clone()));
+            }
+        }
+        for d in smelt_db::check_type_diagnostics::accumulated::<DiagnosticAcc>(&db, ws, file) {
+            if !is_target_code(d.0.code.as_ref()) {
+                continue;
+            }
+            if is_target {
+                target.push(d.0.clone());
+            } else {
+                other.push((rel.clone(), d.0.clone()));
+            }
+        }
+    }
+
+    assert!(
+        other.is_empty(),
+        "expected zero MaintenanceUnsupportedGrain diagnostics from files other than \
+         '{expected_file}', got {}:\n  {}",
+        other.len(),
+        other
+            .iter()
+            .map(|(f, d)| format!("[{:?}] {}: {}", d.code, f, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+
+    assert_eq!(
+        target.len(),
+        1,
+        "expected exactly 1 MaintenanceUnsupportedGrain from '{expected_file}', got {}:\n  {}",
+        target.len(),
+        target
+            .iter()
+            .map(|d| format!("[{:?}]: {}", d.code, d.message))
+            .collect::<Vec<_>>()
+            .join("\n  ")
+    );
+    assert_eq!(
+        target[0].code,
+        Some(DiagnosticCode::MaintenanceUnsupportedGrain)
+    );
+    assert!(
+        target[0].message.contains("key_per_partition"),
+        "message must name the unsupported grain: {}",
+        target[0].message
+    );
+    assert!(
+        target[0]
+            .message
+            .contains("20260715-composed-axes-conditional-maintenance.md"),
+        "message must name the tracking plan: {}",
+        target[0].message
+    );
+}

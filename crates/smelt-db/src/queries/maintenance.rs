@@ -167,6 +167,21 @@ pub fn derive_model_maintenance_plan(
         return None;
     }
     let grain = metadata.grain?;
+    if grain == ConfigGrain::KeyPerPartition {
+        // Not yet supported: deriving a real plan for `key_per_partition`
+        // needs trajectory/backfill machinery that doesn't exist yet
+        // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+        // Phase A0). Refuse fail-loud instead of silently collapsing into a
+        // keyed plan with an empty `unique_key` — there is nothing
+        // meaningful to derive here, so this bypasses
+        // `derive_maintenance_plan` entirely rather than feeding it inputs
+        // built from a grain it was never taught to admit.
+        return Some(MaintenancePlanResult {
+            plan: smelt_logical::maintenance::unsupported_grain_plan("key_per_partition"),
+            column_groups: Vec::new(),
+            degenerate: Vec::new(),
+        });
+    }
     let partition_col = metadata
         .timeseries
         .as_ref()
@@ -175,7 +190,8 @@ pub fn derive_model_maintenance_plan(
         ConfigGrain::Partition => PlanGrain::Partition {
             partition_col: partition_col.clone().unwrap_or_default(),
         },
-        ConfigGrain::Key | ConfigGrain::KeyPerPartition => PlanGrain::Key { unique_key: vec![] },
+        ConfigGrain::Key => PlanGrain::Key { unique_key: vec![] },
+        ConfigGrain::KeyPerPartition => unreachable!("handled above"),
     };
     let skeleton = skeleton_columns(sql, &[], partition_col.as_deref());
     let grouping = derive_column_groups(sql, sources, &skeleton);
@@ -355,8 +371,18 @@ pub fn build_source_facts(
 /// files).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum MaintenanceRefusal {
-    ScanUnbounded { source: String, why: String },
-    NoAdmissibleTechnique { trigger: String, why: String },
+    ScanUnbounded {
+        source: String,
+        why: String,
+    },
+    NoAdmissibleTechnique {
+        trigger: String,
+        why: String,
+    },
+    UnsupportedGrain {
+        grain: String,
+        tracking_plan: String,
+    },
 }
 
 /// The result `maintenance_plan` (the Salsa query) returns: every admission
@@ -450,6 +476,13 @@ pub fn maintenance_plan_diagnostics(
             // divergences). Leave unmapped so a future phase's own diagnostic
             // lands it, exactly as `SkeletonColumnAdded` above.
             smelt_logical::maintenance::Refusal::ReachNotDerivable { .. } => None,
+            smelt_logical::maintenance::Refusal::UnsupportedGrain {
+                grain,
+                tracking_plan,
+            } => Some(MaintenanceRefusal::UnsupportedGrain {
+                grain: grain.clone(),
+                tracking_plan: tracking_plan.clone(),
+            }),
         })
         .collect();
     let cell_column_group_violations = metadata

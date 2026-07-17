@@ -229,3 +229,36 @@ fn sessions_show_sql_emits_statements() {
         "expected at least one DeleteInsert cell to check: {stdout}"
     );
 }
+
+/// Phase A0 TDD (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// `smelt explain` on `examples/timeseries_broken_key_per_partition/models/trajectory.sql`
+/// (`grain: key_per_partition`) prints the `UnsupportedGrain` refusal — naming
+/// the grain and the tracking plan — and no cell table, never a keyed cell
+/// derived with an empty `unique_key`.
+#[test]
+fn key_per_partition_shows_unsupported_grain_refusal_not_keyed_cells() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries_broken_key_per_partition")
+        .canonicalize()
+        .expect("examples/timeseries_broken_key_per_partition exists");
+
+    let report =
+        build_report_for(&project_dir, "trajectory").expect("trajectory has a maintenance plan");
+
+    assert!(
+        report.contains("Cells: (none)"),
+        "expected no cells for the unsupported key_per_partition grain: {report}"
+    );
+    assert!(
+        report.contains("UnsupportedGrain"),
+        "expected the UnsupportedGrain refusal: {report}"
+    );
+    assert!(
+        report.contains("key_per_partition"),
+        "expected the refusal to name the grain: {report}"
+    );
+    assert!(
+        report.contains("20260715-composed-axes-conditional-maintenance.md"),
+        "expected the refusal to name the tracking plan: {report}"
+    );
+}

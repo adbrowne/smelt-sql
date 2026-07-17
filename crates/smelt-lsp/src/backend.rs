@@ -454,6 +454,7 @@ impl Backend {
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
                 DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
+                DbCode::MaintenanceUnsupportedGrain => "maintenance-unsupported-grain",
             };
             NumberOrString::String(code_str.to_string())
         });

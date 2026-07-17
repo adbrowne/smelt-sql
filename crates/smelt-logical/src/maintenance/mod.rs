@@ -224,6 +224,15 @@ pub enum Refusal {
     /// creation-trigger cell cannot be clamped. Recorded (never a silent
     /// drop), naming the edge (the `MaintenanceReachNotDerivable` refusal).
     ReachNotDerivable { edge: String, why: String },
+    /// A declared `grain:` this phase of maintenance-plan derivation does not
+    /// yet support (e.g. `key_per_partition`). Names the grain and the plan
+    /// tracking the missing support, rather than silently deriving a plan for
+    /// a grain shape that was never actually admitted (the
+    /// `MaintenanceUnsupportedGrain` refusal).
+    UnsupportedGrain {
+        grain: String,
+        tracking_plan: String,
+    },
 }
 
 /// The derived maintenance plan: admitted cells plus fail-loud refusals.
@@ -238,5 +247,26 @@ impl MaintenancePlan {
     /// cell per trigger × group).
     pub fn cell_for(&self, trigger: &Trigger) -> Option<&PlanCell> {
         self.cells.iter().find(|c| &c.trigger == trigger)
+    }
+}
+
+/// The plan tracking `grain:` shapes maintenance-plan derivation does not yet
+/// support (`Refusal::UnsupportedGrain`'s `tracking_plan`).
+pub const UNSUPPORTED_GRAIN_TRACKING_PLAN: &str =
+    "docs/plans/20260715-composed-axes-conditional-maintenance.md";
+
+/// The plan derived for a `grain:` this phase of derivation does not yet
+/// support: no cells, a single [`Refusal::UnsupportedGrain`] naming `grain`
+/// and [`UNSUPPORTED_GRAIN_TRACKING_PLAN`]. There is nothing meaningful to
+/// derive for an unsupported grain, so this bypasses
+/// [`derive::derive_maintenance_plan`] entirely rather than feeding it inputs
+/// built from a grain shape it was never taught to admit.
+pub fn unsupported_grain_plan(grain: &str) -> MaintenancePlan {
+    MaintenancePlan {
+        cells: Vec::new(),
+        refusals: vec![Refusal::UnsupportedGrain {
+            grain: grain.to_string(),
+            tracking_plan: UNSUPPORTED_GRAIN_TRACKING_PLAN.to_string(),
+        }],
     }
 }

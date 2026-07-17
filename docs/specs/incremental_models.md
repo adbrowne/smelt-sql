@@ -1776,14 +1776,13 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   built, no keyed node is propagation-admissible, no key→partition dirt projection exists, and
   write-suppression compare costs cannot be slice-bounded. Tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **`grain: key_per_partition` is surface-only and collapses silently.** The value parses and
-  passes declaration validation (`unique_key` + `timeseries:` required), but the maintenance
-  derivation maps it to a plain key-grain plan **with an empty `unique_key`**
-  (`crates/smelt-db/src/queries/maintenance.rs`), no executor implements the trajectory shape,
-  and the graph layer would refuse it as an unclocked keyed node. This is a fail-loud-discipline
-  violation: the honest interim behaviour is an explicit not-yet-supported refusal at plan
-  derivation, not a silent collapse to a different grain. Tracked by
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md` (phase A0).
+- **`grain: key_per_partition` derives no plan yet.** The value parses and passes declaration
+  validation, but maintenance-plan derivation has no trajectory/backfill machinery to back the
+  per-`(key, partition)` shape, so a `refresh: incremental` model declaring it refuses fail-loud
+  at plan derivation (`MaintenanceUnsupportedGrain`, naming the grain and the tracking plan) —
+  no cells are derived and no executor runs. Full trajectory support (the locality routes, a
+  real emitted plan, and graph-layer admission of the shape) is tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **No conditional maintenance technique exists.** §"Windowed maintenance and the horizon"
   category 2 (no-op write elimination) is normative taxonomy with no implementation: every
   emitted MERGE writes all matched rows unconditionally, every region overwrite rewrites
