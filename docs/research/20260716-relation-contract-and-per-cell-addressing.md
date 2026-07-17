@@ -154,10 +154,12 @@ proposal and is the deliberate cost of the strongest unification.
 ## Part 3 — per-cell write addressing (the original ask)
 
 With addressing decoupled from the now-derived grain, every
-`(column-group × trigger × changed-input)` cell derives its physical write from:
+`(column-group × trigger × changed-input)` cell derives its physical write from the **currently
+known** pattern set — *an open list, not a closed enum* (see "The write-pattern set is open"
+below):
 
 ```
-{ region DELETE+INSERT, keyed MERGE, column-scoped MERGE, in-place UPDATE, full rebuild }
+{ region DELETE+INSERT, keyed MERGE, column-scoped MERGE, in-place UPDATE, full rebuild, … }
 ```
 
 **Available-addressings rule** — a write mechanism is admitted for a cell iff:
@@ -174,6 +176,21 @@ With addressing decoupled from the now-derived grain, every
 - SCD2's close-out cell has **only** keyed MERGE available, because its write provably escapes any
   time window — derived per-cell, fail-loud if the facts can't support it, no bespoke grain
   needed.
+
+**Addressing mechanism vs execution span — a keyed write on a clocked model is still
+partition-scoped.** Choosing *keyed MERGE* (or column-scoped MERGE / in-place UPDATE) for a cell
+picks how a row is *found* — by identity — not that the statement runs unbounded over the whole
+table. When the output also declares a `timeseries:` axis, the write stays **bounded to (and,
+where the backend benefits, iterated over) the affected partitions**: the changed-input delta is
+first resolved to the set of touched partitions, and the keyed MERGE is emitted per-partition (or
+with a partition predicate) against just those. So "dimension change → keyed MERGE" on a
+partition-clocked model is a keyed merge *scoped to the partitions the correction lands in*, not a
+single table-wide MERGE/UPDATE scan. A genuinely window-free keyed write — one whole-table MERGE —
+is the exception, reached only when the cell **provably cannot** be bounded to a partition set
+(the SCD2 close-out above, whose affected rows escape any time window); that unboundedness is
+itself a derived per-cell fact, fail-loud, not a default. Partition-scoping is orthogonal to the
+addressing corner: region and keyed writes alike ride the same partition-pruning the plan already
+computes.
 
 **User pins.** The existing override ladder is extended to name the write mechanism per trigger:
 
@@ -194,19 +211,67 @@ silently honored. This keeps the whole feature inside *validator, not chooser*.
 
 - **A (mixed by input):** the output declares **both** `timeseries:` and `unique_key:`. The
   creation-trigger cell (main fact delta) derives a region rewrite / fold; the dimension-change
-  cell derives a keyed column-scoped MERGE — available *because* `unique_key` is declared. Pin
-  either if the cost model picks wrong.
+  cell derives a keyed column-scoped MERGE — available *because* `unique_key` is declared — still
+  **scoped to the partitions the correction touches** (per the note above), not a whole-table
+  merge. Pin either if the cost model picks wrong.
 - **B (mixed by trigger):** the output declares `timeseries:` (± `unique_key`). Creation/mutation
   cells derive keyed merge / fold; the `backfill` cell is pinned
   `on: backfill, technique: recompute, write: region` → DELETE+INSERT. Licensed by the existing
   fixed-`S` interchangeability rule (a recompute supersedes and resets what folds wrote).
+
+### The write-pattern set is open (and partly backend-provided)
+
+The five patterns above are the ones we understand *today*. The set will grow — partition/atomic
+swap (Delta/Iceberg `REPLACE PARTITION`), copy-on-write vs merge-on-read variants, MERGE with
+`WHEN NOT MATCHED BY SOURCE` prune, staged-upsert, incremental MV refresh, and backend-specific
+primitives we haven't met yet. Treating the list as closed would bake today's engines into the
+surface. So the design's durable contract is deliberately **not** the enumeration; the enumeration
+is data. Three ramifications follow, and each is a reason the reframe is *more* robust to growth,
+not less:
+
+- **The invariant is the admission function, not the enum.** The stable, load-bearing thing is the
+  available-addressings rule — `available = (declared contract facts) × (trigger/changed-input
+  needs) × (the equivalence invariant)` — and the doctrine that we *validate, never choose blind*.
+  A new pattern is admitted purely by declaring **which contract facts it requires** (identity? a
+  partition axis? ordered arrival?) and **discharging the equivalence proof obligation**
+  (`incremental_state(S) == full_refresh(inputs ∈ S)` for the cells it serves). Nothing else in
+  the framing has to move: grain stays derived, the contract stays the vocabulary, the cost model
+  ranks whatever candidates the rule admits. Extensibility is *safe by construction* because the
+  equivalence gate is the price of entry, so a new mechanism can never be less correct than the
+  ones it joins.
+- **The pattern set is backend-relative, so the rule gains a fourth factor.** Not every engine
+  offers every primitive (DuckDB, Delta, Iceberg, BigQuery diverge sharply on atomic partition
+  swap, true `UPDATE`, merge-on-read). Admission is therefore
+  `available = contract facts × trigger needs × equivalence × **backend capability**`: the write
+  layer queries a **capability registry** the backend fills, and a pattern the target can't
+  execute is simply not a candidate. This makes the write-pattern registry the natural home for
+  backend-specific optimizations to be *contributed* rather than special-cased in the planner —
+  and keeps a portable project from silently depending on a primitive only one engine has.
+- **The `write:` pin is an open, fail-loud vocabulary — not a fixed keyword set.** Because pins
+  name patterns and patterns are extensible, `write:` cannot be a sealed
+  `region|keyed|column|update` enum in the surface; it is an **open name resolved against the
+  registry**. An unrecognised pin, or one naming a pattern the target backend can't provide, is
+  **refused with a diagnostic** (fail-loud discipline), never silently downgraded to a default.
+  This is the same "validator, not chooser" stance applied to the naming layer: the surface admits
+  new pattern names the moment a backend registers them, and rejects everything it cannot honour.
+
+Net: the enum is a **snapshot of a registry**, the admission rule + equivalence gate + capability
+factor are the **contract**. New write patterns are expected, plug in without reopening the
+grain/contract reframe, and each carries its own correctness proof — so growth costs a registry
+entry, not a redesign.
 
 ## Blast radius (spec edits this design drives)
 
 - **`incremental_models.md`** — rewrite §Surface "declared shape axis" and the addressing framing;
   demote grain to derived label; add the available-addressings rule and the `write:` pin; recast
   the "two axes are orthogonal" table as the actual declaration; fold `key_per_partition` and
-  locality routes into the partition∈key mechanism.
+  locality routes into the partition∈key mechanism. Frame the write-pattern set as an **open
+  registry** (non-exhaustive enum), state the admission-function-not-enumeration invariant, and
+  document `write:` as an open, fail-loud pin name rather than a sealed keyword set.
+- **`architecture.md`** — the write-pattern **capability registry** (backend-filled) and the
+  fourth admission factor (backend capability) are an architectural extension point; note who owns
+  the registry and that unsupported/unrecognised patterns fail loud, consistent with the
+  maintenance-plan-purity invariant (backends execute registered patterns, never author).
 - **`models.md`** — refresh axis keeps its trichotomy; grain moves from declared selector to
   derived label + check-only assertion; litmus-rule wording updated to name addressing as
   derived-per-cell.
@@ -233,3 +298,7 @@ silently honored. This keeps the whole feature inside *validator, not chooser*.
   models, or models only.
 - Whether `write:` is a distinct pin or a refinement of `technique:` (the four techniques already
   imply an addressing; `write:` may be redundant for all but the region-vs-keyed ambiguity).
+- Where the **write-pattern capability registry** lives and how a backend contributes a new
+  pattern: the shape of a pattern's declaration (required contract facts + equivalence proof
+  obligation + backend-capability predicate), and whether new patterns can be registered
+  out-of-tree or must land in `smelt-logical`'s maintenance layer to keep the emitter single-owner.
