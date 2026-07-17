@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-07-15
+last_reviewed: 2026-07-17
 owners: [andrew]
 ---
 
@@ -9,9 +9,8 @@ owners: [andrew]
 
 > **What this is.** The single normative spec for **maintained models** — the contract, the derived plan, the graph built on it, and the declared shapes of `refresh: incremental`. It owns, in order: (a) the **maintenance contract** every maintained (non-`full`) model upholds — the equivalence invariant, the algebraic ladder, the windowed-scan/horizon contract, validator-not-chooser, and the composition contract; (b) the **maintenance plan** — the derived, per-model object that says how each part of a model's output is kept current under each kind of change, a matrix indexed by `(output-column-group × trigger)` whose cells choose maintenance techniques; (c) the **graph layer** built on the plan — given what landed upstream, which partitions of which downstream models must run (forward propagation), and given a requested output period, which upstream slices must exist (backward resolution); and (d) the **shape profiles** of `refresh: incremental` — the partition grain (`grain: partition`), the key grain (`grain: key`), and the key grain's interval-versioning sub-declaration (`versioning: interval`, SCD2).
 >
-> **One feature, one declared axis — the shapes are not competing modes.** A modeller declares `refresh: incremental` plus how output rows are **addressed for update** — `grain: partition` or `grain: key`, the latter optionally `versioning: interval` — and everything else (technique, clamps, windows, ledgers, propagation edges) is *derived* per `(column-group × trigger)` cell. The shapes share one invariant, one plan machinery, and one graph layer; they differ only in output addressing and each shape's local machinery, all specified here. This spec supersedes and retires four earlier specs (`maintenance_plan.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`) whose file-per-shape cut misread as mutually exclusive options.
+> **One feature, two declared shape facts — the shapes are not competing modes.** A modeller declares `refresh: incremental` plus the output's **shape-defining facts** — its clock (`timeseries:`) and/or identity (`unique_key:`) — and everything else (the `grain` label, technique, **physical write addressing**, clamps, windows, ledgers, propagation edges) is *derived* per `(column-group × trigger × changed-input)` cell. The shapes share one invariant, one plan machinery, and one graph layer; they differ only in the declared facts and each shape's local machinery, all specified here. Physical write addressing — whether a cell rewrites a region or merges by key — is **not** a model-wide verdict: a model can be region-addressed with respect to its main fact table yet keyed-addressed when a *different* input changes (§"Per-cell write addressing"). This spec supersedes and retires four earlier specs (`maintenance_plan.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`) whose file-per-shape cut misread as mutually exclusive options.
 >
-FEEDBACK: I am unsure this is quite right - in particular even for updates it need not be strictly true that every update is either partition wide or key - we should be able to decide based on what changed, how the structure is etc. For example an item might be grain: partition with respect to it's main table but we update by key when a different table changes. We need to think about this a bit more deeply - why are we specifying the grain at all (there is proably a good reason?) and is it universal because the updates are probably tuned by both the table shape as well as what changed.
 > Out of scope, with their own homes: the properties a model's SQL can be proven to have (`model_properties.md`); the physical transform mechanisms themselves (`model_transforms.md`); the `refresh:` axis, the declaration law, and the litmus rule (`models.md`); source world-fact declarations (`sources.md`); the time-dimension declaration `event_time_column`/`partition_column`/`granularity` (`timeseries.md`); engine-owned maintenance (`materialized_view.md` — the one shape profile that stays a separate spec, because its maintainer is the engine, not smelt); backend capability flags (`multi_backend.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
@@ -24,30 +23,42 @@ FEEDBACK: I am unsure this is quite right - in particular even for updates it ne
 
 ### The declared shape axis
 
-The entire declared strategy surface of an incremental model is the shape:
+The entire declared shape surface of an incremental model is the two shape-defining facts of the Relation Contract (`models.md` §"The Relation Contract") — its **clock** and its **identity** — plus the optional interval-versioning sub-declaration:
 
 ```yaml
 refresh: incremental        # the one refresh mode this spec covers
-grain: partition | key      # how output rows are addressed for update
-versioning: interval        # optional; key-grain only — keep every version with a validity interval (SCD2)
+timeseries: { ... }         # the clock: a time axis (event_time_column / partition_column / granularity)
+unique_key: [ ... ]         # the identity: makes the output key-addressable (incl. whether partition_column is a member)
+versioning: interval        # optional; requires identity + no model clock — keep every version with a validity interval (SCD2)
+grain: partition | key | key_per_partition   # optional CHECK-ONLY assertion; drives nothing (§"Grain is a derived label")
 ```
 
-- **`grain: partition`** — a partition-addressed table, one row per `(partition_column, …)`: a complete table kept current by rewriting whole partitions (the recompute-a-region corner, DELETE+INSERT). Requires a `timeseries:` block. §"Partition-grain declaration (`grain: partition`)" and §"The partition grain (`grain: partition`)".
-- **`grain: key`** — keyed state, one row per `unique_key`, kept current by folding deltas into the stored state (the fold-a-delta corner, keyed `merge_into`). One profile covers the running-aggregate, latest-value, and milestone patterns; what distinguishes them is the **column family** of each projection, derived from the SQL, never declared. §"Key-grain declaration (`grain: key`)" and §"The key grain (`grain: key`)".
-- **`grain: key` + `versioning: interval`** — keyed state **plus history**: every version of a key is kept, each stamped with a non-overlapping validity interval (SCD2). Deliberately not a third grain: row addressing is still by key; the interval is structure within the key. §"Interval-versioned declaration (`versioning: interval`)" and §"Interval versioning (`versioning: interval`)".
+The four corners these two facts inhabit — and the derived `grain` label each earns — are the shape profiles this spec details:
 
-The `refresh:` axis itself (including `full`, `materialized_view`, and the `grain: key_per_partition` value) and the declaration law are owned by `models.md` §"Refresh axis"; this spec covers the `incremental` shapes above. The declarations name **output shape only** — which technique realizes which part of the output is a property of `(column-group × trigger)` cells (§"The plan (derived, reported)"), never of the model as a whole, and the machinery validates the declared shape rather than choosing one (§"Validator, not chooser").
+- **clock, no identity** → a **partition-addressed table** (derived `grain: partition`), one row per `(partition_column, …)`: a complete table whose *default* cell addressing is region rewrite (DELETE+INSERT). §"Partition-grain declaration" and §"The partition grain".
+- **identity, no clock** → **bare keyed state** (derived `grain: key`), one row per `unique_key`, read in full by consumers, kept current by folding deltas into the stored state (keyed `merge_into`). One profile covers the running-aggregate, latest-value, and milestone patterns; what distinguishes them is the **column family** of each projection, derived from the SQL, never declared. §"Key-grain declaration" and §"The key grain".
+- **clock + identity, `partition_column` ∉ key** → **keyed state with a home slice** (derived `grain: key`, time-partitioned): one row per key, each key's partition value a fixed per-key constant; admitted iff key temporal locality is established (§"Key temporal locality").
+- **clock + identity, `partition_column` ∈ key** → the **trajectory** (derived `grain: key_per_partition`): one row per `(key, partition)`; the natural key recurs across partitions.
+- the **identity-no-clock** corner **+ `versioning: interval`** → keyed state **plus history**: every version of a key kept, each stamped with a non-overlapping validity interval (SCD2). Requires identity and **no model clock** — the close-out escapes every time window, so a `timeseries:` block on the model is a hard error. Deliberately not a shape of its own: row addressing is still by key; the interval is structure within the key. §"Interval-versioned declaration" and §"Interval versioning".
+
+The `refresh:` axis itself (including `full`, `materialized_view`) and the declaration law are owned by `models.md` §"Refresh axis"; this spec covers the `incremental` shapes above. The declarations name **shape-defining facts only** — which technique realizes which part of the output, and how it **physically addresses rows**, are properties of `(column-group × trigger × changed-input)` cells (§"The plan (derived, reported)", §"Per-cell write addressing"), never of the model as a whole, and the machinery validates the declared facts rather than choosing them (§"Validator, not chooser").
+
+#### Grain is a derived label (+ optional check-only assertion)
+
+`grain` is **not declared as a driver**. It is a derived classification computed from `(clock?, identity?, partition_column ∈ key?)` — the corners above — reported by `smelt explain`, and computed for sources too (a source also has an effective grain: clocked-fact, keyed-dimension, …). A modeller who wants the friendly name in frontmatter may write it only as a **check-only assertion** (like `maintenance.scan_bounds`): it errors on mismatch with the derived facts (`models.md` §"Constraint violations") and *drives nothing*. This keeps a shared, human-readable shape name that can never disagree with the facts: the declared *facts* stay one per node, and only the *derived* label and addressing vary, so two declarations of one node can never conflict. The single fact `partition_column ∈ unique_key` distinguishes a trajectory (`key_per_partition`) from a keyed lookup whose key has a fixed home slice — which is why key temporal locality's **route 1** ("`partition_column` is a `unique_key` column") *is* the partition-∈-key case and **route 2** ("partition is a per-key constant, functionally dependent on the key") *is* the partition-∉-key case (§"Key temporal locality").
 
 #### The two axes are orthogonal — "partitioned or keyed" is a category error
 
-`grain:` declares **addressing**: how stored rows are located for update (whole-partition rewrite
-vs keyed `merge_into`). Whether the output **carries a time axis** — a partition column consumers
-can window over — is a separate, composable fact. The inhabited combinations:
+The two shape-defining facts are **orthogonal**: whether the output declares an **identity**
+(`unique_key:` — making it key-addressable) and whether it declares a **clock** (`timeseries:` — a
+time axis consumers can window over) vary independently. Physical write *addressing* (region
+rewrite vs keyed merge) is a separate, per-cell derived fact (§"Per-cell write addressing"), not a
+declared property of the shape. The inhabited combinations (with their derived `grain` label):
 
-| | output has a time axis | output has no time axis |
+| | declares a clock (time axis) | no clock |
 |---|---|---|
-| **partition-addressed** | `grain: partition` (the time axis *is* the addressing) | — (not a shape: partition addressing is addressing by the partition column) |
-| **key-addressed** | `grain: key` + admitted `timeseries:` (§"Key temporal locality (the time-partitioned output)"); `grain: key_per_partition` (one row per `(key, partition)`; `timeseries:` required — `models.md` §"Refresh axis") | `grain: key` bare (a lookup, read in full by consumers) |
+| **no identity** | derived `grain: partition` — a complete clocked table | — (a keyless, clockless table has no maintainable shape) |
+| **declares identity** | derived `grain: key` (time-partitioned, locality-admitted, `partition_column` ∉ key) or `grain: key_per_partition` (`partition_column` ∈ key) | derived `grain: key` bare — a lookup, read in full by consumers |
 
 A model with **both** a key and a partition axis is a first-class shape, not a corner case, and
 several capabilities exist **only** in that composed form
@@ -78,21 +89,26 @@ Every shape profile — the shape sections of this spec and `materialized_view.m
 ### The plan (derived, reported)
 
 Every non-`full` model has a **maintenance plan**: a set of **cells**, each keyed by
-`(output-column-group × trigger)` and carrying:
+`(output-column-group × trigger × changed-input)` and carrying:
 
-- the **corner** of the read-scope × write-scope 2×2 the cell occupies (§Semantics);
+- the **corner** of the read-scope × write-scope 2×2 the cell occupies (§Semantics), where
+  write-scope is the cell's **physical write addressing** — `{targeted addresses, region-overwrite}`;
 - the **technique** that realizes it (`DELETE`+`INSERT` region recompute, keyed fold `MERGE`,
-  column-scoped `MERGE`, in-place `UPDATE`);
+  column-scoped `MERGE`, in-place `UPDATE`, …) drawn from the open write-pattern registry
+  (§"Per-cell write addressing");
+- the **write mechanism** admitted for the cell — derived by the available-addressings rule, or a
+  validated user `write:` pin (§"Per-cell write addressing");
 - the **derived scan clamps** — per read source, the `(partition_col, before, after)` window the
   cell reads, anchored to the output region;
 - the **partition-locality verdict** per source (§Semantics);
 - the cell's **obligations** and any **traded guarantees** (per-column, two-dimensional:
   equivalence contract × settle bound).
 
-The plan is **derived, never declared**. What stays declared is the model's output shape and
-grain (`models.md`) — validated against the plan, an error on mismatch, never a silent flip.
-`smelt explain` prints the plan: every cell, its clamps and locality verdicts, the per-column
-guarantee ledger, and — at the graph level — the model's inbound edges.
+The plan is **derived, never declared**. What stays declared is the model's **shape-defining facts**
+— its clock and identity (`models.md`) — validated against the plan, an error on mismatch, never a
+silent flip; the `grain` label is derived from those facts. `smelt explain` prints the plan: every
+cell, its addressing, clamps and locality verdicts, the per-column guarantee ledger, and — at the
+graph level — the model's inbound edges.
 
 ### Triggers
 
@@ -102,6 +118,13 @@ Four trigger classes index the plan's columns:
 - **mutation** — a post-creation delta in a source some column group is mutation-sensitive to;
 - **definition change** — the model gained output fields while sources stood still;
 - **backfill** — an explicit region recompute from replayable input.
+
+Each trigger is paired with the **changed-input** it fires for — the specific source (or self-edge,
+or definition diff) whose delta drives the cell; this is the third axis of the plan's cell key. The
+same column group under the same trigger class can derive *different* physical write addressing for
+*different* changed inputs (§"Per-cell write addressing"): a creation delta on the driving fact
+rewrites/folds a region, while a mutation delta on a dimension merges by key. The scope maps
+(§"The composition contract") are the per-changed-input dispatch this axis names.
 
 ### Upstream model edges
 
@@ -128,9 +151,12 @@ maintenance:
     prefer: recompute | fold | auto        # per-model soft default (auto = cost model)
   cells:
     - columns: [<col>, ...]                # names any member of a derived column group
-      on: <source-address> | backfill      # the trigger this cell handles
+      on: <source-address> | backfill      # the trigger + changed-input this cell handles
       prefer: fold | recompute             # soft per-cell bias (cost model still refines)
-      technique: fold | recompute | rederive_columns   # hard per-cell pin (bypasses cost model)
+      technique: fold | recompute | rederive_columns   # hard per-cell technique pin (bypasses cost model)
+      write: <pattern>                     # hard per-cell addressing pin (optional); OPEN name resolved
+                                           #   against the write-pattern registry (e.g. region | keyed |
+                                           #   column | update); unknown or backend-unavailable → refused
   scan_bounds:
     require: partition_local | none        # default: partition_local
     on_violation: error | warn             # default: error
@@ -142,6 +168,13 @@ maintenance:
 
 - The override ladder is `defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
   scope winning; `technique:` alone bypasses the cost model. Almost every model sets none.
+- `cells[].write` is a **hard per-cell addressing pin**: an **open name** resolved against the
+  write-pattern registry, not a sealed keyword set (§"Per-cell write addressing" → "The
+  write-pattern set is open"). Every pin is **validated against the equivalence invariant** for its
+  cell — an addressing that cannot uphold equivalence is refused with a diagnostic, never silently
+  honoured — and an unrecognised name, or one naming a pattern the target backend cannot execute, is
+  refused fail-loud (never silently downgraded). This keeps the whole feature inside *validator, not
+  chooser*.
 - `cells[].columns` naming columns that span two derived groups is an error (it would silently
   re-partition the plan).
 - `scan_bounds` is **check-only**: it never modifies a clamp; it only refuses (or warns) when the
@@ -180,12 +213,11 @@ The normative content of this spec is that table plus the profile's **local** ma
 ```sql
 ---
 refresh: incremental
-grain: partition
+grain: partition              # optional CHECK-ONLY assertion; derived from timeseries + no unique_key
 timeseries:
   event_time_column: order_date
   partition_column: order_date
   granularity: day
-unique_key: [order_id]        # optional; backends with MERGE can use it; within-partition dedup aid only
 safety_overrides:             # optional; bypass specific safety checks
   allow_window_functions: false
   allow_having: false
@@ -200,9 +232,9 @@ FROM smelt.orders
 GROUP BY order_date, customer_id
 ```
 
-`refresh: incremental` + `grain: partition` is the entire opt-in; it implies a stored `table`. `unique_key` and `safety_overrides` are top-level frontmatter keys (`models.md` §"YAML frontmatter keys") that apply only under `grain: partition`; `safety_overrides` on a key grain is a hard error (`models.md` §"Constraint violations").
+`refresh: incremental` plus a `timeseries:` clock and **no declared identity** is the opt-in for the partition shape; the stored `table` is implied. A written `grain: partition` is the **check-only assertion** of the shape the facts already fix (§"Grain is a derived label"). `safety_overrides` is a top-level frontmatter key (`models.md` §"YAML frontmatter keys") admitted only on a partition-shaped output. Declaring a `unique_key` here does **not** add a "dedup aid" to the partition shape — it declares identity, which reshapes the output to the composed clock-and-identity keyed corner (`models.md` §"Refresh axis"), where keyed dimension-change addressing lives (§"Per-cell write addressing", §"What the composed shape uniquely enables"); `safety_overrides` is then a hard error. A model that wants only whole-partition rewrites declares no identity.
 
-A model with `grain: partition` must also declare `timeseries:` (`timeseries.md`). Missing the block produces a hard error at workspace load (`models.md` §"Constraint violations": "`grain: partition` without `timeseries`"). The declared `partition_column` must be **monotone** — validated by the event-time monotonicity trace (`model_properties.md` §"Event-time monotonicity trace"). Monotone admits either a timestamp *or* an ever-increasing integer (a sequence id / offset / watermark column): the trace recognises a constant shift over such a column (`batch_id + 5`, `batch_id - 5`) on the same footing as a constant `INTERVAL` shift over a timestamp column, while a non-monotone integer transform (`batch_id % n`, `batch_id * n`) is rejected fail-closed, naming the construct.
+The partition shape is fixed by the `timeseries:` block (`timeseries.md`); missing the block on a model asserting `grain: partition` is a hard error (`models.md` §"Constraint violations"). The declared `partition_column` must be **monotone** — validated by the event-time monotonicity trace (`model_properties.md` §"Event-time monotonicity trace"). Monotone admits either a timestamp *or* an ever-increasing integer (a sequence id / offset / watermark column): the trace recognises a constant shift over such a column (`batch_id + 5`, `batch_id - 5`) on the same footing as a constant `INTERVAL` shift over a timestamp column, while a non-monotone integer transform (`batch_id % n`, `batch_id * n`) is rejected fail-closed, naming the construct.
 
 An output column's equivalence contract is the per-column `columns.<c>.contract` declaration (`models.md` §"`columns:` — column metadata", semantics owned by this spec): `contract: plausible` exempts that column from the determinism requirement (audit stamps and surrogates the modeller accepts may vary) exactly where the pre-cut `nondeterministic_columns` list did. Listing `event_time_column`, `partition_column`, or a `unique_key` column as `plausible` is a configuration error (a skeleton position must be deterministic — `models.md` §"Constraint violations").
 
@@ -237,7 +269,7 @@ enum IncrementalStrategy {
 }
 ```
 
-DuckDB currently always uses `DeleteInsert`. UPSERT (`MERGE`) is **not** a partition-grain strategy — it is the keyed `merge_into` transform (`model_transforms.md`) the key-grain default plan drives, whose column families carry the end-state (not per-partition) equivalence contract (§"The key grain (`grain: key`)").
+DuckDB currently always uses `DeleteInsert`. A partition-shaped output's *creation/backfill* cells are region-addressed (DELETE+INSERT); UPSERT (`MERGE`) is not the addressing of those cells and a pure partition grain (no declared identity) has no keyed addressing at all. Keyed `MERGE` is the addressing a *dimension-change* cell derives on a **composed clock-and-identity** output (one that declares a `unique_key` — derived `grain: key`, time-partitioned; §"Per-cell write addressing") — the keyed `merge_into` transform (`model_transforms.md`), scoped to the touched partitions — so `MERGE` is per-cell, driven by what changed, not tied to one grain.
 
 ### Key-grain declaration (`grain: key`)
 
@@ -268,8 +300,8 @@ The normative content of this spec is that table plus the profile's **local** ma
 ```sql
 ---
 refresh: incremental
-grain: key
 unique_key: [order_id]
+grain: key                    # optional CHECK-ONLY assertion; derived from unique_key + no clock
 ---
 
 SELECT
@@ -282,7 +314,7 @@ FROM smelt.order_events
 GROUP BY order_id
 ```
 
-`refresh: incremental` + `grain: key` is the entire opt-in; it implies a stored `table` (`models.md` §Design — the modeller does not restate `materialization: table`). `unique_key` is **required** on `grain: key` (`models.md` §"Refresh axis") and must restate the `GROUP BY` column list — the classifier checks the two agree (§"The column-family catalogue"). No rule-specific config block is read or required, and `safety_overrides` — a partition-grain-only key (`models.md` §"Constraint violations") — is a hard error here.
+`refresh: incremental` plus a declared `unique_key` (with no clock, or a clock admitted under key temporal locality) is the opt-in for the key shape; the stored `table` is implied (`models.md` §Design — the modeller does not restate `materialization: table`). A written `grain: key` is the **check-only assertion** of the shape the identity fact already fixes (§"Grain is a derived label"). `unique_key` is the identity that makes the output key-addressed, and must restate the `GROUP BY` column list — the classifier checks the two agree (§"The column-family catalogue"). No rule-specific config block is read or required, and `safety_overrides` — admitted only on a partition-shaped output (`models.md` §"Constraint violations") — is a hard error once identity makes the output key-addressed.
 
 By default the output carries no partition column (§"Key-grain output shape"). A model **may** declare a `timeseries:` block to time-partition its keyed output — admitted **iff key temporal locality is established** (§Semantics "Key temporal locality"), refused otherwise (`KeyedForbidsTimeseries`, naming the missing route). Output partitioning is independent of event-time-aware *consumption*: a key-grain model over a source that carries a `timeseries:` declaration consumes that source window-forward whether or not its own output declares a clock (§Semantics). `grain: key_per_partition` (`models.md` §"Refresh axis") is a **different grain**, not a sub-declaration of this one — it stores the per-partition trajectory, not the end-state this profile maintains.
 
@@ -291,8 +323,8 @@ The time-partitioned form, on the flagship shape it exists for (event-grain dedu
 ```sql
 ---
 refresh: incremental
-grain: key
 unique_key: [event_id]
+grain: key                    # optional CHECK-ONLY assertion; derived from unique_key + locality-admitted clock
 timeseries:
   event_time_column: first_seen_at
   partition_column: first_seen_date
@@ -340,7 +372,7 @@ The pattern functions `smelt.latest(value, ordering)` (→ `MAX_BY`), `smelt.onc
 
 ### Interval-versioned declaration (`versioning: interval`)
 
-The shape profile for `refresh: incremental` + `grain: key` + `versioning: interval` (SCD2): the
+The shape profile for `refresh: incremental` + a declared identity (`unique_key:`) + `versioning: interval`, with no model clock (derived `grain: key`, SCD2): the
 stored table is keyed state **plus history** — every version of a key is kept, each stamped with
 a non-overlapping validity interval. It is deliberately not a third grain: row addressing is
 still by key; the interval is structure within the key. (Historical name: "versioned".)
@@ -351,7 +383,7 @@ Per the composition contract (§"The composition contract"), the SCD2 profile is
 
 | Kind | What the profile composes | Home |
 |---|---|---|
-| **Output shape / grain** | `grain: key` + `versioning: interval` — the key-grain sub-declaration that keeps every version with a validity interval instead of only the current row | `models.md` §"Refresh axis" |
+| **Output shape / grain** | declared identity (`unique_key:`) + `versioning: interval`, no model clock (derived `grain: key`) — the sub-declaration that keeps every version with a validity interval instead of only the current row | `models.md` §"Refresh axis" |
 | **Properties (required)** | algebraic monotonicity / ordering discriminants (value-monotone vs order-monotone, for tracked-attribute change detection); **event-time monotonicity trace** (validity is stamped from source event-time, never the run clock); **driving-fact / anchor resolution** (the single clocked source under window-forward); **window-independence / ordered-execution** (the combiner reads versions in event order) | `model_properties.md` |
 | **World-facts (consumed)** | the **timeseries clock** of an update-events / CDC feed (`timeseries.md`), *or* a mutable snapshot's **source mutation profile** (`sources.md`) — one of the two, derived from the source's shape, never declared on the model | `timeseries.md`, `sources.md` |
 | **Default plan (fold-a-delta corner)** | keyed **`merge_into`** sequenced by the **windowed-keyed-maintenance driver**, with **source-filter pushdown** on the driving source, folding through the **close-old / open-new interval maintenance** combiner (profile-local, below) | `model_transforms.md` |
@@ -365,9 +397,9 @@ The normative content of this spec is that table plus the profile's **local** ma
 ```sql
 ---
 refresh: incremental
-grain: key
-versioning: interval
 unique_key: [customer_id]
+versioning: interval
+grain: key                    # optional CHECK-ONLY assertion; derived from unique_key + no clock
 ---
 
 SELECT
@@ -377,7 +409,7 @@ SELECT
 FROM smelt.customers_snapshot
 ```
 
-`versioning: interval` is admitted only on `grain: key` (`models.md` §"Constraint violations") and is a hard error together with a `timeseries:` block on the model itself — the SCD2 close-out escapes every time window (`models.md` §"Constraint violations"). This forbids output partitioning, not event-time-aware *consumption*: like the plain key grain, a `versioning: interval` model over a source that carries a `timeseries:` declaration (an update-events / CDC feed) consumes that source window-forward (see §"Input consumption").
+`versioning: interval` is admitted only where the output declares **identity** (a `unique_key:`, the key-shaped corners — `models.md` §"Constraint violations") and is a hard error together with a `timeseries:` block on the model itself — the SCD2 close-out escapes every time window (`models.md` §"Constraint violations"). This forbids output partitioning, not event-time-aware *consumption*: like the plain key grain, a `versioning: interval` model over a source that carries a `timeseries:` declaration (an update-events / CDC feed) consumes that source window-forward (see §"Input consumption").
 
 The model's SELECT projects the **natural key** and the tracked attribute columns as they are *now*. smelt maintains the version history: each `smelt build` compares incoming rows against the stored current version per key and, where a tracked attribute changed, closes the prior version and opens a new one.
 
@@ -449,6 +481,13 @@ retired mode spellings (§Known Divergences → "The partition grain").
   refused as a column backfill.
 - `MaintenanceGraphUnsupportedNode` — a keyed-grain or self-referential node in the propagation
   graph (refused fail-loud; §Semantics).
+- `MaintenanceWriteAddressingRefused` — a `maintenance.cells[].write` pin names an addressing that
+  cannot uphold the cell's equivalence invariant (e.g. keyed on an output with no identity, or a
+  region write on a cell whose footprint escapes any partition set). Names the cell and the refused
+  pattern (§"Per-cell write addressing").
+- `MaintenanceWritePatternUnavailable` — a `write:` pin names an unrecognised pattern, or one the
+  target backend's capability registry does not provide. Names the pattern and the backend; never a
+  silent downgrade (§"Per-cell write addressing" → "The write-pattern set is open").
 
 #### Key-grain diagnostic codes
 
@@ -478,10 +517,10 @@ This is the parent contract of the whole family. Every maintained (non-`full`) m
 
 **Order/set-determinacy is a corollary, and it holds for every shape profile — the partition grain included.** The right-hand side depends only on the *set* `S`, never the order it was processed, so any conforming profile is order-independent. This is not special to the key-addressed shapes: a partition-grain model's partitions are disjoint, so its combiner is disjoint union (a commutative monoid) and the property is trivial — but it is present.
 
-The shape profiles differ not in *which* equivalence they satisfy but in **how the output is addressed for update** — the axis that actually drives the physical transform and the identity requirement:
+The shape profiles differ not in *which* equivalence they satisfy but in **how their writes address rows** — the axis that actually drives the physical transform and the identity requirement. Addressing is a per-cell fact (§"Per-cell write addressing"); each profile below names the addressing of its *dominant* (creation/default) cell, and a model may derive the other addressing for a different `(trigger × changed-input)` cell (a composed clock-and-identity output's dimension-change cell is keyed while its fact-creation cell region-rewrites the touched partitions):
 
-- **Partition-addressed** (identity-free — `grain: partition`): output is addressed by `partition_column`; a source partition maps to an output partition rewritten wholesale (DELETE+INSERT), no row identity needed. Here equivalence is additionally checkable slice-by-slice — *per-partition equivalence* — a **strengthening** of the one invariant, available because each output slice depends only on its own source partition (partition-local).
-- **Key-addressed** (identity-requiring — `grain: key`, `versioning: interval`, `refresh: materialized_view`): output is addressed by a key; each processed input contributes a delta merged into the keyed state (`merge_into`). The write reaches stored rows **by key, wherever they live** — it is *not* bounded by the incoming data's time window. The interval-versioned profile (SCD2, `versioning: interval`) is the sharp case: admitting a new value for a key requires closing the previously-open version, a row whose timestamp lies arbitrarily far outside the current input window — which is exactly why a key-addressed output cannot be maintained as a per-partition rewrite. Equivalence is checked on the end-state.
+- **Partition-addressed** (identity-free — the partition shape's default cell): output is addressed by `partition_column`; a source partition maps to an output partition rewritten wholesale (DELETE+INSERT), no row identity needed. Here equivalence is additionally checkable slice-by-slice — *per-partition equivalence* — a **strengthening** of the one invariant, available because each output slice depends only on its own source partition (partition-local).
+- **Key-addressed** (identity-requiring — the key shape's default cell, `versioning: interval`, `refresh: materialized_view`): output is addressed by a key; each processed input contributes a delta merged into the keyed state (`merge_into`). The write reaches stored rows **by key, wherever they live** — it is *not* bounded by the incoming data's time window. The interval-versioned profile (SCD2, `versioning: interval`) is the sharp case: admitting a new value for a key requires closing the previously-open version, a row whose timestamp lies arbitrarily far outside the current input window — which is exactly why a key-addressed *write* cannot be maintained as a per-partition rewrite. Equivalence is checked on the end-state.
 
 Key-addressing admits a **derived refinement**: a key-addressed output that also carries a `timeseries:` partition column, admitted when **key temporal locality** is established — every stored row a run's deltas can touch provably lies within a derived slice of the output's time axis (§"Key temporal locality"). The write is still a keyed `merge_into`; locality licenses pruning the merge's *target scan* to the slice, and makes **per-slice equivalence** — the keyed analogue of per-partition equivalence — available as the same kind of strengthening. SCD2's close-out is why this is a per-model *established fact*, not a key-grain default: some key-addressed writes intrinsically escape every time window.
 
@@ -551,7 +590,7 @@ one. Two `model_transforms.md`-catalogued transforms read a **derived** (never d
 
 ### Validator, not chooser
 
-The machinery **validates** the declared `refresh:`/`grain:` shape against the derived properties and rejects (fail-loud) when the SQL cannot uphold the shape's contract. It **never chooses or silently switches** the shape. A full refresh is the honest fallback surfaced as a diagnostic, never an automatic downgrade. (Per-cell technique choice among proven-interchangeable techniques — §"Per-cell admission" — operates strictly inside this rule: it may change freshness, never observable bits at a fixed processed-input set.)
+The machinery **validates** the declared shape — the `refresh:` value plus the shape-defining facts (clock `timeseries:`, identity `unique_key:`), and any check-only `grain:`/`write:` assertion — against the derived properties, and rejects (fail-loud) when the SQL cannot uphold the shape's contract. It **never chooses or silently switches** the shape or the addressing. A full refresh is the honest fallback surfaced as a diagnostic, never an automatic downgrade. (Per-cell technique choice among proven-interchangeable techniques — §"Per-cell admission" — operates strictly inside this rule: it may change freshness, never observable bits at a fixed processed-input set.)
 
 ### The plan matrix
 
@@ -561,15 +600,20 @@ degenerate-collapse rule are defined there; this spec consumes the resulting gro
 column axis). Creation is shared by every column (all columns of a new row are computed
 together); mutation is what partitions them.
 
-Each `(group × trigger)` cell picks a corner of the 2×2 of **read scope** (delta+state vs the
-region's full upstream input) × **write scope** (targeted addresses vs region overwrite):
+Each `(group × trigger × changed-input)` cell picks a corner of the 2×2 of **read scope**
+(delta+state vs the region's full upstream input) × **write scope** — the cell's **physical write
+addressing** (targeted addresses vs region overwrite):
 
-|              | write: targeted | write: region-overwrite |
+|              | write: targeted (keyed addressing) | write: region-overwrite (partition addressing) |
 |---|---|---|
 | **read: delta+state** | fold-a-delta | read-modify-write region |
 | **read: full-input** | column-scoped re-derivation | recompute-a-region |
 
-Recompute-a-region is contract-agnostic and unconditionally valid over replayable input; the
+The write-scope column *is* the addressing corner, and which concrete write pattern realizes it —
+keyed `MERGE`, column-scoped `MERGE`, in-place `UPDATE`, region `DELETE`+`INSERT`, or a
+backend-provided variant — is drawn from the open write-pattern registry by the available-addressings
+rule (§"Per-cell write addressing"). Recompute-a-region is contract-agnostic and unconditionally
+valid over replayable input; the
 fold corner is contract-specific (it needs a combiner algebra — §"The algebraic maintenance
 ladder"). Where the interchangeability conditions below hold, a recompute of a
 region **supersedes** and resets what folds had written there.
@@ -615,6 +659,112 @@ resets the region's ledger), recompute-then-refold double-counts. Technique choi
 proven-interchangeable techniques is the cost model's (or the operator's, via `prefer`/
 `technique`); it may change only *which `S` is reflected* (freshness), never observable bits at a
 fixed `S` — this is how per-cell choice stays inside validator-not-chooser.
+
+### Per-cell write addressing
+
+Every `(column-group × trigger × changed-input)` cell derives its **physical write** — how the cell
+locates the stored rows it updates — from the **currently known** write-pattern set, an **open
+registry**, not a closed enum:
+
+```
+{ region DELETE+INSERT, keyed MERGE, column-scoped MERGE, in-place UPDATE, full rebuild, … }
+```
+
+**The available-addressings rule.** A write mechanism is admitted for a cell iff:
+
+> `available = (which contract facts the output declares) × (what the trigger/changed-input needs) × (the equivalence invariant) × (backend capability)`
+
+The first three factors are structural; the fourth is the target engine's capability registry
+(`architecture.md`). What each declared fact gates:
+
+- keyed `MERGE` / column-scoped `MERGE` / in-place `UPDATE` require a declared `unique_key` (row
+  identity);
+- region `DELETE`+`INSERT` requires a declared partition axis (`timeseries:`) to delete by;
+- a **bare lookup** (identity, no clock) has no region → only keyed merge or full rebuild;
+- a **bare partition table** (clock, no identity) has no identity → only region rewrite or full
+  rebuild. To gain keyed dimension-change addressing the output must **declare a `unique_key`**,
+  which makes it the composed clock-and-identity keyed shape (derived `grain: key`, time-partitioned;
+  §"What the composed shape uniquely enables") — so declaring identity is **load-bearing** (it admits
+  keyed writes), never a dedup footnote;
+- SCD2's close-out cell (§"Interval versioning") has **only** keyed `MERGE` available, because its
+  write provably escapes any time window — derived per-cell, fail-loud if the facts can't support
+  it, no bespoke shape needed.
+
+A cell with no admissible write mechanism is `MaintenanceNoAdmissibleTechnique`, naming the cell.
+
+**Addressing mechanism vs execution span — a keyed write on a clocked model is still
+partition-scoped.** Choosing keyed `MERGE` (or column-scoped `MERGE` / in-place `UPDATE`) for a cell
+picks how a row is *found* — by identity — not that the statement runs unbounded over the whole
+table. When the output also declares a `timeseries:` axis, the write stays **bounded to (and, where
+the backend benefits, iterated over) the affected partitions**: the changed-input delta is first
+resolved to the set of touched partitions, and the keyed `MERGE` is emitted per-partition (or with a
+partition predicate) against just those. So "dimension change → keyed merge" on a partition-clocked
+model is a keyed merge *scoped to the partitions the correction lands in*, not a table-wide scan.
+A genuinely window-free keyed write — one whole-table `MERGE` — is the exception, reached only when
+the cell **provably cannot** be bounded to a partition set (the SCD2 close-out, whose affected rows
+escape any time window); that unboundedness is itself a derived per-cell fact, fail-loud
+(`MaintenanceUnboundedFootprint` / `MaintenanceScanUnbounded`), never a default. Partition-scoping
+is orthogonal to the addressing corner: region and keyed writes alike ride the same
+partition-pruning the plan already computes (§"Partition-local maintenance").
+
+**User pins.** The override ladder (§Surface "Frontmatter") names the write mechanism per cell via
+`maintenance.cells[].write`. A pin is **validated against the equivalence invariant** for its cell
+(§"Per-cell admission", "Interchangeability and choice") — an addressing that cannot uphold
+equivalence is **refused with a diagnostic** (`MaintenanceWriteAddressingRefused`), never silently
+honoured — and a name the target backend cannot execute is refused too
+(`MaintenanceWritePatternUnavailable`). The pin selects among *admissible* mechanisms; it never
+widens the admissible set.
+
+**The two scenarios resolved.**
+
+- **Mixed addressing by which input changed.** The output declares **both** `timeseries:` and
+  `unique_key:`. The creation-trigger cell (main fact delta) derives a region rewrite (or fold, per the plan matrix); the
+  dimension-change cell derives a keyed column-scoped `MERGE` — available *because* `unique_key` is
+  declared — still **scoped to the partitions the correction touches** (per the note above), not a
+  whole-table merge. Pin either if the cost model picks wrong.
+- **Mixed addressing by trigger.** The output declares `timeseries:` (± `unique_key`). Creation /
+  mutation cells derive keyed merge / fold; the `backfill` cell is pinned
+  `on: backfill, technique: recompute, write: region` → `DELETE`+`INSERT` (a clean region reset).
+  Licensed by the fixed-`S` interchangeability rule (a recompute supersedes and resets what folds
+  wrote — §"Per-cell admission").
+
+#### The write-pattern set is open (and partly backend-provided)
+
+The patterns above are the ones understood *today*. The set will grow — partition/atomic swap
+(Delta/Iceberg `REPLACE PARTITION`), copy-on-write vs merge-on-read variants, `MERGE … WHEN NOT
+MATCHED BY SOURCE` prune, staged-upsert, incremental MV refresh, and backend-specific primitives not
+yet met. The design's durable contract is therefore deliberately **not** the enumeration; the
+enumeration is data. Three ramifications, each a reason the reframe is *more* robust to growth:
+
+- **The invariant is the admission function, not the enum.** The stable, load-bearing thing is the
+  available-addressings rule and the *validate, never choose blind* doctrine. A new pattern is
+  admitted purely by declaring **which contract facts it requires** (identity? a partition axis?
+  ordered arrival?) and **discharging the equivalence proof obligation**
+  (`incremental_state(S) == full_refresh(inputs ∈ S)` for the cells it serves — §"The equivalence
+  invariant"). Nothing else moves: grain stays derived, the contract stays the vocabulary, the cost
+  model ranks whatever candidates the rule admits. Extensibility is *safe by construction* because
+  the equivalence gate is the price of entry — a new mechanism can never be less correct than the
+  ones it joins.
+- **The pattern set is backend-relative — the fourth admission factor.** Engines differ sharply on
+  atomic partition swap, true `UPDATE`, and merge-on-read, so admission carries **backend
+  capability** as a fourth factor: the write layer queries the backend's **capability registry**
+  (`architecture.md`), and a pattern the target cannot execute is simply not a candidate. This makes
+  the registry the natural home for backend-specific optimisations to be *contributed* rather than
+  special-cased in the planner, and keeps a portable project from silently depending on a primitive
+  only one engine has.
+- **The `write:` pin is an open, fail-loud vocabulary.** Because pins name patterns and patterns are
+  extensible, `write:` is **not** a sealed `region|keyed|column|update` enum — it is an **open name
+  resolved against the registry**. An unrecognised pin, or one naming a pattern the target backend
+  cannot provide, is **refused with a diagnostic** (fail-loud discipline), never silently downgraded
+  to a default. The surface admits new pattern names the moment a backend registers them, and rejects
+  everything it cannot honour.
+
+Net: the enum is a **snapshot of a registry**; the admission rule + equivalence gate + capability
+factor are the **contract**. A new write pattern plugs in without reopening the shape/contract
+framing and carries its own correctness proof — so growth costs a registry entry, not a redesign.
+Backends **execute** registered patterns; they never **author** maintenance-statement text
+(§"Statement emission (single owner)"; `architecture.md` §"Constraints & Invariants" maintenance-plan
+purity).
 
 ### Partition-local maintenance (the K8 guardrail)
 
@@ -1138,25 +1288,33 @@ contract-preserving at fixed `S`, smelt may measure alternative physical plans o
 offline and pin the cheapest (`smelt bakeoff`) — a capability per-query optimisers structurally
 lack (01 §11).
 
-**One invariant, not two; addressing is the real axis.** An earlier cut split the contract into
-"per-partition equivalence" (partition grain) and "end-state equivalence" (key grain), one per
-output shape. That split was miscast: order/set-determinacy falls out of the single invariant for
-*every* shape (the partition grain included), and per-partition equivalence is a *strengthening*
-of that one invariant, not a peer of it. What actually distinguishes the shapes — and drives the
-physical transform — is how the output is **addressed for update**: partition-addressed
-(identity-free, whole-partition rewrite) versus key-addressed (identity-requiring `merge_into`,
-writes reaching stored rows by key outside the input window). SCD2 is the proof that this is an
-*addressing* distinction, not a source-clock one: its close-out write escapes the input
-time-window intrinsically, so it can never be a per-partition rewrite regardless of whether its
-source is clocked.
+**One invariant, not two; addressing is the real axis — and it is per-cell.** An earlier cut split
+the contract into "per-partition equivalence" (partition grain) and "end-state equivalence" (key
+grain), one per output shape. That split was miscast: order/set-determinacy falls out of the single
+invariant for *every* shape (the partition grain included), and per-partition equivalence is a
+*strengthening* of that one invariant, not a peer of it. What actually drives the physical transform
+is how a write **addresses rows** — partition-addressed (identity-free, whole-partition rewrite)
+versus key-addressed (identity-requiring `merge_into`, reaching stored rows by key outside the input
+window). The decisive point is that addressing is a property of *a write*, not
+of *a model*: the declared shape facts (clock, identity) fix which addressings are **available**, but
+each `(column-group × trigger × changed-input)` cell derives its own addressing from the
+available-addressings rule (§"Per-cell write addressing"). SCD2 is the proof that addressing is
+intrinsic to the *write*, not the source clock: its close-out write escapes the input time-window,
+so that cell is keyed regardless of whether its source is clocked — while the same model's creation
+cell is region-addressed. Deriving `grain: partition`'s old "addressed by whole-partition rewrite"
+half per-cell (keeping only "a stored row is one row of a complete clocked table" declared) is what
+puts each half on its correct side of the litmus line (`models.md` §Design). Full derivation:
+`docs/research/20260716-relation-contract-and-per-cell-addressing.md`.
 
-**Addressing stays binary; locality is a refinement, not a third pole.** Partition-addressed vs
-key-addressed remains the load-bearing distinction (identity-free rewrite vs identity-requiring
-merge). Key temporal locality does not change how output is addressed — the write is still a
-keyed `merge_into` — it adds a proof about *where* addressed rows can live, licensing target
-pruning, a time-partitioned keyed output, and per-slice equivalence. Promoting it to a third axis
-pole was rejected: it would suggest a different write primitive and identity requirement where
-there is none, and it would misplace a per-model derived/declared fact as a shape property
+**The two mechanisms stay binary per cell; locality is a refinement, not a third pole.** Within a
+cell, region-overwrite vs keyed-merge remains the binary write-scope corner (identity-free rewrite
+vs identity-requiring merge); which concrete pattern realizes the corner is drawn from an **open
+registry** (§"The write-pattern set is open"), so the *mechanism set* grows without the corner
+distinction changing. Key temporal locality does not change how a keyed write is addressed — it is
+still a keyed `merge_into` — it adds a proof about *where* addressed rows can live, licensing target
+pruning, a time-partitioned keyed output, and per-slice equivalence. Promoting it to a third
+addressing pole was rejected: it would suggest a different write primitive and identity requirement
+where there is none, and it would misplace a per-model derived/declared fact as a shape property
 (`docs/research/20260705-keyed-time-superset.md`).
 
 **The axes compose; exclusivity is the recurring error.** Because the pre-consolidation specs
@@ -1221,8 +1379,12 @@ new `smelt-maintenance` crate (the derivation needs the tightest coupling to the
 classifiers; module boundary kept extraction-mechanical instead — `08-code-placement.md` §2.1);
 qualifying the output clamp to a resolved inner alias (answers a question the output clamp must
 never ask — `03-design-forks.md` F1); a third addressing pole for locality (it changes no write
-primitive — §"Addressing stays binary" above); per-edge grain declarations (two declarations can
-disagree; one per node cannot). Deeper rationale:
+primitive — §"The two mechanisms stay binary per cell" above); per-edge grain declarations (two
+declarations can disagree — resolved by the derived label + check-only assertion, §"Grain is a
+derived label"); a *declared model-wide* addressing token (the per-cell plan already knows better —
+§"Addressing is per-cell", `docs/research/20260716-relation-contract-and-per-cell-addressing.md`);
+a **closed** write-pattern enum baked into the surface (bakes today's engines in — §"The
+write-pattern set is open"). Deeper rationale:
 `docs/research/20260705-refresh-as-maintenance-plan/` (parts 01–10, with ratification records in
 09 §1 and 10 §11).
 
@@ -1282,13 +1444,25 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   transform that cannot preserve it for a given model is refused, never applied approximately.
   Order/set-determinacy is a corollary of it for **every** shape (the partition grain included);
   per-partition equivalence is a *strengthening* of it, not a separate contract.
-- **Output addressing** is the load-bearing axis: partition-addressed shapes (identity-free)
-  rewrite whole partitions; key-addressed shapes (identity-requiring) `merge_into` by key and may
-  write outside the input time-window. This distinction is intrinsic to the shape (SCD2's
-  retroactive close-out), independent of the source clock. Key temporal locality, where
-  established, refines key-addressing with a derived slice bound — target-scan pruning and
-  per-slice equivalence — without changing the addressing or the write primitive
-  (§"Key temporal locality").
+- **Write addressing** is the load-bearing axis, and it is **per-cell, not per-model**:
+  region-addressed writes (identity-free) rewrite whole partitions; key-addressed writes
+  (identity-requiring) `merge_into` by key and may write outside the input time-window. Which a
+  cell uses is derived by the **available-addressings rule** — `available = declared contract facts
+  × trigger/changed-input needs × equivalence invariant × backend capability` (§"Per-cell write
+  addressing") — over the **open write-pattern registry**. The declared shape facts (clock,
+  identity) fix which addressings are *available*; a model may derive region addressing for its
+  creation cell and keyed addressing for a dimension-change cell. Some writes are intrinsically
+  keyed regardless of source clock (SCD2's retroactive close-out). A keyed write on a clocked output
+  is still **partition-scoped** to the touched partitions unless it provably cannot be
+  (§"Per-cell write addressing"). Key temporal locality, where established, refines keyed
+  addressing with a derived slice bound — target-scan pruning and per-slice equivalence — without
+  changing the addressing corner (§"Key temporal locality").
+- **The write-pattern set is an open registry, not a closed enum.** New patterns are admitted by
+  declaring their required contract facts and discharging the equivalence proof obligation; the
+  `write:` pin is an open, fail-loud name resolved against the registry; a pattern the target
+  backend cannot execute is not a candidate (`architecture.md` capability registry). The stable
+  contract is the admission function + equivalence gate, never the enumeration
+  (§"The write-pattern set is open").
 - Maintenance is **windowed by default** where the model is clocked; a full scan is a surfaced
   fallback, never the silent baseline. Always `scan window ⊇ write window`.
 - The **horizon is derived** from the model's reach; a declared horizon is a warning ceiling only
@@ -1301,10 +1475,12 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 - **Proofs are fail-closed** (owned in `model_properties.md`, relied on here): an undecidable
   construct rejects; a declared escape hatch may only *widen* eligibility, never substitute for a
   proof's default reject.
-- The declared **`refresh:` + `grain:` shape is the only declared strategy surface**;
-  input-consumption is derived from the source, never declared per model. No `strategy:`
-  sub-knob. The machinery **validates, never chooses** the shape; a fallback to full refresh is a
-  surfaced diagnostic, never an automatic switch.
+- The declared **`refresh:` value plus the shape-defining facts (clock `timeseries:`, identity
+  `unique_key:`) are the only shape surface**; the `grain` label is a derived check-only assertion,
+  physical write addressing is derived per cell (steerable only via the validated `write:` pin), and
+  input-consumption is derived from the source — none declared per model as a driver. No `strategy:`
+  sub-knob. The machinery **validates, never chooses** the shape or the addressing; a fallback to
+  full refresh is a surfaced diagnostic, never an automatic switch.
 - **The plan is pure data, derived by pure functions, in one place** (`smelt-logical`);
   consumers — diagnostics, planner application, runtime lowering, the graph layer — never
   re-derive it. (Also recorded as an invariant in `architecture.md`.)
@@ -1374,6 +1550,20 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
 ### The contract, plan, and graph layer
 
+- **The grain-demotion, per-cell `write:` pin, and open write-pattern registry are spec-ahead-of-code.**
+  This spec makes the shape-defining facts (`timeseries:` / `unique_key:`) the declared surface and
+  `grain:` a derived check-only assertion (§"The declared shape axis"); it makes physical write
+  addressing a per-`(column-group × trigger × changed-input)`-cell derivation governed by the
+  available-addressings rule, adds the `maintenance.cells[].write` pin, and frames the write-pattern
+  set as an open registry with a backend-capability admission factor (§"Per-cell write addressing").
+  Today the implementation still requires a declared `grain:` driver and does not derive the label;
+  the plan's write-scope is a fixed 2×2 corner with a closed technique set (`Technique` /
+  `IncrementalStrategy`), the `write:` frontmatter key does not parse, no write-pattern *registry* or
+  per-pattern equivalence-obligation declaration exists (the backend-capability check is the ad-hoc
+  `Backend::supports_column_scoped_merge`-style flag, not a registry), and
+  `MaintenanceWriteAddressingRefused` / `MaintenanceWritePatternUnavailable` are unbuilt codes.
+  Design derivation: `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; the
+  Relation Contract that reframes the declared facts is `models.md` §"The Relation Contract".
 - **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
   is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
   graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a
@@ -1398,9 +1588,10 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   than dead code. A thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/
   maintenance.rs`) assembles a model's referenced sources, declared output shape, and
   `maintenance:`/`columns.<c>.contract` frontmatter, calls the pure derivation, and folds two of
-  the six `Maintenance*` diagnostics — `MaintenanceNoAdmissibleTechnique` and
+  the eight `Maintenance*` diagnostics — `MaintenanceNoAdmissibleTechnique` and
   `MaintenanceScanUnbounded` — into `file_diagnostics()` (see `diagnostics.md` §Known
-  divergences for the remaining four). `smelt explain <model>` reads the same derivation (via
+  divergences for the other six, including the two write-addressing codes that guard the unbuilt
+  `write:` pin). `smelt explain <model>` reads the same derivation (via
   the non-Salsa `maintenance_plan_report`) and prints every cell's trigger, corner, technique,
   locality verdict, and scan clamps. On the execution side, the creation trigger's write
   strategy is read off the derived plan instead of a hardcoded constant (`smelt-runtime::
@@ -1836,13 +2027,17 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   `docs/plans/20260705-property-discovery-loop.md` (the empirical engine).
 - **Research**: `docs/research/20260715-conditional-maintenance-without-cdf.md` (change-suppressed
   writes, delta-restricted compute, derived change feeds — the source of the pruning taxonomy's
-  no-op write-elimination category and the composed-shape composition points).
+  no-op write-elimination category and the composed-shape composition points);
+  `docs/research/20260716-relation-contract-and-per-cell-addressing.md` (the shared Relation
+  Contract, grain-as-derived-label, per-cell write addressing, and the open write-pattern registry
+  this spec's §"Per-cell write addressing" and §"The declared shape axis" encode).
 - **Related specs** (one list for the whole spec): `model_properties.md` (the derived proofs —
   monotonicity trace, bound/reach, partition alignment, determinism, discriminants, anchor
   resolution, once-write and join-contribution proofs, `bounded_domain:`); `model_transforms.md`
   (the physical mechanisms — pushdown, DELETE+INSERT, the clamps, pinning, `merge_into`, the
   windowed-keyed-maintenance driver, dimension-horizon MERGE); `models.md` (the refresh axis,
-  declared grain, three-state declaration law, input-consumption axis, litmus rule);
+  the declared shape facts + derived grain label, the Relation Contract, three-state declaration
+  law, input-consumption axis, litmus rule);
   `timeseries.md` (declares `event_time_column`, `partition_column`, `granularity`); `sources.md`
   (host of `timeseries:` and source-lateness/mutation-profile/key-recurrence world-facts);
   `expansion.md` (function expansion; runs before every analysis stage here); `functions.md` (the

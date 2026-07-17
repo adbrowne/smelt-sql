@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-17
 owners: [andrew]
 ---
 
@@ -462,12 +462,15 @@ Owned by `docs/specs/incremental_models.md`.
 | `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. |
 | `MaintenanceGraphUnsupportedNode` | Error | A keyed-grain or self-referential node in the propagation graph; refused fail-loud rather than silently under-running. |
 | `MaintenanceGranularityMismatch` | Error | A declared `timeseries.granularity` narrows past what the model's own `partition_column` projection actually derives (a `date_trunc`-style grouping check) — a safe widen (declared coarser than or equal to the derived unit) is never flagged. |
+| `MaintenanceWriteAddressingRefused` | Error | A `maintenance.cells[].write` pin names a physical addressing that cannot uphold the cell's equivalence invariant (e.g. keyed on an output with no identity, or a region write on a cell whose footprint escapes any partition set); names the cell and the refused pattern. |
+| `MaintenanceWritePatternUnavailable` | Error | A `write:` pin names an unrecognised write pattern, or one the target backend's write-pattern capability registry does not provide; names the pattern and the backend, never a silent downgrade. |
 
 ---
 
 ## Known divergences
 
-- **Four of the seven `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, and `MaintenanceGranularityMismatch` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) and the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **Four of the seven plan/graph `Maintenance*` codes are specified and unimplemented** (the two write-addressing codes are covered in the following bullet). `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, and `MaintenanceGranularityMismatch` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) and the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **`MaintenanceWriteAddressingRefused` and `MaintenanceWritePatternUnavailable` are specified ahead of the surface they guard.** Both govern the per-cell `maintenance.cells[].write` addressing pin and the backend write-pattern capability registry (`incremental_models.md` §"Per-cell write addressing"; `architecture.md` §"Constraints & Invariants" #12), neither of which is built — the `write:` key does not parse and no registry exists — so the codes have no `DiagnosticCode` variant yet. Design derivation: `docs/research/20260716-relation-contract-and-per-cell-addressing.md`.
 
 ## Open questions
 

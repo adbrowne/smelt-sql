@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-07-07
+last_reviewed: 2026-07-17
 owners: [andrew]
 ---
 
@@ -20,6 +20,22 @@ owners: [andrew]
 A **source** is an external table that already exists in the target database, populated by some pipeline outside smelt. Smelt declares the source's schema, type-checks references, surfaces the columns in the LSP, and routes `smelt.<path>` references to the underlying `<schema>.<table>` — but it never runs `CREATE TABLE` or `INSERT` for the source. `smelt seed` does not touch sources.
 
 Beyond the schema, a source YAML declares the source's **world-facts** — delivery-contract properties of the feed (how rows change, how late they arrive, what identifies them) that no analysis of consumer SQL can derive. These facts are what license the cheaper maintenance techniques (`incremental_models.md` §"Per-cell admission"); they are declared once on the source and shared by every consumer, never per model.
+
+### The source as a Relation Contract provider
+
+A source and a model output are two **providers** of the same **Relation Contract** — one named vocabulary a downstream consumer reads without caring which provider filled it (`models.md` §"The Relation Contract"). A source fills the contract's slots by **declaration** (its world-facts are external and unprovable — the trust rule below governs them); a model output fills the same slots by **derivation** or as **declared-and-checked** shape facts. The shared slots carry **identical field paths** across both providers:
+
+| Contract slot | Source fills it with | Fill mode |
+|---|---|---|
+| **schema** | `columns:` | declared |
+| **clock** | `timeseries:` (`timeseries.md`) | declared |
+| **identity** | `unique_key:` | declared (trust rule) |
+| **mutation / arrival** | `mutation_profile:` (the mutation slot — kind, lateness, redelivery, retractions, ordering, delta identity, key recurrence) | declared (trust rule) |
+| **completeness / settle** | `watermark:` | declared |
+| **replay bound** | `retention:` | declared (trusted-replayable default) |
+| *source-only* | `name:` external routing | declared |
+
+The **clock** and **identity** slots share their field paths (`timeseries:`, `unique_key:`) with the model-output contract verbatim — which is exactly what lets a downstream consumer treat an upstream maintained model and a `sources.*` ref as the same standing (`incremental_models.md` §"Upstream model edges"). The **mutation**, **completeness**, and **replay** slots are **source-declared, model-derived**: a source declares them (it has world-knowledge of its own feed's physics; a model has none), a model proves them from its plan — so there is no field-path to reconcile, and the source keeps the `mutation_profile:` spelling of the mutation slot (§Known Divergences records the shared-name reconciliation). A source has an **effective grain** too (clocked-fact, keyed-dimension, …), derived from its clock and identity the same way a model's is (`models.md` §"Refresh axis") and reported by `smelt explain`.
 
 ### Filesystem layout
 
@@ -190,6 +206,8 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 
 ## Design
 
+**One contract, two providers.** Casting the source YAML as the source-side fill of the shared Relation Contract (§"The source as a Relation Contract provider") is what makes "an upstream maintained model is a plan edge of the same standing as a `sources.*` ref" honest rather than asserted: the clock and identity slots are literally the same field paths on both providers, and the mutation / completeness / replay slots are source-declared / model-derived, so no path collides. Sources and models are two providers, **not a symmetric pair** — the asymmetries (source-only `name:` routing and `retention:`; model-only per-column `contract:`) are explicit, not accidental. The derived `grain` label is surfaced by `smelt explain` for **sources as well as models**: the derivation (`(clock?, identity?, partition_column ∈ key?)`) is identical for both providers, so surfacing it symmetrically costs nothing and keeps the shared vocabulary honest. Full derivation: `docs/research/20260716-relation-contract-and-per-cell-addressing.md`.
+
 **World-facts live on the source, never per model.** How a feed changes, how late it arrives, what identifies a delta — these do not vary by which model reads the feed. Declaring them per consumer would let two models assert contradictory physics about one table; declaring them once makes every consumer's admission consistent and every tripwire shared. (Rejected: per-model lateness/mutation declarations — `docs/research/20260705-refresh-as-maintenance-plan/05-source-properties.md` P2.)
 
 **The trust rule generalizes `key_recurrence`'s original discipline.** The spec's earlier posture — one runtime-checked narrowing key among otherwise-trusted declarations — is now the governing classification for every world-fact: widening declarations trusted, narrowing declarations verified, assertions check-only. This is the production form of the property-loop's lesson that a declared `append_only` on a generated schedule was never trusted unverified; real sources get the same discipline, mechanically weaker (smelt cannot see every write) but structurally identical — verify what can be probed, bound the blast radius of what cannot.
@@ -226,6 +244,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 
 ## Known Divergences / Open Questions
 
+- **The mutation slot keeps the `mutation_profile:` spelling.** The shared Relation Contract names the mutation slot `mutation:` (`models.md` §"The Relation Contract"); the source-side surface keeps the existing `mutation_profile:` key, because the slot is source-declared / model-derived and no model-side field path collides with it (§"The source as a Relation Contract provider"). Renaming the source key to `mutation:` for cosmetic vocabulary alignment is a possible future cleanup, deliberately not taken here to avoid churn without a field-path benefit — the reconciliation `docs/research/20260716-relation-contract-and-per-cell-addressing.md` §Open questions flagged.
 - **The structured `mutation_profile` block parses; licensing and runtime tripwires remain unbuilt.** `crates/smelt-core/src/sources.rs` parses both the bare-string shorthand and the structured block (`kind` + `lateness`/`redelivery`/`retractions`/`ordered`/`delta_identity`/`key_recurrence`), the `mutable_snapshot` wire name, `watermark:`, composite `unique_key:`, and `retention:`. A sub-fact declared for the wrong `kind`, and the `source_lateness`/`mutation_profile.lateness` double-declare, are `MalformedSource` errors. What remains open: cross-referencing `delta_identity`/`key_recurrence.key` column names against `columns:` is not yet validated at parse time (surfaces later, at admission or runtime); the per-cell admission that reads these facts and the runtime verification mechanisms below are still unbuilt.
 - **Declared profiles license almost nothing yet.** `mutation_profile` reaches only the input-delta classifier (whose only wired consumer distinction is `change_feed`) — every partition-grain cell is served by unconditional recompute regardless of profile, and the fold/ledger techniques the licence table describes are the unbuilt machinery of `incremental_models.md` §Known Divergences. None of the verification tripwires (`SourceMutationProfileViolated`, `SourceWatermarkViolated`, `SourceUniqueKeyViolated`, `SourceRetentionExceeded`) exist; `smelt verify` does not exist.
 - **Landed-delta recording is v1 (append-only interval diff only).** The per-source delta intervals the graph layer consumes are recorded per source address in the run state (`smelt_state::landed_deltas`), no longer model-only: an append-only clocked source's landing is interval-diffed against prior coverage; a `mutable_snapshot` or unclocked source always resolves to the whole-table delta. `change_feed` offset-based delta detection and snapshot diffing are not yet built — every source still resolves through the append-only-or-whole-table path regardless of a declared `change_feed` profile.
@@ -254,6 +273,6 @@ Sources are discovered alongside every other project file by walking `paths:`. R
   - `smelt_yml.md` — `paths:` key the discovery layer consumes.
   - `timeseries.md` — the `timeseries:` block grammar this spec hosts on external sources.
   - `incremental_models.md` — the per-cell admission and graph layer these world-facts license and feed; consumer of `timeseries:` on sources via source-filter pushdown, and of `mutation_profile`/`key_recurrence` (key temporal locality).
-  - `models.md` — the input-consumption axis these declarations decide.
+  - `models.md` — the input-consumption axis these declarations decide, and §"The Relation Contract" (the shared vocabulary this source YAML is the declared-provider fill of).
   - `run_state.md` — where landed-delta intervals and probe records live.
   - `types.md` — `DataType` vocabulary used by `columns[].type`.

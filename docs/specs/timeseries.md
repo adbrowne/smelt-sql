@@ -1,7 +1,7 @@
 ---
 feature: timeseries
 status: experimental
-last_reviewed: 2026-07-05
+last_reviewed: 2026-07-17
 owners: [andrew]
 ---
 
@@ -144,6 +144,8 @@ This section captures the load-bearing rationale.
 **Closed granularity enum, not free intervals.** `hour`, `day`, `week`, `month`, `quarter`, `year` cover the vast majority of partition cadences and give planner rules a finite set to reason about (chunk arithmetic, lookback derivation, source-filter pushdown). *Free `INTERVAL` granularity* (`granularity: "12 hours"`) was rejected for v1 because the planner's run-window alignment and chunking heuristics become open-ended — easier to extend the enum than to support arbitrary intervals. A custom-granularity plugin surface is reserved for future work but ships no plugins today.
 
 **`timeseries:` lives in core, not in any planner rule.** Future planner rules — MERGE-strategy, snapshot, CDC, late-data audit — will all want to read the time dimension. Putting `timeseries:` in core means it is one declaration consumed by many rules. `incremental:` carries only the rule-specific surface; rules that don't ship as part of the default smelt distribution can still consume `timeseries:` without changing core.
+
+**The clock slot of the Relation Contract.** `timeseries:` is the **clock** slot of the shared Relation Contract (`models.md` §"The Relation Contract") — the one field path both a source (fills by declaration) and a model output (fills declared-and-checked) carry **identically**, which is precisely what lets a downstream consumer window over an upstream maintained model exactly as over a source (`incremental_models.md` §"Upstream model edges"). The shared grammar on both providers is deliberate, not a coincidence. Together with the identity slot (`unique_key:`), the presence or absence of this clock is one of the two shape-defining facts from which a relation's `grain` label is *derived* — never a declared `grain:` token (`incremental_models.md` §"Grain is a derived label").
 
 ## Constraints & Invariants
 
