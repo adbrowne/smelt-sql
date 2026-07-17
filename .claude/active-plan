@@ -137,8 +137,24 @@
 #   maintenance_conformance --quiet 2>&1 | tail -40
 # Automated nightly via the `maintenance-conformance-soak` job in
 # .github/workflows/compat.yml; run it locally/ad hoc the same way.
+# ACTIVE (2026-07-17): the composed-axes + conditional-maintenance programme —
+# the composed keyed+timeseries shape (key temporal locality), the web-analytics
+# tracer, the Relation Contract surface, graph-layer composed-node admission,
+# change-suppressed writes, the open write-pattern registry, observed output
+# deltas, delta-restricted compute, and fingerprint sidecars. One registered
+# sub-plan (34 phases, A0–G2):
+#   docs/plans/20260715-composed-axes-conditional-maintenance.md
+# Spec: docs/specs/incremental_models.md (+ models/sources/model_properties/
+# model_transforms/multi_backend); research:
+# docs/research/20260715-conditional-maintenance-without-cdf.md,
+# docs/research/20260716-relation-contract-and-per-cell-addressing.md.
+# Groups C1/D1/E1/F1 are spec-diff phases — the loop edits the sibling specs
+# before each group's code, per the plan's execution prompt.
+# PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
+# (unset → DuckDB legs skip green, a silent hole — the tracer e2e and
+# conformance legs are DuckDB-backed).
 master_plan: docs/plans/20260704-model-updates.md
-active_subplan: docs/plans/20260712-generative-maintenance-conformance.md
+active_subplan: docs/plans/20260715-composed-axes-conditional-maintenance.md
 
 # Back-compat aliases (older fresh-context flows read these names) — mirror the
 # active master + sub-plan.

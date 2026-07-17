@@ -117,7 +117,7 @@ STOP_FLAG="${STOP_FLAG:-${SCRIPT_DIR}/../autonomy.stop}"
 # probes, simulated change feeds, generated DAGs, probe graduation), under
 # the model-updates master (docs/plans/20260704-model-updates.md via
 # .claude/active-plan).
-LOG_DIR="${HOME}/.claude/logs/maintenance-conformance"
+LOG_DIR="${HOME}/.claude/logs/composed-axes"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
