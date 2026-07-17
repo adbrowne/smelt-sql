@@ -1607,6 +1607,7 @@ pub fn from_clause_alias_sources(from_clause: &smelt_parser::FromClause) -> Vec<
 }
 
 /// Why a single anchor could not be resolved among a scope's joined inputs.
+#[derive(Debug)]
 pub enum AnchorAmbiguity {
     /// No candidate among the joined inputs satisfied the test.
     NoCandidate,

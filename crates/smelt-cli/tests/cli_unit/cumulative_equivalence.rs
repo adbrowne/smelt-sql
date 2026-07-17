@@ -220,7 +220,8 @@ async fn run_cumulative_in_order(
                 .await
                 .unwrap_or_else(|e| panic!("create_table_as on {}: {}", partition, e));
         } else {
-            let merge_sql = build_cumulative_merge_sql("main", table, &delta_sql, classification);
+            let merge_sql =
+                build_cumulative_merge_sql("main", table, &delta_sql, classification, None);
             backend
                 .execute_sql(&merge_sql)
                 .await
@@ -404,7 +405,7 @@ async fn bool_and_combiner_round_trips() {
     let delta_p2 = "SELECT device_id, user_id, BOOL_AND(flag) AS all_flag \
                     FROM main.events WHERE event_date = DATE '2026-01-02' \
                     GROUP BY device_id, user_id";
-    let merge_sql = build_cumulative_merge_sql("main", "bool_and", delta_p2, &cls);
+    let merge_sql = build_cumulative_merge_sql("main", "bool_and", delta_p2, &cls, None);
     backend.execute_sql(&merge_sql).await.unwrap();
 
     // For device 1, user 100:
@@ -493,7 +494,7 @@ async fn bitwise_combiners_round_trip() {
     let delta_p2 = "SELECT key, BIT_AND(bits) AS all_bits, BIT_OR(bits) AS any_bits, \
                            BIT_XOR(bits) AS xor_bits \
                     FROM main.bits WHERE event_date = DATE '2026-01-02' GROUP BY key";
-    let merge_sql = build_cumulative_merge_sql("main", "bits_agg", delta_p2, &cls);
+    let merge_sql = build_cumulative_merge_sql("main", "bits_agg", delta_p2, &cls, None);
     backend.execute_sql(&merge_sql).await.unwrap();
 
     // For key 1:

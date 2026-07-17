@@ -1766,17 +1766,24 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   derived-horizon proof composing every source's reach into one number remains under
   construction, as does the model-author lateness-flag pattern's data-quality check. Tracked by
   `docs/plans/20260704-model-updates.md`.
-- **Key temporal locality, the time-partitioned keyed output, and the scope-map explain surface
-  are specified but unbuilt.** The locality gate and slice-pruned merge are specified at
-  §"Key temporal locality (the time-partitioned output)" (divergence recorded under §Known
-  Divergences → "The key grain" — the gate exists and refuses with the three-route
-  `KeyedForbidsTimeseries` message, but no route admits yet); the per-input `smelt explain`
-  scope-map rows are likewise unbuilt.
-  Design derivation: `docs/research/20260705-keyed-time-superset.md`. Everything
-  §"What the composed shape uniquely enables" names is gated on this: with no locality route
-  built, no keyed node is propagation-admissible, no key→partition dirt projection exists, and
-  write-suppression compare costs cannot be slice-bounded. Tracked by
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Key temporal locality: route 1 (key-embedded) and its slice-pruned merge are built; routes
+  2–3 and the scope-map explain surface are specified but unbuilt.** The locality gate
+  (§"Key temporal locality (the time-partitioned output)") checks the structural preconditions
+  (window-forward run shape, a provably NOT NULL partition column, matching granularity) and
+  admits when `partition_column` is itself a `unique_key` column: the derived slice (the run
+  step's own partition value, widened by the driving source's derived read margin) is carried as
+  a target-scan predicate on the keyed `merge_into`'s `ON` condition, pruning which stored rows
+  the merge needs to match without changing which delta rows merge. A model satisfying neither
+  route 1 nor the (still unbuilt) routes 2–3 refuses with the three-route `KeyedForbidsTimeseries`
+  message. The per-input `smelt explain` scope-map rows, and folding the derived slice into
+  `smelt-db`'s own plan-derivation surface (today it admits route 1 only where it can determine
+  the driving source's granularity; the runtime execution path always can), are still unbuilt.
+  Design derivation: `docs/research/20260705-keyed-time-superset.md`. Route 1's slice-pruned
+  merge is the prerequisite every bullet of §"What the composed shape uniquely enables" builds
+  on, but none of the four bullets themselves are realized yet: the graph-layer bullets
+  (propagation admissibility, key→partition dirt projection) need the Group B phases, and
+  slice-bounded write suppression needs the Group C phases composed with this one (tracked as
+  its own phase, C6). Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **`grain: key_per_partition` derives no plan yet.** The value parses and passes declaration
   validation, but maintenance-plan derivation has no trajectory/backfill machinery to back the
   per-`(key, partition)` shape, so a `refresh: incremental` model declaring it refuses fail-loud

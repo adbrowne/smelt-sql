@@ -113,6 +113,7 @@ fn keyed_fold_renders_combiners_and_insert_star() {
         ],
         "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, \
          MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2",
+        None,
         MaintenanceDialect::DuckDb,
     );
 
@@ -127,6 +128,68 @@ fn keyed_fold_renders_combiners_and_insert_star() {
          first_seen = LEAST(target.first_seen, delta.first_seen), \
          last_seen = GREATEST(target.last_seen, delta.last_seen) \
          WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// A locality-admitted keyed fold (`docs/specs/incremental_models.md`
+/// §"Key temporal locality") carries an extra target-side partition
+/// predicate on the `ON` condition — restricting which target rows the
+/// `MERGE` scans/matches without changing which delta rows merge (every
+/// row in `delta_select` still merges, per "Pruning is not a write
+/// clamp").
+#[test]
+fn keyed_fold_with_slice_carries_target_partition_predicate() {
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate {
+        partition_column: "event_date".to_string(),
+        lower: "2026-01-02".to_string(),
+        upper: "2026-01-02".to_string(),
+    };
+    let group = emit_keyed_fold(
+        "main.device_daily",
+        &["device_id".to_string(), "event_date".to_string()],
+        &[(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )],
+        "SELECT device_id, event_date, COUNT(*) AS event_count FROM events GROUP BY 1, 2",
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO main.device_daily AS target USING (SELECT device_id, event_date, \
+         COUNT(*) AS event_count FROM events GROUP BY 1, 2) AS delta \
+         ON target.device_id = delta.device_id AND target.event_date = delta.event_date \
+         AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02' \
+         WHEN MATCHED THEN UPDATE SET event_count = target.event_count + delta.event_count \
+         WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// A quote in a slice bound is escaped, matching every other emitter in
+/// this module (`delete_insert_escapes_quoted_literal_region_boundaries`).
+#[test]
+fn keyed_fold_slice_escapes_quoted_literal_bounds() {
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate {
+        partition_column: "name".to_string(),
+        lower: "O'Brien".to_string(),
+        upper: "Z".to_string(),
+    };
+    let group = emit_keyed_fold(
+        "main.t",
+        &["id".to_string()],
+        &[],
+        "SELECT id, name FROM events",
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        group.statements[0]
+            .sql
+            .contains("AND target.name BETWEEN 'O''Brien' AND 'Z'"),
+        "expected escaped slice bound: {}",
+        group.statements[0].sql
     );
 }
 

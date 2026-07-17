@@ -284,6 +284,10 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &sources,
             &explicitly_mutable,
             &model_edges,
+            // Not (yet) plumbed with the driving source's declared
+            // granularity at this call site — see the analogous comment in
+            // `maintenance_driver::resolve_live_column_scoped_cell`.
+            None,
         ) else {
             continue;
         };

@@ -225,6 +225,7 @@ fn described_technique_matches_execution_keyed_fold() {
             "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments \
              WHERE pay_date >= DATE '2026-01-02' AND pay_date < DATE '2026-01-03' \
              GROUP BY user_id",
+            None,
             MaintenanceDialect::DuckDb,
         ),
     );

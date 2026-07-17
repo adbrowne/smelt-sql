@@ -43,7 +43,7 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    MaintenanceDialect, Region,
+    MaintenanceDialect, Region, TargetSlicePredicate,
 };
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
 use smelt_runtime::types::ExecuteRequest;
@@ -919,6 +919,7 @@ async fn keyed_fold_statements_come_from_the_emitter() {
             ),
         ],
         delta_select,
+        None,
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -939,6 +940,213 @@ async fn keyed_fold_statements_come_from_the_emitter() {
         )
         .await,
         "the CREATE+MERGE statements execute_project actually ran must reproduce a full refresh"
+    );
+}
+
+/// The slice-predicated keyed-fold family: a `refresh: keyed` model that
+/// also declares its own `timeseries:` block, admitted through key temporal
+/// locality's route 1 (key-embedded — `partition_column` is itself a
+/// `unique_key` column, `docs/specs/incremental_models.md` §"Key temporal
+/// locality (the time-partitioned output)"; `docs/plans/20260715-composed-
+/// axes-conditional-maintenance.md` Phase A2). The established
+/// [`smelt_logical::maintenance::locality::LocalitySlice`] licenses a
+/// `target.<partition_column> BETWEEN ...` predicate on the `MERGE`'s `ON`
+/// clause (`emit_keyed_fold`'s `slice` parameter) — this is
+/// `keyed_fold_statements_come_from_the_emitter` above with one addition (the
+/// keyed model's own `timeseries:` block), proving the *slice-carrying*
+/// MERGE `execute_project` actually runs is still byte-identical to a direct
+/// `emit_keyed_fold` call with that same slice, not merely slice-shaped
+/// text.
+///
+/// `MAX` (not `SUM`) keeps the cell `Grade::Idempotent`
+/// (`WindowedKeyedRule::ledger_grade`), so the step routes through
+/// `Backend::execute_statement_group` — the funnel this test's
+/// `RecordingBackend` records — rather than the ledger-interleaved additive
+/// path, matching `keyed_fold_statements_come_from_the_emitter`'s own choice
+/// of combiner.
+#[tokio::test]
+async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    std::fs::write(
+        project_dir.join("models/sources/events.yml"),
+        "description: statement-parity locality source.\n\
+         mutation_profile: append_only\n\
+         timeseries:\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20granularity: day\n\
+         columns:\n\
+         \x20\x20- name: device_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: event_date\n\
+         \x20\x20\x20\x20type: DATE\n\
+         \x20\x20- name: amount\n\
+         \x20\x20\x20\x20type: DOUBLE\n",
+    )
+    .unwrap();
+
+    // Route 1 (key-embedded): `event_date` is both the model's own
+    // `timeseries.partition_column` and a `unique_key` column (GROUP BY 1,
+    // 2) — the same composed shape `crates/smelt-runtime/tests/
+    // locality_route1_slice_pruning.rs` exercises end-to-end (result
+    // equivalence + slice-shape assertions). This test's own contribution is
+    // the statement-parity leg: byte-identity against a direct emitter
+    // call, the missing coverage this phase's review flagged.
+    write_model(
+        project_dir,
+        "device_daily",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         timeseries:\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT device_id, event_date, MAX(amount) AS max_amount \
+         FROM smelt.sources.events GROUP BY device_id, event_date",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: keyed_slice_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main;\n\
+             CREATE TABLE main.sources_events (device_id INTEGER, event_date DATE, amount DOUBLE);\n\
+             INSERT INTO main.sources_events VALUES \
+             (1, DATE '2024-01-01', 10.0), \
+             (1, DATE '2024-01-02', 20.0), \
+             (2, DATE '2024-01-02', 5.0);",
+        )
+        .expect("seed source table");
+    }
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    // Window 1: day 1 alone — first-run CREATE TABLE ... AS, no MERGE yet.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "keyed-slice-statement-parity-run-1".to_string(),
+            make_request("dev", "2024-01-01", "2024-01-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("window 1 (create) must run");
+    }
+
+    // Window 2: day 2 alone — a single MERGE step carrying the locality
+    // slice (zero margin, since the model's SQL has no lookback construct:
+    // the slice is exactly this step's own date).
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    execute_project(
+        "keyed-slice-statement-parity-run-2".to_string(),
+        make_request("dev", "2024-01-02", "2024-01-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("window 2 (slice-predicated merge) must run");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "window 2 covers exactly one day-step, one MERGE group: {:?}",
+        groups
+    );
+
+    let merge_sql = &groups[0].statements[0].sql;
+    assert_eq!(groups[0].statements.len(), 1);
+
+    let key = vec!["device_id".to_string(), "event_date".to_string()];
+    let folds = vec![(
+        "max_amount".to_string(),
+        "GREATEST(target.max_amount, delta.max_amount)".to_string(),
+    )];
+    let slice = TargetSlicePredicate {
+        partition_column: "event_date".to_string(),
+        lower: "2024-01-02".to_string(),
+        upper: "2024-01-02".to_string(),
+    };
+
+    let prefix = "MERGE INTO main.device_daily AS target USING (";
+    let suffix = ") AS delta ON target.device_id = delta.device_id AND \
+                  target.event_date = delta.event_date AND \
+                  target.event_date BETWEEN '2024-01-02' AND '2024-01-02' \
+                  WHEN MATCHED THEN UPDATE SET \
+                  max_amount = GREATEST(target.max_amount, delta.max_amount) \
+                  WHEN NOT MATCHED THEN INSERT *";
+    assert!(
+        merge_sql.starts_with(prefix) && merge_sql.ends_with(suffix),
+        "unexpected slice-predicated merge statement: {merge_sql}"
+    );
+    let delta_select = &merge_sql[prefix.len()..merge_sql.len() - suffix.len()];
+
+    let expected = emit_keyed_fold(
+        "main.device_daily",
+        &key,
+        &folds,
+        delta_select,
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &groups[0],
+        "executed slice-predicated MERGE group must be byte-identical to a direct emitter call \
+         over the same table/key/folds/slice/delta_select"
+    );
+
+    // Result-equivalence: the CREATE (window 1) + slice-predicated MERGE
+    // (window 2) statements the run actually executed must leave
+    // `device_daily` multiset-equal to a full refresh of the model's own
+    // aggregation over every seeded row.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.device_daily",
+            "SELECT device_id, event_date, MAX(amount) AS max_amount \
+             FROM main.sources_events GROUP BY device_id, event_date"
+        )
+        .await,
+        "the CREATE+slice-predicated-MERGE statements execute_project actually ran must \
+         reproduce a full refresh"
     );
 }
 

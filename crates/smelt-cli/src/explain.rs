@@ -477,6 +477,11 @@ pub fn build_cell_statement_group(
                 &classification.unique_key,
                 &folds,
                 &compiled.sql,
+                // `smelt explain` does not yet render the locality-derived
+                // target-scan slice predicate — that surface lands in
+                // `docs/plans/20260715-composed-axes-conditional-
+                // maintenance.md` phase A5.
+                None,
                 dialect,
             ))
         }

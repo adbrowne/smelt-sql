@@ -436,6 +436,7 @@ fn ex24_keyed_fold_of_a_delta_equals_full_refresh_at_the_advanced_s() {
             "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments \
              WHERE pay_date >= DATE '2026-01-03' AND pay_date < DATE '2026-01-04' \
              GROUP BY user_id",
+            None,
             MaintenanceDialect::DuckDb,
         ),
     );

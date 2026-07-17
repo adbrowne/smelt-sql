@@ -13,7 +13,8 @@
 use std::collections::HashMap;
 
 use smelt_core::config::{
-    Grain as ConfigGrain, MaintenanceConfig, RefreshStrategy, ScanBoundsConfig, ScanBoundsRequire,
+    Grain as ConfigGrain, Granularity, MaintenanceConfig, RefreshStrategy, ScanBoundsConfig,
+    ScanBoundsRequire,
 };
 use smelt_core::sources::{MutationProfile as SourceMutationKind, SourceInfo};
 use smelt_core::ModelMetadata;
@@ -158,12 +159,22 @@ pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
 /// `refresh: incremental` models carry one (`incremental_models.md` §Surface
 /// "The plan (derived, reported)": "Every non-`full` model has a
 /// maintenance plan").
+/// `driving_source_granularity` is the model's driving source's own declared
+/// granularity, when the caller can determine it (used only by a `grain:
+/// key` model that also declares its own `timeseries:` block, to check the
+/// key-temporal-locality gate's granularity-equality structural
+/// precondition — `incremental_models.md` §"Key temporal locality").
+/// `None` fails that precondition closed (an unproven match is never
+/// admitted); the runtime execution path (`smelt-runtime::cumulative`,
+/// which has the driving source's `TimeseriesConfig` directly from the
+/// classifier) is today's actual consumer of an admitted route.
 pub fn derive_model_maintenance_plan(
     sql: &str,
     table: &str,
     metadata: &ModelMetadata,
     sources: &[SourceFacts],
     explicitly_mutable: &std::collections::HashSet<String>,
+    driving_source_granularity: Option<Granularity>,
 ) -> Option<MaintenancePlanResult> {
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
@@ -193,27 +204,6 @@ pub fn derive_model_maintenance_plan(
             partition_col: partition_col.clone().unwrap_or_default(),
         },
         ConfigGrain::Key => {
-            // A `grain: key` model that also declares a `timeseries:`
-            // block must clear the key-temporal-locality gate before a
-            // plan is derived at all — the single entry point deciding
-            // keyed+timeseries admissibility
-            // (`smelt_logical::maintenance::locality::establish_locality`,
-            // `docs/specs/incremental_models.md` §"Key temporal locality").
-            // This phase implements no route, so every such model refuses
-            // here (`KeyedForbidsTimeseries`, the three-route message) —
-            // it never reaches `derive_maintenance_plan` with a
-            // partition-carrying keyed grain.
-            if metadata.timeseries.is_some() {
-                let refusal = establish_locality(&LocalityInputs {
-                    model_name: table.to_string(),
-                })
-                .expect_err("establish_locality admits no route yet — always Err in this phase");
-                return Some(MaintenancePlanResult {
-                    plan: locality_refused_plan(refusal.message(table)),
-                    column_groups: Vec::new(),
-                    degenerate: Vec::new(),
-                });
-            }
             // The model's real derived `unique_key` — the GROUP BY columns
             // of its own outermost SELECT (the same derivation the keyed
             // classifier, `rules::cumulative::classify_cumulative`,
@@ -221,9 +211,66 @@ pub fn derive_model_maintenance_plan(
             // here does not change which techniques any existing plan
             // admits: `derive_maintenance_plan`'s admission logic does not
             // yet branch on `Grain::Key`'s `unique_key` contents.
-            PlanGrain::Key {
-                unique_key: derive_group_by_unique_key(sql),
+            let unique_key = derive_group_by_unique_key(sql);
+            // A `grain: key` model that also declares a `timeseries:`
+            // block must clear the key-temporal-locality gate before a
+            // plan is derived at all — the single entry point deciding
+            // keyed+timeseries admissibility
+            // (`smelt_logical::maintenance::locality::establish_locality`,
+            // `docs/specs/incremental_models.md` §"Key temporal locality").
+            if let Some(own_ts) = metadata.timeseries.as_ref() {
+                // The driving source is the single alias-scoped FROM/JOIN
+                // input that both is a referenced source and declares its
+                // own `timeseries:` clock — resolved by the shared
+                // `locality::resolve_driving_source` helper, the same
+                // anchor resolution `classify_cumulative` uses at runtime
+                // (`smelt_logical::maintenance::locality::
+                // resolve_driving_source`'s doc comment), so this static
+                // plan-derivation call site and the runtime execution path
+                // (`smelt-runtime::cumulative`) agree on which source drives
+                // the model rather than each resolving it independently.
+                // Neither "no clocked candidate" nor "ambiguous" (more than
+                // one alias-scoped candidate) resolve a driving source here;
+                // both fail the gate's structural preconditions closed.
+                let (
+                    driving_source_name,
+                    driving_source_has_clock,
+                    driving_source_partition_column,
+                ) = match smelt_logical::maintenance::locality::resolve_driving_source(sql, sources)
+                {
+                    Ok(Some(driving)) => {
+                        (driving.name.clone(), true, driving.partition_col.clone())
+                    }
+                    Ok(None) | Err(_) => (String::new(), false, None),
+                };
+                let inputs = LocalityInputs {
+                    model_name: table.to_string(),
+                    unique_key: unique_key.clone(),
+                    partition_column: own_ts.partition_column.clone(),
+                    granularity: own_ts.granularity,
+                    partition_column_not_null: unique_key.contains(&own_ts.partition_column),
+                    driving_source_name,
+                    driving_source_has_clock,
+                    driving_source_granularity,
+                    driving_source_partition_column,
+                    sql,
+                };
+                if let Err(refusal) = establish_locality(&inputs) {
+                    return Some(MaintenancePlanResult {
+                        plan: locality_refused_plan(refusal.message(table)),
+                        column_groups: Vec::new(),
+                        degenerate: Vec::new(),
+                    });
+                }
+                // Admitted: the derived `LocalitySlice` (margins) is not yet
+                // folded into `Grain::Key`'s plan shape or the `smelt
+                // explain` surface — that lands in a later phase
+                // (`docs/plans/20260715-composed-axes-conditional-
+                // maintenance.md`, phase A5). The runtime execution path
+                // (`smelt-runtime::cumulative`) is this phase's actual
+                // slice-pruning consumer.
             }
+            PlanGrain::Key { unique_key }
         }
         ConfigGrain::KeyPerPartition => unreachable!("handled above"),
     };
@@ -314,6 +361,7 @@ pub fn derive_model_maintenance_plan(
 /// Kept as a wrapper over [`derive_model_maintenance_plan`] so the many
 /// source-only callers (`smelt-runtime`'s maintenance driver and propagation
 /// walk) are unchanged; both entry points still call one pure derivation.
+#[allow(clippy::too_many_arguments)]
 pub fn derive_model_maintenance_plan_with_edges(
     sql: &str,
     table: &str,
@@ -321,9 +369,16 @@ pub fn derive_model_maintenance_plan_with_edges(
     sources: &[SourceFacts],
     explicitly_mutable: &std::collections::HashSet<String>,
     model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+    driving_source_granularity: Option<Granularity>,
 ) -> Option<MaintenancePlanResult> {
-    let mut result =
-        derive_model_maintenance_plan(sql, table, metadata, sources, explicitly_mutable)?;
+    let mut result = derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        driving_source_granularity,
+    )?;
     // Model edges only clamp against a partition-addressed output axis; a
     // key-addressed downstream contributes none (deferred).
     let output_partition_col = match metadata.grain {
@@ -373,6 +428,25 @@ pub fn cell_column_group_violations(
         }
     }
     violations
+}
+
+/// The single clocked referenced source's own declared granularity — for
+/// the key-temporal-locality gate's granularity-equality structural
+/// precondition (`incremental_models.md` §"Key temporal locality"). `None`
+/// when zero or more than one referenced source declares a `timeseries:`
+/// block: an ambiguous or absent driving source fails that precondition
+/// closed rather than guess.
+pub fn single_clocked_source_granularity(
+    source_refs: &[(String, Option<SourceInfo>)],
+) -> Option<Granularity> {
+    let mut clocked = source_refs
+        .iter()
+        .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()));
+    let first = clocked.next()?;
+    if clocked.next().is_some() {
+        return None;
+    }
+    Some(first.granularity)
 }
 
 /// Build [`SourceFacts`] for every `(ref_string, source_info)` pair a model
@@ -477,9 +551,15 @@ pub fn maintenance_plan_diagnostics(
         .timeseries
         .as_ref()
         .and_then(|ts| check_declared_granularity(sql, &ts.partition_column, ts.granularity));
-    let Some(result) =
-        derive_model_maintenance_plan(sql, table, metadata, &sources, &explicitly_mutable)
-    else {
+    let driving_source_granularity = single_clocked_source_granularity(source_refs);
+    let Some(result) = derive_model_maintenance_plan(
+        sql,
+        table,
+        metadata,
+        &sources,
+        &explicitly_mutable,
+        driving_source_granularity,
+    ) else {
         return MaintenancePlanDiagnostics {
             granularity_mismatch,
             ..Default::default()
@@ -659,6 +739,7 @@ mod tests {
             &metadata,
             &[],
             &std::collections::HashSet::new(),
+            None,
         )
         .expect("grain: key model must derive a plan");
         // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
@@ -684,11 +765,11 @@ mod tests {
         );
     }
 
-    /// A `grain: key` model that also declares a `timeseries:` block is
-    /// refused by the key-temporal-locality gate — no route is implemented
-    /// yet, so admission never proceeds to `derive_maintenance_plan`
-    /// (`docs/specs/incremental_models.md` §"Key temporal locality (the
-    /// time-partitioned output)").
+    /// A `grain: key` model that also declares a `timeseries:` block, but
+    /// whose `partition_column` is not a `unique_key` column and has no
+    /// resolvable driving source, is refused by the key-temporal-locality
+    /// gate (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// (the time-partitioned output)") — no route admits it.
     #[test]
     fn keyed_with_timeseries_refuses_via_locality_gate() {
         use smelt_core::config::{Granularity, TimeseriesConfig};
@@ -712,6 +793,7 @@ mod tests {
             &metadata,
             &[],
             &std::collections::HashSet::new(),
+            None,
         )
         .expect("grain: key + timeseries: must still derive a (refused) plan");
         assert!(
@@ -729,5 +811,139 @@ mod tests {
             }
             other => panic!("expected LocalityNotEstablished, got {other:?}"),
         }
+    }
+
+    /// Route 1 (key-embedded) admits through the full `smelt-db` plumbing:
+    /// `partition_column` (`event_date`) is a `unique_key` column, the
+    /// single referenced source is clocked at the same (day) granularity —
+    /// the model derives an ordinary plan with no `LocalityNotEstablished`
+    /// refusal (`docs/specs/incremental_models.md` §"Key temporal
+    /// locality").
+    #[test]
+    fn keyed_with_timeseries_admits_via_route1_key_embedded() {
+        use smelt_core::config::{Granularity, TimeseriesConfig};
+
+        let sql = "SELECT device_id, event_date, COUNT(*) AS n \
+                    FROM smelt.sources.events GROUP BY device_id, event_date";
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            timeseries: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let sources = vec![SourceFacts {
+            // `SourceFacts::name` is the *bare* source name (`sources.`
+            // breadcrumb stripped) — the real convention `smelt-db::lib`
+            // builds (`ref_string.strip_prefix("smelt.").and_then(|s|
+            // s.strip_prefix("sources."))`), which `locality::
+            // resolve_driving_source` matches against.
+            name: "events".to_string(),
+            mutation: PlanMutationProfile::AppendOnly,
+            partition_col: Some("event_date".to_string()),
+            unique_key: vec![],
+            allow_full_scan: false,
+        }];
+        let result = derive_model_maintenance_plan(
+            sql,
+            "main.device_daily",
+            &metadata,
+            &sources,
+            &std::collections::HashSet::new(),
+            Some(Granularity::Day),
+        )
+        .expect("route 1 must derive a plan");
+        assert!(
+            !result.plan.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+            )),
+            "route 1 must admit — no locality refusal expected: {:?}",
+            result.plan.refusals
+        );
+    }
+
+    /// Multi-source regression for the driving-source resolution this
+    /// phase's review fixed: `smelt-db`'s plan-derivation call site and
+    /// `smelt-runtime`'s runtime execution path (`classify_cumulative`)
+    /// must agree on which source drives a model. A clocked source
+    /// referenced only inside a CTE — never joined into the outer
+    /// SELECT's FROM/JOIN — must not count as a second driving-source
+    /// candidate here, exactly as it would not for the runtime's
+    /// alias-scoped `classify_cumulative` resolution
+    /// (`smelt_logical::maintenance::locality::resolve_driving_source`).
+    /// Before that shared resolution existed, this call site resolved the
+    /// driving source over *every* referenced source — seeing two clocked
+    /// sources here, it would treat the driving source as unresolved and
+    /// refuse route 1 (`KeyedForbidsTimeseries` via `smelt explain`) even
+    /// though `smelt build` would actually admit and execute the model.
+    #[test]
+    fn multi_source_model_agrees_with_runtime_alias_scoped_driving_source() {
+        use smelt_core::config::{Granularity, TimeseriesConfig};
+
+        let sql = "WITH other AS ( \
+                       SELECT device_id, event_date FROM smelt.sources.other_stream \
+                   ) \
+                   SELECT device_id, event_date, COUNT(*) AS n \
+                   FROM smelt.sources.events \
+                   GROUP BY device_id, event_date";
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            timeseries: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let sources = vec![
+            // `SourceFacts::name` is the bare source name — the real
+            // convention `smelt-db::lib` builds and `locality::
+            // resolve_driving_source` matches against.
+            SourceFacts {
+                name: "events".to_string(),
+                mutation: PlanMutationProfile::AppendOnly,
+                partition_col: Some("event_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+            // Clocked, but only ever referenced inside the CTE — never
+            // joined into the outer SELECT's FROM/JOIN. Must NOT be
+            // treated as a second driving-source candidate.
+            SourceFacts {
+                name: "other_stream".to_string(),
+                mutation: PlanMutationProfile::AppendOnly,
+                partition_col: Some("event_date".to_string()),
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+        ];
+        let result = derive_model_maintenance_plan(
+            sql,
+            "main.device_daily",
+            &metadata,
+            &sources,
+            &std::collections::HashSet::new(),
+            Some(Granularity::Day),
+        )
+        .expect("route 1 must derive a plan");
+        assert!(
+            !result.plan.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+            )),
+            "the CTE-only clocked source must not defeat route 1 admission — the driving \
+             source must resolve to the outer FROM/JOIN's alias-scoped `sources.events` alone, \
+             matching the runtime's `classify_cumulative` resolution: {:?}",
+            result.plan.refusals
+        );
     }
 }

@@ -1425,6 +1425,8 @@ pub fn maintenance_plan_report(
         .map(|(name, _)| name.clone())
         .collect();
 
+    let driving_source_granularity =
+        crate::queries::maintenance::single_clocked_source_granularity(&source_refs);
     crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1432,6 +1434,7 @@ pub fn maintenance_plan_report(
         &sources,
         &explicitly_mutable,
         &model_edges,
+        driving_source_granularity,
     )
 }
 

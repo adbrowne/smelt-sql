@@ -12,7 +12,7 @@
 //! [`WindowedKeyedRule`] that cannot vouch for every step's combiner refuses
 //! the whole run before any backend call is made.
 
-use crate::transformer::TimeRange;
+use crate::transformer::{add_seconds_to_date, subtract_seconds_from_date, TimeRange};
 use anyhow::{bail, Context, Result};
 use smelt_backend::{Backend, BackendError, ExecutionResult, IncrementalStrategy};
 use smelt_core::config::{CellTechnique, Granularity};
@@ -21,8 +21,9 @@ use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::emit::{
-    emit_create_table_as, MaintenanceStatement, StatementGroup,
+    emit_create_table_as, MaintenanceStatement, StatementGroup, TargetSlicePredicate,
 };
+use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
     MaintenancePlan, PartitionLocal, PlanCell, ScanClamp, SourceFacts, Technique, Trigger,
 };
@@ -104,8 +105,18 @@ pub trait WindowedKeyedRule: Send + Sync {
     fn refuse(&self) -> Option<String>;
 
     /// Build the `MERGE INTO` statement combining `schema.table`'s existing
-    /// state with one step's compiled delta SQL.
-    fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String;
+    /// state with one step's compiled delta SQL. `slice` is this step's
+    /// target-scan slice predicate, already resolved to concrete bounds by
+    /// the driver (`run_windowed_keyed_maintenance`) from the caller's
+    /// established `LocalitySlice` — `None` for a keyed model with no
+    /// admitted (or no declared) key temporal locality.
+    fn merge_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+    ) -> String;
 
     /// The reconciliation ledger's storage grading for this rule's cell
     /// (`docs/specs/incremental_models.md` §"The reconciliation ledger" —
@@ -147,6 +158,7 @@ pub trait WindowedKeyedRule: Send + Sync {
 /// (`docs/specs/incremental_models.md` §"Reprocessing") instead of silently
 /// double-counting. `Grade::Idempotent` cells skip the ledger entirely — no
 /// warehouse table is ever created for them.
+#[allow(clippy::too_many_arguments)]
 pub async fn run_windowed_keyed_maintenance(
     backend: &dyn Backend,
     model_name: &str,
@@ -154,6 +166,7 @@ pub async fn run_windowed_keyed_maintenance(
     table: &str,
     steps: &[MaintenanceStep],
     rule: &dyn WindowedKeyedRule,
+    locality: Option<&LocalitySlice>,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
 ) -> Result<ExecutionResult> {
     if let Some(reason) = rule.refuse() {
@@ -189,9 +202,21 @@ pub async fn run_windowed_keyed_maintenance(
         } else {
             None
         };
+        // Resolve this step's concrete target-scan slice predicate from the
+        // caller's established `LocalitySlice` (`docs/specs/
+        // incremental_models.md` §"Key temporal locality"): the step's own
+        // partition value, widened by the derived margins. Date arithmetic
+        // is shared with the source-filter pushdown transform
+        // (`transformer::{subtract,add}_seconds_from_date`) rather than
+        // reimplemented here.
+        let slice_predicate = locality.map(|slice| TargetSlicePredicate {
+            partition_column: slice.partition_column.clone(),
+            lower: subtract_seconds_from_date(&step.partition_value, slice.margin_before.0),
+            upper: add_seconds_to_date(&step.partition_value, slice.margin_after.0),
+        });
         let action_sql = match &create_group {
             Some(group) => group.statements[0].sql.clone(),
-            None => rule.merge_sql(schema, table, &delta_sql),
+            None => rule.merge_sql(schema, table, &delta_sql, slice_predicate.as_ref()),
         };
 
         match grade {
@@ -344,6 +369,8 @@ pub fn resolve_incremental_strategy(
         metadata,
         sources,
         explicitly_mutable,
+        // See the analogous call in `resolve_live_column_scoped_cell` above.
+        None,
     ) else {
         return backend_default;
     };
@@ -448,6 +475,15 @@ pub fn resolve_live_column_scoped_cell(
         metadata,
         sources,
         explicitly_mutable,
+        // Not (yet) plumbed with the driving source's declared granularity
+        // at this call site — a keyed model with its own `timeseries:`
+        // block fails the locality gate's granularity-equality precondition
+        // closed here, same as before this phase (`smelt-db`'s own
+        // diagnostic path, `maintenance_plan_diagnostics`, has the real
+        // value; the runtime execution path,
+        // `smelt-runtime::cumulative::execute_cumulative_aggregate`, is
+        // this phase's actual slice-pruning consumer).
+        None,
     )?;
     explicitly_mutable.iter().find_map(|source| {
         let trigger = Trigger::UpstreamMutation {
@@ -776,7 +812,13 @@ mod tests {
         fn refuse(&self) -> Option<String> {
             Some("non-monoid combiner (e.g. MEDIAN) cannot be merged".to_string())
         }
-        fn merge_sql(&self, _schema: &str, _table: &str, _delta_sql: &str) -> String {
+        fn merge_sql(
+            &self,
+            _schema: &str,
+            _table: &str,
+            _delta_sql: &str,
+            _slice: Option<&TargetSlicePredicate>,
+        ) -> String {
             unreachable!("merge_sql must not be called once refuse() fires")
         }
     }
@@ -931,7 +973,13 @@ mod tests {
         fn refuse(&self) -> Option<String> {
             None
         }
-        fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String {
+        fn merge_sql(
+            &self,
+            schema: &str,
+            table: &str,
+            delta_sql: &str,
+            _slice: Option<&TargetSlicePredicate>,
+        ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
     }
@@ -945,7 +993,13 @@ mod tests {
         fn refuse(&self) -> Option<String> {
             None
         }
-        fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String {
+        fn merge_sql(
+            &self,
+            schema: &str,
+            table: &str,
+            delta_sql: &str,
+            _slice: Option<&TargetSlicePredicate>,
+        ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
         fn ledger_grade(&self) -> Grade {
@@ -967,6 +1021,7 @@ mod tests {
             "t",
             &steps,
             &AlwaysRefuses,
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -994,6 +1049,7 @@ mod tests {
             "t",
             &steps,
             &SumRule,
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -1038,6 +1094,7 @@ mod tests {
             "t",
             &steps,
             &SumRuleAdditive,
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -1083,6 +1140,7 @@ mod tests {
             "t",
             &steps,
             &SumRuleAdditive,
+            None,
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",

@@ -111,7 +111,12 @@ pub fn inject_source_filters(
 ///
 /// Only handles whole-day subtraction for day-granularity partitions.
 /// Sub-day offsets are rounded up to the next day boundary (conservative).
-fn subtract_seconds_from_date(date: &str, secs: u64) -> String {
+///
+/// `pub(crate)`: also used by `maintenance_driver.rs` to compute a
+/// locality-admitted keyed fold's target-scan slice bounds
+/// (`docs/specs/incremental_models.md` §"Key temporal locality") — the same
+/// date arithmetic, so it is shared rather than re-implemented.
+pub(crate) fn subtract_seconds_from_date(date: &str, secs: u64) -> String {
     if secs == 0 {
         return date.to_string();
     }
@@ -121,8 +126,9 @@ fn subtract_seconds_from_date(date: &str, secs: u64) -> String {
 /// Add `secs` seconds to an ISO date string `date` (YYYY-MM-DD).
 ///
 /// Only handles whole-day addition. Sub-day offsets are rounded up to the
-/// next day boundary (conservative).
-fn add_seconds_to_date(date: &str, secs: u64) -> String {
+/// next day boundary (conservative). `pub(crate)`: see
+/// [`subtract_seconds_from_date`]'s doc comment.
+pub(crate) fn add_seconds_to_date(date: &str, secs: u64) -> String {
     if secs == 0 {
         return date.to_string();
     }

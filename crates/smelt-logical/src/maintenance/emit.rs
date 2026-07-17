@@ -200,6 +200,21 @@ pub fn emit_in_place_update(
     )]
 }
 
+/// A target-scan slice predicate for a locality-admitted keyed fold
+/// (`docs/specs/incremental_models.md` §"Key temporal locality"): restricts
+/// the `MERGE`'s `ON` condition to target rows whose partition column lies
+/// in `[lower, upper]`. Concrete bounds are computed by the caller (one
+/// step's own partition value, widened by
+/// [`crate::maintenance::locality::LocalitySlice`]'s derived margins);
+/// `lower`/`upper` are plain date/timestamp literal text, unescaped (this
+/// emitter escapes them, matching every other emitter in this module).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TargetSlicePredicate {
+    pub partition_column: String,
+    pub lower: String,
+    pub upper: String,
+}
+
 /// Fold-a-delta into keyed end-state (top-left): the combiner-aware `MERGE`
 /// production actually executes for `refresh: keyed` (`incremental_models.md`,
 /// `crate::cumulative::execute_cumulative_aggregate`'s `WindowedKeyedRule`
@@ -219,18 +234,39 @@ pub fn emit_in_place_update(
 /// `dialect` is accepted for signature symmetry with the other emitters in
 /// this module; the keyed-fold `MERGE` shape is currently dialect-invariant
 /// (no branch reads it yet).
+///
+/// `slice` is the target-scan slice predicate a locality-admitted model
+/// (`incremental_models.md` §"Key temporal locality") licenses: an extra
+/// `AND target.<partition_column> BETWEEN '<lower>' AND '<upper>'` clause on
+/// the `ON` condition, restricting which target rows the `MERGE` needs to
+/// scan/match. It is provably safe — a target row outside the slice cannot
+/// match any delta key (routes 1-2) or is transactionally checked not to
+/// (route 3) — and it never changes *which* delta rows merge (`incremental_
+/// models.md`: "Pruning is not a write clamp" — every scanned delta row
+/// still merges). `None` renders byte-identical output to the pre-locality
+/// shape (a non-time-partitioned keyed model, or a locality-admitted model
+/// this phase doesn't yet slice-prune).
 pub fn emit_keyed_fold(
     schema_table: &str,
     key: &[String],
     folds: &[(String, String)],
     delta_select: &str,
+    slice: Option<&TargetSlicePredicate>,
     _dialect: MaintenanceDialect,
 ) -> StatementGroup {
-    let on = key
+    let mut on = key
         .iter()
         .map(|k| format!("target.{k} = delta.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    if let Some(slice) = slice {
+        let safe_lower = slice.lower.replace('\'', "''");
+        let safe_upper = slice.upper.replace('\'', "''");
+        on.push_str(&format!(
+            " AND target.{} BETWEEN '{}' AND '{}'",
+            slice.partition_column, safe_lower, safe_upper
+        ));
+    }
     let sets = folds
         .iter()
         .map(|(col, expr)| format!("{col} = {expr}"))

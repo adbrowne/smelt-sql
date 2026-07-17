@@ -19,7 +19,8 @@ use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
-use smelt_logical::maintenance::emit::{emit_keyed_fold, MaintenanceDialect};
+use smelt_logical::maintenance::emit::{emit_keyed_fold, MaintenanceDialect, TargetSlicePredicate};
+use smelt_logical::maintenance::locality::{establish_locality, LocalityInputs, LocalitySlice};
 use smelt_planner::{
     classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
     CumulativeClassification, KeyedDiagnostic, SourceTimeseriesMap,
@@ -47,8 +48,14 @@ impl WindowedKeyedRule for CumulativeClassification {
         None
     }
 
-    fn merge_sql(&self, schema: &str, table: &str, delta_sql: &str) -> String {
-        build_cumulative_merge_sql(schema, table, delta_sql, self)
+    fn merge_sql(
+        &self,
+        schema: &str,
+        table: &str,
+        delta_sql: &str,
+        slice: Option<&TargetSlicePredicate>,
+    ) -> String {
+        build_cumulative_merge_sql(schema, table, delta_sql, self, slice)
     }
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
@@ -118,6 +125,44 @@ pub async fn execute_cumulative_aggregate(
         model_name, driving_source_name
     );
 
+    // 1b. When the model declares its own `timeseries:` block, key temporal
+    //     locality (`docs/specs/incremental_models.md` §"Key temporal
+    //     locality") must be established before any merge is emitted — the
+    //     single seam (`smelt_logical::maintenance::locality::establish_
+    //     locality`) is a pure function, so calling it here (in addition to
+    //     `smelt-db`'s plan-derivation call site) is not a second place
+    //     deciding admissibility: both calls are deterministic over the same
+    //     facts and must agree. `partition_column_not_null` is derived
+    //     conservatively as "the column is itself a `unique_key` member" —
+    //     the only structural fact route 1 has to offer today (a real
+    //     non-key nullability prover is future work for routes 2/3).
+    let locality_slice: Option<LocalitySlice> =
+        match model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()) {
+            Some(own_ts) => {
+                let inputs = LocalityInputs {
+                    model_name: model_name.clone(),
+                    unique_key: classification.unique_key.clone(),
+                    partition_column: own_ts.partition_column.clone(),
+                    granularity: own_ts.granularity,
+                    partition_column_not_null: classification
+                        .unique_key
+                        .contains(&own_ts.partition_column),
+                    driving_source_name: driving_source_name.clone(),
+                    driving_source_has_clock: true,
+                    driving_source_granularity: Some(driving_ts.granularity),
+                    driving_source_partition_column: Some(driving_ts.partition_column.clone()),
+                    sql: &clean_sql,
+                };
+                match establish_locality(&inputs) {
+                    Ok(slice) => Some(slice),
+                    Err(refusal) => {
+                        anyhow::bail!("{}", refusal.message(model_name));
+                    }
+                }
+            }
+            None => None,
+        };
+
     // 2. Refuse reprocessing (MP12): the windowed-keyed-maintenance driver
     //    (step 3 below) grades this classification's cell via
     //    `WindowedKeyedRule::ledger_grade` above. For an `Additive`-graded
@@ -161,6 +206,7 @@ pub async fn execute_cumulative_aggregate(
         db_table_name,
         &steps,
         &classification,
+        locality_slice.as_ref(),
         |step| {
             // 4. Per-partition pushdown: inject the driving source's
             //    `[step.start, step.end)` filter, then compile (resolves
@@ -224,6 +270,7 @@ pub fn build_cumulative_merge_sql(
     table: &str,
     delta_sql: &str,
     classification: &CumulativeClassification,
+    slice: Option<&TargetSlicePredicate>,
 ) -> String {
     let folds: Vec<(String, String)> = classification
         .aggregator_columns
@@ -242,6 +289,7 @@ pub fn build_cumulative_merge_sql(
         &classification.unique_key,
         &folds,
         delta_sql,
+        slice,
         MaintenanceDialect::DuckDb,
     );
     group.statements[0].sql.clone()
@@ -343,8 +391,13 @@ mod tests {
             },
         };
         let delta_sql = "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2";
-        let sql =
-            build_cumulative_merge_sql("main", "device_user_edges", delta_sql, &classification);
+        let sql = build_cumulative_merge_sql(
+            "main",
+            "device_user_edges",
+            delta_sql,
+            &classification,
+            None,
+        );
         assert!(sql.contains("MERGE INTO main.device_user_edges"));
         assert!(sql.contains("target.device_id = delta.device_id"));
         assert!(sql.contains("target.user_id = delta.user_id"));
@@ -371,11 +424,62 @@ mod tests {
                 ),
             ],
             delta_sql,
+            None,
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(
             sql, expected.statements[0].sql,
             "build_cumulative_merge_sql must be byte-identical to a direct emitter call"
+        );
+    }
+
+    /// A locality-admitted model's `MERGE` carries a target-side partition
+    /// predicate over the slice (`docs/specs/incremental_models.md` §"Key
+    /// temporal locality") — a non-time-partitioned keyed model's SQL (the
+    /// `None` case above) stays byte-unchanged; passing `Some` only adds the
+    /// extra `AND` clause, nothing else in the statement shifts.
+    #[test]
+    fn build_cumulative_merge_sql_with_slice_carries_target_partition_predicate() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string(), "event_date".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        let delta_sql = "SELECT device_id, event_date, COUNT(*) AS event_count FROM events \
+                          WHERE event_date = '2026-01-02' GROUP BY 1, 2";
+        let slice = TargetSlicePredicate {
+            partition_column: "event_date".to_string(),
+            lower: "2026-01-02".to_string(),
+            upper: "2026-01-02".to_string(),
+        };
+        let without_slice =
+            build_cumulative_merge_sql("main", "device_daily", delta_sql, &classification, None);
+        let with_slice = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            Some(&slice),
+        );
+        assert!(
+            with_slice.contains("AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02'"),
+            "expected slice predicate in: {with_slice}"
+        );
+        assert_eq!(
+            with_slice,
+            format!(
+                "{} AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02'{}",
+                &without_slice[..without_slice.find(" WHEN MATCHED").unwrap()],
+                &without_slice[without_slice.find(" WHEN MATCHED").unwrap()..]
+            ),
+            "the slice predicate must be the ONLY difference from the unsliced merge"
         );
     }
 

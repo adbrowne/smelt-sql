@@ -407,6 +407,7 @@ fn ex24_keyed_fold_sql_combines_matched_and_inserts_unseen_keys() {
             "target.lifetime_spend + delta.lifetime_spend".to_string(),
         )],
         "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments_delta GROUP BY user_id",
+        None,
         MaintenanceDialect::DuckDb,
     );
     let sql = &group.statements[0].sql;
