@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784112672097,
+  "lastUpdate": 1784301922575,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -187,6 +187,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 10.695861,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "7ba0e99de870fac0678496d089c5f9c212401b3a",
+          "message": "fix(test): register ROW_NUMBER/RANK Spark type divergence\n\nDuckDB's ROW_NUMBER() etc. return BIGINT (matches smelt's inference),\nbut Spark returns INT. The type-property Spark oracle was failing on\nthis genuine backend difference; register it in divergences.rs per\nthe type-oracle strictness gate instead of silently tolerating it.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-18T01:20:50+10:00",
+          "tree_id": "022a3ad0400b63e30e8bcbde15154246cd990c49",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/7ba0e99de870fac0678496d089c5f9c212401b3a"
+        },
+        "date": 1784301921420,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 55.595873,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 53.283277,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.075042,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.616515,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.312498,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 932.675618,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.870301,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.3039039999999997,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.1985550000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.706489,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 771.375295,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.03154,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.87338,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.618203,
             "unit": "ms"
           }
         ]
