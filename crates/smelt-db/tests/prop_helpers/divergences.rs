@@ -218,6 +218,15 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::KnownBug,
         },
+        TypeDivergence {
+            id: "row_number_rank_family",
+            description: "ROW_NUMBER/RANK/DENSE_RANK — smelt infers BigInt (matches DuckDB \
+                BIGINT), Spark returns INT (Integer) for these ranking window functions.",
+            smelt_type: DataType::BigInt,
+            duckdb_type: None,
+            spark_type: Some(DataType::Integer),
+            status: DivergenceStatus::BackendSpecific,
+        },
     ]
 }
 
@@ -285,6 +294,14 @@ mod tests {
         let found = find_divergence(&DataType::Double, &DataType::BigInt, "spark", &divs);
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "ceil_floor_double");
+    }
+
+    #[test]
+    fn finds_row_number_rank_family_divergence_spark() {
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::BigInt, &DataType::Integer, "spark", &divs);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "row_number_rank_family");
     }
 
     #[test]
