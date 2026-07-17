@@ -3149,10 +3149,11 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">&lt;tag&gt;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">...</span><span class="p p-Indicator">]</span>
 <a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="nt">target</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;target_name&gt;</span>
 <a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="nt">grain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">partition</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="nt">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">&lt;column&gt;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">...</span><span class="p p-Indicator">]</span>
 <a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
 <a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="w">      </span><span class="c1"># batched fields...</span>
 </code></pre></div>
+<p><code>refresh: incremental</code> is admitted on the two <strong>shape-defining facts</strong> alone — a <code>timeseries:</code> block (the clock) and/or a top-level <code>unique_key:</code> (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. <code>grain:</code> itself is never required to admit a model — it is an optional, <strong>check-only</strong> <code>partition</code> / <code>key</code> / <code>key_per_partition</code> label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.</p>
 <h3 id="model-fields">Model Fields<a class="headerlink" href="#model-fields" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
@@ -3191,7 +3192,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>object</td>
 <td>no</td>
 <td></td>
-<td>Time-dimension declaration for <code>grain: partition</code> / <code>grain: key_per_partition</code> models. Forbidden on <code>grain: key</code> models (see <a href="#timeseries-configuration">Timeseries Configuration</a>)</td>
+<td>Time-dimension declaration — the <strong>clock</strong> shape-defining fact (see <a href="#timeseries-configuration">Timeseries Configuration</a>)</td>
 </tr>
 <tr>
 <td><code>refresh</code></td>
@@ -3201,11 +3202,18 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>Refresh axis: <code>full</code>, <code>incremental</code>, or <code>materialized_view</code></td>
 </tr>
 <tr>
+<td><code>unique_key</code></td>
+<td>string | string[]</td>
+<td>no</td>
+<td></td>
+<td>The <strong>identity</strong> shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with <code>timeseries:</code>, this is what admits <code>refresh: incremental</code>; frontmatter wins over this <code>smelt.yml</code> override when both set it. Distinct from the <code>batched:</code> sub-block's <code>unique_key</code> (a partition-grain dedup aid, never identity).</td>
+</tr>
+<tr>
 <td><code>grain</code></td>
 <td>string</td>
 <td>no</td>
 <td></td>
-<td>Required with <code>refresh: incremental</code>: <code>partition</code>, <code>key</code>, or <code>key_per_partition</code></td>
+<td>Optional check-only assertion — <code>partition</code>, <code>key</code>, or <code>key_per_partition</code> — validated against the label <code>timeseries:</code>/<code>unique_key:</code> derive; never a driver</td>
 </tr>
 <tr>
 <td><code>batched</code></td>
