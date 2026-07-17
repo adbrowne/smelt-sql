@@ -204,15 +204,31 @@ pub async fn run_windowed_keyed_maintenance(
         };
         // Resolve this step's concrete target-scan slice predicate from the
         // caller's established `LocalitySlice` (`docs/specs/
-        // incremental_models.md` §"Key temporal locality"): the step's own
-        // partition value, widened by the derived margins. Date arithmetic
-        // is shared with the source-filter pushdown transform
-        // (`transformer::{subtract,add}_seconds_from_date`) rather than
-        // reimplemented here.
-        let slice_predicate = locality.map(|slice| TargetSlicePredicate {
-            partition_column: slice.partition_column.clone(),
-            lower: subtract_seconds_from_date(&step.partition_value, slice.margin_before.0),
-            upper: add_seconds_to_date(&step.partition_value, slice.margin_after.0),
+        // incremental_models.md` §"Key temporal locality"). The two routes
+        // resolve to structurally different predicates:
+        //   - route 1 (`Window`): the step's own partition value, widened
+        //     by the derived margins. Date arithmetic is shared with the
+        //     source-filter pushdown transform
+        //     (`transformer::{subtract,add}_seconds_from_date`) rather than
+        //     reimplemented here.
+        //   - route 2 (`DeltaValues`): the step's own already-compiled
+        //     delta relation's own partition-column values — no date
+        //     arithmetic, no widening, since a key-determined column is a
+        //     per-key constant regardless of which step reveals it.
+        let slice_predicate = locality.map(|slice| match slice {
+            LocalitySlice::Window {
+                partition_column,
+                margin_before,
+                margin_after,
+            } => TargetSlicePredicate::Range {
+                partition_column: partition_column.clone(),
+                lower: subtract_seconds_from_date(&step.partition_value, margin_before.0),
+                upper: add_seconds_to_date(&step.partition_value, margin_after.0),
+            },
+            LocalitySlice::DeltaValues { partition_column } => TargetSlicePredicate::DeltaValues {
+                partition_column: partition_column.clone(),
+                delta_select: delta_sql.clone(),
+            },
         });
         let action_sql = match &create_group {
             Some(group) => group.statements[0].sql.clone(),
@@ -1160,6 +1176,97 @@ mod tests {
             message.contains("Spark SQL"),
             "error must name the unsupported dialect: {message}"
         );
+    }
+
+    /// A rule that records the slice predicate it receives from the driver —
+    /// used to prove route 2 (key-determined) locality threads a
+    /// `LocalitySlice::DeltaValues` through to `merge_sql` as a
+    /// `TargetSlicePredicate::DeltaValues` over the step's *own* delta
+    /// relation, never a margin-based range
+    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// 2: "the slice is the delta's own partition values — exact
+    /// regardless of key age").
+    struct CapturingRule {
+        captured: Mutex<Vec<Option<TargetSlicePredicate>>>,
+    }
+
+    impl WindowedKeyedRule for CapturingRule {
+        fn refuse(&self) -> Option<String> {
+            None
+        }
+        fn merge_sql(
+            &self,
+            schema: &str,
+            table: &str,
+            delta_sql: &str,
+            slice: Option<&TargetSlicePredicate>,
+        ) -> String {
+            self.captured.lock().unwrap().push(slice.cloned());
+            format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
+        }
+    }
+
+    #[tokio::test]
+    async fn route2_locality_threads_delta_values_slice_over_the_steps_own_delta() {
+        let backend = RecordingBackend::default();
+        // Three day-steps: the first creates the table (no `merge_sql` call
+        // at all — the create branch owns that step); the remaining two
+        // exercise `merge_sql` and are the ones this test inspects.
+        let steps = driving_steps("2024-01-01", "2024-01-04", &Granularity::Day).unwrap();
+        let rule = CapturingRule {
+            captured: Mutex::new(Vec::new()),
+        };
+        let locality = LocalitySlice::DeltaValues {
+            partition_column: "first_seen_at".to_string(),
+        };
+        run_windowed_keyed_maintenance(
+            &backend,
+            "model.under.test",
+            "main",
+            "t",
+            &steps,
+            &rule,
+            Some(&locality),
+            |step| {
+                Ok(format!(
+                    "SELECT id, first_seen_at FROM src WHERE d = '{}'",
+                    step.partition_value
+                ))
+            },
+        )
+        .await
+        .unwrap();
+
+        let captured = rule.captured.lock().unwrap();
+        assert_eq!(
+            captured.len(),
+            2,
+            "the two merge steps must each capture a slice: {:?}",
+            captured
+        );
+        for (idx, slice) in captured.iter().enumerate() {
+            match slice.as_ref().expect("route 2 must thread a slice") {
+                TargetSlicePredicate::DeltaValues {
+                    partition_column,
+                    delta_select,
+                } => {
+                    assert_eq!(partition_column, "first_seen_at");
+                    // The delta relation threaded through is exactly this
+                    // step's own compiled delta — never widened, never a
+                    // caller-precomputed range.
+                    let expected_date = if idx == 0 { "2024-01-02" } else { "2024-01-03" };
+                    assert!(
+                        delta_select.contains(expected_date),
+                        "step {idx} delta_select must be its own step's delta, got: \
+                         {delta_select}"
+                    );
+                }
+                other => panic!(
+                    "step {idx}: route 2 must derive a DeltaValues predicate, not a \
+                                  Window (margin-based) one: {other:?}"
+                ),
+            }
+        }
     }
 
     fn yes_cell(scan: ScanClamp) -> PlanCell {

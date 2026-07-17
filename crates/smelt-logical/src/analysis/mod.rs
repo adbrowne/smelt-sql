@@ -7,6 +7,7 @@ pub mod input_delta;
 pub mod join_shape;
 pub mod model_diff;
 pub mod monotonicity;
+pub mod not_null;
 pub mod presentation;
 pub mod source_bounds;
 pub mod temporal;

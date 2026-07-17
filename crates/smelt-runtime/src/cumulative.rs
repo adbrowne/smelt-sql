@@ -20,7 +20,9 @@ use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
 use smelt_logical::maintenance::emit::{emit_keyed_fold, MaintenanceDialect, TargetSlicePredicate};
-use smelt_logical::maintenance::locality::{establish_locality, LocalityInputs, LocalitySlice};
+use smelt_logical::maintenance::locality::{
+    establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
+};
 use smelt_planner::{
     classify_cumulative, combiner_for, AggregatorColumn, CrossPartitionCombiner,
     CumulativeClassification, KeyedDiagnostic, SourceTimeseriesMap,
@@ -132,25 +134,40 @@ pub async fn execute_cumulative_aggregate(
     //     locality`) is a pure function, so calling it here (in addition to
     //     `smelt-db`'s plan-derivation call site) is not a second place
     //     deciding admissibility: both calls are deterministic over the same
-    //     facts and must agree. `partition_column_not_null` is derived
-    //     conservatively as "the column is itself a `unique_key` member" —
-    //     the only structural fact route 1 has to offer today (a real
-    //     non-key nullability prover is future work for routes 2/3).
+    //     facts and must agree, including `partition_column_not_null`
+    //     (`partition_column_provably_not_null`, the single shared
+    //     derivation both call sites use).
     let locality_slice: Option<LocalitySlice> =
         match model.metadata.as_ref().and_then(|m| m.timeseries.as_ref()) {
             Some(own_ts) => {
+                let declared_functional_dependencies = model
+                    .metadata
+                    .as_ref()
+                    .map(|m| m.functional_dependencies.as_slice())
+                    .unwrap_or(&[]);
                 let inputs = LocalityInputs {
                     model_name: model_name.clone(),
                     unique_key: classification.unique_key.clone(),
                     partition_column: own_ts.partition_column.clone(),
                     granularity: own_ts.granularity,
-                    partition_column_not_null: classification
-                        .unique_key
-                        .contains(&own_ts.partition_column),
+                    // Shared with `smelt-db`'s static plan-derivation call
+                    // site (`smelt_logical::maintenance::locality::
+                    // partition_column_provably_not_null`'s own doc
+                    // comment): a model `smelt-db` admits through the
+                    // locality gate must also be admitted here, or the run
+                    // would fail on a model `smelt explain` reported as
+                    // valid.
+                    partition_column_not_null: partition_column_provably_not_null(
+                        &clean_sql,
+                        &classification.unique_key,
+                        &own_ts.partition_column,
+                        Some(&driving_ts.partition_column),
+                    ),
                     driving_source_name: driving_source_name.clone(),
                     driving_source_has_clock: true,
                     driving_source_granularity: Some(driving_ts.granularity),
                     driving_source_partition_column: Some(driving_ts.partition_column.clone()),
+                    declared_functional_dependencies,
                     sql: &clean_sql,
                 };
                 match establish_locality(&inputs) {
@@ -454,7 +471,7 @@ mod tests {
         };
         let delta_sql = "SELECT device_id, event_date, COUNT(*) AS event_count FROM events \
                           WHERE event_date = '2026-01-02' GROUP BY 1, 2";
-        let slice = TargetSlicePredicate {
+        let slice = TargetSlicePredicate::Range {
             partition_column: "event_date".to_string(),
             lower: "2026-01-02".to_string(),
             upper: "2026-01-02".to_string(),
@@ -480,6 +497,52 @@ mod tests {
                 &without_slice[without_slice.find(" WHEN MATCHED").unwrap()..]
             ),
             "the slice predicate must be the ONLY difference from the unsliced merge"
+        );
+    }
+
+    /// Route 2 (key-determined) locality carries a `DeltaValues` slice
+    /// (`docs/specs/incremental_models.md` §"Key temporal locality", route
+    /// 2) — the target scan is pruned to exactly the partition-column
+    /// values the step's own delta relation carries, read off that same
+    /// relation rather than a caller-precomputed range.
+    #[test]
+    fn build_cumulative_merge_sql_with_delta_values_slice_carries_in_subquery_predicate() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["transaction_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "max_amount".to_string(),
+                per_partition_agg: "MAX".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Max,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.transactions".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        let delta_sql = "SELECT transaction_id, MIN(transaction_timestamp) AS first_seen_at, \
+                          MAX(amount) AS max_amount FROM transactions GROUP BY 1";
+        let slice = TargetSlicePredicate::DeltaValues {
+            partition_column: "first_seen_at".to_string(),
+            delta_select: delta_sql.to_string(),
+        };
+        let with_slice = build_cumulative_merge_sql(
+            "main",
+            "transaction_first_seen",
+            delta_sql,
+            &classification,
+            Some(&slice),
+        );
+        assert!(
+            with_slice.contains(
+                "AND target.first_seen_at IN (SELECT DISTINCT first_seen_at FROM (SELECT \
+                 transaction_id, MIN(transaction_timestamp) AS first_seen_at, MAX(amount) AS \
+                 max_amount FROM transactions GROUP BY 1) AS __locality_delta_values)"
+            ),
+            "expected DeltaValues predicate in: {with_slice}"
+        );
+        assert!(
+            !with_slice.contains("BETWEEN"),
+            "route 2's slice must never render as a margin-based range: {with_slice}"
         );
     }
 

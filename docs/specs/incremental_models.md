@@ -1766,24 +1766,65 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   derived-horizon proof composing every source's reach into one number remains under
   construction, as does the model-author lateness-flag pattern's data-quality check. Tracked by
   `docs/plans/20260704-model-updates.md`.
-- **Key temporal locality: route 1 (key-embedded) and its slice-pruned merge are built; routes
-  2–3 and the scope-map explain surface are specified but unbuilt.** The locality gate
-  (§"Key temporal locality (the time-partitioned output)") checks the structural preconditions
-  (window-forward run shape, a provably NOT NULL partition column, matching granularity) and
-  admits when `partition_column` is itself a `unique_key` column: the derived slice (the run
-  step's own partition value, widened by the driving source's derived read margin) is carried as
-  a target-scan predicate on the keyed `merge_into`'s `ON` condition, pruning which stored rows
-  the merge needs to match without changing which delta rows merge. A model satisfying neither
-  route 1 nor the (still unbuilt) routes 2–3 refuses with the three-route `KeyedForbidsTimeseries`
-  message. The per-input `smelt explain` scope-map rows, and folding the derived slice into
-  `smelt-db`'s own plan-derivation surface (today it admits route 1 only where it can determine
+- **Key temporal locality: routes 1 (key-embedded) and 2 (key-determined) and their slice-pruned
+  merge are built; route 3 and the scope-map explain surface are specified but unbuilt.** The
+  locality gate (§"Key temporal locality (the time-partitioned output)") checks the structural
+  preconditions (window-forward run shape, a provably NOT NULL partition column, matching
+  granularity) and then admits via either route: route 1 when `partition_column` is itself a
+  `unique_key` column (the derived slice is the run step's own partition value, widened by the
+  driving source's derived read margin); route 2 when `partition_column` is proven a per-key
+  constant by a declared `functional_dependencies:` entry naming it — in which case the derived
+  slice is the run step's own delta relation's partition-column values, with no margin widening.
+  Route 2 deliberately does **not** auto-admit from a bare query-derived functional dependency
+  (the model's own `GROUP BY` key subsuming the declared `unique_key`, with no declaration): that
+  proof only establishes the column is a deterministic function of the key *within one fixed
+  computation*, which does not distinguish a genuinely once-write shape from an extremal-fold
+  (`MIN`/`MAX`) combiner — a combiner whose folded value a later, out-of-order redelivery can
+  still change on re-merge, so it is a different family from once-write provenance (§"The
+  algebraic maintenance ladder"; "Row movement" — only route 3, not route 2, may see a partition
+  value move). A `MIN`/`MAX`-derived partition column is refused by route 2 even when a
+  `functional_dependencies:` entry names it: a declaration can widen only a genuinely undecidable
+  origin, never override the walk's own proof that the column is an extremal-fold combiner.
+  Either admitted slice is carried as a target-scan predicate on the keyed `merge_into`'s `ON`
+  condition (a literal range for route 1, an `IN (SELECT DISTINCT … FROM (delta))` subquery for
+  route 2), pruning which stored rows the merge needs to match without changing which delta rows
+  merge. A model satisfying none of the three routes refuses with the three-route
+  `KeyedForbidsTimeseries` message.
+
+  Route 2's declared-FD sub-route is reachable only when the determined column's non-nullness is
+  itself provable: the shared NOT-NULL derivation
+  (`smelt_logical::analysis::not_null::partition_column_provably_not_null`) recognises only
+  driving-clock-derived shapes — the column is itself a `unique_key` column, a direct `MIN`/`MAX`
+  aggregate over the driving source's own clock column, or a direct scalar wrapper
+  (`DATE_TRUNC`/`CAST`) around it. A declared functional dependency naming an arbitrary dimension
+  column that is not derived from the driving source's clock (e.g. a plain enrichment column with
+  no relation to the model's event-time axis) fails the NOT-NULL structural precondition before
+  the functional-dependency check ever runs, so the declared-FD sub-route is real for a
+  clock-derived determined column but not yet reachable for an arbitrary declared non-null
+  dimension column — extending the NOT-NULL derivation (or introducing a dedicated non-null column
+  declaration) to cover that case is unbuilt.
+
+  Route 2's real-fixture coverage is unit- and driver-level rather than a full
+  `execute_project`-driven DuckDB fixture: the keyed classifier's aggregator allowlist
+  (`combiner_for`) admits only the additive-fold and extremal-fold families, and every extremal
+  aggregate (`MIN`/`MAX`) is inferred nullable unconditionally by the type-inference registry's
+  nullability policy regardless of its argument's own nullability — so any `MIN`/`MAX`-derived
+  `timeseries.partition_column` trips the unrelated NOT-NULL diagnostic
+  (`incremental_models.md` §Diagnostics) that gates both `example_diagnostics` and
+  `execute_project`, independent of locality admission (moot for route 2 today in any case, since
+  a `MIN`/`MAX`-derived column is refused by route 2 on family grounds regardless). Building a
+  runnable route-2 fixture end-to-end needs the once-write classifier family (tracked by
+  `docs/plans/20260705-keyed-collapse.md`) to produce a determined column that is both
+  clock-derived-NOT-NULL and genuinely once-write — out of this plan's scope. The per-input
+  `smelt explain` scope-map rows, route 3 (recurrence-bounded), and folding the derived slice into
+  `smelt-db`'s own plan-derivation surface (today it admits routes 1–2 only where it can determine
   the driving source's granularity; the runtime execution path always can), are still unbuilt.
-  Design derivation: `docs/research/20260705-keyed-time-superset.md`. Route 1's slice-pruned
-  merge is the prerequisite every bullet of §"What the composed shape uniquely enables" builds
-  on, but none of the four bullets themselves are realized yet: the graph-layer bullets
-  (propagation admissibility, key→partition dirt projection) need the Group B phases, and
-  slice-bounded write suppression needs the Group C phases composed with this one (tracked as
-  its own phase, C6). Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+  Design derivation: `docs/research/20260705-keyed-time-superset.md`. The slice-pruned merge is the
+  prerequisite every bullet of §"What the composed shape uniquely enables" builds on, but none of
+  the four bullets themselves are realized yet: the graph-layer bullets (propagation
+  admissibility, key→partition dirt projection) need the Group B phases, and slice-bounded write
+  suppression needs the Group C phases composed with this one (tracked as its own phase, C6).
+  Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **`grain: key_per_partition` derives no plan yet.** The value parses and passes declaration
   validation, but maintenance-plan derivation has no trajectory/backfill machinery to back the
   per-`(key, partition)` shape, so a `refresh: incremental` model declaring it refuses fail-loud

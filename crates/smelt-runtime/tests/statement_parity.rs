@@ -1100,7 +1100,7 @@ async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
         "max_amount".to_string(),
         "GREATEST(target.max_amount, delta.max_amount)".to_string(),
     )];
-    let slice = TargetSlicePredicate {
+    let slice = TargetSlicePredicate::Range {
         partition_column: "event_date".to_string(),
         lower: "2024-01-02".to_string(),
         upper: "2024-01-02".to_string(),

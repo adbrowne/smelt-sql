@@ -14,11 +14,14 @@
 //! A1's review checklist: "no second place decides keyed+timeseries
 //! admissibility"). Structural preconditions are checked first (window-forward
 //! run shape, a provably NOT NULL partition column, matching granularity);
-//! then routes are tried in order. This phase (A2) implements **route 1**
-//! (key-embedded — `partition_column` is itself a `unique_key` column) only;
-//! routes 2 (key-determined) and 3 (recurrence-bounded) land in later phases
-//! behind this same seam — later phases widen the body of
-//! `establish_locality`, not its signature or its callers.
+//! then routes are tried in order. **Route 1** (key-embedded —
+//! `partition_column` is itself a `unique_key` column) and **route 2**
+//! (key-determined — the partition projection is a per-key constant under
+//! the once-write provenance proof, admitted only via a declared
+//! `functional_dependencies:` entry; an extremal-fold combiner such as
+//! `MIN`/`MAX` is a distinct, value-mutating family and is refused even
+//! when declared) are implemented; route 3 (recurrence-bounded) lands in a
+//! later phase behind this same seam.
 //!
 //! Pure module: no I/O, no Salsa. `smelt-db`'s `maintenance_plan` query
 //! (`crates/smelt-db/src/queries/maintenance.rs`) and `smelt-runtime`'s
@@ -28,12 +31,18 @@
 //! (the review checklist's concern): it is one deterministic pure function
 //! whose result is identical wherever it is invoked with the same facts.
 
+use crate::analysis::discriminants::Monotone;
+use crate::analysis::functional_dependency::{
+    functional_dependency_verdict_over_vector, FunctionalDependencyVerdict,
+};
+use crate::analysis::join_shape::JoinContext;
 use crate::analysis::source_bounds::{
     derive_model_bounds, from_clause_alias_sources, resolve_single_anchor, AnchorAmbiguity,
     BoundContext, BoundResult, Seconds,
 };
+use crate::analysis::walk::model_property_vector;
 use crate::maintenance::SourceFacts;
-use smelt_core::config::Granularity;
+use smelt_core::config::{FunctionalDependency, Granularity};
 
 /// Inputs the locality gate consults.
 ///
@@ -75,27 +84,76 @@ pub struct LocalityInputs<'a> {
     /// The driving source's own partition column, when known — needed to
     /// derive read margins via [`derive_model_bounds`].
     pub driving_source_partition_column: Option<String>,
-    /// Expanded model SQL, for margin derivation (route 1).
+    /// Expanded model SQL, for margin derivation (route 1) and for the
+    /// walk-composed property vector route 2 consumes
+    /// (`analysis::walk::model_property_vector`) — never re-scanned as raw
+    /// text by this module.
     pub sql: &'a str,
+    /// Model-scoped `functional_dependencies:` declarations
+    /// (`model_properties.md` §"Model-scoped declarations"), consulted by
+    /// route 2 against the model's walk-derived [`crate::analysis::walk::
+    /// PropertyVector`] via
+    /// [`functional_dependency_verdict_over_vector`]. Route 2 admits only
+    /// via a declaration naming `partition_column` (the modeller's own
+    /// once-write assertion) — there is currently no walk-provable
+    /// "no declaration needed" shape distinct from route 1's literal
+    /// key-column case, and a grain-subset-key FD proof alone cannot
+    /// distinguish a genuinely once-write column from an extremal-fold
+    /// (`MIN`/`MAX`) one, so it is never used to auto-admit route 2. Empty
+    /// when the model declares none — route 2 then always refuses.
+    pub declared_functional_dependencies: &'a [FunctionalDependency],
 }
 
 /// The established locality slice a `merge_into` target scan may be pruned
-/// to (`incremental_models.md` §"Key temporal locality"): the derived read
-/// margins around a run step's own partition value. Concrete lower/upper
-/// bounds for one step are computed by the caller (`smelt-runtime`, which
-/// already owns date arithmetic in `transformer.rs`) — this module stays
-/// date-arithmetic-free, matching `analysis::source_bounds`'s own
-/// `Seconds`-only vocabulary.
+/// to (`incremental_models.md` §"Key temporal locality"). The two routes
+/// this module implements license two structurally different slices:
+///
+/// - Route 1 (key-embedded) derives a **window**: margins around a run
+///   step's own partition value, resolved to concrete bounds by the caller
+///   (`smelt-runtime`, which already owns date arithmetic in
+///   `transformer.rs`) — this module stays date-arithmetic-free, matching
+///   `analysis::source_bounds`'s own `Seconds`-only vocabulary.
+/// - Route 2 (key-determined) derives **delta values**: the slice is
+///   exactly the partition-column values the step's own delta carries — no
+///   widening, and independent of the run step's own date, since a
+///   once-write-provenance-proven column is a per-key constant regardless
+///   of which row (or which run) reveals it (`incremental_models.md`
+///   §"Key temporal locality (the time-partitioned output)": "the slice is
+///   the delta's own partition values — exact regardless of key age").
+///   The caller resolves this to a `target.<col> IN (SELECT DISTINCT <col>
+///   FROM (<delta>))` predicate against the step's own already-compiled
+///   delta relation — no new value discovery, no extra query round trip.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct LocalitySlice {
-    /// The output's partition column the slice predicate ranges over.
-    pub partition_column: String,
-    /// How far back of a step's own partition value the slice must widen
-    /// (lateness/skew margin, route 1).
-    pub margin_before: Seconds,
-    /// How far forward of a step's own partition value the slice must
-    /// widen.
-    pub margin_after: Seconds,
+pub enum LocalitySlice {
+    /// Route 1: a step-relative window.
+    Window {
+        /// The output's partition column the slice predicate ranges over.
+        partition_column: String,
+        /// How far back of a step's own partition value the slice must
+        /// widen (lateness/skew margin).
+        margin_before: Seconds,
+        /// How far forward of a step's own partition value the slice must
+        /// widen.
+        margin_after: Seconds,
+    },
+    /// Route 2: the exact partition values the step's own delta carries.
+    DeltaValues {
+        /// The output's partition column the slice predicate ranges over.
+        partition_column: String,
+    },
+}
+
+impl LocalitySlice {
+    /// The output's partition column the slice predicate ranges over,
+    /// regardless of route.
+    pub fn partition_column(&self) -> &str {
+        match self {
+            LocalitySlice::Window {
+                partition_column, ..
+            }
+            | LocalitySlice::DeltaValues { partition_column } => partition_column,
+        }
+    }
 }
 
 /// Why key temporal locality could not be established for a model's
@@ -207,6 +265,17 @@ pub fn resolve_driving_source<'a>(
     }
 }
 
+/// The single shared "provably NOT NULL" derivation both of
+/// [`establish_locality`]'s callers must use (`smelt-db`'s static
+/// plan-derivation query and `smelt-runtime`'s keyed execution loop) — moved
+/// to `analysis::not_null` (`crate::analysis::not_null`) because it is a
+/// **leaf classifier** per `docs/specs/architecture.md` §"Property
+/// composition walk rule", and that is the directory the walk-coverage gate
+/// (`cargo test -p smelt-logical --test walk_coverage`) scans. Re-exported
+/// here so callers that already import it from this module (`smelt-db`,
+/// `smelt-runtime`) are unaffected.
+pub use crate::analysis::not_null::partition_column_provably_not_null;
+
 /// Establish key temporal locality for a keyed model's `timeseries:`
 /// block.
 ///
@@ -219,11 +288,15 @@ pub fn resolve_driving_source<'a>(
 /// 2. `partition_column` is provably NOT NULL.
 /// 3. The block's granularity equals the driving source's granularity.
 ///
-/// Then tries **route 1** (key-embedded: `partition_column ∈ unique_key`).
-/// Routes 2 and 3 are not yet implemented (`docs/plans/20260715-composed-
-/// axes-conditional-maintenance.md` phases A3/A4) — every model that clears
-/// the preconditions but does not satisfy route 1 refuses with a message
-/// naming that.
+/// Then tries **route 1** (key-embedded: `partition_column ∈ unique_key`),
+/// then **route 2** (key-determined: `partition_column` is a per-key
+/// constant, admitted only via a declared `functional_dependencies:` entry
+/// naming it — and refused outright, even when declared, when the walk's
+/// own discriminants prove the column is an extremal-fold (`MIN`/`MAX`)
+/// combiner, a distinct value-mutating family, not once-write). Route 3 is
+/// not yet implemented (`docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` phase A4) — every model that clears the preconditions
+/// but does not satisfy routes 1 or 2 refuses with a message naming that.
 pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, LocalityRefusal> {
     // Structural precondition 1: window-forward run shape.
     if !inputs.driving_source_has_clock {
@@ -291,17 +364,98 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
                 )));
             }
         };
-        return Ok(LocalitySlice {
+        return Ok(LocalitySlice::Window {
             partition_column: inputs.partition_column.clone(),
             margin_before,
             margin_after,
         });
     }
 
+    // Route 2: key-determined — the partition projection is a per-key
+    // constant under the once-write provenance proof
+    // (`incremental_models.md` §"Key temporal locality", route 2): a
+    // declared functional dependency over a column present non-null on
+    // every input row (the "present non-null" half of that obligation is
+    // the structural precondition already checked above —
+    // `partition_column_not_null` gates every route, not just this one).
+    // This route consumes the existing walk-composed property vector
+    // (`analysis::walk::model_property_vector`) and the existing
+    // functional-dependency verdict
+    // (`analysis::functional_dependency::functional_dependency_verdict_over_vector`)
+    // — no raw-text FD reimplementation.
+    //
+    // Once-write provenance is a **family** distinction
+    // (`incremental_models.md` §"The algebraic maintenance ladder"), not
+    // merely "deterministic given the current computation": an
+    // extremal-fold combiner (`MIN`/`MAX`) is a genuinely value-mutating
+    // combiner across merges — a later, out-of-order redelivery with an
+    // earlier true event value changes the folded value on re-merge
+    // (`analysis::discriminants::Monotone::Value`). The plain grain-
+    // subset-key FD proof (`functional_dependency_verdict_over_vector`'s
+    // "no declaration needed" branch) only establishes that the column is
+    // a deterministic function of the key *within one fixed computation*;
+    // it says nothing about invariance across merges over time, so it is
+    // never consulted here — no currently-implemented walk proof
+    // distinguishes a genuinely once-write shape (e.g. a literal `GROUP
+    // BY` key passthrough) from an extremal-fold aggregate over the same
+    // grain. Route 2 therefore consults only an explicit
+    // `functional_dependencies:` declaration (the modeller's own
+    // once-write assertion) — and even then refuses outright when the
+    // walk's own discriminants prove the column is an extremal-fold
+    // combiner: a declaration can widen only a genuinely undecidable
+    // origin, never override a proven value-mutating combiner.
+    if let Some(vector) = model_property_vector(inputs.sql, &JoinContext::new()) {
+        if let Some(discriminant) = vector
+            .discriminants
+            .iter()
+            .find(|d| d.output.eq_ignore_ascii_case(&inputs.partition_column))
+        {
+            if discriminant.discriminants.monotone == Monotone::Value {
+                return Err(refuse(format!(
+                    "route 2 (key-determined) refused: `{}` is derived from an extremal-fold \
+                     combiner (MIN/MAX) — a later, out-of-order row can still change its value on \
+                     re-merge, so it belongs to the extremal-fold family, distinct from once-write \
+                     provenance (`incremental_models.md` §\"Key temporal locality\")",
+                    inputs.partition_column
+                )));
+            }
+        }
+
+        let verdict = match inputs
+            .declared_functional_dependencies
+            .iter()
+            .find(|fd| fd.determines.eq_ignore_ascii_case(&inputs.partition_column))
+        {
+            Some(fd) => {
+                functional_dependency_verdict_over_vector(&fd.key, &fd.determines, &vector, true)
+            }
+            None => FunctionalDependencyVerdict::NotProven,
+        };
+        match verdict {
+            FunctionalDependencyVerdict::Constant => {
+                return Ok(LocalitySlice::DeltaValues {
+                    partition_column: inputs.partition_column.clone(),
+                });
+            }
+            FunctionalDependencyVerdict::Refused(reason) => {
+                return Err(refuse(format!(
+                    "route 2 (key-determined) refused: `{}` is not a provable per-key constant \
+                     — {reason}",
+                    inputs.partition_column
+                )));
+            }
+            FunctionalDependencyVerdict::NotProven => {
+                // Fall through to the final refusal below — route 3 is not
+                // yet implemented either.
+            }
+        }
+    }
+
     Err(refuse(format!(
-        "`{}` is not a `unique_key` column (route 1 fails); route 2 (key-determined) and route \
-         3 (recurrence-bounded) are not yet implemented \
-         (docs/plans/20260715-composed-axes-conditional-maintenance.md, phases A3-A4)",
+        "`{}` is not a `unique_key` column (route 1 fails) and is not proven a per-key constant \
+         by a declared `functional_dependencies:` entry (route 2 fails); route 3 \
+         (recurrence-bounded) is not yet implemented \
+         (docs/plans/20260715-composed-axes-conditional-maintenance.md, phase A4)",
         inputs.partition_column
     )))
 }
@@ -373,6 +527,7 @@ mod tests {
             driving_source_has_clock: true,
             driving_source_granularity: Some(Granularity::Day),
             driving_source_partition_column: Some("event_date".to_string()),
+            declared_functional_dependencies: &[],
             sql,
         }
     }
@@ -446,9 +601,18 @@ mod tests {
     fn route1_admits_key_embedded_partition_column() {
         let inputs = route1_inputs(SIMPLE_SQL);
         let slice = establish_locality(&inputs).expect("route 1 must admit");
-        assert_eq!(slice.partition_column, "event_date");
-        assert_eq!(slice.margin_before, Seconds::ZERO);
-        assert_eq!(slice.margin_after, Seconds::ZERO);
+        assert_eq!(slice.partition_column(), "event_date");
+        match slice {
+            LocalitySlice::Window {
+                margin_before,
+                margin_after,
+                ..
+            } => {
+                assert_eq!(margin_before, Seconds::ZERO);
+                assert_eq!(margin_after, Seconds::ZERO);
+            }
+            other => panic!("route 1 must derive a Window slice, got {other:?}"),
+        }
     }
 
     /// A genuine lookback construct in the model SQL (Form B: a WHERE
@@ -463,7 +627,12 @@ mod tests {
                    GROUP BY device_id, event_date";
         let inputs = route1_inputs(sql);
         let slice = establish_locality(&inputs).expect("route 1 must admit");
-        assert_eq!(slice.margin_before, Seconds::days(2));
+        match slice {
+            LocalitySlice::Window { margin_before, .. } => {
+                assert_eq!(margin_before, Seconds::days(2));
+            }
+            other => panic!("route 1 must derive a Window slice, got {other:?}"),
+        }
     }
 
     /// When `partition_column` is not a `unique_key` column, route 1 fails
@@ -512,6 +681,162 @@ mod tests {
         assert!(
             message.contains("Nearest missing fact"),
             "message must name the nearest missing fact: {message}"
+        );
+    }
+
+    // ---- Route 2 -------------------------------------------------------
+
+    /// A minimal route-2-shaped input: `unique_key` is `event_id` alone
+    /// (not `event_date`), and `first_seen_date` is a non-key aggregate
+    /// projection (`MIN(event_date)`), so route 1 fails
+    /// (`partition_column ∉ unique_key`).
+    fn route2_inputs(sql: &'_ str) -> LocalityInputs<'_> {
+        LocalityInputs {
+            model_name: "events_deduped".to_string(),
+            unique_key: vec!["event_id".to_string()],
+            partition_column: "first_seen_date".to_string(),
+            granularity: Granularity::Day,
+            partition_column_not_null: true,
+            driving_source_name: "smelt.sources.raw.events".to_string(),
+            driving_source_has_clock: true,
+            driving_source_granularity: Some(Granularity::Day),
+            driving_source_partition_column: Some("event_date".to_string()),
+            declared_functional_dependencies: &[],
+            sql,
+        }
+    }
+
+    const ROUTE2_SQL: &str = "SELECT event_id, MIN(event_date) AS first_seen_date, \
+         COUNT(*) AS event_count FROM smelt.sources.raw.events GROUP BY event_id";
+
+    /// Regression test (reviewer-found correctness bug): a `MIN`/`MAX`-
+    /// derived partition column must NOT be admitted by route 2, declared
+    /// FD or not. `MIN`/`MAX` is a genuinely value-mutating combiner across
+    /// merges — a late/out-of-order redelivery with an earlier true event
+    /// date changes the folded value on re-merge — so it belongs to the
+    /// extremal-fold family, which is distinct from once-write provenance
+    /// (`incremental_models.md` §"Key temporal locality", "Row movement":
+    /// only route 3, not route 2, may see a partition value move). Proving
+    /// that the model's own `GROUP BY` key is a subset of its `unique_key`
+    /// only establishes that `first_seen_date` is a deterministic function
+    /// of the key *within one fixed computation* — it says nothing about
+    /// invariance across merges over time, so it must never be treated as
+    /// a once-write proof.
+    #[test]
+    fn route2_refuses_min_derived_partition_column_not_once_write() {
+        let inputs = route2_inputs(ROUTE2_SQL);
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.to_lowercase().contains("extremal-fold"),
+            "message must name the extremal-fold family as the refusal reason: {message}"
+        );
+    }
+
+    /// The same refusal holds even when a `functional_dependencies:` entry
+    /// explicitly declares `event_id -> first_seen_date`: a declaration is
+    /// the modeller's once-write assertion, but it can never override the
+    /// walk's own proof that the column is an extremal-fold combiner.
+    #[test]
+    fn route2_refuses_min_derived_partition_column_even_when_declared() {
+        let mut inputs = route2_inputs(ROUTE2_SQL);
+        let fd = smelt_core::config::FunctionalDependency {
+            key: vec!["event_id".to_string()],
+            determines: "first_seen_date".to_string(),
+        };
+        let declared = [fd];
+        inputs.declared_functional_dependencies = &declared;
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.to_lowercase().contains("extremal-fold"),
+            "message must name the extremal-fold family as the refusal reason: {message}"
+        );
+    }
+
+    /// A declared `functional_dependencies:` entry widens an otherwise
+    /// undecidable (no traceable join, no `GROUP BY` subset-key) origin to
+    /// `Constant` — the same widening `functional_dependency_verdict_over_
+    /// vector` already proves at the unit level, exercised here through the
+    /// locality gate's own consumption of it.
+    #[test]
+    fn route2_admits_declared_functional_dependency() {
+        let sql = "SELECT customer_id, region FROM smelt.sources.raw.crm";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["customer_id".to_string()];
+        inputs.partition_column = "region".to_string();
+        let fd = smelt_core::config::FunctionalDependency {
+            key: vec!["customer_id".to_string()],
+            determines: "region".to_string(),
+        };
+        let declared = [fd];
+        inputs.declared_functional_dependencies = &declared;
+        let slice = establish_locality(&inputs).expect("declared FD must admit route 2");
+        assert!(matches!(slice, LocalitySlice::DeltaValues { .. }));
+    }
+
+    /// A declared FD over a column the model does not even project is not
+    /// widened (`functional_dependency_verdict_over_vector`'s consultation
+    /// rule) — route 2 refuses fail-closed rather than trust a declaration
+    /// disconnected from the model's own columns.
+    #[test]
+    fn route2_refuses_declared_fd_over_column_not_projected() {
+        let sql = "SELECT customer_id, region FROM smelt.sources.raw.crm";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["customer_id".to_string()];
+        inputs.partition_column = "region".to_string();
+        let fd = smelt_core::config::FunctionalDependency {
+            key: vec!["not_a_real_column".to_string()],
+            determines: "region".to_string(),
+        };
+        let declared = [fd];
+        inputs.declared_functional_dependencies = &declared;
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.contains("Nearest missing fact"),
+            "message must name the nearest missing fact: {message}"
+        );
+    }
+
+    /// A `determines` column sourced from a join F6 proves fans out
+    /// (`OneToMany`) is a structural disproof no declaration can override —
+    /// route 2 refuses fail-closed and names the reason.
+    #[test]
+    fn route2_refuses_when_column_crosses_undiscriminated_union() {
+        let sql = "SELECT customer_id, region FROM smelt.sources.raw.crm_a \
+                   UNION ALL \
+                   SELECT customer_id, region FROM smelt.sources.raw.crm_b";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["customer_id".to_string()];
+        inputs.partition_column = "region".to_string();
+        let fd = smelt_core::config::FunctionalDependency {
+            key: vec!["customer_id".to_string()],
+            determines: "region".to_string(),
+        };
+        let declared = [fd];
+        inputs.declared_functional_dependencies = &declared;
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.to_lowercase().contains("union"),
+            "message must name the structural disproof reason: {message}"
+        );
+    }
+
+    /// The structural NOT NULL precondition (checked before any route) gates
+    /// route 2 exactly as it gates route 1 — a non-key partition column the
+    /// caller cannot prove NOT NULL is refused before the functional-
+    /// dependency proof is ever consulted.
+    #[test]
+    fn route2_refuses_when_partition_column_not_provably_not_null() {
+        let mut inputs = route2_inputs(ROUTE2_SQL);
+        inputs.partition_column_not_null = false;
+        let err = establish_locality(&inputs).unwrap_err();
+        let message = err.message("events_deduped");
+        assert!(
+            message.contains("NOT NULL"),
+            "message must name the NOT NULL precondition: {message}"
         );
     }
 }

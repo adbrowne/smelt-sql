@@ -22,7 +22,9 @@ use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
-use smelt_logical::maintenance::locality::{establish_locality, LocalityInputs};
+use smelt_logical::maintenance::locality::{
+    establish_locality, partition_column_provably_not_null, LocalityInputs,
+};
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
     locality_refused_plan, ColumnGroup, Grain as PlanGrain, MaintenancePlan,
@@ -243,16 +245,23 @@ pub fn derive_model_maintenance_plan(
                     }
                     Ok(None) | Err(_) => (String::new(), false, None),
                 };
+                let partition_column_not_null = partition_column_provably_not_null(
+                    sql,
+                    &unique_key,
+                    &own_ts.partition_column,
+                    driving_source_partition_column.as_deref(),
+                );
                 let inputs = LocalityInputs {
                     model_name: table.to_string(),
                     unique_key: unique_key.clone(),
                     partition_column: own_ts.partition_column.clone(),
                     granularity: own_ts.granularity,
-                    partition_column_not_null: unique_key.contains(&own_ts.partition_column),
+                    partition_column_not_null,
                     driving_source_name,
                     driving_source_has_clock,
                     driving_source_granularity,
                     driving_source_partition_column,
+                    declared_functional_dependencies: &metadata.functional_dependencies,
                     sql,
                 };
                 if let Err(refusal) = establish_locality(&inputs) {

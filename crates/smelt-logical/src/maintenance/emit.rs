@@ -202,17 +202,34 @@ pub fn emit_in_place_update(
 
 /// A target-scan slice predicate for a locality-admitted keyed fold
 /// (`docs/specs/incremental_models.md` §"Key temporal locality"): restricts
-/// the `MERGE`'s `ON` condition to target rows whose partition column lies
-/// in `[lower, upper]`. Concrete bounds are computed by the caller (one
-/// step's own partition value, widened by
-/// [`crate::maintenance::locality::LocalitySlice`]'s derived margins);
-/// `lower`/`upper` are plain date/timestamp literal text, unescaped (this
-/// emitter escapes them, matching every other emitter in this module).
+/// the `MERGE`'s `ON` condition to target rows the write provably cannot
+/// touch outside of. The two shapes mirror the two routes
+/// [`crate::maintenance::locality::LocalitySlice`] can derive:
+///
+/// - [`TargetSlicePredicate::Range`] (route 1) — target rows whose
+///   partition column lies in `[lower, upper]`. Concrete bounds are
+///   computed by the caller (one step's own partition value, widened by
+///   the route's derived margins); `lower`/`upper` are plain
+///   date/timestamp literal text, unescaped (this emitter escapes them,
+///   matching every other emitter in this module).
+/// - [`TargetSlicePredicate::DeltaValues`] (route 2) — target rows whose
+///   partition column appears among the step's own delta relation's
+///   partition-column values, read directly off the same already-compiled
+///   delta `SELECT` the `MERGE` scans (`delta_select`) rather than a
+///   caller-precomputed range: under route 2 the value is a per-key
+///   constant, so the delta's own values are the exact (never widened)
+///   slice.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct TargetSlicePredicate {
-    pub partition_column: String,
-    pub lower: String,
-    pub upper: String,
+pub enum TargetSlicePredicate {
+    Range {
+        partition_column: String,
+        lower: String,
+        upper: String,
+    },
+    DeltaValues {
+        partition_column: String,
+        delta_select: String,
+    },
 }
 
 /// Fold-a-delta into keyed end-state (top-left): the combiner-aware `MERGE`
@@ -260,12 +277,28 @@ pub fn emit_keyed_fold(
         .collect::<Vec<_>>()
         .join(" AND ");
     if let Some(slice) = slice {
-        let safe_lower = slice.lower.replace('\'', "''");
-        let safe_upper = slice.upper.replace('\'', "''");
-        on.push_str(&format!(
-            " AND target.{} BETWEEN '{}' AND '{}'",
-            slice.partition_column, safe_lower, safe_upper
-        ));
+        match slice {
+            TargetSlicePredicate::Range {
+                partition_column,
+                lower,
+                upper,
+            } => {
+                let safe_lower = lower.replace('\'', "''");
+                let safe_upper = upper.replace('\'', "''");
+                on.push_str(&format!(
+                    " AND target.{partition_column} BETWEEN '{safe_lower}' AND '{safe_upper}'"
+                ));
+            }
+            TargetSlicePredicate::DeltaValues {
+                partition_column,
+                delta_select,
+            } => {
+                on.push_str(&format!(
+                    " AND target.{partition_column} IN (SELECT DISTINCT {partition_column} FROM \
+                     ({delta_select}) AS __locality_delta_values)"
+                ));
+            }
+        }
     }
     let sets = folds
         .iter()

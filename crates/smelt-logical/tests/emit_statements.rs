@@ -139,7 +139,7 @@ fn keyed_fold_renders_combiners_and_insert_star() {
 /// clamp").
 #[test]
 fn keyed_fold_with_slice_carries_target_partition_predicate() {
-    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate {
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate::Range {
         partition_column: "event_date".to_string(),
         lower: "2026-01-02".to_string(),
         upper: "2026-01-02".to_string(),
@@ -171,7 +171,7 @@ fn keyed_fold_with_slice_carries_target_partition_predicate() {
 /// this module (`delete_insert_escapes_quoted_literal_region_boundaries`).
 #[test]
 fn keyed_fold_slice_escapes_quoted_literal_bounds() {
-    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate {
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate::Range {
         partition_column: "name".to_string(),
         lower: "O'Brien".to_string(),
         upper: "Z".to_string(),
@@ -190,6 +190,36 @@ fn keyed_fold_slice_escapes_quoted_literal_bounds() {
             .contains("AND target.name BETWEEN 'O''Brien' AND 'Z'"),
         "expected escaped slice bound: {}",
         group.statements[0].sql
+    );
+}
+
+/// Route 2 (key-determined) locality slices the target scan by the delta's
+/// own partition values (`docs/specs/incremental_models.md` §"Key temporal
+/// locality", route 2), rendered as an `IN (SELECT DISTINCT … FROM
+/// (<delta>))` predicate rather than route 1's literal `BETWEEN` range —
+/// no widening, no caller-precomputed bounds.
+#[test]
+fn keyed_fold_with_delta_values_slice_carries_in_subquery_predicate() {
+    let delta_select = "SELECT event_id, MIN(event_date) AS first_seen_date FROM events GROUP BY 1";
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate::DeltaValues {
+        partition_column: "first_seen_date".to_string(),
+        delta_select: delta_select.to_string(),
+    };
+    let group = emit_keyed_fold(
+        "main.events_deduped",
+        &["event_id".to_string()],
+        &[],
+        delta_select,
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO main.events_deduped AS target USING (SELECT event_id, MIN(event_date) AS \
+         first_seen_date FROM events GROUP BY 1) AS delta ON target.event_id = delta.event_id \
+         AND target.first_seen_date IN (SELECT DISTINCT first_seen_date FROM (SELECT event_id, \
+         MIN(event_date) AS first_seen_date FROM events GROUP BY 1) AS __locality_delta_values) \
+         WHEN MATCHED THEN UPDATE SET  WHEN NOT MATCHED THEN INSERT *"
     );
 }
 
