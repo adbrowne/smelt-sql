@@ -78,7 +78,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A4 | Route 3 (recurrence-bounded): consume `key_recurrence` + transactional `KeyedRecurrenceBoundViolated` check | done (2026-07-18) |
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
-| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending |
+| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | blocked (2026-07-18) — pre-existing MIN/MAX NOT-NULL inference gap trips at diagnostic time |
 | W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | pending |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | pending |
@@ -117,6 +117,52 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 4. **Digest stance**: exact `IS DISTINCT FROM` for write suppression (C4/C5); SHA-256-class digests only for the F-group sidecar, with the soundness invariant stated in F1's spec diff and oracle-gated.
 5. **Sidecar lifecycle and observed-delta trust boundary** are settled in the D1/F1 spec-diff phases (warehouse-resident beside the merge ledger, same-transaction, is the default posture); those phases block their groups until the spec says otherwise.
 6. **v1 delta posture**: record key-level, propagate partition-level (widen-never-narrow) — D3.
+
+## Blocked phases
+
+- **2026-07-18 — W1** (`Web-analytics tracer: composed events_deduped model`). Blocked by a
+  pre-existing, out-of-scope defect: the type-inference registry infers `MIN`/`MAX` as nullable
+  unconditionally, regardless of argument nullability. W1's flagship shape needs an extremal-fold
+  (`MIN(event_date)`-class) `timeseries.partition_column` — exactly the route-2/route-3 shape
+  `docs/specs/incremental_models.md` lines ~1810-1867 already documents as carrying this gap. The
+  block fires *earlier* than that spec text anticipated: not only at the manually-driven runtime
+  harness, but already at static-diagnostic time (`example_diagnostics`/LSP), because the
+  `timeseries.md` NOT-NULL precondition on `partition_column` can never be satisfied by a
+  `MIN`/`MAX` projection under the current inference. Reproduced directly: staging
+  `examples/web_analytics/models/silver/events_deduped.sql` (`grain: key`, `timeseries: {
+  event_time_column: first_seen_date, partition_column: first_seen_date, granularity: day }`, body
+  `SELECT event_id, MIN(device_id) AS device_id, MIN(user_id) AS user_id, MIN(CAST(event_time AS
+  TIMESTAMP)) AS event_ts, MIN(CAST(event_date AS DATE)) AS first_seen_date, MIN(utm_campaign) AS
+  utm_campaign, MIN(payload) AS payload FROM smelt.sources.raw.events GROUP BY event_id`, no
+  `WHERE`/`unique_key:`/`safety_overrides:`) alongside a `mutation_profile.key_recurrence: {key:
+  [event_id], window: '1 day'}` + matching `timeseries:` block added to
+  `examples/web_analytics/models/sources/raw/events.yml`, then running
+  `cargo test -p smelt-cli --test example_diagnostics web_analytics_no_diagnostics -- --nocapture`
+  produces:
+  ```
+  [Error] models/silver/events_deduped.sql: timeseries partition_column 'first_seen_date' must be NOT NULL — a nullable value silently escapes the pruning window
+  [Error] models/silver/events_deduped.sql: no maintenance technique admits trigger NewData { source: "raw.events" }: keyed grain with no fold specification
+  ```
+  The second diagnostic is a downstream consequence of the same failed classification
+  (`crates/smelt-logical/src/maintenance/derive.rs` around line 311-317, `inputs.fold == None`),
+  not an independent bug. Because the diagnostic-clean requirement fires at test 1
+  (`example_diagnostics`) and test 2 (`example_workspaces` via the real LSP) — both of W1's own TDD
+  list — there is no way to land any of the four planned tests green with the flagship model
+  present in the tree until the nullability gap is fixed; fixing it is production-code work this
+  phase's own scope excludes ("Implementation shape. Example + source-YAML work only ... no
+  production code"). All investigation changes were reverted; the tree is clean and matches HEAD.
+  **Candidate options:** (a) fix the `MIN`/`MAX` nullable-unconditionally inference gap in a
+  dedicated phase first (likely in `smelt-db`'s type-inference registry, propagating real argument
+  nullability through extremal aggregates) and re-open W1 after; (b) reshape W1's flagship SQL to
+  avoid an extremal-fold `partition_column` (e.g. a route that doesn't need `MIN`/`MAX` on the
+  clock column) — but this would abandon the "extremal-fold family" demonstration the tracer is
+  meant to showcase and may not be achievable for a dedupe-by-first-arrival shape; (c) narrow W1 to
+  a `smelt explain`-only admission demo (drop the real `smelt run`/e2e leg and the
+  diagnostic-clean requirement) pending the fix. **Recommendation:** (a) — the gap is already
+  tracked as a known, separately-trackable defect by the spec text itself; fixing it once likely
+  unblocks route 2's identical documented gap at the same time, and every other option either
+  weakens the flagship or defers real coverage indefinitely.
+
 ---
 
 ## Group A — the composed shape exists at all (key temporal locality)
