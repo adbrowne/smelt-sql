@@ -79,7 +79,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | blocked (2026-07-18) — pre-existing MIN/MAX NOT-NULL inference gap trips at diagnostic time |
-| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending |
+| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | blocked (2026-07-18) — precondition W1 is blocked |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | pending |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | pending |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | pending |
@@ -162,6 +162,17 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
   tracked as a known, separately-trackable defect by the spec text itself; fixing it once likely
   unblocks route 2's identical documented gap at the same time, and every other option either
   weakens the flagship or defers real coverage indefinitely.
+
+- **2026-07-18 — W2** (`Web-analytics tutorial chapter + composed-shape guide`). Blocked
+  transitively: W2's stated pre-condition is W1 (the tracer must exist to be teachable —
+  the tutorial page and staged workspace are built around `events_deduped`, which W1 was
+  supposed to land), and W1 is itself blocked on the pre-existing MIN/MAX NOT-NULL
+  inference gap above. No independent W2 work is in scope until W1 unblocks.
+  **Candidate options:** (a) wait for W1's blocker (the MIN/MAX inference fix) to land,
+  then resume W1 → W2 in order; (b) re-scope W2 to a flagship shape that doesn't depend on
+  W1's exact fixture (out of scope for this phase — would require a plan edit).
+  **Recommendation:** (a) — same as W1's recommendation; no autonomous action fixes this
+  faster than resolving the shared blocker.
 
 ---
 
