@@ -443,12 +443,19 @@ pub enum MetadataError {
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
-    /// A model declares `refresh: keyed` and a `timeseries:` block without
-    /// key temporal locality being established. Keyed outputs are not
-    /// themselves timeseries by default — the rule reads the partition
-    /// shape from the driving source instead (see
-    /// `docs/specs/incremental_models.md` §"Key-grain output shape").
-    #[error("KeyedForbidsTimeseries: keyed models must not declare a `timeseries:` block — the keyed output has no partition column; the rule reads the partition shape from the driving source")]
+    /// A model declares `refresh: incremental` + `grain: key` and a
+    /// `timeseries:` block, and key temporal locality cannot be
+    /// established for it. Not raised by [`validate_timeseries`] — the
+    /// admissibility decision needs derived facts (`unique_key`, partition
+    /// provenance) this pure frontmatter validator doesn't have, so it is
+    /// made by the locality gate in plan derivation
+    /// (`smelt_logical::maintenance::locality::establish_locality`) and
+    /// surfaced from there instead (see
+    /// `docs/specs/incremental_models.md` §"Key temporal locality (the
+    /// time-partitioned output)"). The variant is kept here so the
+    /// `MetadataError` type remains the shared vocabulary every consumer's
+    /// exhaustive match already handles.
+    #[error("KeyedForbidsTimeseries: key temporal locality could not be established for this `timeseries:` block")]
     KeyedForbidsTimeseries,
 
     /// A model declares `refresh: incremental` + `grain: key` (or another
@@ -561,12 +568,17 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         return Err(MetadataError::KeyedForbidsBatched);
     }
 
-    // Rule: keyed forbids timeseries: — the keyed output has no
-    // partition column by default (key temporal locality establishment
-    // is not yet built; see docs/specs/incremental_models.md §Known Divergences "The key grain").
-    if metadata.is_keyed() && metadata.timeseries.is_some() {
-        return Err(MetadataError::KeyedForbidsTimeseries);
-    }
+    // Keyed + timeseries: is NOT rejected here. Admission depends on
+    // whether key temporal locality can be established (three routes:
+    // key-embedded, key-determined, recurrence-bounded —
+    // `docs/specs/incremental_models.md` §"Key temporal locality (the
+    // time-partitioned output)"), a decision that needs the model's derived
+    // `unique_key`/partition-column provenance, not just the frontmatter
+    // shape. That decision is made by the single locality-gate entry point
+    // in plan derivation (`smelt_logical::maintenance::locality::establish_locality`,
+    // consumed by `smelt-db`'s `maintenance_plan` query), which still
+    // surfaces as `KeyedForbidsTimeseries` when no route applies — just not
+    // from this frontmatter validator.
 
     // Rule: materialized_view forbids batched: — the engine owns freshness
     // for this mode; there is no smelt-driven batch loop to configure.
@@ -2404,10 +2416,14 @@ GROUP BY device_id, user_id"#;
         }
     }
 
-    /// A model with `refresh: keyed` + a `timeseries:` block
-    /// emits `KeyedForbidsTimeseries`.
+    /// A model with `refresh: keyed` + a `timeseries:` block passes
+    /// frontmatter validation — whether key temporal locality can be
+    /// established is a plan-derivation decision (the locality gate in
+    /// `smelt_logical::maintenance::locality`), not a frontmatter shape
+    /// check (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// (the time-partitioned output)").
     #[test]
-    fn test_keyed_forbids_timeseries() {
+    fn test_keyed_with_timeseries_reaches_plan_derivation() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::Incremental),
@@ -2421,12 +2437,10 @@ GROUP BY device_id, user_id"#;
             }),
             ..Default::default()
         };
-        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-            .expect_err("refresh: keyed + timeseries must error");
         assert!(
-            matches!(err, MetadataError::KeyedForbidsTimeseries),
-            "Expected KeyedForbidsTimeseries, got: {}",
-            err
+            validate_timeseries(&metadata, "SELECT dt FROM foo").is_ok(),
+            "refresh: incremental + grain: key + timeseries: must reach plan derivation, \
+             not fail frontmatter validation"
         );
     }
 

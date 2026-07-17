@@ -111,7 +111,12 @@ impl PlannerRule for KeyedRule {
         if ctx.materialization != "cumulative_aggregate" {
             return Vec::new();
         }
-        match classify_cumulative(ctx.sql, ctx.refs, ctx.source_timeseries) {
+        match classify_cumulative(
+            ctx.sql,
+            ctx.refs,
+            ctx.source_timeseries,
+            ctx.timeseries_config.is_some(),
+        ) {
             Ok(_) => Vec::new(),
             Err(diags) => diags.iter().map(keyed_to_rule).collect(),
         }

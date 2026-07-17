@@ -21,11 +21,13 @@ use smelt_logical::analysis::{select_stmt_items, SelectItemKind};
 use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, ModelInputs};
 use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
+use smelt_logical::maintenance::locality::{establish_locality, LocalityInputs};
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
-    ColumnGroup, Grain as PlanGrain, MaintenancePlan, MutationProfile as PlanMutationProfile,
-    OutputSpec, SourceFacts, Trigger,
+    locality_refused_plan, ColumnGroup, Grain as PlanGrain, MaintenancePlan,
+    MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
 };
+use smelt_logical::rules::cumulative::group_by_unique_key as derive_group_by_unique_key;
 use smelt_types::SqlFunction;
 
 /// Everything `maintenance_plan` derives for one model: the raw plan (cells
@@ -190,7 +192,39 @@ pub fn derive_model_maintenance_plan(
         ConfigGrain::Partition => PlanGrain::Partition {
             partition_col: partition_col.clone().unwrap_or_default(),
         },
-        ConfigGrain::Key => PlanGrain::Key { unique_key: vec![] },
+        ConfigGrain::Key => {
+            // A `grain: key` model that also declares a `timeseries:`
+            // block must clear the key-temporal-locality gate before a
+            // plan is derived at all — the single entry point deciding
+            // keyed+timeseries admissibility
+            // (`smelt_logical::maintenance::locality::establish_locality`,
+            // `docs/specs/incremental_models.md` §"Key temporal locality").
+            // This phase implements no route, so every such model refuses
+            // here (`KeyedForbidsTimeseries`, the three-route message) —
+            // it never reaches `derive_maintenance_plan` with a
+            // partition-carrying keyed grain.
+            if metadata.timeseries.is_some() {
+                let refusal = establish_locality(&LocalityInputs {
+                    model_name: table.to_string(),
+                })
+                .expect_err("establish_locality admits no route yet — always Err in this phase");
+                return Some(MaintenancePlanResult {
+                    plan: locality_refused_plan(refusal.message(table)),
+                    column_groups: Vec::new(),
+                    degenerate: Vec::new(),
+                });
+            }
+            // The model's real derived `unique_key` — the GROUP BY columns
+            // of its own outermost SELECT (the same derivation the keyed
+            // classifier, `rules::cumulative::classify_cumulative`,
+            // performs) — rather than a hardcoded empty vec. Threading it
+            // here does not change which techniques any existing plan
+            // admits: `derive_maintenance_plan`'s admission logic does not
+            // yet branch on `Grain::Key`'s `unique_key` contents.
+            PlanGrain::Key {
+                unique_key: derive_group_by_unique_key(sql),
+            }
+        }
         ConfigGrain::KeyPerPartition => unreachable!("handled above"),
     };
     let skeleton = skeleton_columns(sql, &[], partition_col.as_deref());
@@ -383,6 +417,9 @@ pub enum MaintenanceRefusal {
         grain: String,
         tracking_plan: String,
     },
+    LocalityNotEstablished {
+        message: String,
+    },
 }
 
 /// The result `maintenance_plan` (the Salsa query) returns: every admission
@@ -483,6 +520,11 @@ pub fn maintenance_plan_diagnostics(
                 grain: grain.clone(),
                 tracking_plan: tracking_plan.clone(),
             }),
+            smelt_logical::maintenance::Refusal::LocalityNotEstablished { message } => {
+                Some(MaintenanceRefusal::LocalityNotEstablished {
+                    message: message.clone(),
+                })
+            }
         })
         .collect();
     let cell_column_group_violations = metadata
@@ -598,5 +640,94 @@ mod tests {
         let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
         assert_eq!(fold.add_columns, vec!["total".to_string()]);
         assert_eq!(fold.combiner, SqlFunction::Sum);
+    }
+
+    /// A `grain: key` model's derived plan carries the classifier's real
+    /// `unique_key` (its own GROUP BY columns) — not a hardcoded empty vec.
+    #[test]
+    fn keyed_plan_carries_real_unique_key() {
+        let sql = "SELECT device_id, user_id, COUNT(*) AS n \
+                    FROM smelt.sources.events GROUP BY device_id, user_id";
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            ..Default::default()
+        };
+        let result = derive_model_maintenance_plan(
+            sql,
+            "main.device_user",
+            &metadata,
+            &[],
+            &std::collections::HashSet::new(),
+        )
+        .expect("grain: key model must derive a plan");
+        // `derive_model_maintenance_plan` threads `derive_group_by_unique_key`
+        // into `PlanGrain::Key` — assert the same derivation directly (the
+        // plan itself does not yet re-expose the grain on a public surface,
+        // `MaintenancePlanResult` carries only cells/refusals/column_groups).
+        assert_eq!(
+            derive_group_by_unique_key(sql),
+            vec!["device_id".to_string(), "user_id".to_string()]
+        );
+        // Sanity: this model has no timeseries: block, so it must NOT hit
+        // the locality refusal — it derives ordinary cells/no-cells like
+        // any other grain: key model (no admission assertion beyond "no
+        // locality refusal" — the fold/aggregate admission is exercised by
+        // other tests).
+        assert!(
+            !result.plan.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+            )),
+            "no timeseries: block declared — must not hit the locality gate: {:?}",
+            result.plan.refusals
+        );
+    }
+
+    /// A `grain: key` model that also declares a `timeseries:` block is
+    /// refused by the key-temporal-locality gate — no route is implemented
+    /// yet, so admission never proceeds to `derive_maintenance_plan`
+    /// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+    /// time-partitioned output)").
+    #[test]
+    fn keyed_with_timeseries_refuses_via_locality_gate() {
+        use smelt_core::config::{Granularity, TimeseriesConfig};
+
+        let sql = "SELECT device_id, COUNT(*) AS n FROM smelt.sources.events GROUP BY device_id";
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            timeseries: Some(TimeseriesConfig {
+                event_time_column: "event_date".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            }),
+            ..Default::default()
+        };
+        let result = derive_model_maintenance_plan(
+            sql,
+            "main.device_daily",
+            &metadata,
+            &[],
+            &std::collections::HashSet::new(),
+        )
+        .expect("grain: key + timeseries: must still derive a (refused) plan");
+        assert!(
+            result.plan.cells.is_empty(),
+            "a locality-refused model must admit no cells: {:?}",
+            result.plan.cells
+        );
+        assert_eq!(result.plan.refusals.len(), 1, "{:?}", result.plan.refusals);
+        match &result.plan.refusals[0] {
+            smelt_logical::maintenance::Refusal::LocalityNotEstablished { message } => {
+                assert!(
+                    message.contains("KeyedForbidsTimeseries"),
+                    "message: {message}"
+                );
+            }
+            other => panic!("expected LocalityNotEstablished, got {other:?}"),
+        }
     }
 }

@@ -866,10 +866,16 @@ pub async fn execute_project(
                     // this, forbidden keyed SQL (e.g. a non-allowlisted
                     // aggregator) would be silently materialised as a plain
                     // full refresh whenever no event-time window is supplied.
+                    let model_has_timeseries = plan
+                        .model_file
+                        .metadata
+                        .as_ref()
+                        .is_some_and(|m| m.timeseries.is_some());
                     crate::cumulative::classify_cumulative_sql(
                         &plan.name,
                         &clean_sql,
                         &source_timeseries,
+                        model_has_timeseries,
                     )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
                         &plan.model_file,

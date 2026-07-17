@@ -1731,9 +1731,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
-                smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => {
-                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsTimeseries))
-                }
+                // `validate_timeseries` no longer raises this — whether
+                // keyed+timeseries: is admitted is decided by the locality
+                // gate in plan derivation
+                // (`smelt_logical::maintenance::locality::establish_locality`),
+                // which surfaces its own `KeyedForbidsTimeseries` diagnostic
+                // from the maintenance-plan fold-in below. The arm is kept
+                // (rather than folded into the `_ => None` wildcard) so the
+                // `MetadataError` variant's diagnostic mapping stays
+                // documented at its point of historical use.
+                smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => None,
                 smelt_core::metadata::MetadataError::KeyedForbidsBatched => {
                     Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsBatched))
                 }
@@ -1932,6 +1939,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     DiagnosticCode::MaintenanceNoAdmissibleTechnique,
                     format!("no maintenance technique admits trigger {trigger}: {why}"),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
+                    message,
+                } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
                 crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
                     grain,
                     tracking_plan,

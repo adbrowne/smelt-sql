@@ -140,11 +140,17 @@ fn refresh_latest_value_and_accumulating_snapshot_remain_unknown() {
 
 // ── refresh: incremental + grain: key forbids timeseries: and batched: ───────
 
-/// `refresh: incremental` + `grain: key` + `timeseries:` → `KeyedForbidsTimeseries`.
+/// `refresh: incremental` + `grain: key` + `timeseries:` is no longer
+/// rejected at frontmatter validation — whether key temporal locality can
+/// be established is decided later, by the locality gate in plan
+/// derivation (`smelt_logical::maintenance::locality::establish_locality`),
+/// not by this pure frontmatter check
+/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// time-partitioned output)"). The combination now reaches plan derivation
+/// instead of failing here.
 #[test]
-fn refresh_keyed_forbids_timeseries() {
+fn refresh_keyed_with_timeseries_reaches_plan_derivation() {
     use smelt_core::config::{Granularity, TimeseriesConfig};
-    use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
@@ -159,12 +165,10 @@ fn refresh_keyed_forbids_timeseries() {
         }),
         ..Default::default()
     };
-    let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-        .expect_err("refresh: incremental + grain: key + timeseries: must error");
     assert!(
-        matches!(err, MetadataError::KeyedForbidsTimeseries),
-        "Expected KeyedForbidsTimeseries, got: {}",
-        err
+        validate_timeseries(&metadata, "SELECT dt FROM foo").is_ok(),
+        "refresh: incremental + grain: key + timeseries: must reach plan derivation, \
+         not fail frontmatter validation"
     );
 }
 

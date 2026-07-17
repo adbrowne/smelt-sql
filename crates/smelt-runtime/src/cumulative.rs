@@ -101,9 +101,14 @@ pub async fn execute_cumulative_aggregate(
     // 1. Classify the model SQL.
     let clean_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let refs = collect_refs_from_sql(&clean_sql);
+    let model_has_timeseries = model
+        .metadata
+        .as_ref()
+        .is_some_and(|m| m.timeseries.is_some());
 
-    let classification = classify_cumulative(&clean_sql, &refs, source_timeseries)
-        .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
+    let classification =
+        classify_cumulative(&clean_sql, &refs, source_timeseries, model_has_timeseries)
+            .map_err(|diagnostics| format_classifier_error(model_name, &diagnostics))?;
 
     let driving_source_name = classification.driving_source.name.clone();
     let driving_ts = classification.driving_source.timeseries.clone();
@@ -261,13 +266,20 @@ fn collect_refs_from_sql(sql: &str) -> Vec<String> {
 /// rejection must refuse the model rather than silently materialise forbidden
 /// SQL (`incremental_models.md` §"Key-grain constraints" #4 — "The catalogue is closed and the
 /// classifier is fail-closed").
+///
+/// `model_has_timeseries` is whether the model's own frontmatter declares a
+/// `timeseries:` block — threaded through to `classify_cumulative` so
+/// `KeyedGroupByContainsPartitionColumn` is narrowed to the no-`timeseries:`
+/// case (a model with its own `timeseries:` block is decided by the key
+/// temporal locality gate instead, `maintenance::locality::establish_locality`).
 pub fn classify_cumulative_sql(
     model_name: &str,
     clean_sql: &str,
     source_timeseries: &SourceTimeseriesMap,
+    model_has_timeseries: bool,
 ) -> Result<CumulativeClassification> {
     let refs = collect_refs_from_sql(clean_sql);
-    classify_cumulative(clean_sql, &refs, source_timeseries)
+    classify_cumulative(clean_sql, &refs, source_timeseries, model_has_timeseries)
         .map_err(|diags| format_classifier_error(model_name, &diags))
 }
 

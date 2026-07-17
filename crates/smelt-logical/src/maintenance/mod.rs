@@ -30,6 +30,7 @@ pub mod derive;
 pub mod emit;
 pub mod granularity;
 pub mod grouping;
+pub mod locality;
 pub mod propagate;
 pub mod skeleton;
 
@@ -233,6 +234,12 @@ pub enum Refusal {
         grain: String,
         tracking_plan: String,
     },
+    /// A `grain: key` model declares a `timeseries:` block but key temporal
+    /// locality could not be established — no route applies (§"Key
+    /// temporal locality"). `message` is the rendered `KeyedForbidsTimeseries`
+    /// diagnostic (`locality::LocalityRefusal::message`): it names all
+    /// three routes and the nearest missing fact.
+    LocalityNotEstablished { message: String },
 }
 
 /// The derived maintenance plan: admitted cells plus fail-loud refusals.
@@ -268,5 +275,19 @@ pub fn unsupported_grain_plan(grain: &str) -> MaintenancePlan {
             grain: grain.to_string(),
             tracking_plan: UNSUPPORTED_GRAIN_TRACKING_PLAN.to_string(),
         }],
+    }
+}
+
+/// The plan derived when the locality gate
+/// ([`locality::establish_locality`]) refuses a keyed model's `timeseries:`
+/// block: no cells, a single [`Refusal::LocalityNotEstablished`] carrying
+/// the rendered `KeyedForbidsTimeseries` message. Bypasses
+/// [`derive::derive_maintenance_plan`] entirely — there is nothing
+/// meaningful to derive for a keyed output whose partitioning was never
+/// admitted.
+pub fn locality_refused_plan(message: String) -> MaintenancePlan {
+    MaintenancePlan {
+        cells: Vec::new(),
+        refusals: vec![Refusal::LocalityNotEstablished { message }],
     }
 }

@@ -422,9 +422,17 @@ pub fn build_cell_statement_group(
             ))
         }
         Technique::KeyedFold => {
-            let classification =
-                classify_cumulative_sql(&model.name, &stripped_sql, source_timeseries)
-                    .map_err(|e| format!("{e}"))?;
+            let model_has_timeseries = model
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let classification = classify_cumulative_sql(
+                &model.name,
+                &stripped_sql,
+                source_timeseries,
+                model_has_timeseries,
+            )
+            .map_err(|e| format!("{e}"))?;
 
             let (raw_start, raw_end) = region.raw();
             let time_range = TimeRange {

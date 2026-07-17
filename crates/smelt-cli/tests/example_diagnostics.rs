@@ -2575,7 +2575,7 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
     example_dir: &str,
     expected_file: &str,
     expected_code: smelt_db::DiagnosticCode,
-) {
+) -> smelt_db::Diagnostic {
     use smelt_cli::{init_db, Config, ModelDiscovery};
     use smelt_db::{DiagnosticAcc, Workspace};
     use std::path::Path;
@@ -2684,6 +2684,8 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
         target_diags[0].code,
         target_diags[0].message
     );
+
+    target_diags.into_iter().next().unwrap()
 }
 
 /// BUG-006 regression: `examples/timeseries_broken_cumulative_with_timeseries/` produces
@@ -2694,12 +2696,32 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
 /// but `file_diagnostics` silently dropped it (`_ => None` in the match block),
 /// so the LSP showed no error even though keyed models must not declare
 /// `timeseries:` without key temporal locality (`incremental_models.md` §"Key-grain output shape").
+///
+/// The diagnostic now comes from the key-temporal-locality gate in plan
+/// derivation (`smelt_logical::maintenance::locality::establish_locality`),
+/// not frontmatter validation — the message must name all three routes and
+/// the nearest missing fact
+/// (`docs/specs/incremental_models.md` §"Key temporal locality (the
+/// time-partitioned output)").
 #[test]
 fn timeseries_broken_cumulative_with_timeseries() {
-    check_workspace_emits_keyed_frontmatter_diagnostic(
+    let diag = check_workspace_emits_keyed_frontmatter_diagnostic(
         "examples/timeseries_broken_cumulative_with_timeseries",
         "models/cumulative_with_timeseries.sql",
         smelt_db::DiagnosticCode::KeyedForbidsTimeseries,
+    );
+    let message = diag.message.to_lowercase();
+    for expected in ["key-embedded", "key-determined", "recurrence-bounded"] {
+        assert!(
+            message.contains(expected),
+            "expected the KeyedForbidsTimeseries message to name route '{expected}': {}",
+            diag.message
+        );
+    }
+    assert!(
+        diag.message.contains("Nearest missing fact"),
+        "expected the KeyedForbidsTimeseries message to name the nearest missing fact: {}",
+        diag.message
     );
 }
 
