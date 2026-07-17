@@ -242,11 +242,36 @@ pub enum Refusal {
     LocalityNotEstablished { message: String },
 }
 
+/// The admitted key-temporal-locality verdict for a `grain: key` model that
+/// also declares a `timeseries:` block
+/// (`locality::establish_locality`'s admitted result, plus the derived
+/// settle bound). Carried on [`MaintenancePlan`] so `smelt-db` and `smelt
+/// explain` can fold the already-admitted verdict into `Grain::Key`'s plan
+/// shape and the explain surface without re-deriving admission — the
+/// single derivation in `locality.rs` is the only place that decides both
+/// (`CLAUDE.md` §"Maintenance-plan purity": "derived once by pure
+/// functions … consumers never re-derive it").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct KeyLocality {
+    /// The admitted slice a `merge_into` target scan may be pruned to.
+    pub slice: locality::LocalitySlice,
+    /// How long a written slice may still change before it is safe to
+    /// treat as final (route 2 is honestly [`locality::SettleBound::Never`],
+    /// never a large sentinel duration).
+    pub settle_bound: locality::SettleBound,
+}
+
 /// The derived maintenance plan: admitted cells plus fail-loud refusals.
 #[derive(Debug, Clone, Default)]
 pub struct MaintenancePlan {
     pub cells: Vec<PlanCell>,
     pub refusals: Vec<Refusal>,
+    /// The admitted key-temporal-locality verdict, for a `grain: key` model
+    /// whose `timeseries:` block cleared the locality gate. `None` for a
+    /// `grain: partition` model, a `grain: key` model with no `timeseries:`
+    /// block, or a locality refusal (in which case the plan is
+    /// [`locality_refused_plan`]'s no-cells shape instead).
+    pub key_locality: Option<KeyLocality>,
 }
 
 impl MaintenancePlan {
@@ -275,6 +300,7 @@ pub fn unsupported_grain_plan(grain: &str) -> MaintenancePlan {
             grain: grain.to_string(),
             tracking_plan: UNSUPPORTED_GRAIN_TRACKING_PLAN.to_string(),
         }],
+        key_locality: None,
     }
 }
 
@@ -289,5 +315,6 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
     MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
+        key_locality: None,
     }
 }

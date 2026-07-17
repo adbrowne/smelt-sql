@@ -23,7 +23,8 @@ use smelt_logical::maintenance::derive::{derive_maintenance_plan, FoldSpec, Mode
 use smelt_logical::maintenance::granularity::{check_declared_granularity, GranularityMismatch};
 use smelt_logical::maintenance::grouping::{derive_column_groups, DegenerateColumn};
 use smelt_logical::maintenance::locality::{
-    establish_locality, partition_column_provably_not_null, LocalityInputs,
+    establish_locality, partition_column_provably_not_null, single_clocked_granularity,
+    LocalityInputs,
 };
 use smelt_logical::maintenance::skeleton::skeleton_columns;
 use smelt_logical::maintenance::{
@@ -211,6 +212,16 @@ pub fn derive_model_maintenance_plan(
         .timeseries
         .as_ref()
         .map(|t| t.partition_column.clone());
+    // The admitted key-temporal-locality verdict for a `grain: key` model
+    // that also declares a `timeseries:` block — captured here (the `Ok`
+    // branch of `establish_locality`, below) and folded onto the derived
+    // plan's `key_locality` after `derive_maintenance_plan` runs, so
+    // `smelt-db`'s diagnostics and `smelt explain` can read the
+    // already-admitted verdict instead of re-deriving it
+    // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // Phase A5).
+    let mut established_key_locality: Option<smelt_logical::maintenance::locality::LocalitySlice> =
+        None;
     let plan_grain = match grain {
         ConfigGrain::Partition => PlanGrain::Partition {
             partition_col: partition_col.clone().unwrap_or_default(),
@@ -279,20 +290,24 @@ pub fn derive_model_maintenance_plan(
                     driving_source_key_recurrence,
                     sql,
                 };
-                if let Err(refusal) = establish_locality(&inputs) {
-                    return Some(MaintenancePlanResult {
-                        plan: locality_refused_plan(refusal.message(table)),
-                        column_groups: Vec::new(),
-                        degenerate: Vec::new(),
-                    });
+                match establish_locality(&inputs) {
+                    Err(refusal) => {
+                        return Some(MaintenancePlanResult {
+                            plan: locality_refused_plan(refusal.message(table)),
+                            column_groups: Vec::new(),
+                            degenerate: Vec::new(),
+                        });
+                    }
+                    // Admitted: the derived `LocalitySlice` is folded onto
+                    // the plan's `key_locality` below (after
+                    // `derive_maintenance_plan` runs) rather than
+                    // discarded — `smelt-db`'s diagnostics and `smelt
+                    // explain` are consumers of the same admitted verdict
+                    // the runtime execution path (`smelt-runtime::
+                    // cumulative`) already slice-prunes with, not a second
+                    // re-derivation of it.
+                    Ok(slice) => established_key_locality = Some(slice),
                 }
-                // Admitted: the derived `LocalitySlice` (margins) is not yet
-                // folded into `Grain::Key`'s plan shape or the `smelt
-                // explain` surface — that lands in a later phase
-                // (`docs/plans/20260715-composed-axes-conditional-
-                // maintenance.md`, phase A5). The runtime execution path
-                // (`smelt-runtime::cumulative`) is this phase's actual
-                // slice-pruning consumer.
             }
             PlanGrain::Key { unique_key }
         }
@@ -362,7 +377,14 @@ pub fn derive_model_maintenance_plan(
     }
     triggers.push(Trigger::Backfill);
 
-    let plan = derive_maintenance_plan(&inputs, &triggers);
+    let mut plan = derive_maintenance_plan(&inputs, &triggers);
+    plan.key_locality = established_key_locality.map(|slice| {
+        let bound = smelt_logical::maintenance::locality::settle_bound(&slice);
+        smelt_logical::maintenance::KeyLocality {
+            slice,
+            settle_bound: bound,
+        }
+    });
     Some(MaintenancePlanResult {
         plan,
         column_groups: grouping.groups,
@@ -462,17 +484,23 @@ pub fn cell_column_group_violations(
 /// when zero or more than one referenced source declares a `timeseries:`
 /// block: an ambiguous or absent driving source fails that precondition
 /// closed rather than guess.
+///
+/// Thin wrapper over the single shared "exactly one clocked candidate, else
+/// undecided" rule
+/// ([`smelt_logical::maintenance::locality::single_clocked_granularity`]) —
+/// declared sources are this function's own candidate pool; a caller that
+/// also folds in composed-upstream-model candidates (`maintenance_plan_diagnostics`,
+/// `smelt-db/src/lib.rs::maintenance_plan_report`) calls the shared rule
+/// directly over the concatenated pool instead of this function.
 pub fn single_clocked_source_granularity(
     source_refs: &[(String, Option<SourceInfo>)],
 ) -> Option<Granularity> {
-    let mut clocked = source_refs
-        .iter()
-        .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()));
-    let first = clocked.next()?;
-    if clocked.next().is_some() {
-        return None;
-    }
-    Some(first.granularity)
+    single_clocked_granularity(
+        source_refs
+            .iter()
+            .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
+            .map(|t| t.granularity),
+    )
 }
 
 /// Build [`SourceFacts`] for every `(ref_string, source_info)` pair a model
@@ -578,6 +606,16 @@ pub struct MaintenancePlanDiagnostics {
 /// this model's SQL references that resolves to a source declaration
 /// (already resolved by the caller — mirrors
 /// `smelt-db::lib::ref_timeseries_config`'s resolution seam).
+/// `extra_model_sources` is every referenced upstream model that is itself
+/// a locality-admitted composed output (`grain: key` + `timeseries:`),
+/// already resolved by the caller (`smelt-db::lib::ref_model_source_facts`)
+/// — appended to the declared-source candidate pool `resolve_driving_source`
+/// consults, paired with its own granularity folded into
+/// `driving_source_granularity`'s "exactly one clocked candidate" rule, so
+/// a `grain: key` model may take a composed upstream model's own output as
+/// its driving source exactly as it would a declared source
+/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)" — "The output as a clocked source").
 ///
 /// Pure function — the `#[salsa::tracked]` wrapper in `smelt-db/src/lib.rs`
 /// only gathers `source_refs`/`metadata`/`sql` and calls this.
@@ -587,12 +625,18 @@ pub fn maintenance_plan_diagnostics(
     metadata: &ModelMetadata,
     source_refs: &[(String, Option<SourceInfo>)],
     project_scan_bounds: Option<&ScanBoundsConfig>,
+    extra_model_sources: &[(SourceFacts, Granularity)],
 ) -> MaintenancePlanDiagnostics {
     let model_scan_bounds = metadata
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources = build_source_facts(source_refs, model_scan_bounds, project_scan_bounds);
+    let mut sources = build_source_facts(source_refs, model_scan_bounds, project_scan_bounds);
+    for (facts, _) in extra_model_sources {
+        if !sources.iter().any(|s| s.name == facts.name) {
+            sources.push(facts.clone());
+        }
+    }
     let explicitly_mutable: std::collections::HashSet<String> = source_refs
         .iter()
         .filter(|(_, info)| {
@@ -608,7 +652,13 @@ pub fn maintenance_plan_diagnostics(
         .timeseries
         .as_ref()
         .and_then(|ts| check_declared_granularity(sql, &ts.partition_column, ts.granularity));
-    let driving_source_granularity = single_clocked_source_granularity(source_refs);
+    let mut clocked_granularities: Vec<Granularity> = source_refs
+        .iter()
+        .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
+        .map(|t| t.granularity)
+        .collect();
+    clocked_granularities.extend(extra_model_sources.iter().map(|(_, g)| *g));
+    let driving_source_granularity = single_clocked_granularity(clocked_granularities);
     let key_recurrences = build_key_recurrences(source_refs);
     let Some(result) = derive_model_maintenance_plan(
         sql,

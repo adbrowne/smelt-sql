@@ -76,7 +76,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A2 | Route 1 (key-embedded): admission + slice-pruned merge target scan | done (2026-07-17) |
 | A3 | Route 2 (key-determined, once-write provenance) | done (2026-07-18) |
 | A4 | Route 3 (recurrence-bounded): consume `key_recurrence` + transactional `KeyedRecurrenceBoundViolated` check | done (2026-07-18) |
-| A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | pending |
+| A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | pending |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending |
 | W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending |
@@ -307,6 +307,9 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 - `crates/smelt-logical/src/analysis/` — model-output timeseries into the shape registry consumed by pushdown/driving-source resolution.
 - `crates/smelt-cli/src/explain.rs` — report rows.
 - `examples/timeseries/` — the two-stage fixture.
+- `crates/smelt-db/src/queries/maintenance.rs` — fold the admitted `LocalitySlice`/settle bound (the `Ok` branch of `establish_locality`, previously discarded) into the derived plan, and publish a referenced upstream model's own admitted composed output as a `SourceFacts` driving-source candidate for a downstream `grain: key` model — the call site's own pre-existing comment named this phase as where that folding lands.
+- `crates/smelt-db/src/lib.rs` — the recursive upstream-model source-facts resolver (`ref_model_source_facts`) lives here, plus its wiring into `maintenance_plan`/`maintenance_plan_report`.
+- `crates/smelt-logical/src/maintenance/mod.rs` — carry the admitted key-temporal-locality verdict (slice + settle bound, a new `KeyLocality` type) on `MaintenancePlan` so `smelt-db` and `smelt explain` can consume it without re-deriving admission.
 
 **Docs touched.**
 - `docs/specs/incremental_models.md` — Known Divergences: output-as-clocked-source + settle bound built (clears the clock-sink half of the composed-shape divergence).

@@ -57,6 +57,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             ledger_catch_up: false,
         }],
         refusals: vec![],
+        key_locality: None,
     }
 }
 
@@ -69,6 +70,7 @@ fn refused_plan(source: &str) -> MaintenancePlan {
             source: source.to_string(),
             why: "derived scan is unbounded".to_string(),
         }],
+        key_locality: None,
     }
 }
 

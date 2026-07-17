@@ -1210,6 +1210,81 @@ fn ref_source_info(
         .cloned()
 }
 
+/// Resolve `ref_str` to a locality-admitted composed model's own output as
+/// a [`smelt_logical::maintenance::SourceFacts`] candidate driving source
+/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)" — "The output as a clocked source": "a downstream keyed model
+/// may take it as its clocked driving source"). `None` when the ref does
+/// not resolve to a maintained `grain: key` model whose own `timeseries:`
+/// block cleared the locality gate — a declared source, a `full`/view
+/// model, a `grain: partition` model (already visible to downstream
+/// pushdown via `smelt-logical`'s own model-graph registry, not this
+/// path), or a keyed model whose own locality gate refused all resolve to
+/// `None` here, so the caller's driving-source resolution falls back to
+/// whatever declared sources it has.
+///
+/// Recurses one level into [`maintenance_plan_report`] over the upstream's
+/// own file to read its already-derived
+/// [`smelt_logical::maintenance::KeyLocality`] verdict — this never
+/// re-implements the locality gate itself (`CLAUDE.md` §"Maintenance-plan
+/// purity"): it calls the same pure entry point
+/// ([`smelt_logical::maintenance::locality::establish_locality`], reached
+/// via [`crate::queries::maintenance::derive_model_maintenance_plan`]) the
+/// upstream's own plan derivation already calls, and reads its result
+/// rather than deriving a second one. Terminates because the model graph
+/// is acyclic (a `smelt.ref()` cycle is rejected elsewhere in workspace
+/// loading); a long composed chain recurses one frame per hop, which is
+/// how the clock is meant to propagate through the DAG.
+/// Returns the candidate [`SourceFacts`](smelt_logical::maintenance::SourceFacts)
+/// alongside the upstream's own declared `timeseries.granularity` — a
+/// downstream keyed model's locality gate needs both: the source-shape
+/// candidate for [`smelt_logical::maintenance::locality::
+/// resolve_driving_source`], and the granularity for the gate's
+/// granularity-equality structural precondition (mirroring
+/// [`crate::queries::maintenance::single_clocked_source_granularity`]'s
+/// role for declared sources).
+fn ref_model_source_facts(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    ref_str: &str,
+) -> Option<(
+    smelt_logical::maintenance::SourceFacts,
+    smelt_core::config::Granularity,
+)> {
+    let stripped = ref_str.strip_prefix("smelt.")?;
+    let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    if resolved.kind != RefKind::Model {
+        return None;
+    }
+    let file = resolved.source_file?;
+    let result = maintenance_plan_report(db, workspace, file)?;
+    let locality = result.plan.key_locality.as_ref()?;
+    let granularity = ref_timeseries_config(
+        db,
+        workspace,
+        find_project(db, workspace, file.project_root(db)),
+        ref_str,
+    )?
+    .granularity;
+    Some((
+        smelt_logical::maintenance::SourceFacts {
+            name: stripped.to_string(),
+            // A composed maintained output's rows, once written by a run,
+            // are not retroactively mutated by a *later* run touching a
+            // different slice — the same append-only posture a declared
+            // `timeseries:` source with no explicit
+            // `mutation_profile: mutable` gets by default
+            // (`crate::queries::maintenance::source_facts`).
+            mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
+            partition_col: Some(locality.slice.partition_column().to_string()),
+            unique_key: Vec::new(),
+            allow_full_scan: false,
+        },
+        granularity,
+    ))
+}
+
 /// Resolve `ref_str` to an upstream **maintained-model edge**
 /// (`incremental_models.md` §"Upstream model edges") when it addresses another
 /// maintained (non-`full`, non-view) model in this project — `None` when the
@@ -1326,12 +1401,28 @@ pub fn maintenance_plan(
         .unwrap_or("")
         .to_string();
 
+    // Mirrors `maintenance_plan_report`'s own composed-driving-source
+    // wiring below: a `grain: key` model's driving source may be another
+    // maintained model's locality-admitted composed output, not just a
+    // declared `sources:` entry.
+    let extra_model_sources: Vec<(
+        smelt_logical::maintenance::SourceFacts,
+        smelt_core::config::Granularity,
+    )> = if metadata.grain == Some(smelt_core::config::Grain::Key) {
+        refs.iter()
+            .filter_map(|r| ref_model_source_facts(db, workspace, r))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
         &metadata,
         &source_refs,
         project_scan_bounds.as_ref(),
+        &extra_model_sources,
     ))
 }
 
@@ -1408,11 +1499,33 @@ pub fn maintenance_plan_report(
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources = crate::queries::maintenance::build_source_facts(
+    let mut sources = crate::queries::maintenance::build_source_facts(
         &source_refs,
         model_scan_bounds,
         project_scan_bounds.as_ref(),
     );
+    // A `grain: key` model's driving source may itself be another
+    // maintained model's locality-admitted composed output, not just a
+    // declared `sources:` entry — `resolve_driving_source` (consulted
+    // below via `derive_model_maintenance_plan`) is already agnostic to
+    // provenance, so publish every referenced upstream model that clears
+    // the locality gate into the same `SourceFacts` candidate list a
+    // declared source populates (`incremental_models.md` §"Key temporal
+    // locality (the time-partitioned output)" — "The output as a clocked
+    // source"). Scoped to `grain: key` models only — a `grain: partition`
+    // downstream's pushdown against a composed upstream is already derived
+    // through `smelt-logical`'s own model-graph registry, not this path.
+    let mut model_source_granularities: Vec<smelt_core::config::Granularity> = Vec::new();
+    if metadata.grain == Some(smelt_core::config::Grain::Key) {
+        for r in &refs {
+            if let Some((facts, granularity)) = ref_model_source_facts(db, workspace, r) {
+                if !sources.iter().any(|s| s.name == facts.name) {
+                    sources.push(facts);
+                    model_source_granularities.push(granularity);
+                }
+            }
+        }
+    }
     let key_recurrences = crate::queries::maintenance::build_key_recurrences(&source_refs);
     let explicitly_mutable: std::collections::HashSet<String> = source_refs
         .iter()
@@ -1426,8 +1539,22 @@ pub fn maintenance_plan_report(
         .map(|(name, _)| name.clone())
         .collect();
 
+    // The locality gate's granularity-equality structural precondition
+    // needs the driving source's granularity regardless of whether it is a
+    // declared source or a composed upstream model's own output — combine
+    // both candidate pools and pass the union through the single shared
+    // "exactly one clocked candidate, else undecided" rule
+    // (`smelt_logical::maintenance::locality::single_clocked_granularity`),
+    // the same rule `single_clocked_source_granularity` applies over
+    // declared sources alone.
+    let mut clocked_granularities: Vec<smelt_core::config::Granularity> = source_refs
+        .iter()
+        .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
+        .map(|t| t.granularity)
+        .collect();
+    clocked_granularities.extend(model_source_granularities);
     let driving_source_granularity =
-        crate::queries::maintenance::single_clocked_source_granularity(&source_refs);
+        smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,

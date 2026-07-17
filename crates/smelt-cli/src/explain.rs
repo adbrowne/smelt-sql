@@ -186,6 +186,31 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
+    // Key temporal locality (`incremental_models.md` §"Key temporal
+    // locality (the time-partitioned output)"): for an admitted `grain:
+    // key` + `timeseries:` model, print the established route/slice and
+    // the derived settle bound. Route 2's settle bound is honestly `Never`
+    // via `SettleBound`'s own `Debug` — never a large sentinel duration
+    // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // Phase A5's review checklist).
+    if let Some(locality) = &result.plan.key_locality {
+        use smelt_logical::maintenance::locality::LocalitySlice;
+        let route = match &locality.slice {
+            LocalitySlice::Window { .. } => {
+                "route 1 (key-embedded) or route 3 (recurrence-bounded, statically derived)"
+            }
+            LocalitySlice::DeltaValues { .. } => "route 2 (key-determined)",
+            LocalitySlice::RecurrenceBounded { .. } => {
+                "route 3 (recurrence-bounded, declared key_recurrence)"
+            }
+        };
+        let _ = writeln!(out, "Key temporal locality:");
+        let _ = writeln!(out, "  route: {route}");
+        let _ = writeln!(out, "  slice: {:?}", locality.slice);
+        let _ = writeln!(out, "  settle bound: {:?}", locality.settle_bound);
+        let _ = writeln!(out);
+    }
+
     if result.plan.refusals.is_empty() {
         let _ = writeln!(out, "Refusals: (none)");
     } else {

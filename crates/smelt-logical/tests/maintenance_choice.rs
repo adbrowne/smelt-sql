@@ -38,6 +38,7 @@ fn admitted_column_merge_plan(source: &str) -> MaintenancePlan {
             ledger_catch_up: false,
         }],
         refusals: vec![],
+        key_locality: None,
     }
 }
 

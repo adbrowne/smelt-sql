@@ -1767,7 +1767,9 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   construction, as does the model-author lateness-flag pattern's data-quality check. Tracked by
   `docs/plans/20260704-model-updates.md`.
 - **Key temporal locality: all three routes and their slice-pruned merge (route 3's checked)
-  are built; the scope-map explain surface is specified but unbuilt.** The
+  are built, the admitted slice and derived settle bound are folded into `smelt-db`'s own
+  plan-derivation surface, and `smelt explain` prints the route/slice/settle bound; the
+  broader per-input scope-map explain surface (§"Scope maps") is specified but unbuilt.** The
   locality gate (§"Key temporal locality (the time-partitioned output)") checks the structural
   preconditions (window-forward run shape, a provably NOT NULL partition column, matching
   granularity) and then admits via either route: route 1 when `partition_column` is itself a
@@ -1815,10 +1817,13 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   a `MIN`/`MAX`-derived column is refused by route 2 on family grounds regardless). Building a
   runnable route-2 fixture end-to-end needs the once-write classifier family (tracked by
   `docs/plans/20260705-keyed-collapse.md`) to produce a determined column that is both
-  clock-derived-NOT-NULL and genuinely once-write — out of this plan's scope. The per-input
-  `smelt explain` scope-map rows, and folding the derived slice into `smelt-db`'s own
-  plan-derivation surface (today it admits routes 1–3 only where it can determine the driving
-  source's granularity; the runtime execution path always can), are still unbuilt.
+  clock-derived-NOT-NULL and genuinely once-write — out of this plan's scope. The derived slice
+  and settle bound are folded into `smelt-db`'s own plan-derivation surface (`MaintenancePlan`)
+  and printed by `smelt explain`; the broader per-input `smelt explain` scope-map rows
+  (§"Scope maps" — the full per-input dispatch table, not just the locality verdict) remain
+  unbuilt. `smelt-db`'s plan derivation still admits routes 1–3 only where it can determine the
+  driving source's granularity from either a declared source or a referenced upstream model's own
+  admitted composed output; the runtime execution path always can.
   Design derivation: `docs/research/20260705-keyed-time-superset.md`.
 
   **Route 3 (recurrence-bounded)** is built: a statically-derivable `r` (the same lookback-margin
@@ -1934,7 +1939,7 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 - **The classifier covers only the direct-monoid families.** The classifier seed (`crates/smelt-logical/src/rules/cumulative.rs`, emitting the `Keyed*` diagnostic family), the windowed-keyed-maintenance driver (`crates/smelt-runtime/src/maintenance_driver.rs`), and the per-window `merge_into` execution (`crates/smelt-runtime/src/cumulative.rs`) admit only the additive-fold and extremal/lattice-fold families. The classifier union (overwrite, once-write, and plain-overwrite families) and the run-shape/posture derivation that distinguishes window-forward from snapshot-reconcile are unbuilt (decision record: `docs/research/20260705-keyed-collapse-application.md`; tracking plan: `docs/plans/20260705-keyed-collapse.md`).
 - **The transactional merge ledger is built on DuckDB only.** Every additive-graded keyed-merge step folds its delta identity into a warehouse-resident per-delta ledger table in the same transaction as the merge (`smelt_backend::Backend::fold_ledger_delta`; DDL/DML in `smelt_state::ddl_duckdb`); a repeat delta violates the table's `PRIMARY KEY` and refuses the run (`KeyedReprocessedWindow`) before the action runs a second time. An idempotent-only cell never creates the table. The DuckDB dialect is the only substrate implemented; an additive-graded cell on another backend fails loudly (`UnsupportedFeature`) rather than being handed SQL it cannot run (§Known Divergences).
 - **The snapshot-reconcile executor is unbuilt.** Until it lands, an unclocked keyed model (zero timeseries-tagged sources in the FROM clause) is refused fail-loud with a not-yet-supported diagnostic (`KeyedSnapshotPostureUnsupported`) naming the delivering plan — it is not treated as a model error.
-- **The time-partitioned keyed output's admission is fully wired; the output-as-clocked-source and settle-bound surface are not.** Locality establishment (all three routes) and the `KeyedRecurrenceBoundViolated` runtime check are built (see the fuller bullet above); the admissibility decision lives in the single fail-closed locality gate in plan derivation (not a frontmatter shape check) that decides every keyed model's `timeseries:` block — a model satisfying none of the three routes refuses with `KeyedForbidsTimeseries`, naming all three routes and the nearest missing fact. What remains unbuilt: registering an admitted composed output as a clocked source for downstream pushdown/driving-source resolution, deriving and surfacing the per-route settle bound, and the per-input `smelt explain` scope-map rows. Design derivation: `docs/research/20260705-keyed-time-superset.md`.
+- **The time-partitioned keyed output's admission, downstream pushdown, downstream keyed driving-source selection, and the `smelt explain` settle-bound surface are all wired.** Locality establishment (all three routes) and the `KeyedRecurrenceBoundViolated` runtime check are built (see the fuller bullet above); the admissibility decision lives in the single fail-closed locality gate in plan derivation (not a frontmatter shape check) that decides every keyed model's `timeseries:` block — a model satisfying none of the three routes refuses with `KeyedForbidsTimeseries`, naming all three routes and the nearest missing fact. The settle bound itself is derived by a pure per-route function (route 1/statically-derived route 3: the source lateness margin; declared route 3: the recurrence bound plus margins; route 2: honestly never) and threaded onto the derived `MaintenancePlan` for `smelt explain` to print (route, slice form, settle bound). A locality-admitted composed output is visible to the rest of the DAG exactly like a declared source: a downstream **partition-grain** model's compiled SQL carries the ordinary widened source-filter pushdown against it, and a downstream **keyed** model's driving-source resolution considers a referenced upstream model's own admitted composed output alongside declared `sources:` YAML entries — the clock propagates through the composed stage rather than stopping there either way. Design derivation: `docs/research/20260705-keyed-time-superset.md`.
 - **Locality open questions.** Whether a derived recurrence bound can license slice pruning under snapshot-reconcile (v1: window-forward only); relaxing the granularity-equality precondition (e.g. a daily driver with weekly output partitions); slice-scoped deletion (`NOT MATCHED BY SOURCE` over a provably complete slice, e.g. re-dropped duplicates) — interacts with the key-deletion divergence below.
 - **The pattern functions (`smelt.latest`, `smelt.once`, `smelt.current`) are unshipped**, as is the decision whether they are built-ins or template files; the canonical once-write spelling is fixed alongside them. Tracked in the keyed-collapse plan.
 - **Driver granularity is `day`/`week` only** (`maintenance_driver.rs::driving_steps` refuses others) — a property of the shared driver inherited by every consumer; widening it is driver work, not profile work.

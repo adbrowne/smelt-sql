@@ -248,6 +248,7 @@ mod tests {
                 ledger_catch_up: false,
             }],
             refusals: vec![],
+            key_locality: None,
         }
     }
 

@@ -205,6 +205,79 @@ impl LocalitySlice {
     }
 }
 
+/// How long a written slice of a locality-admitted output may still change
+/// before it is safe to treat as final (`incremental_models.md` §"Key
+/// temporal locality (the time-partitioned output)": "The output's **settle
+/// bound**"). Derived once from the admitted [`LocalitySlice`] by
+/// [`settle_bound`] — never re-derived by a consumer (`smelt explain`, a
+/// downstream consumer's staleness check) — and printed honestly: route 2's
+/// [`SettleBound::Never`] is a real value, not a large sentinel duration.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum SettleBound {
+    /// Route 1 (key-embedded), or route 3 with a **statically-derived** `r`
+    /// (folded into the window's own margin, so no separate `r` is carried):
+    /// a written slice settles once the source's lateness/skew margin has
+    /// elapsed past it — no row arriving later can still touch it.
+    After {
+        /// The source lateness/skew margin (`LocalitySlice::Window`'s own
+        /// `margin_before`).
+        margin: Seconds,
+    },
+    /// Route 2 (key-determined): a written slice **never** settles — a
+    /// late-arriving row for an arbitrarily old key can still touch it,
+    /// since the partition value is a per-key constant independent of key
+    /// age. Honest, not a large-duration stand-in.
+    Never,
+    /// Route 3 with a **declared** `r` (checked at merge time): a written
+    /// slice settles once the declared recurrence bound plus the derived
+    /// lateness/skew margin has elapsed past it.
+    AfterRecurrenceBound {
+        /// The declared recurrence bound `r`.
+        r: Seconds,
+        /// The derived lateness/skew margin added on top of `r`
+        /// (`LocalitySlice::RecurrenceBounded`'s own `margin_before`, which
+        /// already includes `r` — see [`settle_bound`]'s doc comment for how
+        /// the two are split back apart).
+        margin: Seconds,
+    },
+}
+
+/// Derive the **settle bound** for an admitted [`LocalitySlice`]
+/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)": "under route 1 a slice settles with the source's lateness
+/// margin; under route 3 after `r` plus the margins; under route 2 it never
+/// settles"). Pure function of the already-established slice — this module
+/// is the single place that decides both admissibility and, for an admitted
+/// model, how long a written slice may still change; a consumer (`smelt
+/// explain`, a downstream staleness check) reads the result rather than
+/// re-deriving it.
+pub fn settle_bound(slice: &LocalitySlice) -> SettleBound {
+    match slice {
+        // Route 1, or route 3 with a statically-derived `r`: the two are
+        // structurally identical `Window` slices (see `LocalitySlice`'s own
+        // doc comment), and their settle bound is identical too — the
+        // window's own backward margin is the full lateness allowance,
+        // `r` already folded in for the route-3 case.
+        LocalitySlice::Window { margin_before, .. } => SettleBound::After {
+            margin: *margin_before,
+        },
+        // Route 2: a per-key-constant partition value never bounds how old
+        // a key touched by a late delta may be — never settles.
+        LocalitySlice::DeltaValues { .. } => SettleBound::Never,
+        // Route 3, declared: `margin_before` is `r` plus the derived
+        // lateness/skew margin (see `establish_locality`'s route 3
+        // derivation); `r` is carried separately on the slice already, so
+        // recover the derived-margin-only component by subtracting it back
+        // out rather than double-counting `r`.
+        LocalitySlice::RecurrenceBounded {
+            r, margin_before, ..
+        } => SettleBound::AfterRecurrenceBound {
+            r: *r,
+            margin: Seconds(margin_before.0.saturating_sub(r.0)),
+        },
+    }
+}
+
 /// Why key temporal locality could not be established for a model's
 /// `timeseries:` block.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -252,6 +325,43 @@ fn refuse(nearest_missing_fact: impl Into<String>) -> LocalityRefusal {
     LocalityRefusal::NoRouteEstablished {
         nearest_missing_fact: nearest_missing_fact.into(),
     }
+}
+
+/// The single "exactly one clocked candidate, else undecided" rule for
+/// deriving a model's driving-source granularity — the granularity-equality
+/// structural precondition (`incremental_models.md` §"Key temporal
+/// locality") needs a single answer for "what granularity is the driving
+/// source clocked at", and this is undecidable (not merely unknown) when
+/// zero or more than one candidate declares a clock: zero means
+/// snapshot-reconcile (no clock to match against), and more than one means
+/// an ambiguous driving source (the caller's own driving-source resolution,
+/// e.g. [`resolve_driving_source`], is what should have already refused
+/// that case; this function fails the same way rather than guessing).
+///
+/// `candidates` is every clocked granularity a caller has gathered from its
+/// own candidate pool — declared `sources:` entries, a referenced upstream
+/// model's own locality-admitted composed output, or both concatenated
+/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)" — "The output as a clocked source": a downstream keyed model's
+/// candidate pool spans both declared sources and composed upstream
+/// outputs, but the "exactly one" rule applies over the union, not each
+/// pool independently).
+///
+/// The single home for this rule — `smelt-db`'s `maintenance_plan_report`,
+/// `maintenance_plan_diagnostics`, and any future call site must call this
+/// rather than re-implementing "exactly one else `None`" independently
+/// (`CLAUDE.md` §"Maintenance-plan purity": the maintenance plan is derived
+/// once by pure functions, never re-derived by consumers).
+pub fn single_clocked_granularity<I>(candidates: I) -> Option<Granularity>
+where
+    I: IntoIterator<Item = Granularity>,
+{
+    let mut iter = candidates.into_iter();
+    let first = iter.next()?;
+    if iter.next().is_some() {
+        return None;
+    }
+    Some(first)
 }
 
 /// Resolve the model's **driving source** — the single alias-scoped
@@ -1049,6 +1159,64 @@ mod tests {
         }
     }
 
+    /// `resolve_driving_source` (shared by the locality gate and
+    /// `classify_cumulative`) is generic over `SourceFacts` — it matches by
+    /// bare name and a set `partition_col`, with no test anywhere for
+    /// "declared source vs. model output". A `SourceFacts` entry that
+    /// happens to represent a locality-admitted composed model's own output
+    /// (rather than a declared `sources:` YAML entry) resolves identically —
+    /// this is the mechanism `incremental_models.md` §"Key temporal
+    /// locality": "a downstream keyed model may take it as its clocked
+    /// driving source" rests on (`docs/plans/20260715-composed-axes-
+    /// conditional-maintenance.md` Phase A5).
+    #[test]
+    fn resolve_driving_source_accepts_a_composed_model_output_as_driving_source() {
+        let sql = "SELECT event_id, last_seen_date, COUNT(*) AS n \
+                   FROM smelt.silver.events_deduped GROUP BY event_id, last_seen_date";
+        let composed_output = SourceFacts {
+            name: "silver.events_deduped".to_string(),
+            mutation: crate::maintenance::MutationProfile::AppendOnly,
+            partition_col: Some("first_seen_date".to_string()),
+            unique_key: vec!["event_id".to_string()],
+            allow_full_scan: false,
+        };
+        let sources = [composed_output];
+        let resolved = resolve_driving_source(sql, &sources)
+            .expect("no ambiguity")
+            .expect("a locality-admitted composed model must resolve as a driving source");
+        assert_eq!(resolved.name, "silver.events_deduped");
+    }
+
+    /// End to end: a downstream keyed model whose driving source is a
+    /// composed model's own output (not a declared source) establishes
+    /// locality via route 1 exactly as it would over a declared source —
+    /// `establish_locality`'s inputs carry no provenance distinction between
+    /// the two, so the clock propagates through a composed stage instead of
+    /// stopping at it.
+    #[test]
+    fn downstream_keyed_model_establishes_locality_over_a_composed_driving_source() {
+        let inputs = LocalityInputs {
+            model_name: "gold_daily_rollup".to_string(),
+            unique_key: vec!["event_id".to_string(), "last_seen_date".to_string()],
+            partition_column: "last_seen_date".to_string(),
+            granularity: Granularity::Day,
+            partition_column_not_null: true,
+            // The driving source is `silver.events_deduped` — itself a
+            // locality-admitted composed model, not a declared source.
+            driving_source_name: "silver.events_deduped".to_string(),
+            driving_source_has_clock: true,
+            driving_source_granularity: Some(Granularity::Day),
+            driving_source_partition_column: Some("first_seen_date".to_string()),
+            declared_functional_dependencies: &[],
+            driving_source_key_recurrence: None,
+            sql: "SELECT event_id, last_seen_date, COUNT(*) AS n \
+                  FROM smelt.silver.events_deduped GROUP BY event_id, last_seen_date",
+        };
+        let slice = establish_locality(&inputs)
+            .expect("route 1 must admit over a composed-model driving source");
+        assert_eq!(slice.partition_column(), "last_seen_date");
+    }
+
     /// A declared `key_recurrence` on the driving source, whose `key`
     /// exactly matches the model's own `unique_key`, admits route 3 —
     /// always **checked** (`RecurrenceBounded`), never trusted blindly even
@@ -1115,6 +1283,92 @@ mod tests {
         assert!(
             message.to_lowercase().contains("extremal-fold"),
             "message must surface route 2's more specific reason: {message}"
+        );
+    }
+
+    // ---- Settle bound (Phase A5) ---------------------------------------
+    //
+    // `incremental_models.md` §"Key temporal locality (the time-partitioned
+    // output)": "under route 1 a slice settles with the source's lateness
+    // margin; under route 3 after `r` plus the margins; under route 2 it
+    // never settles."
+
+    /// Route 1 (key-embedded): the settle bound is the source's derived
+    /// lateness/skew margin — here nonzero because the model SQL carries a
+    /// genuine lookback construct.
+    #[test]
+    fn settle_bound_route1_is_the_lateness_margin() {
+        let sql = "SELECT device_id, event_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '2 days' \
+                   GROUP BY device_id, event_date";
+        let inputs = route1_inputs(sql);
+        let slice = establish_locality(&inputs).expect("route 1 must admit");
+        assert_eq!(
+            settle_bound(&slice),
+            SettleBound::After {
+                margin: Seconds::days(2)
+            }
+        );
+    }
+
+    /// Route 2 (key-determined): the settle bound is honestly `Never` — not
+    /// a large sentinel duration — since a per-key-constant partition value
+    /// places no bound on how old a key a late delta may still touch.
+    #[test]
+    fn settle_bound_route2_never_settles() {
+        let sql = "SELECT customer_id, region FROM smelt.sources.raw.crm";
+        let mut inputs = route2_inputs(sql);
+        inputs.unique_key = vec!["customer_id".to_string()];
+        inputs.partition_column = "region".to_string();
+        let fd = smelt_core::config::FunctionalDependency {
+            key: vec!["customer_id".to_string()],
+            determines: "region".to_string(),
+        };
+        let declared = [fd];
+        inputs.declared_functional_dependencies = &declared;
+        let slice = establish_locality(&inputs).expect("declared FD must admit route 2");
+        assert_eq!(settle_bound(&slice), SettleBound::Never);
+    }
+
+    /// Route 3 with a statically-derived `r` (unchecked): structurally a
+    /// `Window` slice, so the settle bound is the same "lateness margin"
+    /// shape route 1 uses — `r` is already folded into the margin.
+    #[test]
+    fn settle_bound_route3_static_is_the_derived_margin() {
+        let sql = "SELECT event_id, MAX(event_date) AS last_seen_date, COUNT(*) AS event_count \
+                   FROM smelt.sources.raw.events \
+                   WHERE event_date >= CAST(event_date AS DATE) - INTERVAL '3 days' \
+                   GROUP BY event_id";
+        let inputs = route3_inputs(sql);
+        let slice = establish_locality(&inputs).expect("route 3 must admit via static derivation");
+        assert_eq!(
+            settle_bound(&slice),
+            SettleBound::After {
+                margin: Seconds::days(3)
+            }
+        );
+    }
+
+    /// Route 3 with a declared `key_recurrence` (checked): the settle bound
+    /// names `r` and the derived margin separately, `r` split back out of
+    /// the slice's combined `margin_before`.
+    #[test]
+    fn settle_bound_route3_declared_names_r_and_margin() {
+        let mut inputs = route3_inputs(ROUTE3_SQL_NO_LOOKBACK);
+        let kr = KeyRecurrence {
+            key: vec!["event_id".to_string()],
+            window: smelt_core::config::DataLatency::parse("3 days").expect("valid interval"),
+        };
+        inputs.driving_source_key_recurrence = Some(&kr);
+        let slice =
+            establish_locality(&inputs).expect("declared key_recurrence must admit route 3");
+        assert_eq!(
+            settle_bound(&slice),
+            SettleBound::AfterRecurrenceBound {
+                r: Seconds::days(3),
+                margin: Seconds::ZERO,
+            }
         );
     }
 }
