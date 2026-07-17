@@ -31,7 +31,9 @@ use smelt_logical::maintenance::{
     locality_refused_plan, ColumnGroup, Grain as PlanGrain, MaintenancePlan,
     MutationProfile as PlanMutationProfile, OutputSpec, SourceFacts, Trigger,
 };
-use smelt_logical::rules::cumulative::group_by_unique_key as derive_group_by_unique_key;
+use smelt_logical::rules::cumulative::{
+    declared_unique_key_matches, group_by_unique_key as derive_group_by_unique_key,
+};
 use smelt_types::SqlFunction;
 
 /// Everything `maintenance_plan` derives for one model: the raw plan (cells
@@ -192,7 +194,14 @@ pub fn derive_model_maintenance_plan(
     if metadata.refresh != Some(RefreshStrategy::Incremental) {
         return None;
     }
-    let grain = metadata.grain?;
+    // The declared `grain:` check-only assertion when written (already
+    // validated against the declared facts by
+    // `smelt_core::metadata::validate_timeseries`), otherwise the label
+    // derived from the two shape-defining facts (`timeseries:` /
+    // `unique_key:`) — `docs/specs/models.md` §"Refresh axis". Reading the
+    // resolved label here (rather than the raw `grain` field) is what admits
+    // `refresh: incremental` on the facts alone, with no `grain:` written.
+    let grain = metadata.resolved_grain()?;
     if grain == ConfigGrain::KeyPerPartition {
         // Not yet supported: deriving a real plan for `key_per_partition`
         // needs trajectory/backfill machinery that doesn't exist yet
@@ -235,6 +244,28 @@ pub fn derive_model_maintenance_plan(
             // admits: `derive_maintenance_plan`'s admission logic does not
             // yet branch on `Grain::Key`'s `unique_key` contents.
             let unique_key = derive_group_by_unique_key(sql);
+            // A declared top-level `unique_key:` (`docs/specs/models.md`
+            // §"Refresh axis") must agree with the GROUP-BY-derived key —
+            // never a silent preference for either list
+            // (`models.md` §"Constraint violations": "For aggregated key
+            // bodies: `unique_key` ≠ the `GROUP BY` column set → hard error
+            // (checked restatement)"). A model with no declared top-level
+            // `unique_key:` (the pre-existing surface, relying on the
+            // GROUP-BY derivation alone) has nothing to check against.
+            if let Some(declared) = metadata.unique_key.as_deref() {
+                if let Err((declared, derived)) = declared_unique_key_matches(declared, sql) {
+                    return Some(MaintenancePlanResult {
+                        plan: locality_refused_plan(format!(
+                            "model '{table}' declares unique_key: {declared:?} but its \
+                             outermost SELECT's GROUP BY derives {derived:?} — the declared \
+                             identity must restate the GROUP BY column set exactly \
+                             (docs/specs/models.md §\"Constraint violations\")"
+                        )),
+                        column_groups: Vec::new(),
+                        degenerate: Vec::new(),
+                    });
+                }
+            }
             // A `grain: key` model that also declares a `timeseries:`
             // block must clear the key-temporal-locality gate before a
             // plan is derived at all — the single entry point deciding
@@ -428,8 +459,11 @@ pub fn derive_model_maintenance_plan_with_edges(
         key_recurrences,
     )?;
     // Model edges only clamp against a partition-addressed output axis; a
-    // key-addressed downstream contributes none (deferred).
-    let output_partition_col = match metadata.grain {
+    // key-addressed downstream contributes none (deferred). Reads the
+    // resolved (declared-or-derived) grain, matching `derive_model_maintenance_plan`
+    // above, so a facts-alone partition-grain model (no `grain:` written)
+    // clamps the same way as one that writes `grain: partition` explicitly.
+    let output_partition_col = match metadata.resolved_grain() {
         Some(ConfigGrain::Partition) => metadata
             .timeseries
             .as_ref()

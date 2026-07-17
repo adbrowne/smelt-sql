@@ -1037,6 +1037,7 @@ mod tests {
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
                 grain: Some(smelt_core::config::Grain::Partition),
+                unique_key: None,
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
@@ -1140,6 +1141,7 @@ mod tests {
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
                 grain: Some(smelt_core::config::Grain::Partition),
+                unique_key: None,
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],

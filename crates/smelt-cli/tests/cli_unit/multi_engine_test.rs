@@ -125,6 +125,7 @@ fn test_logical_graph_cross_engine_edges() {
             timeseries: None,
             refresh: None,
             grain: None,
+            unique_key: None,
             batched: None,
             tags: vec![],
             target: Some("spark_local".to_string()),

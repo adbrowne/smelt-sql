@@ -122,6 +122,7 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::MalformedBoundedDomain { .. } => None,
         MetadataError::GrainRequiredForIncremental => None,
         MetadataError::GrainRequiresIncremental => None,
+        MetadataError::GrainAssertionMismatch { .. } => None,
     }
 }
 
@@ -1895,6 +1896,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 )),
                 smelt_core::metadata::MetadataError::GrainRequiresIncremental => {
                     Some((ts_err.to_string(), DiagnosticCode::GrainRequiresIncremental))
+                }
+                smelt_core::metadata::MetadataError::GrainAssertionMismatch { .. } => {
+                    Some((ts_err.to_string(), DiagnosticCode::GrainAssertionMismatch))
                 }
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.

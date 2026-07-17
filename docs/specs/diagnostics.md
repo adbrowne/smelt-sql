@@ -112,8 +112,9 @@ Owned by `docs/specs/timeseries.md`.
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
 | `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
 | `MalformedBoundedDomain` | Error | A `bounded_domain:` declaration is structurally invalid: a non-positive `max_cardinality` (an absent cap is already a YAML parse error, since the field is required), an empty `column`, or a `column` absent from the model's SQL body. |
-| `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` without a sibling `grain:` declaration. |
+| `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` but declares neither shape-defining fact (`timeseries:` nor `unique_key:`) and writes no `grain:` assertion to fall back on. |
 | `GrainRequiresIncremental` | Error | A model declares `grain:` without `refresh: incremental`. |
+| `GrainAssertionMismatch` | Error | A written `grain:` check-only assertion disagrees with the label derived from the declared shape-defining facts (`timeseries:` / `unique_key:`). |
 
 ---
 

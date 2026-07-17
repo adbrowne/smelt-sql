@@ -2,6 +2,7 @@
 materialization: table
 refresh: incremental
 grain: key
+unique_key: [device_id, user_id]
 ---
 -- Cumulative (device_id, user_id) co-occurrence evidence — every signed-in
 -- event contributes one observation, combined across all source partitions

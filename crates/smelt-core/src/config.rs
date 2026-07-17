@@ -164,6 +164,60 @@ impl Serialize for Grain {
     }
 }
 
+impl std::fmt::Display for Grain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Grain::Partition => "partition",
+            Grain::Key => "key",
+            Grain::KeyPerPartition => "key_per_partition",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// Derive the `grain` label from the two declared-and-checked shape-defining
+/// facts (`docs/specs/models.md` §"Refresh axis", §"The Relation Contract"):
+/// the **clock** (a `timeseries:` block is present) and the **identity** (a
+/// `unique_key:` is declared), plus whether the clock's `partition_column`
+/// is itself a member of the identity.
+///
+/// Pure — no I/O, no SQL parsing. The four corners:
+///
+/// | clock | identity | `partition_column ∈ key` | Derived grain |
+/// |---|---|---|---|
+/// | yes | no | — | `Partition` |
+/// | no | yes | — | `Key` |
+/// | yes | yes | no | `Key` (time-partitioned) |
+/// | yes | yes | yes | `KeyPerPartition` (the trajectory) |
+///
+/// Returns `None` when **neither** fact is present — there is nothing to
+/// derive a shape from (`models.md` §"Constraint violations": "no
+/// shape-defining fact declared"). Callers that have already established at
+/// least one fact is present (e.g. by checking `clock || identity.is_some()`)
+/// can `.expect()` the result; callers validating fresh frontmatter should
+/// treat `None` as the "neither declared" hard-error case.
+pub fn derive_grain(
+    clock: bool,
+    identity: Option<&[String]>,
+    partition_col: Option<&str>,
+) -> Option<Grain> {
+    match (clock, identity) {
+        (true, None) => Some(Grain::Partition),
+        (false, Some(_)) => Some(Grain::Key),
+        (true, Some(key)) => {
+            let partition_in_key = partition_col
+                .map(|p| key.iter().any(|k| k == p))
+                .unwrap_or(false);
+            Some(if partition_in_key {
+                Grain::KeyPerPartition
+            } else {
+                Grain::Key
+            })
+        }
+        (false, None) => None,
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Materialization {
     Table,
@@ -422,11 +476,20 @@ pub struct ModelConfig {
     /// `Config::get_refresh`).
     #[serde(default)]
     pub refresh: Option<RefreshStrategy>,
-    /// Declared grain (`partition` | `key` | `key_per_partition`). Required
-    /// whenever `refresh: incremental` is set, rejected otherwise. See
-    /// [`Grain`].
+    /// Declared grain (`partition` | `key` | `key_per_partition`) — an
+    /// optional **check-only assertion**, validated against the derived
+    /// shape facts rather than driving them. See [`Grain`],
+    /// [`derive_grain`], and `docs/specs/models.md` §"Refresh axis".
     #[serde(default)]
     pub grain: Option<Grain>,
+    /// The identity fact — top-level `unique_key:` (`docs/specs/models.md`
+    /// §"Refresh axis", §"The Relation Contract"). A single string is sugar
+    /// for a one-element list. Frontmatter wins over this smelt.yml override
+    /// when both set it (see [`Config::get_unique_key_with_metadata`]).
+    /// Distinct from the `batched:` sub-block's `unique_key` (a
+    /// partition-grain dedup aid, never key-addressing).
+    #[serde(default, deserialize_with = "crate::sources::opt_string_or_vec")]
+    pub unique_key: Option<Vec<String>>,
     /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
     /// itself is `refresh: incremental` + `grain: partition`, not the
     /// presence of this block.
@@ -1036,6 +1099,32 @@ impl Config {
             }
         }
         self.get_grain(model_name)
+    }
+
+    /// Get the declared top-level `unique_key:` for a model, from smelt.yml only.
+    ///
+    /// **Precedence**: smelt.yml only (for now). Use
+    /// [`Config::get_unique_key_with_metadata`] to also consider SQL frontmatter.
+    pub fn get_unique_key(&self, model_name: &str) -> Option<&[String]> {
+        self.models
+            .get(model_name)
+            .and_then(|m| m.unique_key.as_deref())
+    }
+
+    /// Get the declared top-level `unique_key:` for a model.
+    ///
+    /// **Precedence**: SQL file metadata > smelt.yml model config.
+    pub fn get_unique_key_with_metadata<'a>(
+        &'a self,
+        model_name: &str,
+        sql_metadata: Option<&'a ModelMetadata>,
+    ) -> Option<&'a [String]> {
+        if let Some(metadata) = sql_metadata {
+            if let Some(unique_key) = metadata.unique_key.as_deref() {
+                return Some(unique_key);
+            }
+        }
+        self.get_unique_key(model_name)
     }
 
     /// Get the `batched:` block for a model, when the model is selected into

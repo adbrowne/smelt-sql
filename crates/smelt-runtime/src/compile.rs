@@ -2400,6 +2400,7 @@ JOIN smelt.model_b b ON a.id = b.id
                 timeseries: None,
                 refresh: None,
                 grain: None,
+                unique_key: None,
                 batched: None,
                 tags: Vec::new(),
                 target: None,

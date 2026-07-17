@@ -259,6 +259,37 @@ pub fn group_by_unique_key(sql: &str) -> Vec<String> {
     }
 }
 
+/// Compare a **declared** top-level `unique_key:` (`docs/specs/models.md`
+/// §"Refresh axis") against the GROUP-BY-derived key [`group_by_unique_key`]
+/// computes for the same SQL — a leaf classifier check over one
+/// already-bounded model's own text (`architecture.md` §"Property
+/// composition walk rule"), order-independent (declaring the same columns in
+/// a different order is agreement, not a mismatch).
+///
+/// `Ok(())` on agreement (including when `declared` is empty and so is the
+/// derived key). `Err((declared, derived))` on disagreement — both lists, in
+/// their original declared/derived order, for the caller to name in a
+/// diagnostic (`models.md` §"Constraint violations": "For aggregated key
+/// bodies: `unique_key` ≠ the `GROUP BY` column set → hard error (checked
+/// restatement)"). This function only compares; it does not decide which
+/// list wins — `smelt-db::queries::maintenance` is the sole caller that
+/// turns a mismatch into a refused plan.
+pub fn declared_unique_key_matches(
+    declared: &[String],
+    sql: &str,
+) -> Result<(), (Vec<String>, Vec<String>)> {
+    let derived = group_by_unique_key(sql);
+    let mut declared_sorted = declared.to_vec();
+    declared_sorted.sort();
+    let mut derived_sorted = derived.clone();
+    derived_sorted.sort();
+    if declared_sorted == derived_sorted {
+        Ok(())
+    } else {
+        Err((declared.to_vec(), derived))
+    }
+}
+
 /// Classify a `cumulative_aggregate` model.
 ///
 /// `sql` is the inlined model SQL (post function expansion). `refs` is the

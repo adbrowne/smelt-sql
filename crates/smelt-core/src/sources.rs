@@ -449,7 +449,12 @@ where
     StringOrVec::deserialize(deserializer).map(Into::into)
 }
 
-fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+/// Crate-visible so `metadata::ModelMetadata::unique_key` and
+/// `config::ModelConfig::unique_key` (the top-level identity fact,
+/// `docs/specs/models.md` §"Refresh axis") share the same single-string-is-sugar
+/// convention as the source-side `unique_key:`/`key_recurrence.key` fields
+/// this helper was written for.
+pub(crate) fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {

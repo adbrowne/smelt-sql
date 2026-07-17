@@ -132,10 +132,12 @@ models:
     tags: [<tag>, ...]
     target: <target_name>
     refresh: incremental
-    grain: partition
+    unique_key: [<column>, ...]
     batched:
       # batched fields...
 ```
+
+`refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` / `key_per_partition` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.
 
 ### Model Fields
 
@@ -144,9 +146,10 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `timeseries` | object | no | | Time-dimension declaration for `grain: partition` / `grain: key_per_partition` models. Forbidden on `grain: key` models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `timeseries` | object | no | | Time-dimension declaration — the **clock** shape-defining fact (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
-| `grain` | string | no | | Required with `refresh: incremental`: `partition`, `key`, or `key_per_partition` |
+| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from the `batched:` sub-block's `unique_key` (a partition-grain dedup aid, never identity). |
+| `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
 | `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.

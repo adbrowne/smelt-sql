@@ -80,7 +80,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | blocked (2026-07-18) — pre-existing MIN/MAX NOT-NULL inference gap trips at diagnostic time |
 | W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | blocked (2026-07-18) — precondition W1 is blocked |
-| S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | pending |
+| S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | pending |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | pending |
 | B2 | Key→partition dirt projection (exact routes 1–2; widen-by-`r` route 3) in forward propagation + backward resolution | pending |
@@ -117,6 +117,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 4. **Digest stance**: exact `IS DISTINCT FROM` for write suppression (C4/C5); SHA-256-class digests only for the F-group sidecar, with the soundness invariant stated in F1's spec diff and oracle-gated.
 5. **Sidecar lifecycle and observed-delta trust boundary** are settled in the D1/F1 spec-diff phases (warehouse-resident beside the merge ledger, same-transaction, is the default posture); those phases block their groups until the spec says otherwise.
 6. **v1 delta posture**: record key-level, propagate partition-level (widen-never-narrow) — D3.
+7. **S1 ran ahead of its stated `W2` pre-condition.** W2 (and its transitive blocker W1) were `blocked` on the pre-existing MIN/MAX NOT-NULL inference gap, unrelated to S1's own scope. S1's TDD tests, implementation shape, and critical files were self-contained (no dependency on W2's tutorial content existing), so it proceeded; its named fixture `examples/web_analytics/models/silver/events_deduped.sql` doesn't exist yet (that's W1's undelivered artifact), so S1 substituted the existing `device_user_edges.sql` model to demonstrate the declared-`unique_key` spelling staying diagnostic-clean. `derive_grain` also landed as `-> Option<Grain>` rather than the plan's literal `-> Grain` (`None` represents "neither fact declared"; both call sites handle it without unwrap/panic).
 
 ## Blocked phases
 

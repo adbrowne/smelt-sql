@@ -811,6 +811,7 @@ mod tests {
                     timeseries: None,
                     refresh: None,
                     grain: None,
+                    unique_key: None,
                     batched: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,

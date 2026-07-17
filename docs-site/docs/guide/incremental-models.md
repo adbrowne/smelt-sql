@@ -14,14 +14,14 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-Incremental behavior is configured by selecting `refresh: incremental` + `grain: partition`, plus one required frontmatter block:
+`refresh: incremental` is admitted by the **shape-defining facts** you declare, not by a separate mode selector: a `timeseries:` block (the **clock**) and/or a top-level `unique_key:` (the **identity**). Declaring the clock alone gives you the partition-addressed shape this guide covers — one row per `(partition_column, …)`; declaring the identity instead gives you the key-grain shape (see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md)). `refresh: incremental` with neither fact declared is a hard error naming what's missing.
 
 - **`refresh: incremental`** opts the model into the derived maintenance plan. It implies a stored `table` — you do not also declare `materialization: table`.
-- **`grain: partition`** declares that a stored row is one row of a complete, partition-addressed table — the shape this guide covers. (`grain: key` is a different shape; see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md).)
-- **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
-- **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`).
+- **`timeseries:`** declares the clock — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
+- **`grain: partition`** is the friendly name for this shape — an *optional* check-only assertion, not what admits the model. Write it if you want it in frontmatter; it errors if it disagrees with what the declared facts derive.
+- **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`) — a dedup aid layered on top of the partition-addressed shape, distinct from the top-level `unique_key:` identity fact that opts a model into the key-grain shape instead.
 
-`timeseries:` is required when `refresh: incremental` + `grain: partition` is set. Declaring `refresh: incremental` + `grain: partition` without `timeseries:` is a validation error (`TimeseriesRequiredForBatched`). A `batched:` block without `refresh: incremental` is also a validation error.
+`timeseries:` is required for the shape this guide covers (a model with no declared identity). Declaring `refresh: incremental` without any shape-defining fact is a validation error (`GrainRequiredForIncremental`). A `batched:` block without a declared clock is also a validation error.
 
 ### Frontmatter example
 

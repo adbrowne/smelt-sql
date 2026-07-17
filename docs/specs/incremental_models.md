@@ -1550,14 +1550,23 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
 ### The contract, plan, and graph layer
 
-- **The grain-demotion, per-cell `write:` pin, and open write-pattern registry are spec-ahead-of-code.**
+- **The grain-demotion has landed for the top-level surface (one narrow gap remaining); the per-cell
+  `write:` pin and open write-pattern registry are still spec-ahead-of-code.**
   This spec makes the shape-defining facts (`timeseries:` / `unique_key:`) the declared surface and
-  `grain:` a derived check-only assertion (§"The declared shape axis"); it makes physical write
-  addressing a per-`(column-group × trigger × changed-input)`-cell derivation governed by the
-  available-addressings rule, adds the `maintenance.cells[].write` pin, and frames the write-pattern
-  set as an open registry with a backend-capability admission factor (§"Per-cell write addressing").
-  Today the implementation still requires a declared `grain:` driver and does not derive the label;
-  the plan's write-scope is a fixed 2×2 corner with a closed technique set (`Technique` /
+  `grain:` a derived check-only assertion (§"The declared shape axis"). Top-level `unique_key:` now
+  parses (`.sql` frontmatter and `smelt.yml` model overrides, frontmatter wins); `refresh: incremental`
+  is admitted on the facts alone (no `grain:` required), and a written `grain:` is validated against
+  `derive_grain(clock?, identity?, partition_column ∈ key?)` whenever a top-level `unique_key:` is
+  declared, erroring on mismatch and naming both labels. The narrow gap: a `grain: key` model with no
+  top-level `unique_key:` (identity derived from the SQL body's own `GROUP BY` instead) is checked
+  against that derived key only at plan derivation (`smelt-db::queries::maintenance`), not at the
+  earlier frontmatter-validation step — and only when a top-level `unique_key:` is also declared to
+  check it against; a bare `grain: key` model with neither declaration is unchanged (`models.md`
+  §Known Divergences). This spec also makes physical write addressing a per-`(column-group × trigger
+  × changed-input)`-cell derivation governed by the available-addressings rule, adds the
+  `maintenance.cells[].write` pin, and frames the write-pattern set as an open registry with a
+  backend-capability admission factor (§"Per-cell write addressing") — none of that is built yet: the
+  plan's write-scope is a fixed 2×2 corner with a closed technique set (`Technique` /
   `IncrementalStrategy`), the `write:` frontmatter key does not parse, no write-pattern *registry* or
   per-pattern equivalence-obligation declaration exists (the backend-capability check is the ad-hoc
   `Backend::supports_column_scoped_merge`-style flag, not a registry), and

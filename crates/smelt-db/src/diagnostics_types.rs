@@ -669,6 +669,11 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key"
     GrainRequiresIncremental,
+    /// A written `grain:` check-only assertion disagrees with the label
+    /// derived from the declared shape-defining facts (`timeseries:` /
+    /// `unique_key:`). Anchored at the top of the file (line 0, column 0).
+    /// Message: "GrainAssertionMismatch: declared `grain: {asserted}` disagrees with the grain derived from the declared shape facts (`grain: {derived}`) — fix the `grain:` assertion or the facts it derives from"
+    GrainAssertionMismatch,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or

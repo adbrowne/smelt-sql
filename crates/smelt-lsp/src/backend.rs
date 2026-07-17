@@ -451,6 +451,7 @@ impl Backend {
                 DbCode::PipeStageMalformed => "pipe-stage-malformed",
                 DbCode::GrainRequiredForIncremental => "grain-required-for-incremental",
                 DbCode::GrainRequiresIncremental => "grain-requires-incremental",
+                DbCode::GrainAssertionMismatch => "grain-assertion-mismatch",
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
                 DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
