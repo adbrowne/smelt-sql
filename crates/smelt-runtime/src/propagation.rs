@@ -142,12 +142,46 @@ fn source_grain(info: &SourceInfo) -> Result<PartitionGrain> {
 /// upstream model this workspace doesn't derive a plan for) defaults to
 /// [`PartitionGrain::Unclocked`] — the safe "no interval structure" widen,
 /// never a silent narrow.
-fn model_grain(model: &ModelFile) -> Result<PartitionGrain> {
+///
+/// `locality_admitted` is the per-address key-temporal-locality verdict
+/// (`smelt_logical::maintenance::MaintenancePlan::key_locality`, folded by
+/// [`build_forward_graph`] from the SAME derivation `smelt explain` reads —
+/// never re-derived here) for every `grain: key` model in the workspace.
+/// A `grain: key` model whose locality gate admitted (the composed shape,
+/// `incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)") is a clocked node at its declared `timeseries.granularity`
+/// like any other node (§"The graph layer": "A locality-admitted
+/// time-partitioned keyed output is not refused"); a **bare** keyed model —
+/// no `timeseries:` declared, or one declared but not admitted — stays
+/// [`PartitionGrain::Keyed`] for [`crate::propagate::refuse_keyed_nodes`]-
+/// equivalent (`smelt_logical::maintenance::propagate::refuse_keyed_nodes`)
+/// to refuse. Admission keys off the locality **verdict**, never off the
+/// mere presence of a `timeseries:` block.
+fn model_grain(
+    model: &ModelFile,
+    locality_admitted: &BTreeMap<String, bool>,
+) -> Result<PartitionGrain> {
     let Some(metadata) = model.metadata.as_deref() else {
         return Ok(PartitionGrain::Unclocked);
     };
     match metadata.grain {
-        Some(ConfigGrain::Key) => Ok(PartitionGrain::Keyed),
+        Some(ConfigGrain::Key) => {
+            let admitted = locality_admitted
+                .get(&model.canonical_path())
+                .copied()
+                .unwrap_or(false);
+            if admitted {
+                match metadata.timeseries.as_ref() {
+                    Some(ts) => granularity_grain(ts.granularity),
+                    // Unreachable in practice: locality admission requires a
+                    // declared `timeseries:` block. Fail closed to `Keyed`
+                    // (refused) rather than assume a grain.
+                    None => Ok(PartitionGrain::Keyed),
+                }
+            } else {
+                Ok(PartitionGrain::Keyed)
+            }
+        }
         _ => match metadata.timeseries.as_ref() {
             Some(ts) => granularity_grain(ts.granularity),
             None => Ok(PartitionGrain::Unclocked),
@@ -185,6 +219,14 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
     // (upstream, downstream) -> widest (before_days, after_days) seen across
     // every cell that derives a clamp for that pair.
     let mut clamp_days: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
+
+    // Per-address key-temporal-locality verdict for every `grain: key`
+    // model this workspace derives a plan for — folded from the SAME
+    // `MaintenancePlan::key_locality` `smelt explain` reads (Phase A5),
+    // never re-derived (`CLAUDE.md` §"Maintenance-plan purity"). Populated
+    // below as every model is visited, then consulted by `model_grain`
+    // once the full edge list is assembled.
+    let mut locality_admitted: BTreeMap<String, bool> = BTreeMap::new();
 
     for model in models {
         let Some(metadata) = model.metadata.as_deref() else {
@@ -277,6 +319,35 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             }
         }
 
+        // The locality gate's granularity-equality structural precondition
+        // (`smelt_logical::maintenance::locality::establish_locality`)
+        // needs the driving source's own declared granularity — the same
+        // value `smelt-db`'s `check_file_diagnostics` (the `smelt explain`
+        // path) computes via `single_clocked_granularity` over every
+        // declared source this model references, so a `grain: key` model
+        // admits (or refuses) locality identically here and there. Scoped
+        // to declared `sources.*` refs only — a driving source that is
+        // itself another maintained model's composed output (recursive
+        // "composed driven by composed") is `smelt-db`'s wider
+        // `model_source_granularities` handling and is out of B1's scope
+        // (this call site only needs to admit the ordinary
+        // source-driven composed shape).
+        let driving_source_granularity = if metadata.grain == Some(ConfigGrain::Key) {
+            let clocked_granularities: Vec<Granularity> = sources
+                .iter()
+                .filter_map(|s| {
+                    source_infos
+                        .iter()
+                        .find(|info| bare_name(&info.address_segments) == s.name)
+                        .and_then(|info| info.timeseries.as_ref())
+                        .map(|ts| ts.granularity)
+                })
+                .collect();
+            smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities)
+        } else {
+            None
+        };
+
         let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
             &sql,
             &table,
@@ -284,10 +355,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &sources,
             &explicitly_mutable,
             &model_edges,
-            // Not (yet) plumbed with the driving source's declared
-            // granularity at this call site — see the analogous comment in
-            // `maintenance_driver::resolve_live_column_scoped_cell`.
-            None,
+            driving_source_granularity,
             // Not (yet) plumbed with declared `key_recurrence` bounds at
             // this call site (the graph-propagation walk does not resolve
             // route 3's declared fallback today) — a locality-admitted
@@ -297,6 +365,15 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         ) else {
             continue;
         };
+
+        // The admitted key-temporal-locality verdict for this model, if
+        // it's `grain: key` — `Some(true)` only once `establish_locality`
+        // (`smelt_logical::maintenance::locality`) has admitted it (Phase
+        // A5's `key_locality` fold). Consulted by `model_grain` below, once
+        // every model in the workspace has been visited.
+        if metadata.grain == Some(ConfigGrain::Key) {
+            locality_admitted.insert(table.clone(), result.plan.key_locality.is_some());
+        }
 
         for cell in &result.plan.cells {
             for clamp in &cell.scans {
@@ -325,6 +402,33 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
                 clamp_days
                     .entry((source.clone(), table.clone()))
                     .or_insert((0, 0));
+                continue;
+            }
+            // A locality-admitted composed node's own creation cell
+            // (`Grain::Key`'s `FoldDelta` corner, `derive_new_data`) is
+            // key-addressed, not partition-addressed: it structurally never
+            // carries a `ScanClamp` (`partition_local: PartitionLocal::Yes,
+            // scans: vec![]` unconditionally — there is no partition axis
+            // for `link_source` to bound against). Deriving the model's
+            // *real* key→partition inbound margin from its own SQL is B2's
+            // scope ("Key→partition dirt projection through composed
+            // nodes"); this phase only makes the edge itself walkable, at a
+            // placeholder-exact zero margin, so the composed node
+            // participates in the graph as a clocked node with a real
+            // inbound edge instead of silently having none (the pre-B1
+            // state for every `grain: key` model, composed or bare).
+            // Gated on the admitted locality verdict — never on the mere
+            // presence of a `timeseries:` block — so a bare keyed model's
+            // own creation cell still contributes no edge at all (unchanged
+            // from before this phase; its refusal is `NoAdmissibleTechnique`
+            // at plan-derivation time or `MaintenanceGraphUnsupportedNode`
+            // if it's otherwise reached as a graph node).
+            if cell.scans.is_empty() && locality_admitted.get(&table).copied() == Some(true) {
+                if let smelt_logical::maintenance::Trigger::NewData { source } = &cell.trigger {
+                    clamp_days
+                        .entry((source.clone(), table.clone()))
+                        .or_insert((0, 0));
+                }
             }
         }
     }
@@ -337,14 +441,14 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         {
             source_grain(info)?
         } else if let Some(m) = model_by_addr.get(&upstream) {
-            model_grain(m)?
+            model_grain(m, &locality_admitted)?
         } else {
             PartitionGrain::Unclocked
         };
         let downstream_model = model_by_addr.get(&downstream).with_context(|| {
             format!("internal: '{downstream}' not found among discovered models")
         })?;
-        let downstream_grain = model_grain(downstream_model)?;
+        let downstream_grain = model_grain(downstream_model, &locality_admitted)?;
         edges.push(Edge {
             upstream,
             downstream,

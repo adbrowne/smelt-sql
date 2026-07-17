@@ -14,10 +14,20 @@
 
 use std::collections::BTreeMap;
 
-use smelt_logical::maintenance::propagate::{propagate, required_inputs, DayInterval, Edge};
+use smelt_logical::maintenance::propagate::{
+    propagate, required_inputs, DayInterval, Edge, PartitionGrain,
+};
 
 fn iv(start: i64, end: i64) -> DayInterval {
     DayInterval::new(start, end)
+}
+
+fn deltas(items: &[(&str, DayInterval)]) -> BTreeMap<String, Vec<DayInterval>> {
+    let mut m: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    for (name, interval) in items {
+        m.entry(name.to_string()).or_default().push(*interval);
+    }
+    m
 }
 
 fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> Edge {
@@ -140,4 +150,67 @@ fn build_order_includes_no_inbound_target_alongside_an_unrelated_chain() {
     assert!(!resolved.required.contains_key("bronze"));
     assert!(!resolved.required.contains_key("silver"));
     assert!(!resolved.required.contains_key("rollup"));
+}
+
+// ---------------------------------------------------------------------------
+// Phase B1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// the graph layer admits a locality-admitted composed node (`grain: key` +
+// `timeseries:`, admitted key temporal locality) as a clocked propagation
+// participant at its own declared granularity — it is no longer refused as
+// `PartitionGrain::Keyed`. A bare keyed node (no admitted time axis) still
+// refuses, with a refined message naming the missing time axis and the
+// composed-shape fix.
+// ---------------------------------------------------------------------------
+
+/// A chain `source -> composed(keyed+timeseries) -> rollup`: the middle
+/// node stands in for a locality-admitted composed model, sandwiched
+/// between two ordinary Day-grain nodes with its OWN declared granularity
+/// (Month) — so the containment law also pins that the composed node's own
+/// grain (not just its neighbours') drives outward alignment through it,
+/// exactly as any other clocked node's would (`incremental_models.md`
+/// §"The graph layer": "A locality-admitted time-partitioned keyed output
+/// is not refused... a clocked node whose edges use its declared
+/// granularity like any other node").
+#[test]
+fn composed_node_contributes_edges() {
+    let mut into_composed = edge("source", "composed", 0, 0);
+    into_composed.downstream_grain = PartitionGrain::Month;
+    let mut out_of_composed = edge("composed", "rollup", 0, 0);
+    out_of_composed.upstream_grain = PartitionGrain::Month;
+    let edges = vec![into_composed, out_of_composed];
+    assert_forward_backward_containment(&edges, "rollup", iv(400, 402));
+}
+
+/// A graph with no `PartitionGrain::Keyed` edge at all — precisely what a
+/// locality-admitted composed node classifies as (its declared
+/// granularity, never `Keyed`) — never trips `refuse_keyed_nodes`, in
+/// either direction.
+#[test]
+fn admitted_composed_node_is_not_refused() {
+    let edges = vec![
+        edge("source", "composed", 0, 0),
+        edge("composed", "rollup", 0, 0),
+    ];
+    propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("admitted composed node runs");
+    required_inputs(&edges, "rollup", iv(1, 2)).expect("admitted composed node resolves");
+}
+
+/// A bare keyed node (no admitted time axis) still refuses fail-loud, in
+/// both directions, with a message naming the missing time axis and the
+/// composed-shape fix rather than the old bare "keyed-grain" wording.
+#[test]
+fn bare_keyed_node_still_refuses_with_refined_message() {
+    let mut e = edge("source", "bare_keyed", 0, 0);
+    e.downstream_grain = PartitionGrain::Keyed;
+    let edges = vec![e];
+
+    let fwd = propagate(&edges, &deltas(&[("source", iv(1, 2))]))
+        .expect_err("bare keyed node must refuse");
+    assert!(fwd.contains("without an admitted time axis"), "{fwd}");
+    assert!(fwd.contains("timeseries"), "{fwd}");
+    assert!(fwd.contains("bare_keyed"), "{fwd}");
+
+    let bwd =
+        required_inputs(&edges, "bare_keyed", iv(1, 2)).expect_err("bare keyed node must refuse");
+    assert!(bwd.contains("without an admitted time axis"), "{bwd}");
 }

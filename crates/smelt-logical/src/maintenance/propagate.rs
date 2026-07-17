@@ -178,9 +178,17 @@ impl PartitionGrain {
     }
 }
 
-/// Ratified P7: a keyed-grain node has no partition axis, so interval dirt
-/// through it would be wrong-and-quiet — refuse fail-loud until keyed
-/// dirt-sets exist (S12).
+/// Ratified P7: a **bare** keyed-grain node — no admitted time axis — has
+/// no partition axis, so interval dirt through it would be wrong-and-quiet
+/// — refuse fail-loud until keyed dirt-sets exist (S12). A **locality-
+/// admitted** keyed node (the composed shape, `incremental_models.md`
+/// §"Key temporal locality (the time-partitioned output)") never reaches
+/// this check as [`PartitionGrain::Keyed`] at all — the caller
+/// (`smelt-runtime::propagation::build_forward_graph`) classifies it by its
+/// declared `timeseries.granularity` instead, so it composes through the
+/// graph like any other clocked node (`incremental_models.md` §"The graph
+/// layer": "A locality-admitted time-partitioned keyed output is not
+/// refused").
 fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
     for e in edges {
         let (name, grain) = if e.upstream_grain == PartitionGrain::Keyed {
@@ -192,8 +200,12 @@ fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
         };
         debug_assert_eq!(grain, PartitionGrain::Keyed);
         return Err(format!(
-            "'{name}' is keyed-grain: it has no partition axis for interval dirt to \
-             propagate over — keyed dirt-sets are not yet supported (S12)"
+            "'{name}' is keyed-grain without an admitted time axis: it has no partition axis \
+             for interval dirt to propagate over. Declare a timeseries: block and establish \
+             key temporal locality (docs/specs/incremental_models.md §\"Key temporal \
+             locality\") to admit it as a locality-admitted composed node that participates in \
+             propagation like any other clocked node — keyed dirt-sets over a bare keyed node \
+             are not yet supported (S12)"
         ));
     }
     Ok(())

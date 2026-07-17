@@ -1745,9 +1745,23 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   DuckDB-dialect DDL/DML is the only ledger substrate implemented today; an additive-graded cell
   on a non-DuckDB backend fails loudly (`UnsupportedFeature`) rather than being handed
   DuckDB-flavored SQL it cannot run — a Spark-dialect ledger builder is unbuilt.
-- **Keyed-grain hops and self-referential nodes refuse** in the graph (by design, P7/P8); keyed
-  dirt-sets and time-unrolled self-edges are designed (`10-dependency-propagation.md` §6, S12)
-  and unbuilt.
+- **A bare keyed-grain hop still refuses in the graph; a locality-admitted composed node no
+  longer does.** A `grain: key` node with no admitted key-temporal-locality verdict (no
+  `timeseries:` declared, or one declared but not admitted — §"Key temporal locality") still
+  refuses fail-loud (`MaintenanceGraphUnsupportedNode`, P7/P8), with a message naming the
+  missing time axis and the composed-shape fix. A `grain: key` node whose locality gate *did*
+  admit is classified by its declared `timeseries.granularity` instead — a clocked node that
+  contributes edges like any other node (§"The graph layer": "A locality-admitted
+  time-partitioned keyed output is not refused"), rather than `PartitionGrain::Keyed`
+  (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`,
+  `crates/smelt-logical/src/maintenance/propagate.rs::refuse_keyed_nodes`). Time-unrolled
+  self-edges are still designed and unbuilt (`10-dependency-propagation.md` §6). The composed
+  node's own key→partition dirt projection is not yet exact: its inbound edge (from its own
+  driving source) and outbound edge (to its consumers) both carry a placeholder-exact
+  zero-derived margin rather than the real key-level footprint (`10-dependency-propagation.md`
+  §6, S12; designed but unbuilt — the exact projection under locality routes 1–2, and the
+  `r`-widened one under route 3, is `docs/plans/20260715-composed-axes-conditional-
+  maintenance.md`'s next graph-layer phase).
 - **Delta detection for `--since-upstream` is explicit, not automatic, for v1.** The runner (or an
   external poller) supplies each source's landed delta directly on the command line
   (`--source <address> --landed <start>..<end>`, §CLI); the graph layer reflects exactly the

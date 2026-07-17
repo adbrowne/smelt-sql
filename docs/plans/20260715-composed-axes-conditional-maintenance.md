@@ -82,7 +82,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | blocked (2026-07-18) — precondition W1 is blocked |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | done (2026-07-18) |
-| B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | pending |
+| B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | done (2026-07-18) |
 | B2 | Key→partition dirt projection (exact routes 1–2; widen-by-`r` route 3) in forward propagation + backward resolution | pending |
 | B3 | `--since-upstream` accepts a composed node as `--source`; adjointness tests extended | pending |
 | C1 | Spec diff: `model_transforms.md` T1/T2 variants; `multi_backend.md` capability flags (incl. `supports_column_scoped_merge` into the capability struct) | pending |
@@ -119,6 +119,31 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 6. **v1 delta posture**: record key-level, propagate partition-level (widen-never-narrow) — D3.
 7. **S1 ran ahead of its stated `W2` pre-condition.** W2 (and its transitive blocker W1) were `blocked` on the pre-existing MIN/MAX NOT-NULL inference gap, unrelated to S1's own scope. S1's TDD tests, implementation shape, and critical files were self-contained (no dependency on W2's tutorial content existing), so it proceeded; its named fixture `examples/web_analytics/models/silver/events_deduped.sql` doesn't exist yet (that's W1's undelivered artifact), so S1 substituted the existing `device_user_edges.sql` model to demonstrate the declared-`unique_key` spelling staying diagnostic-clean. `derive_grain` also landed as `-> Option<Grain>` rather than the plan's literal `-> Grain` (`None` represents "neither fact declared"; both call sites handle it without unwrap/panic).
 8. **S2 substituted its real-fixture example.** The plan's literal fixture (`events_deduped`'s inbound edge to the raw events source) doesn't exist yet — still W1's undelivered artifact. S2 used two already-landed `examples/timeseries` fixtures instead (`daily_events_status` for two differently-shaped source edges, `user_spend_running_total` for a model edge), which exercise the identical `RelationContractView`/report code paths and satisfy the "source edge and model edge render through the same rows" requirement. S2 also touched `docs/specs/cli.md` (not listed in the phase's stated "Docs touched") to keep the spec's `smelt explain` surface description in sync with the new contract rows — same spec-first rule as everywhere else, just not anticipated when the phase was scoped.
+9. **B1 substituted its real-fixture example, and had to plumb a pre-existing gap in the same
+   file it was already allowed to touch.** The plan's literal fixture
+   (`examples/web_analytics/models/silver/events_deduped.sql` mid-chain) is still W1's undelivered
+   artifact. B1 used the already-landed `examples/timeseries` composed chain instead —
+   `sources.raw.transactions -> user_daily_spend` (`grain: key` + `timeseries:`, route 1
+   key-embedded) `-> user_spend_rollup` (`grain: partition`) — whose own doc comments already cite
+   this plan's Phase A5, confirming it as the intended tracer analogue. Exercising that real
+   fixture through `build_forward_graph` surfaced a second, narrower gap in the same function:
+   the call site passed `driving_source_granularity: None` unconditionally (a pre-existing,
+   explicitly-commented placeholder from an earlier phase, MP15/MP16), which fails
+   `establish_locality`'s granularity-equality structural precondition unconditionally — so no
+   `grain: key` model could ever actually admit locality through this call site, regardless of
+   B1's own classification fix. Plumbing a real value (the "exactly one clocked declared-source
+   candidate, else undecided" rule via `single_clocked_granularity`, the same computation
+   `smelt-db`'s `check_file_diagnostics` already performs for the `smelt explain` path) was
+   necessary for the real-fixture test to pass at all, stayed entirely inside
+   `crates/smelt-runtime/src/propagation.rs` (the phase's own critical file, doing exactly the
+   "node classification from the locality verdict" work the phase describes), and does not
+   implement any key→partition dirt projection (B2's scope, still deferred) — it only lets a
+   `grain: key` model driven purely by declared `sources.*` refs reach the SAME admission verdict
+   `smelt explain` already reports for it. The recursive case (a driving source that is itself
+   another maintained model's own composed output) is left unplumbed here, matching
+   `smelt-db::lib.rs`'s wider `model_source_granularities` handling that this call site does not
+   replicate — out of scope, and harmless to defer since an unplumbed candidate there still just
+   yields no edge rather than a wrong one.
 
 ## Blocked phases
 

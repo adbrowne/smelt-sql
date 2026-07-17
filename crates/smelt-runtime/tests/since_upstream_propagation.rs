@@ -330,3 +330,124 @@ fn key_per_partition_upstream_propagates_by_granularity_not_refused_as_keyed() {
         plan.runs
     );
 }
+
+/// Phase B1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// a **locality-admitted composed node** (`grain: key` + `timeseries:`,
+/// admitted key temporal locality) sits *inside* a real propagation chain
+/// instead of terminating it (`incremental_models.md` §"The graph layer": "A
+/// locality-admitted time-partitioned keyed output is not refused").
+///
+/// This phase's own flagship fixture (`examples/web_analytics/models/
+/// silver/events_deduped.sql`) is not yet buildable — its
+/// extremal-fold (`MIN`/`MAX`) `timeseries.partition_column` hits a
+/// pre-existing, out-of-scope NOT-NULL inference gap (`docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` §"Blocked phases",
+/// 2026-07-18, W1). `examples/timeseries` already carries an equivalent,
+/// already-landed composed shape wired for exactly this scenario
+/// (`user_daily_spend.sql`'s own doc comment cites this plan's Phase A5):
+/// `raw.transactions -> user_daily_spend` (`grain: key` + `timeseries:`,
+/// route 1 key-embedded) `-> user_spend_rollup` (`grain: partition`).
+#[test]
+fn composed_node_in_the_chain() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the graph must build without MaintenanceGraphUnsupportedNode: user_daily_spend is a \
+         locality-admitted composed node, not a bare keyed refusal",
+    );
+
+    // Inbound: the composed node's own driving-source edge
+    // (placeholder-exact zero margin in this phase — B2 derives the real
+    // key→partition projection).
+    let inbound = edges
+        .iter()
+        .find(|e| e.upstream == "raw.transactions" && e.downstream == "user_daily_spend")
+        .unwrap_or_else(|| panic!("expected an inbound edge into the composed node: {edges:?}"));
+    assert_eq!(
+        inbound.downstream_grain,
+        smelt_logical::maintenance::propagate::PartitionGrain::Day,
+        "the composed node classifies by its declared granularity, not PartitionGrain::Keyed"
+    );
+
+    // Outbound: the composed node feeds an ordinary downstream consumer.
+    let outbound = edges
+        .iter()
+        .find(|e| e.upstream == "user_daily_spend" && e.downstream == "user_spend_rollup")
+        .unwrap_or_else(|| panic!("expected an outbound edge from the composed node: {edges:?}"));
+    assert_eq!(
+        outbound.upstream_grain,
+        smelt_logical::maintenance::propagate::PartitionGrain::Day,
+        "the composed node's own outbound edge must not be PartitionGrain::Keyed"
+    );
+
+    // The whole graph — including the bare Day-grain neighbours — still
+    // propagates end to end through the composed node without refusing.
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "raw.transactions".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    plan_since_upstream(&models, &source_infos, &order, &deltas)
+        .expect("a delta on the composed node's driving source must propagate through it");
+}
+
+/// A **bare** keyed model (no `timeseries:` declared at all) that another
+/// model reads still refuses fail-loud in the real per-workspace assembly
+/// — `MaintenanceGraphUnsupportedNode`, naming the missing time axis — the
+/// same safety property `keyed_grain_model_never_derives_an_edge` pins for
+/// the model's own creation edge, but exercised here through the edge an
+/// explicitly-mutable **unclocked** dimension source contributes (the one
+/// real path that reaches a bare keyed node as a graph node today).
+#[test]
+fn bare_keyed_upstream_still_refuses() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/sources/dims.yml",
+        "description: dims\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: region\n  type: VARCHAR\n\
+         mutation_profile:\n  kind: mutable_snapshot\n",
+    );
+    write(
+        root,
+        "models/bare_keyed.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT p.user_id, SUM(p.amount) AS total, d.region\n\
+         FROM smelt.sources.payments p\n\
+         JOIN smelt.sources.dims d ON p.user_id = d.user_id\n\
+         GROUP BY p.user_id, d.region\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let order = vec!["bare_keyed".to_string()];
+    let err = plan_since_upstream(&models, &source_infos, &order, &[])
+        .expect_err("a bare keyed node reached by the graph must still refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
+    assert!(msg.contains("without an admitted time axis"), "{msg}");
+    assert!(msg.contains("bare_keyed"), "{msg}");
+}
