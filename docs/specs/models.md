@@ -346,6 +346,7 @@ Modelling any of the derived rows as a declared selector was rejected for one sh
 - **Source mutation profile has a first-class declaration, but only `change_feed` currently changes the derived verdict.** The input-consumption cell reads a declared `mutation_profile:` (`sources.md`): a declared `change_feed` yields the change-feed verdict; absent that, the *presence* of a `timeseries:` clock is the fallback (clocked ⇒ window-forward, otherwise ⇒ snapshot-diff). A declared `append_only` or `mutable` on an unclocked source does **not yet** change the verdict. Tracked in `docs/plans/20260704-model-updates.md`.
 - **Snapshot-diff mechanics are specified for the key grain, open for `versioning: interval`** (`incremental_models.md` §"The two run shapes"; `docs/research/20260703-model-updates.md` §19.8).
 - **`smelt explain` does not yet report the input-consumption cell or the maintenance plan** (`incremental_models.md` §Known Divergences).
+- **The Relation Contract's read side is landed for the clock/identity/derived-grain slots only.** `smelt explain <model>` prints the model's own contract (clock, identity, derived `grain`) and one contract block per inbound edge — a declared source or an upstream model, rendered through the identical rows and labelled by provider. The mutation/completeness/replay slots (`sources.md` §"The Relation Contract") are not yet part of this report; a source's `mutation_profile:`, `watermark:`, and `retention:` remain readable only from the source YAML itself, not surfaced per edge.
 
 ## References
 

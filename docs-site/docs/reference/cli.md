@@ -923,9 +923,15 @@ With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance p
 cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
 the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
 derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-and the model's inbound edges. This only applies to incremental models (`refresh: incremental`
-with a `grain:` declared)
-— other models print a one-line notice instead.
+the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
+contract block per **inbound edge**. This only applies to incremental models (`refresh:
+incremental` with a `grain:` declared) — other models print a one-line notice instead.
+
+An inbound edge is either a declared source (`sources.*`) or an upstream maintained model —
+both render through the identical `clock:` / `identity:` / `derived grain:` rows, labelled
+`(source)` or `(model)` so it's clear which provider filled them. A row prints `(none)` when
+that provider declares neither fact — a source with no `timeseries:` and no `unique_key:` is
+legal and simply has nothing to summarize, never an error.
 
 Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
@@ -996,7 +1002,16 @@ Cells (2):
 
 Refusals: (none)
 
-Inbound edges: (none)
+Relation contract:
+  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+  identity: (none)
+  derived grain: partition
+
+Inbound edges: sources.raw.events
+  - sources.raw.events (source)
+      clock:    (none)
+      identity: event_id
+      derived grain: key
 ```
 
 ---

@@ -1,7 +1,7 @@
 use crate::discovery::ModelFile;
 use anyhow::Result;
 use serde::Serialize;
-use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
+use smelt_core::config::{Config, Grain, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::{BatchedConfig, Granularity, Materialization, ModelOriginKind};
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
@@ -101,6 +101,210 @@ fn is_self_origin(origins: &[String]) -> bool {
     origins.len() == 1
 }
 
+/// The clock slot's shared fields (`docs/specs/models.md` §"The Relation
+/// Contract": clock and identity "carry identical field paths" across
+/// both providers). Rendered identically whichever provider filled it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RelationContractClock {
+    pub event_time_column: String,
+    pub partition_column: String,
+    pub granularity: Granularity,
+}
+
+/// One provider's fill of the Relation Contract's **declared-and-checked**
+/// shape-defining slots — the clock and identity — plus the derived
+/// `grain` label that summarizes them (`docs/specs/models.md` §"Refresh
+/// axis", §"The Relation Contract"; `docs/specs/sources.md` §"The source
+/// as a Relation Contract provider"). Both a source and a model output are
+/// rendered through this one struct — a consumer never needs to know
+/// which provider filled it (`clock`/`identity` are the two fields every
+/// provider fills through the same field paths).
+///
+/// `clock`/`identity`/`derived_grain` are all `None` for a provider that
+/// declares neither fact — legal for a source (no admission gate to
+/// fail), reported rather than refused.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RelationContractView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock: Option<RelationContractClock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_grain: Option<Grain>,
+}
+
+impl RelationContractView {
+    /// Provider-agnostic construction from the raw declared facts — reads
+    /// `Option<&TimeseriesConfig>` / `Option<&[String]>` directly rather
+    /// than a `SourceInfo` or `ModelMetadata`, so there is exactly one
+    /// derivation reused by both providers
+    /// (`smelt_core::config::derive_grain`), never a source-specific or
+    /// model-specific reimplementation.
+    pub fn from_facts(
+        timeseries: Option<&TimeseriesConfig>,
+        unique_key: Option<&[String]>,
+    ) -> Self {
+        let derived_grain = smelt_core::config::derive_grain(
+            timeseries.is_some(),
+            unique_key,
+            timeseries.map(|t| t.partition_column.as_str()),
+        );
+        RelationContractView {
+            clock: timeseries.map(|ts| RelationContractClock {
+                event_time_column: ts.event_time_column.clone(),
+                partition_column: ts.partition_column.clone(),
+                granularity: ts.granularity,
+            }),
+            identity: unique_key.map(|k| k.to_vec()),
+            derived_grain,
+        }
+    }
+}
+
+/// Which provider filled one inbound edge's [`RelationContractView`] — a
+/// declared `sources.*` ref or an upstream maintained model
+/// (`docs/specs/incremental_models.md` §"Upstream model edges": the graph
+/// layer treats both edge kinds as the same standing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationContractProvider {
+    Source,
+    Model,
+}
+
+/// One inbound edge's provider identity and Relation Contract fill
+/// (`docs/specs/models.md` §"The Relation Contract").
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InboundEdgeContract {
+    pub name: String,
+    pub provider: RelationContractProvider,
+    pub contract: RelationContractView,
+}
+
+impl InboundEdgeContract {
+    pub fn source(name: String, contract: RelationContractView) -> Self {
+        InboundEdgeContract {
+            name,
+            provider: RelationContractProvider::Source,
+            contract,
+        }
+    }
+
+    pub fn model(name: String, contract: RelationContractView) -> Self {
+        InboundEdgeContract {
+            name,
+            provider: RelationContractProvider::Model,
+            contract,
+        }
+    }
+}
+
+/// Render one [`RelationContractView`] as indented text lines shared by
+/// the model's own contract and every inbound edge's contract — the same
+/// field names (`clock:`, `identity:`, `derived grain:`) print for both
+/// providers (`docs/specs/models.md` §"The Relation Contract").
+fn write_relation_contract(out: &mut String, indent: &str, contract: &RelationContractView) {
+    use std::fmt::Write as _;
+    match &contract.clock {
+        Some(clock) => {
+            let _ = writeln!(
+                out,
+                "{indent}clock:    event_time_column={} partition_column={} granularity={:?}",
+                clock.event_time_column, clock.partition_column, clock.granularity
+            );
+        }
+        None => {
+            let _ = writeln!(out, "{indent}clock:    (none)");
+        }
+    }
+    match &contract.identity {
+        Some(key) => {
+            let _ = writeln!(out, "{indent}identity: {}", key.join(", "));
+        }
+        None => {
+            let _ = writeln!(out, "{indent}identity: (none)");
+        }
+    }
+    match &contract.derived_grain {
+        Some(grain) => {
+            let _ = writeln!(out, "{indent}derived grain: {grain}");
+        }
+        None => {
+            let _ = writeln!(out, "{indent}derived grain: (unclassified)");
+        }
+    }
+}
+
+/// Assemble a model's own [`RelationContractView`] plus its inbound edges'
+/// contracts (`docs/specs/models.md` §"The Relation Contract").
+///
+/// Model-to-model edges come from `model_upstream`
+/// (`DependencyGraph::get_upstream`) — resolved against `models` for each
+/// upstream's own declared clock/identity. Source edges are read directly
+/// off `model`'s own `smelt.sources.*` refs (`model.refs`), because the
+/// graph layer's dependency map excludes per-entity source refs entirely
+/// (`smelt_core::graph::DependencyGraph::build` filters `first == "sources"`
+/// out of `deps`) — the graph layer's model/source distinction, not a
+/// second one invented here. Edges are sorted by name for a deterministic
+/// report.
+pub fn build_relation_contract(
+    model: &ModelFile,
+    models: &[ModelFile],
+    model_upstream: &[String],
+    source_infos: &[smelt_core::SourceInfo],
+) -> (RelationContractView, Vec<InboundEdgeContract>) {
+    let own_metadata = model.metadata.as_deref();
+    let own_contract = RelationContractView::from_facts(
+        own_metadata.and_then(|m| m.timeseries.as_ref()),
+        own_metadata.and_then(|m| m.unique_key.as_deref()),
+    );
+
+    let mut edges: Vec<InboundEdgeContract> = model_upstream
+        .iter()
+        .filter_map(|name| {
+            models
+                .iter()
+                .find(|m| &m.canonical_path() == name)
+                .map(|m| {
+                    let md = m.metadata.as_deref();
+                    InboundEdgeContract::model(
+                        name.clone(),
+                        RelationContractView::from_facts(
+                            md.and_then(|m| m.timeseries.as_ref()),
+                            md.and_then(|m| m.unique_key.as_deref()),
+                        ),
+                    )
+                })
+        })
+        .collect();
+
+    for r in &model.refs {
+        let segs = r.smelt_ref.to_path();
+        if segs.first().map(String::as_str) != Some("sources") {
+            continue;
+        }
+        // `SourceInfo::address_segments` is the full scan-root-stripped path,
+        // `sources` segment included (`discover_source_infos` /
+        // `ModelDiscovery::compute_address_segments`) — the same segments a
+        // `smelt.sources.<...>` ref carries, so no prefix-stripping here.
+        let Some(info) = source_infos.iter().find(|s| s.address_segments == segs) else {
+            continue;
+        };
+        let name = segs.join(".");
+        if edges.iter().any(|e| e.name == name) {
+            continue;
+        }
+        edges.push(InboundEdgeContract::source(
+            name,
+            RelationContractView::from_facts(info.timeseries.as_ref(), info.unique_key.as_deref()),
+        ));
+    }
+
+    edges.sort_by(|a, b| a.name.cmp(&b.name));
+
+    (own_contract, edges)
+}
+
 /// Build the plain-text `smelt explain <model>` maintenance-plan report
 /// (`incremental_models.md` §Surface "CLI": "prints the plan (cells, clamps,
 /// locality, guarantee ledger, edges)"). Pure string-builder — no I/O — so it
@@ -108,12 +312,16 @@ fn is_self_origin(origins: &[String]) -> bool {
 ///
 /// `result` is the plan derived by `smelt_db::maintenance_plan_report`
 /// (already-derived data; this function never re-derives admission,
-/// locality, or ledger logic). `upstream` is the model's inbound edges
-/// (`DependencyGraph::get_upstream`), and `model_name` is its canonical path.
+/// locality, or ledger logic). `own_contract` is this model's own Relation
+/// Contract fill (`docs/specs/models.md` §"The Relation Contract");
+/// `edges` are its inbound edges — a declared source or an upstream
+/// maintained model, rendered through the same contract rows regardless
+/// of which provider filled them. `model_name` is its canonical path.
 pub fn build_maintenance_plan_report(
     model_name: &str,
     result: &smelt_db::queries::maintenance::MaintenancePlanResult,
-    upstream: &[String],
+    own_contract: &RelationContractView,
+    edges: &[InboundEdgeContract],
 ) -> String {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -221,10 +429,28 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
-    if upstream.is_empty() {
+    // Relation Contract (`docs/specs/models.md` §"The Relation Contract"):
+    // this model's own clock/identity/derived-grain rows, then one contract
+    // block per inbound edge — a source and an upstream model render
+    // through the same rows (`write_relation_contract`), never a
+    // provider-specific format.
+    let _ = writeln!(out, "Relation contract:");
+    write_relation_contract(&mut out, "  ", own_contract);
+    let _ = writeln!(out);
+
+    if edges.is_empty() {
         let _ = writeln!(out, "Inbound edges: (none)");
     } else {
-        let _ = writeln!(out, "Inbound edges: {}", upstream.join(", "));
+        let names: Vec<&str> = edges.iter().map(|e| e.name.as_str()).collect();
+        let _ = writeln!(out, "Inbound edges: {}", names.join(", "));
+        for edge in edges {
+            let provider = match edge.provider {
+                RelationContractProvider::Source => "source",
+                RelationContractProvider::Model => "model",
+            };
+            let _ = writeln!(out, "  - {} ({})", edge.name, provider);
+            write_relation_contract(&mut out, "      ", &edge.contract);
+        }
     }
 
     out
@@ -641,21 +867,30 @@ pub struct ExplainCellJson {
 }
 
 /// The `--json --show-sql` per-model report:
-/// `{"model": "<name>", "cells": [...]}`, each cell carrying its own
-/// `statements` array (`docs/specs/cli.md` §"`smelt explain <model>`
-/// maintenance-plan report").
+/// `{"model": "<name>", "contract": {...}, "inbound_edges": [...], "cells":
+/// [...]}`, carrying the Relation Contract slots
+/// (`docs/specs/models.md` §"The Relation Contract") for both this model
+/// and every inbound edge alongside each cell's own `statements` array
+/// (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
+/// report").
 #[derive(Debug, Serialize)]
 pub struct ExplainMaintenanceJson {
     pub model: String,
+    pub contract: RelationContractView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inbound_edges: Vec<InboundEdgeContract>,
     pub cells: Vec<ExplainCellJson>,
 }
 
 /// Build the `--json --show-sql` report from the derived plan cells and
-/// their built statement groups.
+/// their built statement groups, plus the model's own Relation Contract
+/// fill and its inbound edges' contracts.
 pub fn build_maintenance_plan_json(
     model_name: &str,
     plan_cells: &[PlanCell],
     statements: &[CellStatements],
+    own_contract: RelationContractView,
+    inbound_edges: Vec<InboundEdgeContract>,
 ) -> ExplainMaintenanceJson {
     let cells = plan_cells
         .iter()
@@ -692,6 +927,8 @@ pub fn build_maintenance_plan_json(
         .collect();
     ExplainMaintenanceJson {
         model: model_name.to_string(),
+        contract: own_contract,
+        inbound_edges,
         cells,
     }
 }

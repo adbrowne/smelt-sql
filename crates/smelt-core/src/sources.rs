@@ -230,6 +230,29 @@ pub struct SourceInfo {
 }
 
 impl SourceInfo {
+    /// The derived Relation Contract `grain` label for this source
+    /// (`docs/specs/sources.md` §"The source as a Relation Contract
+    /// provider": "A source has an **effective grain** too … derived from
+    /// its clock and identity the same way a model's is"). Reuses the
+    /// identical pure derivation a model output's
+    /// `ModelMetadata::resolved_grain` reads
+    /// (`docs/specs/models.md` §"Refresh axis") — one derivation, two
+    /// providers, never a source-specific reimplementation.
+    ///
+    /// `None` when the source declares **neither** `timeseries:` nor
+    /// `unique_key:` — a legal, shape-fact-free source (reported as such
+    /// by `smelt explain`, never refused: a source's declaration surface
+    /// has no `refresh: incremental`-style admission gate to fail).
+    pub fn resolved_grain(&self) -> Option<crate::config::Grain> {
+        crate::config::derive_grain(
+            self.timeseries.is_some(),
+            self.unique_key.as_deref(),
+            self.timeseries
+                .as_ref()
+                .map(|t| t.partition_column.as_str()),
+        )
+    }
+
     /// Returns the fully-qualified database name for this source given the active
     /// target name and schema.
     ///

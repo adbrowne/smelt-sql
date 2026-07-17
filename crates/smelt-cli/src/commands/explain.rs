@@ -424,7 +424,11 @@ async fn explain_maintenance_plan(
         .with_context(|| "Failed to build dependency graph")?;
     let upstream = graph.get_upstream(&canonical);
 
-    let report = build_maintenance_plan_report(&canonical, &result, &upstream);
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let (own_contract, edges) =
+        smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+
+    let report = build_maintenance_plan_report(&canonical, &result, &own_contract, &edges);
 
     if !args.show_sql {
         println!("{}", report);
@@ -503,7 +507,6 @@ async fn explain_maintenance_plan(
         .map(|b| b.unique_key.clone())
         .unwrap_or_default();
 
-    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
     let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);
 
     let region = match &args.period {
@@ -555,6 +558,8 @@ async fn explain_maintenance_plan(
             &canonical,
             &result.plan.cells,
             &statements,
+            own_contract.clone(),
+            edges.clone(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

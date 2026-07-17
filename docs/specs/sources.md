@@ -253,6 +253,7 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 - **Probe cost governance is open**: which tripwires run per-run vs sampled vs on-demand — likely a project-level policy key, not per-source (`docs/research/20260705-refresh-as-maintenance-plan/05-source-properties.md` §Open questions).
 - **Column-level tests on sources.** Same status as for seeds — per-column assertions on the shared YAML grammar are not yet defined.
 - **Co-location with seeds.** A `.yml` declaring a source can be co-located with seed CSVs in the same directory (different stems); style guides may discourage mixing, the resolver does not.
+- **The source-side derived grain is landed.** `SourceInfo::resolved_grain` derives the effective grain label from a source's declared clock/identity facts via the same pure derivation a model output's `grain` reads, and `smelt explain <model>` prints it for every source edge alongside the model's own contract (`models.md` §"The Relation Contract"). Only the clock/identity/derived-grain slots render this way; the mutation/completeness/replay slots remain readable only from the source YAML itself.
 
 ## References
 

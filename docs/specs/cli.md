@@ -121,9 +121,13 @@ Three input shapes are accepted:
 model's maintenance plan (`incremental_models.md` §Surface "The plan (derived, reported)") instead
 of the whole-project graph: every cell (its trigger, corner, technique, and `ledger_catch_up`
 flag), the derived per-source scan clamps, the per-source partition-locality verdict, any
-admission refusals, and the model's inbound edges (upstream dependencies). The report is
-read-only and plain text. `--select` and `--json` are ignored when a model-name argument is
-given, except `--json` combined with `--show-sql` (below).
+admission refusals, the model's own **Relation Contract** fill (`models.md` §"The Relation
+Contract": its clock, identity, and derived `grain` label), and one contract block per inbound
+edge (upstream dependency) — a declared source or an upstream maintained model, rendered through
+the identical `clock:` / `identity:` / `derived grain:` rows and labelled `(source)` or `(model)`
+so the reader knows which provider filled them; a row prints `(none)` when that provider declares
+neither fact. The report is read-only and plain text. `--select` and `--json` are ignored when a
+model-name argument is given, except `--json` combined with `--show-sql` (below).
 
 **`--show-sql`** additionally prints, after each cell's report block, the maintenance statements
 that cell executes — the output of the same pure emitters a run executes

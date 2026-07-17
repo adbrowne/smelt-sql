@@ -435,3 +435,126 @@ mutation_profile:
         "an unknown mutation_profile sub-fact key must be a fail-loud parse error"
     );
 }
+
+// ---------------------------------------------------------------------------
+// source_derived_grain (Phase S2 of
+// `docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// `SourceInfo::resolved_grain` derives the Relation Contract `grain` label
+// from a source's own clock/identity facts, via the same `derive_grain`
+// pure function a model output's `resolved_grain` reads
+// (`docs/specs/sources.md` §"The source as a Relation Contract provider").
+// ---------------------------------------------------------------------------
+
+#[test]
+fn source_derived_grain_clocked_fact_no_identity() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: event_id, type: BIGINT, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+"#,
+    );
+    let info = parse_source_yaml(&path).expect("should parse");
+    assert_eq!(
+        info.resolved_grain(),
+        Some(smelt_core::config::Grain::Partition),
+        "a clock with no declared identity derives the clocked-fact (partition) label"
+    );
+}
+
+#[test]
+fn source_derived_grain_keyed_dimension_no_clock() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: user_id, type: BIGINT, nullable: false }
+  - { name: tier, type: VARCHAR, nullable: true }
+unique_key: user_id
+"#,
+    );
+    let info = parse_source_yaml(&path).expect("should parse");
+    assert_eq!(
+        info.resolved_grain(),
+        Some(smelt_core::config::Grain::Key),
+        "a declared identity with no clock derives the keyed-dimension (key) label"
+    );
+}
+
+#[test]
+fn source_derived_grain_trajectory_when_partition_column_in_key() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: user_id, type: BIGINT, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+unique_key:
+  - user_id
+  - event_date
+"#,
+    );
+    let info = parse_source_yaml(&path).expect("should parse");
+    assert_eq!(
+        info.resolved_grain(),
+        Some(smelt_core::config::Grain::KeyPerPartition),
+        "clock + identity with partition_column in the key derives the trajectory label"
+    );
+}
+
+#[test]
+fn source_derived_grain_keyed_with_fixed_home_slice_when_partition_column_not_in_key() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: user_id, type: BIGINT, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+unique_key:
+  - user_id
+"#,
+    );
+    let info = parse_source_yaml(&path).expect("should parse");
+    assert_eq!(
+        info.resolved_grain(),
+        Some(smelt_core::config::Grain::Key),
+        "clock + identity with partition_column NOT in the key still derives key \
+         (time-partitioned lookup), not the trajectory"
+    );
+}
+
+#[test]
+fn source_derived_grain_unclassified_when_neither_fact_declared() {
+    let tmp = TempDir::new().unwrap();
+    let path = write_source(
+        &tmp,
+        r#"
+columns:
+  - { name: id, type: BIGINT, nullable: false }
+"#,
+    );
+    let info = parse_source_yaml(&path).expect("should parse");
+    assert_eq!(
+        info.resolved_grain(),
+        None,
+        "a source declaring neither clock nor identity is legal — reported as \
+         unclassified, never refused"
+    );
+}

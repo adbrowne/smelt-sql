@@ -68,8 +68,15 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(&canonical);
 
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let (own_contract, edges) =
+        smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+
     Some(build_maintenance_plan_report(
-        &canonical, &result, &upstream,
+        &canonical,
+        &result,
+        &own_contract,
+        &edges,
     ))
 }
 
