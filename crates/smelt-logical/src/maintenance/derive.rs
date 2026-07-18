@@ -223,6 +223,7 @@ pub fn append_model_edge_cells(
             scans,
             ledger_catch_up: false,
             row_identity: identity.clone(),
+            skeleton_source_closure: None,
         });
     }
 }
@@ -387,6 +388,7 @@ fn derive_new_data(
                 scans,
                 ledger_catch_up: false,
                 row_identity: identity.clone(),
+                skeleton_source_closure: None,
             });
         }
         Grain::Key { .. } => {
@@ -520,6 +522,7 @@ fn derive_new_data(
                 scans: vec![],
                 ledger_catch_up: false,
                 row_identity: identity.clone(),
+                skeleton_source_closure: None,
             });
         }
     }
@@ -593,6 +596,7 @@ fn derive_mutation(
             scans,
             ledger_catch_up: false,
             row_identity: identity.clone(),
+            skeleton_source_closure: None,
         });
     }
 }
@@ -641,6 +645,7 @@ fn derive_column_added(
                     scans: vec![],
                     ledger_catch_up: true,
                     row_identity: identity.clone(),
+                    skeleton_source_closure: None,
                 }),
                 Some(ModelDiff::NotAdditive { reason }) => {
                     plan.refusals.push(Refusal::NoAdmissibleTechnique {
@@ -715,6 +720,7 @@ fn derive_column_added(
             scans,
             ledger_catch_up: true,
             row_identity: identity.clone(),
+            skeleton_source_closure: None,
         });
     }
 }
@@ -737,6 +743,7 @@ fn derive_backfill(
         scans,
         ledger_catch_up: false,
         row_identity: identity.clone(),
+        skeleton_source_closure: None,
     });
 }
 

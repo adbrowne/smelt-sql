@@ -41,6 +41,7 @@ fn admitted_column_merge_plan(source: &str) -> MaintenancePlan {
                 identity: RowIdentity::WholeRow,
                 proven_mismatch: None,
             },
+            skeleton_source_closure: None,
         }],
         refusals: vec![],
         key_locality: None,

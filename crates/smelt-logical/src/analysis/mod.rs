@@ -9,6 +9,7 @@ pub mod model_diff;
 pub mod monotonicity;
 pub mod not_null;
 pub mod presentation;
+pub mod skeleton_closure;
 pub mod source_bounds;
 pub mod temporal;
 pub mod walk;

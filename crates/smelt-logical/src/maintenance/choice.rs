@@ -647,6 +647,7 @@ mod tests {
                     identity: crate::maintenance::RowIdentity::WholeRow,
                     proven_mismatch: None,
                 },
+                skeleton_source_closure: None,
             }],
             refusals: vec![],
             key_locality: None,

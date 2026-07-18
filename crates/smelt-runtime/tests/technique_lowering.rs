@@ -100,6 +100,7 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
                 identity: RowIdentity::WholeRow,
                 proven_mismatch: None,
             },
+            skeleton_source_closure: None,
         }],
         refusals: vec![],
         key_locality: None,
@@ -404,6 +405,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
             identity: RowIdentity::WholeRow,
             proven_mismatch: None,
         },
+        skeleton_source_closure: None,
     };
 
     let dispatch = decide_column_merge_dispatch(
@@ -1279,6 +1281,7 @@ mod write_pattern_registry_pin {
                     identity: RowIdentity::Key(vec!["id".to_string()]),
                     proven_mismatch: None,
                 },
+                skeleton_source_closure: None,
             }],
             refusals: vec![],
             key_locality: None,

@@ -1771,6 +1771,7 @@ mod tests {
                 identity: smelt_logical::maintenance::RowIdentity::WholeRow,
                 proven_mismatch: None,
             },
+            skeleton_source_closure: None,
         }
     }
 
@@ -1792,6 +1793,7 @@ mod tests {
                 identity: smelt_logical::maintenance::RowIdentity::WholeRow,
                 proven_mismatch: None,
             },
+            skeleton_source_closure: None,
         }
     }
 

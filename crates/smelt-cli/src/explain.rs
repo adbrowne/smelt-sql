@@ -1727,6 +1727,7 @@ mod tests {
                 identity: smelt_logical::maintenance::RowIdentity::WholeRow,
                 proven_mismatch: None,
             },
+            skeleton_source_closure: None,
         };
 
         let source_timeseries = smelt_planner::SourceTimeseriesMap::new();

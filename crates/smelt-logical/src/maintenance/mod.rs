@@ -36,6 +36,7 @@ pub mod skeleton;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use crate::analysis::skeleton_closure::SkeletonSourceClosure;
 use crate::analysis::walk::{ColumnComparability, Comparability};
 
 /// How a source's rows change after they first appear.
@@ -242,6 +243,15 @@ pub struct PlanCell {
     /// derived once by [`derive::row_identity`] — no emitter or admission
     /// consumes it yet (that is a later phase's scope).
     pub row_identity: RowIdentityVerdict,
+    /// The skeleton-source-closure verdict (P1, `model_properties.md`
+    /// §"Skeleton-source closure") for this cell's enrichment join, when
+    /// one is present. Plain data, derived once by
+    /// [`crate::analysis::skeleton_closure::skeleton_source_closure`] —
+    /// `None` when the cell has no enrichment join to close over (the
+    /// common case for a `{*}` creation cell or a single-source model), not
+    /// a refusal. No consumer reads this yet (that is a later phase's
+    /// scope, the delta-restricted enrichment join transform).
+    pub skeleton_source_closure: Option<SkeletonSourceClosure>,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting

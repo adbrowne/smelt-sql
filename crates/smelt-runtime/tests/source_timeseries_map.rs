@@ -32,6 +32,7 @@ fn make_source(segments: Vec<&str>, ts: Option<TimeseriesConfig>) -> SourceInfo 
         watermark: None,
         unique_key: None,
         retention: None,
+        referential_integrity: None,
     }
 }
 
