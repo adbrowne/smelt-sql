@@ -458,12 +458,6 @@ ${hint}}" 2>&1 | tee "${log}"
 
   echo
 
-  if [ "${rc}" -ne 0 ]; then
-    echo "===== claude exited with code ${rc} — pausing loop ====="
-    exit_reason="claude_nonzero_${rc}"
-    break
-  fi
-
   # Sentinels must appear in the agent's final user-facing message (.result),
   # not anywhere in the streamed log. Plan files document the sentinel strings,
   # so reading them produces tool_use_result payloads that contain the literals
@@ -473,6 +467,14 @@ ${hint}}" 2>&1 | tee "${log}"
   # emitted when the agent spawns async background work and returns). Without
   # this a single stray line makes jq abort before the result envelope, yielding
   # a spurious no_result_envelope pause instead of the real "no sentinel" path.
+  #
+  # Extracted BEFORE the rc!=0 check below: a 429/session-limit hit makes
+  # `claude --print` itself exit nonzero (observed rc=1), so the session-limit
+  # classification must run first or the rc!=0 branch claims it as a generic
+  # infra failure and it counts toward the forever-wrapper's fast-fail
+  # crash-loop guard — exactly the 2026-07-18 22:37-22:58 failure (three
+  # consecutive 429s misclassified as claude_nonzero_1, halting the loop
+  # mid-reset-window instead of waiting it out).
   final_result="$(jq -Rr 'fromjson? | select(.type == "result") | .result // empty' "${log}" 2>/dev/null)"
   api_error_status="$(jq -Rr 'fromjson? | select(.type == "result") | .api_error_status // empty' "${log}" 2>/dev/null | tail -1)"
 
@@ -487,6 +489,12 @@ ${hint}}" 2>&1 | tee "${log}"
      || printf '%s' "${final_result}" | grep -qiE 'session limit|usage limit'; then
     echo "===== session/usage limit hit (429) — not a crash, will retry later ====="
     exit_reason="session_limit"
+    break
+  fi
+
+  if [ "${rc}" -ne 0 ]; then
+    echo "===== claude exited with code ${rc} — pausing loop ====="
+    exit_reason="claude_nonzero_${rc}"
     break
   fi
 
