@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784301925125,
+  "lastUpdate": 1784353955200,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -281,6 +281,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.618203,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "25a34a152bc59c6f95fefbb05f2807860d5a5b94",
+          "message": "fix(test): register cast_float_as_double divergence for Spark oracle\n\nCI's dual-target property test failed against Spark: CAST(DECIMAL AS\nFLOAT) returns FLOAT there too (smelt normalizes to DOUBLE), but the\nexisting cast_float_as_double divergence only listed a duckdb_type.\nAdd the matching spark_type and a regression test.",
+          "timestamp": "2026-07-18T15:48:10+10:00",
+          "tree_id": "35058021b526be54fb85b802fb4b3cad9b470eed",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/25a34a152bc59c6f95fefbb05f2807860d5a5b94"
+        },
+        "date": 1784353953807,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 56.144268,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 53.802209,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.093524,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.645479,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.296871,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 933.833557,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.840084,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.226969,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.171546,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.780679,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 762.525123,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.66941,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 32.843,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.638866,
             "unit": "ms"
           }
         ]
