@@ -1238,9 +1238,40 @@ fn test_tablesample_system_with_repeatable() {
 
 #[test]
 fn test_tablesample_with_alias() {
+    // Legacy alias-last order — accepted for lenience, but the printer must
+    // never re-emit this shape (see `tablesample_after_alias` below): real
+    // DuckDB v1.5.4 rejects `base TABLESAMPLE(...) AS alias`.
     let input = "SELECT * FROM events TABLESAMPLE BERNOULLI (1) AS sample_data";
     let parse = parse(input);
     assert_eq!(parse.errors.len(), 0);
+}
+
+#[test]
+fn tablesample_after_alias() {
+    // DuckDB v1.5.4 requires `base AS alias TABLESAMPLE(...)` — alias BEFORE
+    // TABLESAMPLE — and rejects the reverse order. `FROM t TABLESAMPLE(...)
+    // AS x` is a parse error on real DuckDB.
+    let input = "SELECT * FROM events AS x TABLESAMPLE BERNOULLI (10)";
+    let parse = parse(input);
+    assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+
+    let root = parse.syntax();
+    let tablesample = root.descendants().find(|n| n.kind() == TABLESAMPLE_CLAUSE);
+    assert!(
+        tablesample.is_some(),
+        "TABLESAMPLE clause should be present"
+    );
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let alias_pos = printed.find("AS x").expect("alias should be printed");
+    let tablesample_pos = printed
+        .find("TABLESAMPLE")
+        .expect("TABLESAMPLE should be printed");
+    assert!(
+        alias_pos < tablesample_pos,
+        "alias must print before TABLESAMPLE (DuckDB-valid order): {printed}"
+    );
 }
 
 // Phase 15: Aggregate function enhancements
@@ -1669,6 +1700,52 @@ fn test_pivot_with_alias() {
         .descendants()
         .find_map(PivotClause::cast)
         .expect("should have a PivotClause");
+}
+
+#[test]
+fn pivot_after_alias_prints_alias_first() {
+    // DuckDB v1.5.4 accepts alias before PIVOT (`t AS x PIVOT(...)`) —
+    // oracle-verified. Assert both that this shape parses and that the
+    // printer emits alias-first (never re-derives the legacy alias-last
+    // order the parser also tolerates on input).
+    let input = "SELECT * FROM t AS x PIVOT (SUM(amount) FOR quarter IN ('Q1', 'Q2'))";
+    let parse = parse(input);
+    assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+
+    let root = parse.syntax();
+    let pivot = root.descendants().find(|n| n.kind() == PIVOT_CLAUSE);
+    assert!(pivot.is_some(), "PivotClause should be present");
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let alias_pos = printed.find("AS x").expect("alias should be printed");
+    let pivot_pos = printed.find("PIVOT").expect("PIVOT should be printed");
+    assert!(
+        alias_pos < pivot_pos,
+        "alias must print before PIVOT (DuckDB-valid order): {printed}"
+    );
+}
+
+#[test]
+fn unpivot_after_alias_prints_alias_first() {
+    // DuckDB v1.5.4 accepts alias before UNPIVOT (`t AS x UNPIVOT(...)`) —
+    // oracle-verified. Assert both parse success and alias-first print order.
+    let input = "SELECT * FROM t AS x UNPIVOT (val FOR name IN (col1, col2, col3))";
+    let parse = parse(input);
+    assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+
+    let root = parse.syntax();
+    let unpivot = root.descendants().find(|n| n.kind() == UNPIVOT_CLAUSE);
+    assert!(unpivot.is_some(), "UnpivotClause should be present");
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let alias_pos = printed.find("AS x").expect("alias should be printed");
+    let unpivot_pos = printed.find("UNPIVOT").expect("UNPIVOT should be printed");
+    assert!(
+        alias_pos < unpivot_pos,
+        "alias must print before UNPIVOT (DuckDB-valid order): {printed}"
+    );
 }
 
 // ===== Phase 4d: Array subscript/slice =====

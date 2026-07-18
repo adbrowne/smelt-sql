@@ -598,7 +598,23 @@ impl<'a> super::Parser<'a> {
             self.error("Expected table reference".to_string());
         }
 
-        // Optional TABLESAMPLE clause (PostgreSQL)
+        // Optional alias, with an optional column list. The alias may be
+        // explicit (`AS t`) or implicit (`t`); the `(c1, c2, …)` column list
+        // attaches to either form identically.
+        //
+        // DuckDB v1.5.4 requires the alias to appear *before* TABLESAMPLE
+        // (`base AS alias TABLESAMPLE(...)`) and rejects the reverse order
+        // (oracle-verified — see docs/TODO.md "TABLESAMPLE/PIVOT/UNPIVOT vs
+        // alias ordering"). Parse it here, in the DuckDB-valid position, so
+        // the printer can emit alias-first. The legacy alias-last position
+        // (`base TABLESAMPLE(...) [PIVOT/UNPIVOT (...)] AS alias`) is still
+        // accepted below for lenience — but only if no alias was found here
+        // — so older smelt SQL keeps parsing; the printer, however, only
+        // ever emits the alias-first form (see `printer.rs`).
+        self.skip_trivia();
+        let mut alias_parsed = self.try_parse_table_alias();
+
+        // Optional TABLESAMPLE clause (PostgreSQL/DuckDB)
         self.skip_trivia();
         if self.at(TABLESAMPLE_KW) {
             self.start_node(TABLESAMPLE_CLAUSE);
@@ -643,10 +659,22 @@ impl<'a> super::Parser<'a> {
             self.parse_unpivot_clause();
         }
 
-        // Optional alias, with an optional column list. The alias may be
-        // explicit (`AS t`) or implicit (`t`); the `(c1, c2, …)` column list
-        // attaches to either form identically.
-        self.skip_trivia();
+        // Legacy alias-last position: only consulted if no alias was found
+        // in the DuckDB-valid position above.
+        if !alias_parsed {
+            self.skip_trivia();
+            alias_parsed = self.try_parse_table_alias();
+        }
+        let _ = alias_parsed;
+
+        self.finish_node();
+    }
+
+    /// Parse an optional table alias (`AS t` or implicit `t`), with its
+    /// optional column list. Returns `true` if an alias was consumed, `false`
+    /// if the current position has no alias to parse (caller should try
+    /// again at another valid alias position, if any).
+    fn try_parse_table_alias(&mut self) -> bool {
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
@@ -656,6 +684,7 @@ impl<'a> super::Parser<'a> {
                 self.expect(IDENT);
             }
             self.parse_alias_column_list();
+            true
         } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
             // Implicit alias (no AS keyword). Only consume if it's not a
             // keyword that would end the table ref. Deliberately does not
@@ -668,9 +697,10 @@ impl<'a> super::Parser<'a> {
             // rather than half-wired here.
             self.advance();
             self.parse_alias_column_list();
+            true
+        } else {
+            false
         }
-
-        self.finish_node();
     }
 
     /// Parse an optional alias column list `(c1, c2, …)` immediately following

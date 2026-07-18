@@ -324,21 +324,23 @@ impl Display for TableRef {
             write!(f, ")")?;
         } else {
             write!(f, "{}", self.syntax().text())?;
-        }
-
-        // TABLESAMPLE / PIVOT / UNPIVOT clauses sit between the base
-        // reference and the alias; print them verbatim (no dedicated
-        // pretty-printer exists for these yet).
-        for clause in self
-            .syntax()
-            .children()
-            .filter(|n| matches!(n.kind(), TABLESAMPLE_CLAUSE | PIVOT_CLAUSE | UNPIVOT_CLAUSE))
-        {
-            write!(f, " {}", clause.text())?;
+            // The raw-text fallback above already prints this whole
+            // TABLE_REF node's source text verbatim, including any
+            // TABLESAMPLE/PIVOT/UNPIVOT clauses and alias it contains —
+            // printing them again below would double-print. This branch is
+            // believed unreachable now that the subquery/nested/identifier
+            // branches above are explicit, but guard defensively (see
+            // docs/TODO.md "TABLESAMPLE/PIVOT/UNPIVOT vs alias ordering").
+            return Ok(());
         }
 
         // Raw alias token text (quotes intact for `AS "quoted"`) — see the
-        // matching note on `Display for SelectItem`.
+        // matching note on `Display for SelectItem`. Printed *before*
+        // TABLESAMPLE/PIVOT/UNPIVOT: DuckDB v1.5.4 requires
+        // `base AS alias TABLESAMPLE(...)` and rejects the reverse order
+        // (oracle-verified). PIVOT/UNPIVOT accept the alias either before or
+        // after (also oracle-verified), so printing alias-first here is safe
+        // for those too, and keeps a single consistent print order.
         if let Some(alias) = self.alias_token_text().or_else(|| self.alias()) {
             write!(f, " AS {}", alias)?;
             if let Some(cols) = self.alias_column_names() {
@@ -346,6 +348,16 @@ impl Display for TableRef {
                     write!(f, "({})", cols.join(", "))?;
                 }
             }
+        }
+
+        // TABLESAMPLE / PIVOT / UNPIVOT clauses; print them verbatim (no
+        // dedicated pretty-printer exists for these yet).
+        for clause in self
+            .syntax()
+            .children()
+            .filter(|n| matches!(n.kind(), TABLESAMPLE_CLAUSE | PIVOT_CLAUSE | UNPIVOT_CLAUSE))
+        {
+            write!(f, " {}", clause.text())?;
         }
 
         Ok(())
