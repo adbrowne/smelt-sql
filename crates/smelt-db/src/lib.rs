@@ -123,6 +123,13 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::GrainRequiredForIncremental => None,
         MetadataError::GrainRequiresIncremental => None,
         MetadataError::GrainAssertionMismatch { .. } => None,
+        // Never returned by extract_file_metadata/validate_timeseries — made
+        // by `maintenance_plan_diagnostics` (needs the write-pattern
+        // registry + backend capabilities) and folded into
+        // `Maintenance*` diagnostics in `check_file_diagnostics` below,
+        // exactly like `KeyedForbidsTimeseries` above.
+        MetadataError::MaintenanceWritePatternUnavailable { .. } => None,
+        MetadataError::MaintenanceWriteAddressingRefused { .. } => None,
     }
 }
 
@@ -1417,6 +1424,15 @@ pub fn maintenance_plan(
         Vec::new()
     };
 
+    // `maintenance.cells[].write` pins are validated against every one of
+    // the project's declared target backends (`write_pin_diagnostics`'s own
+    // doc comment) — reuses the same `project_active_backends` query the
+    // `smelt.as_struct()` backend check already threads through
+    // `file_diagnostics` (`as_struct_backend_diagnostics_for_file`).
+    let active_backends = project
+        .and_then(|p| project_active_backends(db, p))
+        .unwrap_or_default();
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
@@ -1424,6 +1440,7 @@ pub fn maintenance_plan(
         &source_refs,
         project_scan_bounds.as_ref(),
         &extra_model_sources,
+        &active_backends,
     ))
 }
 
@@ -2105,6 +2122,39 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: violation.clone(),
                 range: rowan::TextRange::empty(body_start),
                 code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for write_refusal in &plan_diags.write_pin_refusals {
+            let (code, message) = match write_refusal {
+                crate::queries::maintenance::WritePinDiagnostic::PatternUnavailable {
+                    pattern,
+                    backend,
+                } => (
+                    DiagnosticCode::MaintenanceWritePatternUnavailable,
+                    format!(
+                        "MaintenanceWritePatternUnavailable: write pattern '{pattern}' is \
+                         unrecognised, or backend '{backend}' cannot provide it"
+                    ),
+                ),
+                crate::queries::maintenance::WritePinDiagnostic::AddressingRefused {
+                    cell,
+                    pattern,
+                    why,
+                } => (
+                    DiagnosticCode::MaintenanceWriteAddressingRefused,
+                    format!(
+                        "MaintenanceWriteAddressingRefused: write pattern '{pattern}' cannot \
+                         uphold the equivalence invariant for cell {cell} — {why}"
+                    ),
+                ),
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message,
+                range: rowan::TextRange::empty(body_start),
+                code: Some(code),
                 data: None,
             })
             .accumulate(db);

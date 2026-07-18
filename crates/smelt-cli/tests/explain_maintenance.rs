@@ -72,11 +72,19 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
     let (own_contract, edges) =
         smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
 
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.maintenance.as_ref())
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+
     Some(build_maintenance_plan_report(
         &canonical,
         &result,
         &own_contract,
         &edges,
+        cells_cfg,
     ))
 }
 

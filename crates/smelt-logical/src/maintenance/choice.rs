@@ -42,15 +42,34 @@ pub enum ChosenTechnique {
     RegionRecompute,
 }
 
+/// Which kind of hard pin a [`ChoiceRefusal`] names: the `cells[].technique`
+/// fold/recompute/rederive-columns pin, or a `cells[].write` open-registry
+/// pin (already validated against the registry itself by
+/// [`super::resolve_write_pin`] — this refusal fires one level deeper, when
+/// the *validated* pattern's [`super::WriteSelection`] still isn't what this
+/// cell's derived plan actually admits, e.g. `write: keyed` resolves fine
+/// against the registry for an identity-bearing output but this particular
+/// trigger's cell admitted `Technique::ColumnScopedMerge`, not
+/// `KeyedFold`).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum PinnedRequest {
+    Technique(CellTechnique),
+    Write(String),
+}
+
 /// Why a requested technique choice could not be honoured: `cells[].technique`
 /// (or a soft `prefer`, when it disagrees with every resolvable member) names
 /// a technique outside `{the cell's own admitted technique, RegionRecompute}`
 /// — a pin bypasses the cost model, never admission
-/// (`incremental_models.md` §Surface "Frontmatter").
+/// (`incremental_models.md` §Surface "Frontmatter"). A `cells[].write` pin
+/// that resolves in the open registry but whose selected [`super::
+/// WriteSelection`] this cell's derived plan does not admit refuses the
+/// same way — never a silent downgrade to a different technique than the
+/// pin named.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct ChoiceRefusal {
     pub trigger: String,
-    pub pinned: CellTechnique,
+    pub pinned: PinnedRequest,
     pub why: String,
 }
 
@@ -143,9 +162,33 @@ fn admits(
     }
 }
 
+/// Whether a validated [`super::WriteSelection`] (the resolved shape of a
+/// `cells[].write` pin — already checked against the open registry and the
+/// backend's write capabilities by [`super::resolve_write_pin`]) is a member
+/// of this cell's resolvable set: the always-available region recompute, or
+/// the cell's own admitted (and, for `ColumnScopedMerge`, backend-live)
+/// technique when it matches the selection's `Technique` exactly.
+fn admits_write_selection(
+    selection: super::WriteSelection,
+    admitted: Option<&Technique>,
+    backend_supports_column_scoped_merge: bool,
+) -> bool {
+    match selection {
+        super::WriteSelection::RegionRecompute => true,
+        super::WriteSelection::Technique(Technique::ColumnScopedMerge) => {
+            admitted == Some(&Technique::ColumnScopedMerge) && backend_supports_column_scoped_merge
+        }
+        super::WriteSelection::Technique(t) => admitted == Some(&t),
+    }
+}
+
 /// Resolve which technique executes for `trigger`, given the plan, the
-/// effective override (already narrowed by [`effective_override`]), and
-/// whether the target backend can run a column-scoped `MERGE` at all.
+/// effective override (already narrowed by [`effective_override`]), an
+/// optional already-validated `cells[].write` pin
+/// ([`super::resolve_write_pin`]'s `Ok` result — this function never
+/// re-validates the pin against the registry or backend capabilities, only
+/// against what THIS trigger's cell actually admits), and whether the target
+/// backend can run a column-scoped `MERGE` at all.
 ///
 /// Mirrors `incremental_models.md` §"Per-cell admission": a `technique:` pin
 /// bypasses the cost model, **never** admission — pinning a technique the
@@ -158,10 +201,26 @@ fn admits(
 /// Absent any override, the cell's own admitted+live technique is preferred
 /// over region recompute (the point of admitting it at all); otherwise
 /// region recompute is the safe default.
+///
+/// A `write_pin` is consulted **before** the `cells[].technique`/`prefer`
+/// ladder and, when present, decides the cell alone: `incremental_models.md`
+/// §"Per-cell write addressing" names `cells[].write` the addressing-level
+/// pin, one layer more specific than the fold-vs-recompute `technique`
+/// ladder, so a cell carrying both pins is resolved by its `write` pin — the
+/// `technique`/`prefer` ladder is not consulted for that cell in that case.
+/// `resolve_write_pin`'s own registry/capability/equivalence checks already
+/// ran by the time a `Some(pattern)` reaches here; this only asks whether
+/// the validated pattern's [`super::WriteSelection`] is realizable by THIS
+/// trigger's own derived plan cell — a validated-but-structurally-mismatched
+/// pin (e.g. `write: keyed` validated against the output's declared facts,
+/// but this particular trigger's cell happens to have admitted
+/// `ColumnScopedMerge`, not `KeyedFold`) still refuses, never silently
+/// substitutes a different technique than the one named.
 pub fn resolve_cell_choice(
     plan: &MaintenancePlan,
     trigger: &Trigger,
     overrides: &EffectiveOverride,
+    write_pin: Option<&'static super::WritePattern>,
     backend_supports_column_scoped_merge: bool,
 ) -> Result<ChosenTechnique, ChoiceRefusal> {
     let cell = plan.cell_for(trigger);
@@ -170,6 +229,37 @@ pub fn resolve_cell_choice(
         Technique::ColumnScopedMerge => backend_supports_column_scoped_merge,
         _ => true,
     });
+
+    if let Some(pattern) = write_pin {
+        let selection = pattern.selects();
+        return if admits_write_selection(
+            selection.clone(),
+            admitted_technique,
+            backend_supports_column_scoped_merge,
+        ) {
+            match selection {
+                super::WriteSelection::RegionRecompute => Ok(ChosenTechnique::RegionRecompute),
+                super::WriteSelection::Technique(_) => Ok(ChosenTechnique::Admitted(
+                    admitted_technique
+                        .expect(
+                            "admits_write_selection already proved `admitted_technique` is \
+                             Some for this pin",
+                        )
+                        .clone(),
+                )),
+            }
+        } else {
+            Err(ChoiceRefusal {
+                trigger: trigger_label(trigger),
+                pinned: PinnedRequest::Write(pattern.name.to_string()),
+                why: format!(
+                    "the derived plan's resolvable set for this cell is {{{}}} — a write pin \
+                     bypasses the cost model, never admission",
+                    resolvable_set_label(admitted_technique, backend_supports_column_scoped_merge)
+                ),
+            })
+        };
+    }
 
     if let Some(pin) = overrides.technique {
         return if admits(
@@ -192,7 +282,7 @@ pub fn resolve_cell_choice(
         } else {
             Err(ChoiceRefusal {
                 trigger: trigger_label(trigger),
-                pinned: pin,
+                pinned: PinnedRequest::Technique(pin),
                 why: format!(
                     "the derived plan's resolvable set for this cell is {{{}}} — a pin \
                      bypasses the cost model, never admission",
@@ -576,7 +666,7 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::RederiveColumns),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &overrides, true)
+        let resolved = resolve_cell_choice(&plan, &trigger, &overrides, None, true)
             .expect("pin naming the admitted technique must resolve");
         assert_eq!(
             resolved,
@@ -590,14 +680,14 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::Fold),
         };
-        let err = resolve_cell_choice(&plan, &trigger, &bad_overrides, true)
+        let err = resolve_cell_choice(&plan, &trigger, &bad_overrides, None, true)
             .expect_err("pinning an unadmitted technique must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
         // Pinning `rederive_columns` when the backend cannot run it is the
         // same refusal shape — a capability gap is indistinguishable from
         // an unadmitted cell.
-        let err2 = resolve_cell_choice(&plan, &trigger, &overrides, false)
+        let err2 = resolve_cell_choice(&plan, &trigger, &overrides, None, false)
             .expect_err("pin naming a capability-gapped backend must refuse");
         assert!(err2.to_string().contains("MaintenanceUnboundedFootprint"));
 
@@ -607,7 +697,7 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::Recompute),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &recompute_overrides, true)
+        let resolved = resolve_cell_choice(&plan, &trigger, &recompute_overrides, None, true)
             .expect("recompute is always resolvable");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
     }
@@ -623,13 +713,14 @@ mod tests {
             prefer: None,
             technique: Some(CellTechnique::RederiveColumns),
         };
-        let err = resolve_cell_choice(&plan, &trigger, &overrides, true)
+        let err = resolve_cell_choice(&plan, &trigger, &overrides, None, true)
             .expect_err("a pin naming a cell the plan never admitted must refuse");
         assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
 
         // Absent a pin, the safe default resolves with no error.
-        let resolved = resolve_cell_choice(&plan, &trigger, &EffectiveOverride::default(), true)
-            .expect("no pin + unadmitted cell must fall back safely, not error");
+        let resolved =
+            resolve_cell_choice(&plan, &trigger, &EffectiveOverride::default(), None, true)
+                .expect("no pin + unadmitted cell must fall back safely, not error");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
     }
 
@@ -644,6 +735,7 @@ mod tests {
             on: on.to_string(),
             prefer,
             technique,
+            write: None,
         }
     }
 
@@ -711,7 +803,7 @@ mod tests {
         let trigger = Trigger::UpstreamMutation {
             source: "sources.users".to_string(),
         };
-        let resolved = resolve_cell_choice(&plan, &trigger, &effective, true)
+        let resolved = resolve_cell_choice(&plan, &trigger, &effective, None, true)
             .expect("recompute is always resolvable");
         assert_eq!(resolved, ChosenTechnique::RegionRecompute);
     }

@@ -63,7 +63,7 @@ fn technique_pin_bypasses_cost_model_but_not_admission() {
     // The cost model's own default (no override at all) picks the admitted,
     // live technique.
     let no_override = EffectiveOverride::default();
-    let default_choice = resolve_cell_choice(&plan, &trigger, &no_override, true)
+    let default_choice = resolve_cell_choice(&plan, &trigger, &no_override, None, true)
         .expect("no override resolves without error");
     assert_eq!(
         default_choice,
@@ -76,7 +76,7 @@ fn technique_pin_bypasses_cost_model_but_not_admission() {
         prefer: None,
         technique: Some(CellTechnique::Recompute),
     };
-    let pinned_choice = resolve_cell_choice(&plan, &trigger, &pin_recompute, true)
+    let pinned_choice = resolve_cell_choice(&plan, &trigger, &pin_recompute, None, true)
         .expect("recompute is always in the resolvable set");
     assert_eq!(pinned_choice, ChosenTechnique::RegionRecompute);
     assert_ne!(
@@ -91,7 +91,7 @@ fn technique_pin_bypasses_cost_model_but_not_admission() {
         prefer: None,
         technique: Some(CellTechnique::Fold),
     };
-    let err = resolve_cell_choice(&plan, &trigger, &pin_fold, true)
+    let err = resolve_cell_choice(&plan, &trigger, &pin_fold, None, true)
         .expect_err("pinning an unadmitted technique must refuse, never silently override");
     assert!(
         err.to_string().contains("MaintenanceUnboundedFootprint"),
@@ -105,7 +105,7 @@ fn technique_pin_bypasses_cost_model_but_not_admission() {
         prefer: None,
         technique: Some(CellTechnique::RederiveColumns),
     };
-    let err2 = resolve_cell_choice(&plan, &trigger, &pin_rederive, false)
+    let err2 = resolve_cell_choice(&plan, &trigger, &pin_rederive, None, false)
         .expect_err("pin naming a capability-gapped backend must refuse, not downgrade");
     assert!(err2.to_string().contains("MaintenanceUnboundedFootprint"));
 }
@@ -125,6 +125,7 @@ fn ladder_narrower_scope_wins() {
         on: "sources.raw.users".to_string(),
         prefer: Some(TechniquePreference::Recompute),
         technique: None,
+        write: None,
     }];
 
     // Broad default alone (no matching cells[] entry): the model-wide
@@ -158,6 +159,7 @@ fn ladder_narrower_scope_wins() {
         on: "sources.other".to_string(),
         prefer: Some(TechniquePreference::Recompute),
         technique: None,
+        write: None,
     }];
     let unshadowed = effective_override(
         Some(&defaults),
@@ -173,10 +175,10 @@ fn ladder_narrower_scope_wins() {
     let trigger = Trigger::UpstreamMutation {
         source: "sources.raw.users".to_string(),
     };
-    let broad_choice =
-        resolve_cell_choice(&plan, &trigger, &broad_only, true).expect("soft prefer never refuses");
-    let narrow_choice =
-        resolve_cell_choice(&plan, &trigger, &narrowed, true).expect("soft prefer never refuses");
+    let broad_choice = resolve_cell_choice(&plan, &trigger, &broad_only, None, true)
+        .expect("soft prefer never refuses");
+    let narrow_choice = resolve_cell_choice(&plan, &trigger, &narrowed, None, true)
+        .expect("soft prefer never refuses");
     assert_eq!(
         broad_choice,
         ChosenTechnique::Admitted(Technique::ColumnScopedMerge)

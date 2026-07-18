@@ -317,11 +317,16 @@ pub fn build_relation_contract(
 /// `edges` are its inbound edges — a declared source or an upstream
 /// maintained model, rendered through the same contract rows regardless
 /// of which provider filled them. `model_name` is its canonical path.
+/// `cells_cfg` is the model's own `maintenance.cells[]` frontmatter (empty
+/// when the model declares none) — read only to look up each cell's active
+/// `write:` pin, if any (`docs/specs/incremental_models.md` §"Per-cell
+/// write addressing").
 pub fn build_maintenance_plan_report(
     model_name: &str,
     result: &smelt_db::queries::maintenance::MaintenancePlanResult,
     own_contract: &RelationContractView,
     edges: &[InboundEdgeContract],
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
 ) -> String {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
@@ -401,6 +406,47 @@ pub fn build_maintenance_plan_report(
                         "        - source={} column={} before={:?} after={:?}",
                         scan.source, scan.column, scan.before, scan.after
                     );
+                }
+            }
+            // Open write-pattern registry (`docs/specs/incremental_models.md`
+            // §"Per-cell write addressing"): the admissible pattern-name set
+            // for this cell's own declared facts (structural + registry-
+            // capability factors only — the fourth, backend-capability
+            // factor is not narrowed here since `smelt explain` has no live
+            // target connection; `BackendWriteCapabilities::all()` reports
+            // every pattern a real backend *could* provide), and the active
+            // `write:` pin (if any) this cell's `maintenance.cells[]` entry
+            // names.
+            let facts = smelt_logical::maintenance::OutputContractFacts {
+                has_identity: matches!(
+                    cell.row_identity.identity,
+                    smelt_logical::maintenance::RowIdentity::Key(_)
+                ),
+                has_partition_axis: own_contract.clock.is_some(),
+            };
+            let admissible = smelt_logical::maintenance::admissible_write_patterns(
+                facts,
+                smelt_logical::maintenance::BackendWriteCapabilities::all(),
+            );
+            let _ = writeln!(
+                out,
+                "      admissible write patterns: {}",
+                if admissible.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    admissible.join(", ")
+                }
+            );
+            match smelt_db::queries::maintenance::matching_write_pin(
+                cell,
+                &result.column_groups,
+                cells_cfg,
+            ) {
+                Some(pin) => {
+                    let _ = writeln!(out, "      write pin: {pin}");
+                }
+                None => {
+                    let _ = writeln!(out, "      write pin: (none)");
                 }
             }
         }

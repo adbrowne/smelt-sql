@@ -30,6 +30,7 @@ use smelt_logical::maintenance::emit::{
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
     MaintenancePlan, PartitionLocal, PlanCell, ScanClamp, SourceFacts, Technique, Trigger,
+    WritePattern, WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -564,7 +565,8 @@ pub fn resolve_incremental_strategy(
 /// from the derived [`MaintenancePlan`], the operator's optional hard pin
 /// (`maintenance.cells[].technique`), and whether the target backend can
 /// run a column-scoped `MERGE` at all
-/// (`Backend::supports_column_scoped_merge`).
+/// (`BackendCapabilities::supports_column_scoped_merge`, read via
+/// `Backend::capabilities`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ResolvedTechnique {
     /// No live targeted-write cell for this trigger (unadmitted, or the
@@ -588,16 +590,85 @@ pub enum ResolvedTechnique {
 /// execution differs by column group"); otherwise the safe region-recompute
 /// default applies with no error (an unpinned model simply has no
 /// column-scoped cell to run yet).
+///
+/// `write_pin` is an already-validated `cells[].write` registry entry
+/// (`smelt_logical::maintenance::resolve_write_pin`'s `Ok` result —
+/// registry/capability/equivalence already checked by the caller; this
+/// function only asks whether the validated pattern's own
+/// [`WriteSelection`] is realizable by THIS narrow (`ColumnScopedMerge` vs
+/// `RegionRecompute`) resolver). When present it is consulted **before**
+/// `pin` (the `cells[].technique` ladder) and decides the cell alone — same
+/// precedence rule as `smelt_logical::maintenance::choice::
+/// resolve_cell_choice`'s own write-pin consultation, so the two resolvers
+/// agree on which pin wins when a cell carries both. A `write_pin` selecting
+/// a technique this resolver has no arm for (`KeyedFold`/`InPlaceUpdate` —
+/// this function's own scope is only ever the dimension-merge two-way
+/// choice) refuses fail-loud rather than silently falling back to region
+/// recompute for a pin that named something else.
 pub fn resolve_cell_technique(
     plan: &MaintenancePlan,
     trigger: &Trigger,
     pin: Option<CellTechnique>,
     backend_supports_column_scoped_merge: bool,
 ) -> Result<ResolvedTechnique> {
+    resolve_cell_technique_with_write_pin(
+        plan,
+        trigger,
+        pin,
+        None,
+        backend_supports_column_scoped_merge,
+    )
+}
+
+/// [`resolve_cell_technique`] plus an optional already-validated
+/// `cells[].write` pin — see that function's doc comment for the full
+/// contract and precedence rule. Split out as its own function so the
+/// existing `pin`-only call sites (and this module's own unit tests) keep
+/// compiling unchanged; production write-pin consultation happens through
+/// this entry point once a caller has a resolved [`WritePattern`] in hand.
+pub fn resolve_cell_technique_with_write_pin(
+    plan: &MaintenancePlan,
+    trigger: &Trigger,
+    pin: Option<CellTechnique>,
+    write_pin: Option<&'static WritePattern>,
+    backend_supports_column_scoped_merge: bool,
+) -> Result<ResolvedTechnique> {
     let admitted = plan
         .cell_for(trigger)
         .is_some_and(|c| c.technique == Technique::ColumnScopedMerge);
     let live = admitted && backend_supports_column_scoped_merge;
+
+    if let Some(pattern) = write_pin {
+        return match pattern.selects() {
+            WriteSelection::RegionRecompute => Ok(ResolvedTechnique::RegionRecompute),
+            WriteSelection::Technique(Technique::ColumnScopedMerge) if live => {
+                Ok(ResolvedTechnique::ColumnScopedMerge)
+            }
+            WriteSelection::Technique(Technique::ColumnScopedMerge) if admitted => bail!(
+                "MaintenanceUnboundedFootprint: write pin '{}' for {trigger:?} resolves to a \
+                 column-scoped MERGE admitted by the derived plan, but the target backend does \
+                 not support column-scoped MERGE — a capability gap drops the technique from \
+                 admission at plan time; refusing rather than silently falling back to a \
+                 targeted write at runtime",
+                pattern.name
+            ),
+            WriteSelection::Technique(Technique::ColumnScopedMerge) => bail!(
+                "MaintenanceUnboundedFootprint: write pin '{}' for {trigger:?} names a cell the \
+                 derived plan did not admit as a column-scoped MERGE — a write pin bypasses the \
+                 cost model, never admission (`incremental_models.md` §\"Per-cell write \
+                 addressing\"); refusing rather than lowering an unbounded-footprint targeted \
+                 write at runtime",
+                pattern.name
+            ),
+            WriteSelection::Technique(other) => bail!(
+                "MaintenanceUnboundedFootprint: write pin '{}' for {trigger:?} selects {other:?}, \
+                 which this dimension-merge resolver has no lowering for (only ColumnScopedMerge \
+                 and the always-available region recompute are reachable here) — refusing rather \
+                 than silently substituting a different technique than the one pinned",
+                pattern.name
+            ),
+        };
+    }
 
     match pin {
         Some(CellTechnique::RederiveColumns) if live => Ok(ResolvedTechnique::ColumnScopedMerge),
@@ -679,14 +750,37 @@ pub fn resolve_live_column_scoped_cell(
         // temporal locality's routes do not gate.
         &[],
     )?;
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
+        .maintenance
+        .as_ref()
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
     explicitly_mutable.iter().find_map(|source| {
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };
-        let resolved = resolve_cell_technique(
+        // An already-validated `cells[].write` pin for this trigger's cell
+        // (`smelt-db`'s pre-execution diagnostic gate already ran
+        // `resolve_write_pin`'s registry/capability/equivalence checks — an
+        // invalid pin never reaches here, the run would already have been
+        // refused with `MaintenanceWritePatternUnavailable`/
+        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
+        // *name* to its registry entry so `resolve_cell_technique_with_write_pin`
+        // can consult which [`smelt_logical::maintenance::WriteSelection`]
+        // it maps to, never re-deriving admission itself.
+        let write_pin = result.plan.cell_for(&trigger).and_then(|plan_cell| {
+            let pin_name = smelt_db::queries::maintenance::matching_write_pin(
+                plan_cell,
+                &result.column_groups,
+                cells_cfg,
+            )?;
+            smelt_logical::maintenance::lookup_write_pattern(&pin_name)
+        });
+        let resolved = resolve_cell_technique_with_write_pin(
             &result.plan,
             &trigger,
             None,
+            write_pin,
             backend_supports_column_scoped_merge,
         )
         .ok()?;

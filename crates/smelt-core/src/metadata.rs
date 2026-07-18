@@ -563,6 +563,36 @@ pub enum MetadataError {
         asserted: crate::config::Grain,
         derived: crate::config::Grain,
     },
+
+    /// A `maintenance.cells[].write` pin names a write pattern the open
+    /// registry (`smelt_logical::maintenance::lookup_write_pattern`) does
+    /// not recognise, or one the target backend's write-pattern capability
+    /// registry does not provide. Not raised by a pure frontmatter
+    /// validator — like `KeyedForbidsTimeseries`, the admissibility
+    /// decision needs derived facts (the registry, the backend's declared
+    /// capabilities) this crate doesn't have, so it is made by the
+    /// maintenance-plan diagnostics layer
+    /// (`smelt_db::queries::maintenance::maintenance_plan_diagnostics`) and
+    /// surfaced from there. The variant is kept here so `MetadataError`
+    /// stays the shared vocabulary every consumer's exhaustive match already
+    /// handles (`docs/specs/incremental_models.md` §"Per-cell write
+    /// addressing" → "User pins").
+    #[error("MaintenanceWritePatternUnavailable: write pattern '{pattern}' is unrecognised, or backend '{backend}' cannot provide it")]
+    MaintenanceWritePatternUnavailable { pattern: String, backend: String },
+
+    /// A `maintenance.cells[].write` pin names a write pattern the registry
+    /// recognises and the target backend can execute, but this cell's own
+    /// facts cannot uphold the pattern's equivalence obligation (e.g.
+    /// `write: keyed` on an output that declares no `unique_key`). Kept
+    /// here for the same reason as `MaintenanceWritePatternUnavailable`
+    /// above — surfaced by the maintenance-plan diagnostics layer, never
+    /// raised by a pure frontmatter validator.
+    #[error("MaintenanceWriteAddressingRefused: write pattern '{pattern}' cannot uphold the equivalence invariant for cell {cell} — {why}")]
+    MaintenanceWriteAddressingRefused {
+        cell: String,
+        pattern: String,
+        why: String,
+    },
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its

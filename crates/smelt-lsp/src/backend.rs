@@ -456,6 +456,10 @@ impl Backend {
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
                 DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
                 DbCode::MaintenanceUnsupportedGrain => "maintenance-unsupported-grain",
+                DbCode::MaintenanceWritePatternUnavailable => {
+                    "maintenance-write-pattern-unavailable"
+                }
+                DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
             };
             NumberOrString::String(code_str.to_string())
         });

@@ -156,6 +156,8 @@ Cells (2):
       region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      write pin: (none)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert
@@ -163,6 +165,8 @@ Cells (2):
       region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      write pin: (none)
 
 Key temporal locality:
   route: route 3 (recurrence-bounded, declared key_recurrence)

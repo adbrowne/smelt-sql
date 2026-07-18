@@ -109,6 +109,20 @@ pub struct BackendCapabilities {
     /// this — it is `true` universally and exists so the capability matrix stays
     /// accurate and callers can assert the contract.
     pub requires_schema_init: bool,
+
+    /// Supports a column-scoped `MERGE` — the physical primitive behind
+    /// `smelt_logical::maintenance::Technique::ColumnScopedMerge`
+    /// (`docs/specs/model_transforms.md` §"Dimension-driven horizon-bounded
+    /// MERGE") and the open write-pattern registry's `column` /
+    /// `keyed_conditional` entries (`docs/specs/incremental_models.md`
+    /// §"Per-cell write addressing"). This is the capability struct's copy
+    /// of what was formerly `Backend::supports_column_scoped_merge()` — a
+    /// genuine backend-capability gate, not a policy choice: a backend that
+    /// cannot run a targeted `MERGE` against a full-row source projection
+    /// must drop the technique from admission at plan time. `false` unless
+    /// the backend can execute `merge_into` against a source projection
+    /// carrying the full target row.
+    pub supports_column_scoped_merge: bool,
 }
 
 impl BackendCapabilities {
@@ -137,6 +151,7 @@ impl BackendCapabilities {
             supports_column_mapping: false,
             supports_pipe_syntax: false,
             requires_schema_init: true,
+            supports_column_scoped_merge: true,
         }
     }
 
@@ -171,6 +186,10 @@ impl BackendCapabilities {
             supports_column_mapping: true,
             supports_pipe_syntax: false,
             requires_schema_init: true,
+            // Delta MERGE supports `WHEN MATCHED THEN UPDATE SET *` over a
+            // full-row source projection — the same shape DuckDB's MERGE
+            // uses (`docs/specs/multi_backend.md` capability matrix).
+            supports_column_scoped_merge: true,
         }
     }
 
@@ -201,6 +220,7 @@ impl BackendCapabilities {
             supports_column_mapping: false,
             supports_pipe_syntax: false,
             requires_schema_init: true,
+            supports_column_scoped_merge: false,
         }
     }
 
@@ -230,6 +250,7 @@ impl BackendCapabilities {
             supports_column_mapping: false,
             supports_pipe_syntax: false,
             requires_schema_init: true,
+            supports_column_scoped_merge: false,
         }
     }
 }

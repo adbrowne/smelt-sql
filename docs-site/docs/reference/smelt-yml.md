@@ -270,6 +270,27 @@ A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets 
 
 `maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns) — they never reach inside whichever technique is chosen to force or forbid a [conditional (write-suppressed) matched arm](../guide/incremental-models.md#conditional-writes). Whether a `ColumnScopedMerge`/`KeyedFold` cell's write is suppressed for unchanged rows is decided automatically, the same way for every occurrence of that technique, and is not a `prefer`/`technique` setting.
 
+#### `cells[].write` — the physical addressing pin
+
+`maintenance.cells[].write` is a separate axis from `prefer`/`technique`: it pins *how* a cell physically locates the rows it writes (region `DELETE`+`INSERT`, keyed `MERGE`, column-scoped `MERGE`, in-place `UPDATE`, full rebuild, or a backend-contributed pattern), not which technique family runs.
+
+```yaml
+maintenance:
+  cells:
+    - columns: [amount]
+      on: backfill
+      technique: recompute
+      write: region
+```
+
+`write:` is an **open name**, not a sealed keyword set — it resolves against a registry of currently-known write patterns, and the set grows as backends contribute new ones. A pin is validated, never silently honoured or downgraded:
+
+- An unrecognised pattern name, or one the model's target backend cannot execute (e.g. `write: column` on a backend with no column-scoped `MERGE`), fails the build with `MaintenanceWritePatternUnavailable`, naming the pattern and the backend.
+- A recognised, backend-capable pattern that this cell's own declared facts cannot support (e.g. `write: keyed` on an output with no `unique_key`) fails with `MaintenanceWriteAddressingRefused`, naming the cell and the pattern.
+- A refused pin never falls back to a different addressing — fix the pin or the model's declared facts.
+
+`smelt explain <model>` prints each cell's admissible pattern set and its active pin (if any), so you can see what a pin would resolve against before setting one.
+
 ---
 
 ## Validation Rules

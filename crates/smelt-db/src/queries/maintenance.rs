@@ -613,6 +613,21 @@ pub enum MaintenanceRefusal {
     },
 }
 
+/// A Salsa-friendly (`PartialEq`) projection of a
+/// [`smelt_logical::maintenance::WritePinRefusal`] — mirrors the pure enum's
+/// data exactly, for the same reason [`MaintenanceRefusal`] exists.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WritePinDiagnostic {
+    /// `MaintenanceWritePatternUnavailable`.
+    PatternUnavailable { pattern: String, backend: String },
+    /// `MaintenanceWriteAddressingRefused`.
+    AddressingRefused {
+        cell: String,
+        pattern: String,
+        why: String,
+    },
+}
+
 /// The result `maintenance_plan` (the Salsa query) returns: every admission
 /// refusal from the derived plan, mapped to a Salsa-safe shape, plus the
 /// `maintenance.cells[]` column-group-span violations. `file_diagnostics`
@@ -630,6 +645,182 @@ pub struct MaintenancePlanDiagnostics {
     /// [`smelt_logical::maintenance::granularity::check_declared_granularity`]'s
     /// own fail-open posture.
     pub granularity_mismatch: Option<GranularityMismatch>,
+    /// Every `maintenance.cells[].write` pin that failed to resolve against
+    /// the open write-pattern registry (`incremental_models.md` §"Per-cell
+    /// write addressing" → "User pins") — computed by
+    /// [`write_pin_diagnostics`].
+    pub write_pin_refusals: Vec<WritePinDiagnostic>,
+}
+
+/// The open write-pattern registry's [`smelt_logical::maintenance::
+/// BackendWriteCapabilities`] for a declared backend name (`smelt.yml`
+/// `targets.*.type`, lower-cased — the same vocabulary
+/// `smelt_logical::lowering::backend_supports_struct_literal` and
+/// `project_active_backends` already use). The single owner of the
+/// name→struct mapping stays `smelt_dialect::BackendCapabilities`'s own
+/// constructors — this only narrows the two booleans the write-pattern
+/// registry needs (`CLAUDE.md` §"Layered single-ownership": `smelt-logical`
+/// stays below `smelt-dialect`, so it cannot hold this mapping itself).
+/// An unrecognised backend name conservatively reports no capability at
+/// all — a `write:` pin naming a capability-gated pattern is refused rather
+/// than silently assumed available.
+pub fn backend_write_capabilities_for(
+    backend_name: &str,
+) -> smelt_logical::maintenance::BackendWriteCapabilities {
+    let caps = match backend_name.to_ascii_lowercase().as_str() {
+        "duckdb" => smelt_dialect::BackendCapabilities::duckdb(),
+        "spark" | "databricks" => smelt_dialect::BackendCapabilities::spark(),
+        "postgres" | "postgresql" => smelt_dialect::BackendCapabilities::postgresql(),
+        _ => {
+            return smelt_logical::maintenance::BackendWriteCapabilities::default();
+        }
+    };
+    smelt_logical::maintenance::BackendWriteCapabilities {
+        supports_merge: caps.supports_merge,
+        supports_column_scoped_merge: caps.supports_column_scoped_merge,
+    }
+}
+
+/// The `on:` address a derived [`Trigger`] resolves to, for matching against
+/// a `maintenance.cells[].on` frontmatter entry — mirrors the vocabulary
+/// `cells[].on` already writes (`incremental_models.md` §Surface
+/// "Frontmatter": "`on: <source-address> | backfill`"). `ColumnAdded` (the
+/// definition-change trigger) has no `on:` address of its own — `write:`
+/// pins do not address it in this phase.
+fn trigger_on_address(trigger: &Trigger) -> Option<String> {
+    match trigger {
+        Trigger::NewData { source } | Trigger::UpstreamMutation { source } => Some(source.clone()),
+        Trigger::Backfill => Some("backfill".to_string()),
+        Trigger::ColumnAdded { .. } => None,
+    }
+}
+
+/// The `maintenance.cells[].write` pin (if any) that addresses `plan_cell`,
+/// per the same trigger/column-group matching
+/// [`write_pin_diagnostics`] uses — read-only presentation lookup for
+/// `smelt explain` (`smelt-cli/src/explain.rs`'s admissible-set + active-pin
+/// rows). Never re-derives admission or the registry's admissible set
+/// itself (`CLAUDE.md` §"Maintenance-plan purity") — just answers "does a
+/// `cells[]` entry name this cell, and if so, what pin did it write".
+pub fn matching_write_pin(
+    plan_cell: &smelt_logical::maintenance::PlanCell,
+    column_groups: &[ColumnGroup],
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
+) -> Option<String> {
+    cells_cfg.iter().find_map(|cell_cfg| {
+        let pin = cell_cfg.write.as_deref()?;
+        let on_matches =
+            trigger_on_address(&plan_cell.trigger).as_deref() == Some(cell_cfg.on.as_str());
+        if !on_matches {
+            return None;
+        }
+        let matched_group_name = column_groups
+            .iter()
+            .find(|g| {
+                g.columns
+                    .iter()
+                    .any(|c| cell_cfg.columns.iter().any(|cc| cc == c))
+            })
+            .map(|g| g.name());
+        let group_matches =
+            plan_cell.group == "{*}" || Some(plan_cell.group.clone()) == matched_group_name;
+        group_matches.then(|| pin.to_string())
+    })
+}
+
+/// Validate every `maintenance.cells[].write` pin against the open
+/// write-pattern registry (`incremental_models.md` §"Per-cell write
+/// addressing" → "User pins"): an unrecognised name, or one the target
+/// backend(s) cannot execute, is `MaintenanceWritePatternUnavailable`; a
+/// name the registry and backend admit but whose cell declares none of the
+/// pattern's required contract facts (e.g. `write: keyed` on an
+/// identity-free cell) is `MaintenanceWriteAddressingRefused`. Checked
+/// against every one of the project's `active_backends` — a pin unavailable
+/// on any declared target backend refuses, naming that backend, rather than
+/// silently passing because a *different* target happens to support it.
+///
+/// Pure function — the caller ([`maintenance_plan_diagnostics`]) gathers
+/// `metadata`/`plan`/`column_groups`/`active_backends` and calls this; it
+/// never re-derives the plan itself (Salsa purity rule).
+pub fn write_pin_diagnostics(
+    metadata: &ModelMetadata,
+    plan: &MaintenancePlan,
+    column_groups: &[ColumnGroup],
+    active_backends: &[String],
+) -> Vec<WritePinDiagnostic> {
+    use smelt_logical::maintenance::{
+        resolve_write_pin, OutputContractFacts, RowIdentity, WritePinRefusal,
+    };
+
+    let Some(maintenance) = metadata.maintenance.as_ref() else {
+        return Vec::new();
+    };
+    let has_partition_axis = metadata.timeseries.is_some();
+    let backends: Vec<String> = if active_backends.is_empty() {
+        vec!["duckdb".to_string()]
+    } else {
+        active_backends.to_vec()
+    };
+
+    let mut out = Vec::new();
+    for cell_cfg in &maintenance.cells {
+        let Some(pin) = cell_cfg.write.as_deref() else {
+            continue;
+        };
+        // A whole-row trigger's cell (`NewData`/`Backfill`) carries the
+        // `{*}` wildcard group name (`PlanCell::group`'s own doc comment),
+        // not a derived `ColumnGroup::name()` — it matches any `cells[]`
+        // entry on the same `on:` trigger regardless of `columns`. A
+        // per-column-group trigger (`UpstreamMutation`/`ColumnAdded`) only
+        // matches a `cells[]` entry whose `columns` land in that same
+        // derived group.
+        let matched_group_name = column_groups
+            .iter()
+            .find(|g| {
+                g.columns
+                    .iter()
+                    .any(|c| cell_cfg.columns.iter().any(|cc| cc == c))
+            })
+            .map(|g| g.name());
+        let Some(plan_cell) = plan.cells.iter().find(|c| {
+            trigger_on_address(&c.trigger).as_deref() == Some(cell_cfg.on.as_str())
+                && (c.group == "{*}" || Some(c.group.clone()) == matched_group_name)
+        }) else {
+            continue;
+        };
+        let has_identity = matches!(plan_cell.row_identity.identity, RowIdentity::Key(_));
+        let facts = OutputContractFacts {
+            has_identity,
+            has_partition_axis,
+        };
+        let cell_label = format!("{:?}", plan_cell.trigger);
+
+        for backend_name in &backends {
+            let backend_caps = backend_write_capabilities_for(backend_name);
+            if let Err(refusal) = resolve_write_pin(
+                &cell_label,
+                pin,
+                backend_name,
+                facts,
+                backend_caps,
+                |_pattern| Ok(()),
+            ) {
+                out.push(match refusal {
+                    WritePinRefusal::PatternUnavailable { pattern, backend } => {
+                        WritePinDiagnostic::PatternUnavailable { pattern, backend }
+                    }
+                    WritePinRefusal::AddressingRefused { cell, pattern, why } => {
+                        WritePinDiagnostic::AddressingRefused { cell, pattern, why }
+                    }
+                });
+                // One diagnostic per cell is enough — the pin either
+                // resolves against every declared backend or it doesn't;
+                // reporting per-backend duplicates would just be noise.
+                break;
+            }
+        }
+    }
+    out
 }
 
 /// Assemble inputs (resolved source facts, declared output shape,
@@ -658,6 +849,7 @@ pub fn maintenance_plan_diagnostics(
     source_refs: &[(String, Option<SourceInfo>)],
     project_scan_bounds: Option<&ScanBoundsConfig>,
     extra_model_sources: &[(SourceFacts, Granularity)],
+    active_backends: &[String],
 ) -> MaintenancePlanDiagnostics {
     let model_scan_bounds = metadata
         .maintenance
@@ -753,10 +945,17 @@ pub fn maintenance_plan_diagnostics(
         .as_ref()
         .map(|m| cell_column_group_violations(m, &result.column_groups))
         .unwrap_or_default();
+    let write_pin_refusals = write_pin_diagnostics(
+        metadata,
+        &result.plan,
+        &result.column_groups,
+        active_backends,
+    );
     MaintenancePlanDiagnostics {
         refusals,
         cell_column_group_violations,
         granularity_mismatch,
+        write_pin_refusals,
     }
 }
 
@@ -785,6 +984,7 @@ mod tests {
                 on: "sources.payments".to_string(),
                 prefer: None,
                 technique: None,
+                write: None,
             }],
             scan_bounds: None,
         };
@@ -807,6 +1007,7 @@ mod tests {
                 on: "sources.payments".to_string(),
                 prefer: None,
                 technique: None,
+                write: None,
             }],
             scan_bounds: None,
         };

@@ -428,7 +428,14 @@ async fn explain_maintenance_plan(
     let (own_contract, edges) =
         smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
 
-    let report = build_maintenance_plan_report(&canonical, &result, &own_contract, &edges);
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.maintenance.as_ref())
+        .map(|m| m.cells.as_slice())
+        .unwrap_or(&[]);
+    let report =
+        build_maintenance_plan_report(&canonical, &result, &own_contract, &edges, cells_cfg);
 
     if !args.show_sql {
         println!("{}", report);

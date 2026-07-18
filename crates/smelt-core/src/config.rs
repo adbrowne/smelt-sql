@@ -817,6 +817,21 @@ pub struct MaintenanceCellConfig {
     /// pin naming an unadmitted technique is an error, not an override).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub technique: Option<CellTechnique>,
+    /// Hard per-cell **addressing** pin (`incremental_models.md` §"Per-cell
+    /// write addressing" → "User pins"): an **open name** resolved against
+    /// the write-pattern registry (`smelt_logical::maintenance::
+    /// lookup_write_pattern`), not a sealed keyword set — deliberately
+    /// `Option<String>`, not an enum, so a new backend-contributed pattern
+    /// name is admitted the moment it registers, with no `smelt-core`
+    /// release required. An unrecognised name, or one the target backend
+    /// cannot execute, is `MaintenanceWritePatternUnavailable`; a
+    /// registry-recognised, backend-capable name whose addressing cannot
+    /// uphold this cell's equivalence invariant is
+    /// `MaintenanceWriteAddressingRefused` — both validated downstream
+    /// (`smelt-db`'s maintenance-plan diagnostics), never here (this struct
+    /// only parses the open string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<String>,
 }
 
 /// `maintenance.cells[].technique` — the hard-pin value set (a superset of

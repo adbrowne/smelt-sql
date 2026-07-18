@@ -161,6 +161,16 @@ fn every_flag_matches_matrix() {
     cell!(duckdb, requires_schema_init, true, "DuckDB");
     cell!(delta, requires_schema_init, true, "Spark(Delta)");
     cell!(parquet, requires_schema_init, true, "Spark(Parquet)");
+
+    // supports_column_scoped_merge
+    cell!(duckdb, supports_column_scoped_merge, true, "DuckDB");
+    cell!(delta, supports_column_scoped_merge, true, "Spark(Delta)");
+    cell!(
+        parquet,
+        supports_column_scoped_merge,
+        false,
+        "Spark(Parquet)"
+    );
 }
 
 /// Exhaustiveness guard: destructuring all `BackendCapabilities` fields triggers a
@@ -189,6 +199,7 @@ fn all_fields_destructured() {
         supports_column_mapping: _,
         supports_pipe_syntax: _,
         requires_schema_init: _,
+        supports_column_scoped_merge: _,
     } = BackendCapabilities::duckdb();
     // Adding a field to BackendCapabilities without listing it here is a compile error.
     // When that happens: add the field above, add it to every_flag_matches_matrix(),

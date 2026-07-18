@@ -1555,8 +1555,7 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
 ### The contract, plan, and graph layer
 
-- **The grain-demotion has landed for the top-level surface (one narrow gap remaining); the per-cell
-  `write:` pin and open write-pattern registry are still spec-ahead-of-code.**
+- **The grain-demotion has landed for the top-level surface (one narrow gap remaining).**
   This spec makes the shape-defining facts (`timeseries:` / `unique_key:`) the declared surface and
   `grain:` a derived check-only assertion (§"The declared shape axis"). Top-level `unique_key:` now
   parses (`.sql` frontmatter and `smelt.yml` model overrides, frontmatter wins); `refresh: incremental`
@@ -1567,17 +1566,26 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   against that derived key only at plan derivation (`smelt-db::queries::maintenance`), not at the
   earlier frontmatter-validation step — and only when a top-level `unique_key:` is also declared to
   check it against; a bare `grain: key` model with neither declaration is unchanged (`models.md`
-  §Known Divergences). This spec also makes physical write addressing a per-`(column-group × trigger
-  × changed-input)`-cell derivation governed by the available-addressings rule, adds the
-  `maintenance.cells[].write` pin, and frames the write-pattern set as an open registry with a
-  backend-capability admission factor (§"Per-cell write addressing") — none of that is built yet: the
-  plan's write-scope is a fixed 2×2 corner with a closed technique set (`Technique` /
-  `IncrementalStrategy`), the `write:` frontmatter key does not parse, no write-pattern *registry* or
-  per-pattern equivalence-obligation declaration exists (the backend-capability check is the ad-hoc
-  `Backend::supports_column_scoped_merge`-style flag, not a registry), and
-  `MaintenanceWriteAddressingRefused` / `MaintenanceWritePatternUnavailable` are unbuilt codes.
-  Design derivation: `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; the
-  Relation Contract that reframes the declared facts is `models.md` §"The Relation Contract".
+  §Known Divergences).
+- **The open write-pattern registry, the `maintenance.cells[].write` pin, and both write-addressing
+  diagnostics are built; the equivalence-invariant factor the registry consults is still the
+  structural contract-facts check only.** The registry (`smelt_logical::maintenance::
+  WRITE_PATTERN_REGISTRY`) declares each pattern's required contract facts and backend-capability key;
+  `resolve_write_pin` implements the available-addressings rule's first, second, and fourth factors
+  (declared facts × the pattern's requirements × backend capability, sourced from
+  `BackendCapabilities` via the project's declared target backends) and refuses fail-loud —
+  `MaintenanceWritePatternUnavailable` for an unrecognised name or a capability gap, never
+  `MaintenanceWriteAddressingRefused` for one — never a silent downgrade to a substituted technique.
+  `maintenance.cells[].write` parses as an open string (`smelt_core::config::MaintenanceCellConfig`),
+  not a sealed enum. What is not yet consulted: the third factor (a per-cell equivalence proof beyond
+  the pattern's declared required facts — e.g. threading `P3` column-comparability or a
+  suppression-specific proof into the pin's own equivalence check) is a caller-supplied hook
+  (`resolve_write_pin`'s `cell_can_uphold_equivalence` closure) that today always accepts; deepening it
+  is later work, tracked alongside this entry. `supports_column_scoped_merge` migrated from the
+  `Backend` trait into `BackendCapabilities` (`multi_backend.md` §Known Divergences narrows the
+  remaining two flags in that section). Design derivation:
+  `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; the Relation Contract that
+  reframes the declared facts is `models.md` §"The Relation Contract".
 - **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
   is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
   graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a

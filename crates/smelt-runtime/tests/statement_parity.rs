@@ -153,10 +153,6 @@ impl Backend for RecordingBackend {
         self.inner.capabilities()
     }
 
-    fn supports_column_scoped_merge(&self) -> bool {
-        self.inner.supports_column_scoped_merge()
-    }
-
     async fn load_table(
         &self,
         schema: &str,
@@ -293,9 +289,6 @@ impl Backend for ArcBackend {
     }
     fn dialect(&self) -> SqlDialect {
         self.0.dialect()
-    }
-    fn supports_column_scoped_merge(&self) -> bool {
-        self.0.supports_column_scoped_merge()
     }
     fn capabilities(&self) -> BackendCapabilities {
         self.0.capabilities()

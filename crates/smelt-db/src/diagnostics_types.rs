@@ -868,6 +868,23 @@ pub enum DiagnosticCode {
     /// plan tracking the missing support. Anchored at the model SQL body
     /// start.
     MaintenanceUnsupportedGrain,
+    /// Emitted (Error) when a `maintenance.cells[].write` pin names a write
+    /// pattern the open registry does not recognise, or one the target
+    /// backend's write-pattern capability does not provide
+    /// (`incremental_models.md` §"Per-cell write addressing" → "User
+    /// pins"). Names the pattern and the backend; never a silent
+    /// downgrade to a different addressing. Anchored at the model SQL body
+    /// start.
+    MaintenanceWritePatternUnavailable,
+    /// Emitted (Error) when a `maintenance.cells[].write` pin names a
+    /// write pattern the registry recognises and the target backend can
+    /// execute, but the pinned cell's own facts cannot uphold that
+    /// pattern's equivalence obligation (e.g. `write: keyed` on an output
+    /// with no declared identity) — `incremental_models.md` §"Per-cell
+    /// write addressing" → "User pins". Names the cell and the refused
+    /// pattern; the pin never silently resolves to a substituted
+    /// technique. Anchored at the model SQL body start.
+    MaintenanceWriteAddressingRefused,
 }
 
 /// Structured metadata attached to diagnostics for code actions

@@ -1093,7 +1093,7 @@ pub async fn execute_project(
                         metadata,
                         &maint_source_facts,
                         &explicitly_mutable,
-                        backend.supports_column_scoped_merge(),
+                        backend.capabilities().supports_column_scoped_merge,
                     )
                 });
 

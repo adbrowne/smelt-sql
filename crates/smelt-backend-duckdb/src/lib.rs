@@ -664,18 +664,17 @@ impl Backend for DuckDbBackend {
         .map_err(|e| BackendError::Other(e.into()))?
     }
 
-    /// DuckDB executes the emitted column-scoped `MERGE`'s `UPDATE SET *`
-    /// form; the full-row source-projection contract that shape relies on is
-    /// documented on `smelt_logical::maintenance::emit::
-    /// emit_column_scoped_merge`, the single author of that statement text.
-    /// `merge_into` itself is not overridden here — the `Backend` trait's
-    /// default implementation (build the `StatementGroup` via that emitter,
-    /// then `execute_statement_group`) is exactly this backend's shape: a
-    /// single non-transactional statement over the same connection every
-    /// other statement group runs through.
-    fn supports_column_scoped_merge(&self) -> bool {
-        true
-    }
+    // DuckDB executes the emitted column-scoped `MERGE`'s `UPDATE SET *`
+    // form; the full-row source-projection contract that shape relies on is
+    // documented on `smelt_logical::maintenance::emit::
+    // emit_column_scoped_merge`, the single author of that statement text.
+    // `merge_into` itself is not overridden here — the `Backend` trait's
+    // default implementation (build the `StatementGroup` via that emitter,
+    // then `execute_statement_group`) is exactly this backend's shape: a
+    // single non-transactional statement over the same connection every
+    // other statement group runs through. The capability itself now lives
+    // on `capabilities().supports_column_scoped_merge`
+    // (`BackendCapabilities::duckdb()`, `true`), not a trait-method override.
 
     async fn insert_overwrite(
         &self,

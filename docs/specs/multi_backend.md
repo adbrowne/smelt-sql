@@ -149,9 +149,9 @@ set is never offered that technique, at plan time, not surfaced as a runtime err
   write path available to a backend with `supports_merge = false` (Spark-over-Parquet).
 
 These flags live in `BackendCapabilities` itself, queried by admission exactly like every other
-capability flag above — never re-derived by a consumer. `supports_column_scoped_merge` names the
-struct field this spec targets; it is not yet where the capability actually lives in code (see
-§Known Divergences).
+capability flag above — never re-derived by a consumer. `supports_column_scoped_merge` is a
+struct field; `supports_merge_not_matched_by_source` and `supports_staged_relation_group` are
+specified ahead of their own struct fields (see §Known Divergences).
 
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may
@@ -243,18 +243,15 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
-- **`supports_column_scoped_merge` lives on the `Backend` trait, not in `BackendCapabilities`.**
-  §"Column-scoped merge and conditional-write capabilities" specifies its target home as a
-  capability-struct field, matrixed above alongside every other flag; today it is a
-  `Backend::supports_column_scoped_merge(&self) -> bool` trait method
-  (`crates/smelt-backend/src/lib.rs:324`, default `false`, overridden to `true` only by
-  `crates/smelt-backend-duckdb`), absent from `BackendCapabilities`
-  (`crates/smelt-dialect/src/dialect.rs:29`) entirely — so it is not yet asserted by the
-  capability-conformance test the way every struct field is, and Spark's constructors carry no
-  explicit value for it at all (they inherit the trait default). Migrating it into the struct,
-  and adding real `supports_merge_not_matched_by_source` / `supports_staged_relation_group`
-  fields and their conformance assertions, is later work; the matrix above records the intended
-  end state so admission has one place to specify against. Tracked in
+- **`supports_merge_not_matched_by_source` / `supports_staged_relation_group` are specified
+  ahead of their own `BackendCapabilities` fields.** `supports_column_scoped_merge` migrated
+  into the capability struct (`crates/smelt-dialect/src/dialect.rs`), matrixed above and asserted
+  by the capability-conformance test alongside every other flag; the `Backend` trait no longer
+  carries its own `supports_column_scoped_merge` method. The other two flags in this section
+  still have no struct field or conformance assertion — the change-suppressed MERGE's
+  `NOT MATCHED BY SOURCE` lowering and the staged-candidate mechanism's temp-relation grouping
+  are not yet gated by a declared capability. Adding those fields is later work; the matrix above
+  records the intended end state so admission has one place to specify against. Tracked in
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Parity is verified by a gated CI job.** The full dual-target matrix (DuckDB + Spark),
   conformance suite, and the W1–W7 parity initiative are complete. The `spark-parity` CI job in
