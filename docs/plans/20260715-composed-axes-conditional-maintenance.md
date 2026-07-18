@@ -90,7 +90,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | C1 | Spec diff: `model_transforms.md` T1/T2 variants; `multi_backend.md` capability flags (incl. `supports_column_scoped_merge` into the capability struct) | done (2026-07-18) |
 | C2 | P3 change-comparability per column (walk lattice fold; `plausible`/pinned-`NOW()` ⇒ Incomparable) | done (2026-07-18) |
 | C3 | P2 region row identity (declared `unique_key` → proven grain key → `WholeRow` multiset) | done (2026-07-18) |
-| C4 | T1 change-suppressed column-scoped MERGE (+ statement-parity leg; suppressed-vs-unconditional bit-equality at fixed `S`) | pending |
+| C4 | T1 change-suppressed column-scoped MERGE (+ statement-parity leg; suppressed-vs-unconditional bit-equality at fixed `S`) | done (2026-07-18) |
 | C5 | T1 on the keyed fold; T2 staged-candidate conditional DELETE+INSERT (staged temp relation in the statement group) | pending |
 | C6 | Slice-bounded compare on composed models (compose C4/C5 with A2) | pending |
 | C7 | Docs: conditional writes (explain output, cost notes, `prefer`/`technique` steering) | pending |
@@ -1535,6 +1535,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 
 - `key_per_partition`'s real trajectory profile (backfill-cascade discipline, lateness truncation — `models.md` names both). A0 only makes it refuse honestly; building the grain waits for demand and gets its own plan.
 - Retiring the `batched:` sub-block surface (`batched.unique_key` / `batched.safety_overrides` → top-level keys) — S1 lands the top-level `unique_key:` and derived-label logic without breaking the sub-block; the sub-block's retirement + `smelt migrate` assist is a follow-up surface cut.
+- **C4 — the `maintenance_conformance/gate.rs` generative equivalence leg for column-scoped-MERGE suppression.** The only existing generative recipe that produces `Technique::ColumnScopedMerge` (`MutableEnrichedRecipe`'s fact+dimension join) resolves `RowIdentity::WholeRow` under the current P2 derivation — no proven grain key threads through a join yet — so `resolve_write_suppression` can never actually admit `Suppressed` for it, and a generative leg wired against the current recipe pool would exercise only the `Unconditional` fallback, not the claim it's meant to prove. C4 instead proves the suppressed-vs-unconditional-vs-full-refresh equivalence via `statement_parity.rs` (byte-identical emitted text) and a real-DuckDB e2e in `technique_lowering.rs` (zero-row re-run, state equals full-refresh oracle) on a hand-built fixture. Closing this properly needs either a provably-keyed recipe variant in the generator or extending row-identity proof through joins — both non-trivial and out of C4's file scope. G1's own precondition text ("the C4/E4 conformance legs are the proof") should be read against this narrower C4 evidence until the generative leg lands.
 
 ## Verification
 

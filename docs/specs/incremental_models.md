@@ -1936,12 +1936,19 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   no cells are derived and no executor runs. Full trajectory support (the locality routes, a
   real emitted plan, and graph-layer admission of the shape) is tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **No conditional maintenance technique exists.** §"Windowed maintenance and the horizon"
-  category 2 (no-op write elimination) is normative taxonomy with no implementation: every
-  emitted MERGE writes all matched rows unconditionally, every region overwrite rewrites
-  unchanged rows, and no observed output delta is recorded anywhere. The recorded
-  "dispatch fires on every run unconditionally" divergence above is the operational face of
-  this gap. Mechanisms and sequencing:
+- **Conditional maintenance technique: column-scoped MERGE only, so far.** §"Windowed
+  maintenance and the horizon" category 2 (no-op write elimination) is now partly built: the
+  column-scoped `MERGE` (`Technique::ColumnScopedMerge`) admits a change-suppressed matched arm
+  (`AND (target.c IS DISTINCT FROM source.c OR …)` over the cell's mutation-sensitive group) that
+  writes zero rows for an unchanged-input re-run — admission is fail-closed over the P2 row-identity
+  verdict (a `WholeRow` cell never suppresses) and the P3 per-column change-comparability verdict
+  (one `Incomparable` column in the group refuses the whole cell's suppression, falling back to the
+  pre-existing unconditional matched arm). Still unbuilt: the keyed-fold `MERGE` and the region
+  `DELETE`+`INSERT` family have no conditional variant yet (every region overwrite still rewrites
+  unchanged rows), the merge-less staged-candidate conditional `DELETE`+`INSERT` (for backends
+  without `MERGE`) does not exist, and no observed output delta is recorded anywhere — the recorded
+  "dispatch fires on every run unconditionally" divergence above is the operational face of the
+  remaining gap. Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly

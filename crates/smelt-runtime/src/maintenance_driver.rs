@@ -14,14 +14,18 @@
 
 use crate::transformer::{add_seconds_to_date, subtract_seconds_from_date, TimeRange};
 use anyhow::{bail, Context, Result};
-use smelt_backend::{Backend, BackendError, ExecutionResult, IncrementalStrategy};
+use smelt_backend::{
+    maintenance_dialect, Backend, BackendError, ExecutionResult, IncrementalStrategy,
+};
 use smelt_core::config::{CellTechnique, Granularity};
 use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
 use smelt_logical::maintenance::emit::{
-    emit_create_table_as, MaintenanceStatement, StatementGroup, TargetSlicePredicate,
+    emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
+    MaintenanceStatement, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
@@ -603,14 +607,28 @@ pub fn resolve_cell_technique(
 /// `derive_model_maintenance_plan` exactly once and only reads the result —
 /// it never re-implements admission itself.
 ///
-/// Returns the matched source name and its admitted [`PlanCell`] so the
-/// caller can pick the right physical primitive from `cell.partition_local`
-/// (a genuine `ScanClamp` licenses the horizon-clamped
-/// [`execute_column_scoped_merge`]; an accepted full scan has no horizon and
-/// takes [`execute_column_scoped_merge_full`] instead). `None` when the
-/// model carries no maintenance plan, declares no explicitly-mutable
-/// source, or no source resolves live — the caller's safe default is the
-/// existing region-recompute batch loop, unchanged.
+/// Returns the matched source name, its admitted [`PlanCell`], and the
+/// resolved [`WriteSuppression`] verdict (T1, `docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` Phase C4) for the
+/// cell's own mutation-sensitive column group, so the caller can pick the
+/// right physical primitive from `cell.partition_local` (a genuine
+/// `ScanClamp` licenses the horizon-clamped [`execute_column_scoped_merge`];
+/// an accepted full scan has no horizon and takes
+/// [`execute_column_scoped_merge_full`] instead). `None` when the model
+/// carries no maintenance plan, declares no explicitly-mutable source, or no
+/// source resolves live — the caller's safe default is the existing
+/// region-recompute batch loop, unchanged.
+///
+/// `WriteSuppression` is resolved here (not re-derived by the caller) from
+/// the same `sql`'s P3 change-comparability walk
+/// (`smelt_logical::analysis::walk::model_property_vector`, never a fresh ad
+/// hoc scan — `architecture.md` §"Property composition walk rule") and the
+/// cell's own P2 `row_identity` (already carried on `PlanCell`, C3), folded
+/// via `choice::resolve_write_suppression`. The cell's raw column list comes
+/// from `result.column_groups` (the same derivation's own `ColumnGroup`s),
+/// matched by `PlanCell::group`'s display name — the plan-purity invariant's
+/// "derived once, never re-derived" extends to this lookup, not a second
+/// column-grouping pass.
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -618,7 +636,7 @@ pub fn resolve_live_column_scoped_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
-) -> Option<(String, PlanCell)> {
+) -> Option<(String, PlanCell, WriteSuppression)> {
     let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
         table,
@@ -654,11 +672,19 @@ pub fn resolve_live_column_scoped_cell(
         if resolved != ResolvedTechnique::ColumnScopedMerge {
             return None;
         }
-        result
-            .plan
-            .cell_for(&trigger)
-            .cloned()
-            .map(|cell| (source.clone(), cell))
+        let cell = result.plan.cell_for(&trigger)?.clone();
+        let group_columns = result
+            .column_groups
+            .iter()
+            .find(|g| g.name() == cell.group)
+            .map(|g| g.columns.clone())
+            .unwrap_or_default();
+        let comparability = model_property_vector(sql, &JoinContext::new())
+            .map(|v| v.comparability)
+            .unwrap_or_default();
+        let suppression =
+            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
+        Some((source.clone(), cell, suppression))
     })
 }
 
@@ -679,18 +705,45 @@ pub fn resolve_live_column_scoped_cell(
 /// `DELETE`+`INSERT` region rewrite) — matching the cell's own admitted
 /// corner (full-input read, targeted write) without regressing a
 /// forward-only run's already-processed, un-requested partitions.
+/// `suppression` is the cell's already-resolved [`WriteSuppression`]
+/// verdict ([`resolve_live_column_scoped_cell`]'s own output — this function
+/// does not re-derive admission). `WriteSuppression::Suppressed` builds the
+/// change-suppressed matched arm ([`emit_column_scoped_merge_suppressed`]);
+/// `Unconditional` builds the plain matched arm
+/// ([`emit_column_scoped_merge`]), byte-identical to this function's
+/// pre-Phase-C4 behaviour. Either way the [`StatementGroup`] is built by the
+/// single-owner emitter and handed to [`Backend::execute_statement_group`]
+/// directly — never `Backend::merge_into` — so the emitted text is exactly
+/// what a backend executes, matching every other technique in this module
+/// (`docs/specs/incremental_models.md` §"Statement emission (single
+/// owner)").
 pub async fn execute_column_scoped_merge_full(
     backend: &dyn Backend,
     schema: &str,
     table: &str,
     unique_key: &[String],
     dimension_batch_sql: &str,
+    suppression: &WriteSuppression,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
+    let full_table = format!("{schema}.{table}");
+    let dialect = maintenance_dialect(backend.dialect());
+    let group = match suppression {
+        WriteSuppression::Suppressed { compared_columns } => emit_column_scoped_merge_suppressed(
+            &full_table,
+            unique_key,
+            dimension_batch_sql,
+            compared_columns,
+            dialect,
+        ),
+        WriteSuppression::Unconditional { .. } => {
+            emit_column_scoped_merge(&full_table, unique_key, dimension_batch_sql, dialect)
+        }
+    };
     backend
-        .merge_into(schema, table, dimension_batch_sql, unique_key)
+        .execute_statement_group(&group)
         .await
-        .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{schema}.{table}': {e}"))?;
+        .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
         model_name: table.to_string(),
@@ -721,6 +774,10 @@ pub async fn execute_column_scoped_merge_full(
 /// contract; passing every other column through unchanged is what keeps
 /// the *values* column-scoped even though the physical `SET *` touches
 /// every column's assignment.
+/// `suppression` is the cell's already-resolved [`WriteSuppression`]
+/// verdict, exactly like [`execute_column_scoped_merge_full`]'s own
+/// parameter — see that function's doc comment for the emitter/dispatch
+/// contract this one shares.
 #[allow(clippy::too_many_arguments)]
 pub async fn execute_column_scoped_merge(
     backend: &dyn Backend,
@@ -732,6 +789,7 @@ pub async fn execute_column_scoped_merge(
     conv_ts_column: &str,
     conv_ts: &str,
     dimension_batch_sql: &str,
+    suppression: &WriteSuppression,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -745,8 +803,21 @@ pub async fn execute_column_scoped_merge(
     )
     .map_err(|reason| anyhow::anyhow!("{reason}"))?;
 
+    let dialect = maintenance_dialect(backend.dialect());
+    let group = match suppression {
+        WriteSuppression::Suppressed { compared_columns } => emit_column_scoped_merge_suppressed(
+            &full_table,
+            unique_key,
+            &source_sql,
+            compared_columns,
+            dialect,
+        ),
+        WriteSuppression::Unconditional { .. } => {
+            emit_column_scoped_merge(&full_table, unique_key, &source_sql, dialect)
+        }
+    };
     backend
-        .merge_into(schema, table, &source_sql, unique_key)
+        .execute_statement_group(&group)
         .await
         .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
 

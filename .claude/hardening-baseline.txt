@@ -55,7 +55,7 @@ smelt-parser unwrap 2
 smelt-planner expect 0
 smelt-planner println 0
 smelt-planner unwrap 2
-smelt-runtime expect 4
+smelt-runtime expect 5
 smelt-runtime println 0
 smelt-runtime unwrap 0
 smelt-state expect 0

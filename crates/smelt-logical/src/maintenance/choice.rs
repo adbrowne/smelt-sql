@@ -26,7 +26,9 @@ use smelt_core::config::{
     CellTechnique, MaintenanceCellConfig, MaintenanceDefaults, TechniquePreference,
 };
 
-use super::{MaintenancePlan, Technique, Trigger};
+use crate::analysis::walk::{ColumnComparability, Comparability};
+
+use super::{MaintenancePlan, RowIdentity, RowIdentityVerdict, Technique, Trigger};
 
 /// The technique the ladder resolves to for one cell.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -226,6 +228,193 @@ fn resolvable_set_label(
         }
     }
     members.join(", ")
+}
+
+/// Whether a `Technique::ColumnScopedMerge` cell's matched arm may write
+/// conditionally (T1, `docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase C4) — the interchangeable alternative to always
+/// rewriting every matched row: [`emit::emit_column_scoped_merge_suppressed`]
+/// versus the unconditional [`emit::emit_column_scoped_merge`]
+/// (`super::emit`). Both variants are members of the same resolvable
+/// `ColumnScopedMerge` technique; this only decides which matched-arm shape
+/// is safe to emit for one cell.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum WriteSuppression {
+    /// Every compared column is proven `Comparable` across runs (P3) over a
+    /// proven, non-`WholeRow` row identity (P2) — the matched arm may be
+    /// guarded by `IS DISTINCT FROM` over exactly these columns.
+    Suppressed { compared_columns: Vec<String> },
+    /// Fail-closed refusal of the conditional variant: at least one compared
+    /// column is not proven comparable, no row identity is proven, or the
+    /// group is empty. `why` names the specific column(s) or condition that
+    /// refused, so a caller (`smelt explain`) can show the reason rather
+    /// than only ever seeing the safe fallback.
+    Unconditional { why: String },
+}
+
+/// Resolve whether a column-scoped `MERGE` cell's write may be suppressed
+/// for unchanged rows (`incremental_models.md` §"Known Divergences" — this
+/// phase narrows the "every emitted MERGE writes all matched rows
+/// unconditionally" divergence).
+///
+/// Fail-closed over two independent proofs, either alone refusing:
+/// - **P2, row identity** (`super::RowIdentityVerdict`, `derive::row_identity`):
+///   a [`RowIdentity::WholeRow`] cell has no proven per-row join identity to
+///   compare on safely, so suppression refuses regardless of column
+///   comparability.
+/// - **P3, per-column change comparability** (`crate::analysis::walk::
+///   Comparability`, the property-walk fold): every column in `group_columns`
+///   must carry a `Comparable` verdict in `comparability` — a column absent
+///   from the vector is treated exactly like an explicit `Incomparable` verdict
+///   (fail-closed: absence of a proof is never trusted as a pass), matching
+///   `Comparability::default()`'s own fail-closed convention.
+///
+/// `group_columns` is the cell's own mutation-sensitive column group (the
+/// caller resolves this from the same derived plan the cell came from —
+/// e.g. `ColumnGroup::columns` matching `PlanCell::group`'s display name);
+/// an empty group has nothing to compare and refuses.
+pub fn resolve_write_suppression(
+    group_columns: &[String],
+    comparability: &[ColumnComparability],
+    row_identity: &RowIdentityVerdict,
+) -> WriteSuppression {
+    if matches!(row_identity.identity, RowIdentity::WholeRow) {
+        return WriteSuppression::Unconditional {
+            why: "no proven row identity (P2 verdict is WholeRow) — a conditional write cannot \
+                  safely address individual rows to compare, so the matched arm falls back to \
+                  unconditional rewrite"
+                .to_string(),
+        };
+    }
+
+    if group_columns.is_empty() {
+        return WriteSuppression::Unconditional {
+            why: "the cell's column group is empty — there is nothing to compare".to_string(),
+        };
+    }
+
+    let incomparable: Vec<String> = group_columns
+        .iter()
+        .filter(|col| {
+            let verdict = comparability
+                .iter()
+                .find(|c| c.output.eq_ignore_ascii_case(col));
+            match verdict {
+                Some(c) => c.comparability == Comparability::Incomparable,
+                // Fail-closed: no proof at all for this column is never
+                // trusted as a pass.
+                None => true,
+            }
+        })
+        .cloned()
+        .collect();
+
+    if incomparable.is_empty() {
+        WriteSuppression::Suppressed {
+            compared_columns: group_columns.to_vec(),
+        }
+    } else {
+        WriteSuppression::Unconditional {
+            why: format!(
+                "column(s) {} are not proven comparable across runs (P3) — the conditional \
+                 write refuses fail-closed and falls back to the unconditional matched-arm \
+                 rewrite",
+                incomparable.join(", ")
+            ),
+        }
+    }
+}
+
+#[cfg(test)]
+mod write_suppression_tests {
+    use super::*;
+    use crate::maintenance::RowIdentity;
+
+    fn key_identity(cols: &[&str]) -> RowIdentityVerdict {
+        RowIdentityVerdict {
+            identity: RowIdentity::Key(cols.iter().map(|s| s.to_string()).collect()),
+            proven_mismatch: None,
+        }
+    }
+
+    fn comparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Comparable,
+        }
+    }
+
+    fn incomparable(col: &str) -> ColumnComparability {
+        ColumnComparability {
+            output: col.to_string(),
+            comparability: Comparability::Incomparable,
+        }
+    }
+
+    #[test]
+    fn fully_comparable_group_admits_suppression() {
+        let group = vec!["tier".to_string(), "email".to_string()];
+        let comparability = vec![comparable("tier"), comparable("email")];
+        let identity = key_identity(&["id"]);
+
+        let resolved = resolve_write_suppression(&group, &comparability, &identity);
+        assert_eq!(
+            resolved,
+            WriteSuppression::Suppressed {
+                compared_columns: group.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn one_incomparable_column_refuses_named() {
+        let group = vec!["tier".to_string(), "notes".to_string()];
+        let comparability = vec![comparable("tier"), incomparable("notes")];
+        let identity = key_identity(&["id"]);
+
+        let resolved = resolve_write_suppression(&group, &comparability, &identity);
+        match resolved {
+            WriteSuppression::Unconditional { why } => {
+                assert!(
+                    why.contains("notes"),
+                    "refusal reason must name the incomparable column; got: {why}"
+                );
+            }
+            other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn column_missing_from_comparability_vector_fails_closed() {
+        // No proof at all for 'tier' — absence must not be trusted as a pass.
+        let group = vec!["tier".to_string()];
+        let comparability: Vec<ColumnComparability> = vec![];
+        let identity = key_identity(&["id"]);
+
+        let resolved = resolve_write_suppression(&group, &comparability, &identity);
+        match resolved {
+            WriteSuppression::Unconditional { why } => assert!(why.contains("tier")),
+            other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
+
+    #[test]
+    fn whole_row_identity_refuses_regardless_of_comparability() {
+        let group = vec!["tier".to_string()];
+        let comparability = vec![comparable("tier")];
+        let identity = RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        };
+
+        let resolved = resolve_write_suppression(&group, &comparability, &identity);
+        match resolved {
+            WriteSuppression::Unconditional { why } => {
+                assert!(why.contains("row identity") || why.contains("WholeRow"));
+            }
+            other => panic!("expected Unconditional refusal, got {other:?}"),
+        }
+    }
 }
 
 #[cfg(test)]

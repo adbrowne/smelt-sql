@@ -1565,6 +1565,95 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
     );
 }
 
+/// Phase C4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the change-suppressed column-scoped MERGE (T1) dispatches through
+/// `maintenance_driver::execute_column_scoped_merge_full` exactly like the
+/// unconditional variant above, but building its `StatementGroup` via
+/// `emit_column_scoped_merge_suppressed` and handing it straight to
+/// `Backend::execute_statement_group` — never `Backend::merge_into` (which
+/// would route back through the unconditional emitter). This proves the
+/// EXECUTED statement text is byte-identical to a direct call of
+/// `emit_column_scoped_merge_suppressed` over the same inputs, the same
+/// property `column_scoped_merge_statements_come_from_the_emitter` proves
+/// for the unconditional variant.
+#[tokio::test]
+async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create dim table");
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'gold'), (2, 'silver')")
+        .await
+        .expect("seed dim table (user_id=1 mutated)");
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let suppression = smelt_logical::maintenance::choice::WriteSuppression::Suppressed {
+        compared_columns: vec!["tier".to_string()],
+    };
+
+    smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+    )
+    .await
+    .expect("suppressed column-scoped merge must succeed");
+
+    let groups = backend.recorded_groups();
+    let merge_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .collect();
+    assert_eq!(merge_groups.len(), 1, "exactly one MERGE group: {groups:?}");
+    let group = merge_groups[0];
+    assert!(!group.transactional);
+    assert_eq!(group.statements.len(), 1);
+
+    let expected = smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed(
+        "main.dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &["tier".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed suppressed MERGE group must be byte-identical to a direct emitter call over \
+         the same inputs"
+    );
+
+    // Result-equivalence: the same full-refresh oracle property the
+    // unconditional leg proves.
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT * FROM main.dim_users",
+            "SELECT user_id, tier FROM main.sources_users"
+        )
+        .await,
+        "the suppressed MERGE must reproduce a full refresh"
+    );
+}
+
 // =============================================================================
 // Structural gate: no maintenance-statement authoring outside the emitter
 // (`docs/specs/incremental_models.md` §"Statement emission (single owner)";

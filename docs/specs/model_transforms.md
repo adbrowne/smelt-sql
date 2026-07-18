@@ -454,11 +454,16 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
-- **Unbuilt: change-suppressed MERGE and the staged-candidate conditional DELETE+INSERT.**
-  Neither variant's predicate machinery exists yet — every `merge_into`/column-scoped-merge/
-  DELETE+INSERT emitter today writes unconditionally. Both variants' licensing proofs (region row
-  identity, per-column change comparability) and their admission are being built incrementally;
-  tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Change-suppressed MERGE is built for the column-scoped family only; the keyed-fold MERGE
+  and the staged-candidate conditional DELETE+INSERT remain unbuilt.** The column-scoped
+  `MERGE` emitter (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) now
+  gains a matched-arm `IS DISTINCT FROM` predicate over the cell's comparable mutation-sensitive
+  columns, admitted fail-closed by `maintenance::choice::resolve_write_suppression` over the
+  region row identity (P2) and per-column change comparability (P3) proofs — an unchanged-input
+  re-run of a column-scoped MERGE writes zero rows. The keyed-fold `MERGE` and the region
+  DELETE+INSERT family still write/rewrite unconditionally, and the merge-less staged-candidate
+  conditional DELETE+INSERT (for a backend without `MERGE`) does not exist yet; tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
   bounded-domain multiset, compile-time pinning; the reconciliation-ledger
   fold/recompute-reset pair (no `(output-region × column-group)` ledger

@@ -181,6 +181,61 @@ pub fn emit_column_scoped_merge(
     }
 }
 
+/// Change-suppressed column-scoped `MERGE` (T1,
+/// `docs/specs/model_transforms.md` §"Change-suppressed MERGE"): identical to
+/// [`emit_column_scoped_merge`] except the matched arm is guarded by an
+/// `IS DISTINCT FROM` predicate over `compared_columns` — `WHEN MATCHED AND
+/// (target.c1 IS DISTINCT FROM source.c1 OR …) THEN UPDATE SET *` — so an
+/// unchanged-input re-run's `MERGE` matches every row but writes none of
+/// them. This suppresses the WRITE only: the `USING (source_select)` scan is
+/// exactly the caller's already-compiled delta, untouched — restricting what
+/// is evaluated (as opposed to what is written) is a different licence this
+/// emitter does not grant (`docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase C4's "no scope creep" note).
+///
+/// `compared_columns` must be the caller's already fail-closed-admitted set
+/// (`crate::maintenance::choice::resolve_write_suppression`'s
+/// `WriteSuppression::Suppressed` — every member proven `Comparable` by the
+/// P3 change-comparability walk, over a P2-proven row identity): this
+/// emitter does no admission of its own, only string assembly, matching
+/// every other function in this module.
+///
+/// # Panics
+/// Panics if `compared_columns` is empty — an unconditionally-refusing
+/// caller should build [`emit_column_scoped_merge`] instead of handing this
+/// emitter a vacuous compare set (a vacuous `OR` predicate would suppress
+/// every write, silently turning a matched row into a permanent no-op).
+pub fn emit_column_scoped_merge_suppressed(
+    table: &str,
+    unique_key: &[String],
+    source_select: &str,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_column_scoped_merge_suppressed requires a non-empty compared-column set for {table}"
+    );
+    let on = unique_key
+        .iter()
+        .map(|k| format!("target.{k} = source.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("target.{c} IS DISTINCT FROM source.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
+             WHEN MATCHED AND ({suppression}) THEN UPDATE SET * \
+             WHEN NOT MATCHED THEN INSERT *"
+        ))],
+        transactional: false,
+    }
+}
+
 /// In-place field backfill (top-left with an empty input delta): `UPDATE`
 /// the stored region from its own columns; no upstream read at all.
 pub fn emit_in_place_update(
@@ -465,5 +520,71 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
             "STRING".to_string()
         }
         _ => dt.to_backend_sql(),
+    }
+}
+
+#[cfg(test)]
+mod column_scoped_merge_tests {
+    use super::*;
+
+    fn keys() -> Vec<String> {
+        vec!["id".to_string()]
+    }
+
+    /// The unconditional variant's emitted text must be byte-unchanged from
+    /// before this phase — the regression guard the plan phase's TDD list
+    /// names explicitly.
+    #[test]
+    fn unconditional_variant_text_is_unchanged() {
+        let group = emit_column_scoped_merge(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO warehouse.dim_users AS target USING (SELECT * FROM delta) AS source ON \
+             target.id = source.id WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *"
+        );
+        assert!(!group.transactional);
+    }
+
+    /// The suppressed variant's matched arm carries `IS DISTINCT FROM` over
+    /// exactly the compared column set, in order, ORed together.
+    #[test]
+    fn suppressed_variant_carries_is_distinct_from_over_compared_columns() {
+        let compared = vec!["tier".to_string(), "email".to_string()];
+        let group = emit_column_scoped_merge_suppressed(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            &compared,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO warehouse.dim_users AS target USING (SELECT * FROM delta) AS source ON \
+             target.id = source.id WHEN MATCHED AND (target.tier IS DISTINCT FROM source.tier OR \
+             target.email IS DISTINCT FROM source.email) THEN UPDATE SET * WHEN NOT MATCHED THEN \
+             INSERT *"
+        );
+        assert!(!group.transactional);
+    }
+
+    /// A vacuous compare set would suppress every write silently — refuse
+    /// via panic rather than emit a matched arm that never fires.
+    #[test]
+    #[should_panic(expected = "requires a non-empty compared-column set")]
+    fn suppressed_variant_panics_on_empty_compare_set() {
+        emit_column_scoped_merge_suppressed(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
     }
 }

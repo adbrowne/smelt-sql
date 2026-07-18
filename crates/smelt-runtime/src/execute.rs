@@ -1153,7 +1153,7 @@ pub async fn execute_project(
                 // requested window differs.
                 let column_merge_dispatch: Option<crate::maintenance_driver::ColumnMergeDispatch> =
                     match column_scoped_cell.as_ref() {
-                        Some((source, cell)) => {
+                        Some((source, cell, _suppression)) => {
                             let table_exists = backend
                                 .table_exists(schema, &plan.model_file.db_name_owned())
                                 .await
@@ -1347,6 +1347,14 @@ pub async fn execute_project(
                         // `MERGE` — the driver loop becoming the per-cell
                         // technique executor.
                         used_column_scoped_merge = true;
+                        // Same live cell `column_scoped_cell` resolved above —
+                        // its `WriteSuppression` verdict (T1, Phase C4) was
+                        // already derived there, from the SAME plan/comparability
+                        // read; not re-derived per batch.
+                        let suppression = column_scoped_cell
+                            .as_ref()
+                            .map(|(_, _, s)| s)
+                            .expect("dispatch is Some only when column_scoped_cell resolved live");
                         match dispatch {
                             crate::maintenance_driver::ColumnMergeDispatch::Full => {
                                 crate::maintenance_driver::execute_column_scoped_merge_full(
@@ -1355,6 +1363,7 @@ pub async fn execute_project(
                                     &plan.model_file.db_name_owned(),
                                     &inc_plan.config.unique_key,
                                     &compiled.sql,
+                                    suppression,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1390,6 +1399,7 @@ pub async fn execute_project(
                                     &inc_plan.timeseries.partition_column,
                                     &conv_ts,
                                     &compiled.sql,
+                                    suppression,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?

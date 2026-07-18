@@ -32,14 +32,28 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::CellTechnique;
 use smelt_logical::analysis::join_shape::ContributionVerdict;
 use smelt_logical::analysis::source_bounds::{BoundResult, Seconds};
+use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::{
     Corner, MaintenancePlan, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict,
     ScanClamp, Technique, Trigger,
 };
 use smelt_runtime::maintenance_driver::{
-    decide_column_merge_dispatch, execute_column_scoped_merge, resolve_cell_technique,
-    widen_horizon_for_batch, ColumnMergeDispatch, ResolvedTechnique,
+    decide_column_merge_dispatch, execute_column_scoped_merge, execute_column_scoped_merge_full,
+    resolve_cell_technique, widen_horizon_for_batch, ColumnMergeDispatch, ResolvedTechnique,
 };
+
+/// These two physical-mechanism tests below exercise `execute_column_scoped_
+/// merge` directly (not through the derived plan's own `WriteSuppression`
+/// resolution, `maintenance_driver::resolve_live_column_scoped_cell`'s job)
+/// — they always pass the unconditional variant so the pre-Phase-C4
+/// `UPDATE SET *` behaviour they assert on is unchanged by C4's suppression
+/// machinery.
+fn unconditional() -> WriteSuppression {
+    WriteSuppression::Unconditional {
+        why: "test exercises the physical mechanism directly, not suppression admission"
+            .to_string(),
+    }
+}
 
 /// A plan whose only cell is an admitted `ColumnScopedMerge` for `source`'s
 /// mutation trigger over the `{tier}` column group — the enrichment shape's
@@ -237,6 +251,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         "d",
         "2024-01-01 12:00:00",
         dimension_batch_sql,
+        &unconditional(),
     )
     .await
     .expect("column-scoped merge must succeed");
@@ -401,6 +416,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         "d",
         "2024-01-01 00:00:00",
         dimension_batch_sql,
+        &unconditional(),
     )
     .await
     .expect("horizon-clamped column-scoped merge must succeed");
@@ -431,6 +447,203 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         "d=2024-01-03 falls outside [conv_ts - 24h, conv_ts] — the horizon clamp must leave it \
          untouched this run, unlike execute_column_scoped_merge_full's unconditional full merge"
     );
+}
+
+/// Phase C4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the change-suppressed column-scoped MERGE (T1), real-DuckDB proof: an
+/// unchanged-input re-run writes **zero** rows. `resolve_write_suppression`
+/// is fed a proven `Key` row identity (P2) and an all-`Comparable` P3
+/// verdict for the `{tier}` group — the admission this phase adds — so it
+/// resolves `WriteSuppression::Suppressed`, and `execute_column_scoped_merge_
+/// full` dispatches through `emit_column_scoped_merge_suppressed` instead of
+/// the plain unconditional emitter used by the tests above.
+///
+/// The "zero rows written" proof reads DuckDB's own `Count` column off the
+/// `MERGE`'s query result (`execute_sql`'s returned `RecordBatch`, captured
+/// here directly rather than through `execute_column_scoped_merge_full`'s
+/// `ExecutionResult::row_count`, which only reports the target's total row
+/// count, not the number of rows the statement itself touched) — the same
+/// affected-row semantics DuckDB's own `MERGE`/`UPDATE`/`INSERT` report.
+#[tokio::test]
+async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create dim table");
+    // Dimension starts out identical to the target — the first run below is
+    // itself an unchanged-input run.
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed dim table");
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+
+    // The admission this phase adds: a proven key over a fully comparable
+    // group resolves `Suppressed`, naming exactly the `{tier}` group.
+    let row_identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["user_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let comparability = vec![smelt_logical::analysis::walk::ColumnComparability {
+        output: "tier".to_string(),
+        comparability: smelt_logical::analysis::walk::Comparability::Comparable,
+    }];
+    let suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+        &["tier".to_string()],
+        &comparability,
+        &row_identity,
+    );
+    assert_eq!(
+        suppression,
+        WriteSuppression::Suppressed {
+            compared_columns: vec!["tier".to_string()]
+        },
+        "a proven key over a fully comparable group must admit the conditional variant"
+    );
+
+    // Run 1: dimension unchanged relative to the target — the suppressed
+    // MERGE must match every row but write none of them.
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+    )
+    .await
+    .expect("suppressed column-scoped merge must succeed");
+
+    let affected = merge_affected_row_count(
+        &backend,
+        "main.dim_users",
+        "main.sources_users",
+        &["user_id"],
+        &["tier"],
+    )
+    .await;
+    assert_eq!(
+        affected, 0,
+        "an unchanged-input re-run of the suppressed MERGE must write zero rows"
+    );
+
+    // Mutate the dimension for user 1 — now a real change exists.
+    backend
+        .execute_sql("UPDATE main.sources_users SET tier = 'gold' WHERE user_id = 1")
+        .await
+        .expect("mutate dimension");
+
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+    )
+    .await
+    .expect("suppressed column-scoped merge must succeed after mutation");
+
+    let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+    let tier_1: String = conn
+        .query_row(
+            "SELECT tier FROM main.dim_users WHERE user_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read maintained tier for user 1");
+    assert_eq!(
+        tier_1, "gold",
+        "the suppressed MERGE must still pick up a genuine change"
+    );
+    let tier_2: String = conn
+        .query_row(
+            "SELECT tier FROM main.dim_users WHERE user_id = 2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read unaffected tier for user 2");
+    assert_eq!(tier_2, "silver", "an unmutated row must be left untouched");
+
+    // Full-refresh oracle: the maintained state must equal a fresh join,
+    // exactly like the unconditional-variant tests above.
+    let oracle_tier_1: String = conn
+        .query_row(
+            "SELECT tier FROM main.sources_users WHERE user_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("oracle read");
+    assert_eq!(tier_1, oracle_tier_1);
+
+    // Run 3: dimension unchanged again (relative to the now-mutated state)
+    // — zero rows written a second time.
+    let affected_again = merge_affected_row_count(
+        &backend,
+        "main.dim_users",
+        "main.sources_users",
+        &["user_id"],
+        &["tier"],
+    )
+    .await;
+    assert_eq!(
+        affected_again, 0,
+        "a second unchanged-input re-run must also write zero rows"
+    );
+}
+
+/// Issue the exact `emit_column_scoped_merge_suppressed`-shaped statement
+/// directly and read DuckDB's own affected-row `Count` off the query
+/// result — the same probe this test file's e2e proof reads its "zero rows
+/// written" assertion from, kept separate from `execute_column_scoped_merge_
+/// full` (whose `ExecutionResult::row_count` reports the target's total row
+/// count, not the number of rows the statement itself touched).
+async fn merge_affected_row_count(
+    backend: &DuckDbBackend,
+    target: &str,
+    source: &str,
+    key: &[&str],
+    compared: &[&str],
+) -> i64 {
+    use smelt_logical::maintenance::emit::{
+        emit_column_scoped_merge_suppressed, MaintenanceDialect,
+    };
+
+    let key_owned: Vec<String> = key.iter().map(|s| s.to_string()).collect();
+    let compared_owned: Vec<String> = compared.iter().map(|s| s.to_string()).collect();
+    let group = emit_column_scoped_merge_suppressed(
+        target,
+        &key_owned,
+        &format!("SELECT * FROM {source}"),
+        &compared_owned,
+        MaintenanceDialect::DuckDb,
+    );
+    let batches = backend
+        .execute_sql(&group.statements[0].sql)
+        .await
+        .expect("probe merge must succeed");
+    let batch = batches.first().expect("MERGE returns one Count row");
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("Count column is Int64");
+    counts.value(0)
 }
 
 /// Real fixture: `examples/timeseries/models/daily_events_enriched.sql`
