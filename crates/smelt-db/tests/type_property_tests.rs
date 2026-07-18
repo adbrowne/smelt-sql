@@ -158,6 +158,49 @@ fn smoke_upper_function() {
 }
 
 #[test]
+fn smoke_md5_function() {
+    let oracle = DuckDbOracle::new();
+    let sql =
+        "WITH data AS (SELECT CAST('hello' AS VARCHAR) AS s) SELECT MD5(s) AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "s".into(),
+        data_type: DataType::Varchar { max_length: None },
+        cast_sql: "CAST('hello' AS VARCHAR)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    // smelt returns Text, DuckDB returns Varchar — should be Compatible
+    let match_result = compare_types(&inferred[0].1, &actual[0].1);
+    assert!(matches!(
+        match_result,
+        TypeMatch::Exact | TypeMatch::Compatible { .. }
+    ));
+}
+
+#[test]
+fn smoke_to_seconds_function() {
+    let oracle = DuckDbOracle::new();
+    let sql =
+        "WITH data AS (SELECT CAST(42.5 AS DOUBLE) AS s) SELECT TO_SECONDS(s) AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "s".into(),
+        data_type: DataType::Double,
+        cast_sql: "CAST(42.5 AS DOUBLE)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    let match_result = compare_types(&inferred[0].1, &actual[0].1);
+    assert!(matches!(
+        match_result,
+        TypeMatch::Exact | TypeMatch::Compatible { .. }
+    ));
+}
+
+#[test]
 fn smoke_count_aggregate() {
     let oracle = DuckDbOracle::new();
     let sql = "WITH data AS (SELECT CAST(1 AS INTEGER) AS x) SELECT COUNT(x) AS expr_0 FROM data";

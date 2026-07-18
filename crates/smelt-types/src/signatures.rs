@@ -3984,6 +3984,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
     ));
     insert(Signature::new(
+        "MD5",
+        vec![],
+        vec![concrete(DataType::Text)],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Text)),
+    ));
+    insert(Signature::new(
         "LENGTH",
         vec![],
         vec![concrete(DataType::Text)],
@@ -4547,6 +4553,12 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
                 with_timezone: false,
             }),
         ],
+        TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
+    ));
+    insert(Signature::new(
+        "TO_SECONDS",
+        vec![],
+        vec![concrete(DataType::Double)],
         TypeExpr::Concrete(TypeConstraint::Concrete(DataType::Interval)),
     ));
 

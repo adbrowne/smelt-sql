@@ -83,7 +83,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 8     | done    | fix(types): VALUES-body CTE alias arity check (AliasColumnArityMismatch parity) | 2026-07-19 |
 | 9     | done    | fix(logical): sub-day INTERVAL units in extract_interval_days_from_combined | 2026-07-19 |
 | 10    | blocked |        |      |
-| 11    | pending |        |      |
+| 11    | done    | feat(types): register to_seconds (Interval) and md5 (Text) in BuiltinRegistry | 2026-07-19 |
 | 12    | pending |        |      |
 
 ---

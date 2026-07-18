@@ -391,6 +391,7 @@ const REGISTRY_MIGRATED: &[&str] = &[
     "CHARACTER_LENGTH", // → BigInt
     "POSITION",         // → BigInt
     "STRPOS",           // → BigInt
+    "MD5",
     // ── Date / time (fixed return) ──────────────────────────────────────────
     "DATE",
     "CURRENT_DATE",
@@ -401,6 +402,7 @@ const REGISTRY_MIGRATED: &[&str] = &[
     "MAKE_TIMESTAMP",
     "MAKE_TIMESTAMPTZ",
     "AGE",
+    "TO_SECONDS",
     "YEAR",
     "MONTH",
     "DAY",
@@ -728,6 +730,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         SqlFunction::Concat
         | SqlFunction::Upper
         | SqlFunction::Lower
+        | SqlFunction::Md5
         | SqlFunction::Trim
         | SqlFunction::Ltrim
         | SqlFunction::Rtrim
@@ -884,7 +887,7 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
-        SqlFunction::Age => Some(TypedColumn {
+        SqlFunction::Age | SqlFunction::ToSeconds => Some(TypedColumn {
             data_type: DataType::Interval,
             nullable: true,
         }),

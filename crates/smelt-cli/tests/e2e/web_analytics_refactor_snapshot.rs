@@ -274,8 +274,9 @@ fn events_parsed_rowset_equivalent_after_refactor() {
 
 /// Seed CSV shared by both session workspace variants.  8 rows, two devices.
 ///
-/// Device 1 — inactivity-gap boundary (day-level granularity since smelt stores
-///   event_ts as DATE after type-cast wrapping):
+/// Device 1 — inactivity-gap boundary (day-level granularity in the seed data;
+///   `event_ts` is a TIMESTAMP, so the gap comparison operates on the actual
+///   time-of-day delta between events):
 ///   events 1 + 2 on 2026-03-19 → session 0 (gap between same-day events = 0).
 ///   events 3 + 4 on 2026-03-20 → session 1 (gap = 1 day >> 30 min).
 ///
@@ -317,11 +318,8 @@ FROM smelt.raw_events
 /// `sessionize` function declaration — the canonical signature.
 ///
 /// The body uses `epoch_us()` microsecond arithmetic rather than INTERVAL
-/// subtraction because smelt's current type inference for
-/// `CAST(date AS DATE) + to_seconds(n)` produces a DATE column rather than a
-/// TIMESTAMP; DuckDB then stores `event_ts` as DATE, making TIMESTAMP - TIMESTAMP
-/// arithmetic unavailable.  By using `epoch_us(ts_col)` the subtraction is
-/// BIGINT - BIGINT which works for both DATE and TIMESTAMP inputs.
+/// subtraction so the same expression works whether `ts_col` is a DATE or a
+/// TIMESTAMP (BIGINT - BIGINT), independent of the caller's column type.
 ///
 /// The `gap` parameter is in microseconds (default 30 minutes = 1 800 000 000 μs).
 ///
@@ -333,7 +331,7 @@ const SESSIONIZE_FN: &str = "\
 smelt.define sessionize(
     source: TableExpr,
     partition_col: Expr<Integer>,
-    ts_col: Expr<Date>,
+    ts_col: Expr<Timestamp>,
     platform_col: Expr<Text>,
     gap: Expr<BigInt> = 30 * 60 * 1000000
 ) -> TableExpr AS (

@@ -100,11 +100,13 @@ pub enum SqlFunction {
     MakeTimestamp,
     MakeTimestamptz,
     Age,
+    ToSeconds,
 
     // String functions
     Concat,
     Upper,
     Lower,
+    Md5,
     Trim,
     Ltrim,
     Rtrim,
@@ -256,9 +258,11 @@ const ALL_FUNCTIONS: &[SqlFunction] = &[
     SqlFunction::MakeTimestamp,
     SqlFunction::MakeTimestamptz,
     SqlFunction::Age,
+    SqlFunction::ToSeconds,
     SqlFunction::Concat,
     SqlFunction::Upper,
     SqlFunction::Lower,
+    SqlFunction::Md5,
     SqlFunction::Trim,
     SqlFunction::Ltrim,
     SqlFunction::Rtrim,
@@ -410,9 +414,11 @@ impl SqlFunction {
             Self::MakeTimestamp => "MAKE_TIMESTAMP",
             Self::MakeTimestamptz => "MAKE_TIMESTAMPTZ",
             Self::Age => "AGE",
+            Self::ToSeconds => "TO_SECONDS",
             Self::Concat => "CONCAT",
             Self::Upper => "UPPER",
             Self::Lower => "LOWER",
+            Self::Md5 => "MD5",
             Self::Trim => "TRIM",
             Self::Ltrim => "LTRIM",
             Self::Rtrim => "RTRIM",
@@ -544,11 +550,13 @@ impl SqlFunction {
             | Self::MakeTime
             | Self::MakeTimestamp
             | Self::MakeTimestamptz
-            | Self::Age => FunctionCategory::DateTime,
+            | Self::Age
+            | Self::ToSeconds => FunctionCategory::DateTime,
 
             Self::Concat
             | Self::Upper
             | Self::Lower
+            | Self::Md5
             | Self::Trim
             | Self::Ltrim
             | Self::Rtrim
