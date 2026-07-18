@@ -2197,28 +2197,37 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
 
 - **Conditional maintenance without a change feed.** Three composable mechanisms
   (`docs/research/20260715-conditional-maintenance-without-cdf.md`; tracking plan
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`), of which only the first has a
-  normative hook in this spec today (§"Windowed maintenance and the horizon" category 2 —
-  no-op write elimination; technique unbuilt, §Known Divergences):
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`):
   - **M1 — change-suppressed writes**: the emitted MERGE gains an `IS DISTINCT FROM` matched-arm
     predicate (merge-less backends get a staged-candidate conditional DELETE+INSERT), so an
-    unchanged region writes zero rows and redelivery storms become no-ops.
+    unchanged region writes zero rows and redelivery storms become no-ops. Built for the
+    column-scoped and keyed-fold write families (`model_transforms.md` §Known Divergences
+    "Change-suppressed MERGE").
   - **M2 — delta-restricted enrichment compute**: where the row skeleton is provably owned by
     the driving source alone (payload-only 1:1 enrichment joins), the expensive joins run only
-    over rows whose enrichment inputs changed — the classical delta-join algebra, licensed by a
-    new skeleton-source-closure proof plus an exact input delta.
+    over rows whose enrichment inputs changed — the classical delta-join algebra, licensed by
+    the skeleton-source-closure proof (`model_properties.md` §"Skeleton-source closure", P1) plus
+    an exact input delta. The proof and the transform (`model_transforms.md` — delta-restricted
+    enrichment join) are now specified; both remain unbuilt, and so does the `referential_integrity`
+    world-fact (`sources.md`) the proof's row-preservation conjunct consumes for an inner-join
+    enrichment.
   - **M3 — derived change feeds**: snapshot-diff made real on both boundaries — a fingerprint
     sidecar synthesizes a change feed for an external `mutable_snapshot` source, and the
     conditional write's own changed-row set is recorded as the model's **observed output
     delta**, turning every maintained model into a change-feed-postured upstream for free. On a
     composed (key + time) output the observed delta projects to exact partition dirt
     (§"What the composed shape uniquely enables"), which is what makes M3 propagatable through
-    the interval-based graph without keyed dirt-sets.
+    the interval-based graph without keyed dirt-sets. The output-delta half (recording +
+    key→partition projection) is built for the change-suppressed column-scoped MERGE family
+    (§Known Divergences "Observed-delta recording is built…"); the fingerprint-sidecar half, for
+    an external `mutable_snapshot` source, remains unbuilt.
   Each mechanism needs its own spec diff before it is surface: P1–P4 proofs in
-  `model_properties.md`, T1–T5 transform variants in `model_transforms.md`, the
-  referential-integrity world-fact and landed-delta refinement in `sources.md`, capability flags
-  in `multi_backend.md`, and a persistence-fingerprint stance reconciled with
-  `output_fingerprint.md`.
+  `model_properties.md` (P1 landed; P2–P4 remain), T1–T5 transform variants in
+  `model_transforms.md` (T1/T2/T3 landed as catalogue rows; the observed-output-delta recording
+  (T5) is specified in this spec's own graph-layer section above rather than as a catalogue row;
+  T4 remains), the referential-integrity world-fact (landed) and landed-delta refinement (landed) in
+  `sources.md`, capability flags in `multi_backend.md`, and a persistence-fingerprint stance
+  reconciled with `output_fingerprint.md`.
 
 ## References
 

@@ -99,7 +99,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | D2 | T5 observed output delta recording (comparable columns only; byproduct of C4/C5 writes) | done (2026-07-18) |
 | D3 | Partition projection of observed deltas via locality → exact `--landed` for model edges | done (2026-07-18) |
 | D4 | `smelt explain` observed-delta/settle surface; docs | done (2026-07-19) |
-| E1 | Spec diff: `model_properties.md` P1 skeleton-source closure; `sources.md` referential-integrity world-fact + count-preservation tripwire | pending |
+| E1 | Spec diff: `model_properties.md` P1 skeleton-source closure; `sources.md` referential-integrity world-fact + count-preservation tripwire | done (2026-07-19) |
 | E2 | P1 skeleton-source-closure proof (fail-closed to `Open`) | pending |
 | E3 | T3 delta-restricted compute over model edges (web-analytics events→sessions chain demo) | pending |
 | E4 | Conformance legs: delta-restricted vs widened-scan equivalence; empty-delta no-op cascade end-to-end | pending |

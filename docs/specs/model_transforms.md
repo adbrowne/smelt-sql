@@ -62,6 +62,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Reconciliation-ledger fold | additive column-group algebra | consult the `(output-region × column-group)` ledger entry before merging: refuse (never fold) a delta already in its processed set, otherwise combine and extend it; required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
 | Reconciliation-ledger recompute-reset | a region recompute | reset every ledger entry the recompute's footprint intersects to exactly the input the recompute read, so a later fold cannot double-count against stale bookkeeping | unbuilt |
 | Idempotent window re-scan vs delta-driven probe | idempotent monoid + source mutation profile | unconditional CDF-free re-scan when the fold is idempotent; a per-run changed-set probe when a change feed is available | *partial* |
+| Delta-restricted enrichment join | skeleton-source closure (`model_properties.md`) + an exact upstream delta on the driving-side model edge | restrict the enrichment recompute's driving scan to the delta's key set via a semi-join, replacing the widened scan for that cell; restricts recompute *breadth* under an exact delta, never what is scanned into `S` — composes with, but is licensed independently of, write suppression | unbuilt |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
 | DAG composition | litmus rule (`models.md`) | express a mode combination as two composed models at two grains, not a new mode | mechanism exists |
 | Full refresh | — (universal fallback) | drop and rebuild the whole output; the honest verdict for an unmaintainable declared mode | **built** |
@@ -475,6 +476,12 @@ by `docs/plans/20260704-model-updates.md` (design:
   whole-row (`EXCEPT ALL`-both-ways) realisation for a keyless region, and wiring this choice
   into the live `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) all
   remain open, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Delta-restricted enrichment join is specified but unbuilt**, and its licence (skeleton-source
+  closure, `model_properties.md`) is itself unbuilt — no cell can be admitted into this technique
+  yet. The transform is per-cell: an absent closure proof or an absent/inexact upstream delta
+  falls back to the ordinary widened scan, byte-identical to the unrestricted statement — the
+  restriction never changes what is scanned into `S`, only which rows the enrichment recompute
+  re-derives. Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (E3).
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
   bounded-domain multiset, compile-time pinning; the reconciliation-ledger
   fold/recompute-reset pair (no `(output-region × column-group)` ledger

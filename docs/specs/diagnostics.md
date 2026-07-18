@@ -89,6 +89,7 @@ Owned by `docs/specs/sources.md`.
 |------|----------|---------|
 | `SourceTypeError` | Error | A source YAML declares a type that smelt does not recognise. |
 | `MalformedSource` | Error | A source YAML block violates a structural rule. |
+| `SourceCountPreservationViolated` | Error (fails the consuming run, transactionally) | A declared `referential_integrity` was disproved: an enrichment join licensed by it returned fewer rows than the driving side over the touched region. |
 
 ---
 
@@ -472,6 +473,7 @@ Owned by `docs/specs/incremental_models.md`.
 ## Known divergences
 
 - **Four of the ten plan/graph `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, `MaintenanceGranularityMismatch`, `MaintenanceWriteAddressingRefused`, and `MaintenanceWritePatternUnavailable` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`), the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`), and the open write-pattern registry's `resolve_write_pin` (`crates/smelt-logical/src/maintenance/mod.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **`SourceCountPreservationViolated` is specified and unimplemented.** No `DiagnosticCode` variant exists yet; it depends on the unbuilt `referential_integrity` declaration parse and the unbuilt skeleton-source-closure proof (`sources.md`, `model_properties.md`). Landing: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **The write-addressing pin's equivalence-invariant factor is structural-facts-only.** `resolve_write_pin` implements the available-addressings rule's declared-facts, trigger, and backend-capability factors; the third factor (a per-cell equivalence proof beyond a pattern's declared required facts) is a caller-supplied hook that always accepts today (`incremental_models.md` §Known Divergences). Deepening it — e.g. threading P3 column-comparability into a `column`/`keyed_conditional` pin's own check — is later work.
 
 ## Open questions
