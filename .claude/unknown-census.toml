@@ -203,7 +203,7 @@ classification = "legitimate"
 reason = "decimal division early-return: Decimal / T or Integer / Decimal → Unknown; TypeMismatch diagnostic emitted separately by check_decimal_division_diagnostics"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/binary.rs:496"]
+["crates/smelt-db/src/type_inference/binary.rs:499"]
 classification = "error"
 reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown(Unresolved); TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
 discriminant = "unresolved"
@@ -349,14 +349,19 @@ classification = "legitimate"
 reason = "resolve_struct_return_type: row-var name mismatch between param and return — unresolvable"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:622"]
+["crates/smelt-db/src/type_inference/function_call.rs:639"]
 classification = "legitimate"
 reason = "Coalesce: all args Unknown/Null — result type genuinely unknown; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:642"]
+["crates/smelt-db/src/type_inference/function_call.rs:656"]
 classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/function_call.rs:926"]
+classification = "legitimate"
+reason = "Greatest/Least: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"
 
 # ── smelt-db / type_inference/hof ─────────────────────────────────────────────

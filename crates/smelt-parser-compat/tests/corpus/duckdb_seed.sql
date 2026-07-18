@@ -39,3 +39,4 @@ SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())
 SELECT struct_pack(x := a, y := b) AS s FROM t
 SELECT struct_pack(x => a, y => b) AS s FROM t
 SELECT UNNEST([[1, 2, 3]], recursive := true) AS u
+SELECT 2 NOT IN (2, 3) AS x

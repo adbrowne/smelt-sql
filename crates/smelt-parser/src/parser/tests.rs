@@ -8017,16 +8017,274 @@ fn glob_matches_ilike_identifier_precedent() {
 #[test]
 fn not_glob_not_supported() {
     // DuckDB itself rejects `NOT GLOB` (verified against a live DuckDB via the
-    // CLI oracle: `SELECT 'abc' NOT GLOB 'z*'` => Parser Error). This mirrors
-    // the pre-existing `NOT LIKE` limitation (also unsupported by this
-    // grammar), so smelt intentionally does not special-case NOT GLOB either.
+    // CLI oracle: `SELECT 'abc' NOT GLOB 'z*'` => Parser Error), so smelt
+    // intentionally does not special-case NOT GLOB — unlike NOT LIKE/NOT
+    // ILIKE/NOT IN/NOT BETWEEN/NOT SIMILAR TO, which DuckDB does accept (see
+    // the `not_*_parses` tests below).
     let sql = "SELECT a FROM t WHERE b NOT GLOB 'x*'";
     let parse = parse(sql);
     assert!(
         !parse.errors.is_empty(),
-        "NOT GLOB is expected to fail loud, matching DuckDB's own rejection \
-         and the pre-existing NOT LIKE limitation"
+        "NOT GLOB is expected to fail loud, matching DuckDB's own rejection"
     );
+}
+
+// ===== NOT-prefixed binary operators (Phase 1, `not_prefixed_binary_operator`
+// ledger category): `NOT IN`, `NOT LIKE`, `NOT ILIKE`, `NOT BETWEEN`,
+// `NOT SIMILAR TO`, and bare `expr NOT NULL` (sugar for `expr IS NOT NULL`).
+// All verified against a live DuckDB. =====
+
+#[test]
+fn not_in_parses() {
+    let sql = "SELECT 2 NOT IN (2, 3)";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let in_expr = parse1
+        .syntax()
+        .descendants()
+        .find_map(InExpr::cast)
+        .expect("must have an IN_EXPR node");
+    assert!(in_expr.is_negated(), "expected NOT IN to be negated");
+    // `values()` collects every EXPR child of the IN_EXPR node, which
+    // includes the left operand (`2`) alongside the value-list entries
+    // (`2, 3`) — pre-existing behavior, unrelated to the NOT prefix.
+    assert_eq!(in_expr.values().len(), 3);
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT IN"),
+        "printed SQL must retain NOT IN: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn not_like_parses() {
+    let sql = "SELECT a FROM t WHERE b NOT LIKE 'x%'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT LIKE");
+    assert_eq!(binary.operator().as_deref(), Some("NOT LIKE"));
+    assert!(!binary.is_unary(), "NOT LIKE has both operands");
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT LIKE"),
+        "printed SQL must retain NOT LIKE: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn not_between_parses() {
+    let sql = "SELECT 5 NOT BETWEEN 1 AND 3";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let between = parse1
+        .syntax()
+        .descendants()
+        .find_map(BetweenExpr::cast)
+        .expect("must have a BETWEEN_EXPR node");
+    assert!(between.is_negated(), "expected NOT BETWEEN to be negated");
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT BETWEEN"),
+        "printed SQL must retain NOT BETWEEN: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn not_ilike_glob_parse() {
+    // NOT ILIKE is accepted (like NOT LIKE); NOT GLOB is not (see
+    // `not_glob_not_supported` above) — this test pins both sides of that
+    // distinction in one place.
+    let ilike_sql = "SELECT a FROM t WHERE b NOT ILIKE 'X%'";
+    let ilike_parse = parse(ilike_sql);
+    assert!(
+        ilike_parse.errors.is_empty(),
+        "Parse errors: {:?}",
+        ilike_parse.errors
+    );
+    let binary = ilike_parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT ILIKE");
+    assert_eq!(binary.operator().as_deref(), Some("NOT ILIKE"));
+
+    let glob_sql = "SELECT a FROM t WHERE b NOT GLOB 'x*'";
+    assert!(
+        !parse(glob_sql).errors.is_empty(),
+        "NOT GLOB must still fail loud"
+    );
+}
+
+#[test]
+fn similar_to_parses() {
+    let sql = "SELECT a FROM t WHERE b SIMILAR TO 'x.*'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for SIMILAR TO");
+    assert_eq!(binary.operator().as_deref(), Some("SIMILAR TO"));
+}
+
+#[test]
+fn not_similar_to_parses() {
+    let sql = "SELECT a FROM t WHERE b NOT SIMILAR TO 'x.*'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT SIMILAR TO");
+    assert_eq!(binary.operator().as_deref(), Some("NOT SIMILAR TO"));
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT SIMILAR TO"),
+        "printed SQL must retain NOT SIMILAR TO: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn similar_and_to_remain_usable_as_identifiers() {
+    // SIMILAR and TO are unreserved in DuckDB — the contextual lookahead
+    // must not swallow them as plain aliases/columns.
+    assert!(
+        parse("SELECT 1 AS similar").errors.is_empty(),
+        "`similar` must remain usable as an alias"
+    );
+    assert!(
+        parse("SELECT 1 AS to").errors.is_empty(),
+        "`to` must remain usable as an alias"
+    );
+}
+
+#[test]
+fn bare_not_null_parses() {
+    // `expr NOT NULL` — DuckDB sugar for `expr IS NOT NULL` (verified
+    // against a live DuckDB: `SELECT 1 WHERE 1 NOT NULL` executes
+    // identically to `... WHERE 1 IS NOT NULL`). Same ledger category as
+    // NOT IN/LIKE/BETWEEN.
+    let sql = "SELECT a FROM t WHERE b NOT NULL";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for bare NOT NULL");
+    assert_eq!(binary.operator().as_deref(), Some("IS"));
+}
+
+#[test]
+fn prefix_not_on_non_operator_expression_unaffected() {
+    // Regression: prefix NOT applied to a general boolean expression (not
+    // one of IN/LIKE/ILIKE/BETWEEN/SIMILAR TO/NULL) must keep parsing as the
+    // unary boolean NOT, unaffected by the new NOT-prefixed-operator
+    // lookahead.
+    let paren_sql = "SELECT a FROM t WHERE NOT (a AND b)";
+    let paren_parse = parse(paren_sql);
+    assert!(
+        paren_parse.errors.is_empty(),
+        "Parse errors: {:?}",
+        paren_parse.errors
+    );
+    let binary = paren_parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT (a AND b)");
+    assert_eq!(binary.operator().as_deref(), Some("NOT"));
+    assert!(
+        binary.is_unary(),
+        "prefix NOT (a AND b) has no right operand"
+    );
+
+    let bare_sql = "SELECT a FROM t WHERE NOT x";
+    let bare_parse = parse(bare_sql);
+    assert!(
+        bare_parse.errors.is_empty(),
+        "Parse errors: {:?}",
+        bare_parse.errors
+    );
+    let bare_binary = bare_parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT x");
+    assert_eq!(bare_binary.operator().as_deref(), Some("NOT"));
+    assert!(bare_binary.is_unary(), "prefix NOT x has no right operand");
 }
 
 #[test]

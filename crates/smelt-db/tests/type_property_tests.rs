@@ -271,6 +271,194 @@ fn smoke_binary_division() {
     }
 }
 
+/// NOT-prefixed binary operators (Phase 1, `not_prefixed_binary_operator`
+/// ledger category) — `NOT IN`, `NOT LIKE`, `NOT ILIKE`, `NOT BETWEEN`,
+/// `NOT SIMILAR TO`, and bare `NOT NULL` all resolve to Boolean, matching a
+/// real DuckDB.
+#[test]
+fn smoke_not_in() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST(2 AS INTEGER) AS x) \
+               SELECT x NOT IN (2, 3) AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Integer,
+        cast_sql: "CAST(2 AS INTEGER)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt NOT IN should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB NOT IN should be Boolean"
+    );
+}
+
+#[test]
+fn smoke_not_like() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('abc' AS VARCHAR) AS x) \
+               SELECT x NOT LIKE 'z%' AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Text,
+        cast_sql: "CAST('abc' AS VARCHAR)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt NOT LIKE should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB NOT LIKE should be Boolean"
+    );
+}
+
+#[test]
+fn smoke_not_ilike() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('abc' AS VARCHAR) AS x) \
+               SELECT x NOT ILIKE 'Z%' AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Text,
+        cast_sql: "CAST('abc' AS VARCHAR)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt NOT ILIKE should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB NOT ILIKE should be Boolean"
+    );
+}
+
+#[test]
+fn smoke_not_between() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST(5 AS INTEGER) AS x) \
+               SELECT x NOT BETWEEN 1 AND 3 AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Integer,
+        cast_sql: "CAST(5 AS INTEGER)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt NOT BETWEEN should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB NOT BETWEEN should be Boolean"
+    );
+}
+
+#[test]
+fn smoke_similar_to() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('abc' AS VARCHAR) AS x) \
+               SELECT x SIMILAR TO 'a.*' AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Text,
+        cast_sql: "CAST('abc' AS VARCHAR)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt SIMILAR TO should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB SIMILAR TO should be Boolean"
+    );
+}
+
+#[test]
+fn smoke_not_similar_to() {
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('abc' AS VARCHAR) AS x) \
+               SELECT x NOT SIMILAR TO 'z.*' AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Text,
+        cast_sql: "CAST('abc' AS VARCHAR)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt NOT SIMILAR TO should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB NOT SIMILAR TO should be Boolean"
+    );
+}
+
+#[test]
+fn smoke_bare_not_null() {
+    // `expr NOT NULL` — DuckDB sugar for `expr IS NOT NULL`. Same ledger
+    // category (`not_prefixed_binary_operator`) as NOT IN/LIKE/BETWEEN.
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST(1 AS INTEGER) AS x) \
+               SELECT x NOT NULL AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Integer,
+        cast_sql: "CAST(1 AS INTEGER)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+
+    assert_eq!(
+        inferred[0].1,
+        DataType::Boolean,
+        "smelt bare NOT NULL should be Boolean"
+    );
+    assert_eq!(
+        actual[0].1,
+        DataType::Boolean,
+        "DuckDB bare NOT NULL should be Boolean"
+    );
+}
+
 #[test]
 fn smoke_nested_cte_division() {
     let oracle = DuckDbOracle::new();

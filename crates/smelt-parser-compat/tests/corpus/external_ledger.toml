@@ -143,10 +143,6 @@ note = "sqllogictest ${...} template placeholder substituted at test-run time by
 category = "range_keyword_as_identifier_or_function"
 note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
-["bfd77a838c18b1ee"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
 ["f4f84f035bf107c7"]
 category = "double_equals_operator"
 note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
@@ -234,10 +230,6 @@ note = "A glob/path string literal used directly as a FROM target is not parsed"
 ["d8d88b608d1f5372"]
 category = "recursive_cte_cycle_using_key"
 note = "WITH RECURSIVE ... USING KEY cycle-detection clause is not parsed"
-
-["4bfa6e902d2fed4e"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["0287efd3e8516d74"]
 category = "implicit_cross_join_comma_syntax"
@@ -434,10 +426,6 @@ note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in 
 ["85572a0abe900ae0"]
 category = "star_exclude_or_rename_clause"
 note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in all positions (nested in list comprehensions, or with a trailing comma in the column list)"
-
-["4d0dd132657b256e"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["fbe13b47bb1dacaf"]
 category = "implicit_cross_join_comma_syntax"
@@ -742,14 +730,6 @@ note = "SELECT ... INTO [TABLE] target (PostgreSQL's SELECT-INTO table-creation 
 ["bd85096b1212237c"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
-
-["b6df6d802fb49130"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
-["87ca4960829e3b9d"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["b2ac103355cb7e31"]
 category = "information_schema_roundtrip"
@@ -1062,10 +1042,6 @@ note = "A numeric literal immediately followed by an identifier-continuation cha
 ["9c8fe5f0b0ea90e8"]
 category = "regtype_regclass_cast"
 note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
-
-["3226a1a01d7c5be1"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["4fed97a9b0057d83"]
 category = "implicit_cross_join_comma_syntax"

@@ -2370,43 +2370,77 @@ impl BinaryExpr {
 
     /// Get the operator as a string
     pub fn operator(&self) -> Option<String> {
-        for child in self.0.children_with_tokens() {
-            if let Some(token) = child.as_token() {
-                match token.kind() {
-                    PLUS => return Some("+".to_string()),
-                    MINUS => return Some("-".to_string()),
-                    STAR | MULTIPLY => return Some("*".to_string()),
-                    DIVIDE => return Some("/".to_string()),
-                    PERCENT => return Some("%".to_string()),
-                    DOUBLE_STAR => return Some("**".to_string()),
-                    CARET => return Some("^".to_string()),
-                    FLOOR_DIVIDE => return Some("//".to_string()),
-                    EQ => return Some("=".to_string()),
-                    NE => return Some("<>".to_string()),
-                    LT => return Some("<".to_string()),
-                    GT => return Some(">".to_string()),
-                    LE => return Some("<=".to_string()),
-                    GE => return Some(">=".to_string()),
-                    CONCAT => return Some("||".to_string()),
-                    AND_KW => return Some("AND".to_string()),
-                    OR_KW => return Some("OR".to_string()),
-                    IS_KW => return Some("IS".to_string()),
-                    NOT_KW => return Some("NOT".to_string()),
-                    LIKE_KW => return Some("LIKE".to_string()),
-                    ILIKE_KW => return Some("ILIKE".to_string()),
-                    GLOB_KW => return Some("GLOB".to_string()),
-                    TILDE => return Some("~".to_string()),
-                    TILDE_STAR => return Some("~*".to_string()),
-                    NOT_TILDE => return Some("!~".to_string()),
-                    NOT_TILDE_STAR => return Some("!~*".to_string()),
-                    JSON_ARROW => return Some("->".to_string()),
-                    JSON_ARROW_TEXT => return Some("->>".to_string()),
-                    HASH_ARROW => return Some("#>".to_string()),
-                    HASH_ARROW_TEXT => return Some("#>>".to_string()),
-                    AT_GT => return Some("@>".to_string()),
-                    LT_AT => return Some("<@".to_string()),
-                    _ => {}
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|c| c.into_token())
+            .collect();
+        for (i, token) in tokens.iter().enumerate() {
+            match token.kind() {
+                PLUS => return Some("+".to_string()),
+                MINUS => return Some("-".to_string()),
+                STAR | MULTIPLY => return Some("*".to_string()),
+                DIVIDE => return Some("/".to_string()),
+                PERCENT => return Some("%".to_string()),
+                DOUBLE_STAR => return Some("**".to_string()),
+                CARET => return Some("^".to_string()),
+                FLOOR_DIVIDE => return Some("//".to_string()),
+                EQ => return Some("=".to_string()),
+                NE => return Some("<>".to_string()),
+                LT => return Some("<".to_string()),
+                GT => return Some(">".to_string()),
+                LE => return Some("<=".to_string()),
+                GE => return Some(">=".to_string()),
+                CONCAT => return Some("||".to_string()),
+                AND_KW => return Some("AND".to_string()),
+                OR_KW => return Some("OR".to_string()),
+                IS_KW => return Some("IS".to_string()),
+                NOT_KW => {
+                    // A leading `NOT` in a BINARY_EXPR is either the unary
+                    // boolean NOT (this node kind is reused for unary
+                    // operators — `right()` is `None` in that case) or the
+                    // prefix of a NOT-prefixed binary pattern-match operator
+                    // (`NOT LIKE`, `NOT ILIKE`, `NOT SIMILAR TO`) or the bare
+                    // `expr NOT NULL` sugar for `expr IS NOT NULL`. `NOT
+                    // IN`/`NOT BETWEEN` are distinct node kinds
+                    // (IN_EXPR/BETWEEN_EXPR), not BINARY_EXPR, so they never
+                    // reach this arm. DuckDB itself rejects `NOT GLOB`
+                    // (verified against a live DuckDB), so GLOB has no
+                    // compound form here.
+                    let next_kw_text = tokens[i + 1..]
+                        .iter()
+                        .find(|t| !t.kind().is_trivia())
+                        .map(|t| t.text().to_string());
+                    return match next_kw_text.as_deref() {
+                        Some(t) if t.eq_ignore_ascii_case("LIKE") => Some("NOT LIKE".to_string()),
+                        Some(t) if t.eq_ignore_ascii_case("ILIKE") => Some("NOT ILIKE".to_string()),
+                        Some(t) if t.eq_ignore_ascii_case("SIMILAR") => {
+                            Some("NOT SIMILAR TO".to_string())
+                        }
+                        // `expr NOT NULL` — treated as `IS` so it flows
+                        // through the same nullability-checking dispatch arm
+                        // as `expr IS NOT NULL`.
+                        Some(t) if t.eq_ignore_ascii_case("NULL") => Some("IS".to_string()),
+                        _ => Some("NOT".to_string()),
+                    };
                 }
+                LIKE_KW => return Some("LIKE".to_string()),
+                ILIKE_KW => return Some("ILIKE".to_string()),
+                GLOB_KW => return Some("GLOB".to_string()),
+                TILDE => return Some("~".to_string()),
+                TILDE_STAR => return Some("~*".to_string()),
+                NOT_TILDE => return Some("!~".to_string()),
+                NOT_TILDE_STAR => return Some("!~*".to_string()),
+                JSON_ARROW => return Some("->".to_string()),
+                JSON_ARROW_TEXT => return Some("->>".to_string()),
+                HASH_ARROW => return Some("#>".to_string()),
+                HASH_ARROW_TEXT => return Some("#>>".to_string()),
+                AT_GT => return Some("@>".to_string()),
+                LT_AT => return Some("<@".to_string()),
+                IDENT if token.text().eq_ignore_ascii_case("SIMILAR") => {
+                    return Some("SIMILAR TO".to_string())
+                }
+                _ => {}
             }
         }
         None
@@ -3340,6 +3374,16 @@ impl BetweenExpr {
         // Second EXPRESSION child
         self.0.children().filter_map(Expr::cast).nth(1)
     }
+
+    /// True for `expr NOT BETWEEN low AND high`. The leading `NOT` (if
+    /// present) is a direct token child of this node — not nested inside
+    /// either operand — so a plain token scan is unambiguous.
+    pub fn is_negated(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|c| c.into_token())
+            .any(|t| t.kind() == NOT_KW)
+    }
 }
 
 /// IN expression (expr IN (values...) or expr IN (subquery))
@@ -3372,6 +3416,16 @@ impl InExpr {
         } else {
             self.0.children().filter_map(Expr::cast).collect()
         }
+    }
+
+    /// True for `expr NOT IN (...)`. The leading `NOT` (if present) is a
+    /// direct token child of this node — not nested inside the left operand
+    /// or the value list — so a plain token scan is unambiguous.
+    pub fn is_negated(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|c| c.into_token())
+            .any(|t| t.kind() == NOT_KW)
     }
 }
 
