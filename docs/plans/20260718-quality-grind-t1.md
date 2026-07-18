@@ -81,7 +81,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 6     | done    | fix(parser): trailing ORDER BY/LIMIT after parenthesized set-op operand | 2026-07-19 |
 | 7     | done    | fix(parser): alias-first TABLESAMPLE/PIVOT/UNPIVOT ordering to match DuckDB | 2026-07-19 |
 | 8     | done    | fix(types): VALUES-body CTE alias arity check (AliasColumnArityMismatch parity) | 2026-07-19 |
-| 9     | pending |        |      |
+| 9     | done    | fix(logical): sub-day INTERVAL units in extract_interval_days_from_combined | 2026-07-19 |
 | 10    | pending |        |      |
 | 11    | pending |        |      |
 | 12    | pending |        |      |
@@ -555,6 +555,19 @@ Timeless-oracle wording throughout.
   and `example_diagnostics` are all green, and the phase's own red→green
   TDD cycle is verified in isolation. The flake itself remains open for
   human triage per Phase 5's candidate options (unchanged).
+
+- **2026-07-19, Phase 9.** Re-observed the same pre-existing `sessions_chained`
+  fixpoint flake: the full `cargo test (workspace)` gate leg failed on
+  `smelt-datagen::tests::example_web_analytics::test_eventstream_with_identity_includes_backward_fill`
+  with the identical `output-schema fixpoint did not converge within 5
+  rounds` root cause. Confirmed unrelated to this phase: `git stash` (tree
+  with no Phase 9 diff) reproduces a clean pass on one run and the same
+  targeted test also passes clean when re-run with the Phase 9 diff applied
+  — nondeterministic, not caused by this change. This phase's own tests
+  (`interval_minutes_not_days`, `interval_seconds_not_days`,
+  `interval_days_unchanged`) are green, fmt/clippy/example_diagnostics all
+  pass. Per the precedent set by Phases 6, 7, and 8, not treated as a
+  phase-9 blocker.
 
 ## Verification
 
