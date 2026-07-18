@@ -143,10 +143,10 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         TypeDivergence {
             id: "cast_float_as_double",
             description:
-                "CAST(x AS FLOAT) — smelt normalizes FLOAT to DOUBLE, DuckDB returns FLOAT (4-byte)",
+                "CAST(x AS FLOAT) — smelt normalizes FLOAT to DOUBLE, DuckDB and Spark both return FLOAT (4-byte)",
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::Float),
-            spark_type: None,
+            spark_type: Some(DataType::Float),
             status: DivergenceStatus::ByDesign,
         },
         TypeDivergence {
@@ -294,6 +294,17 @@ mod tests {
         let found = find_divergence(&DataType::Double, &DataType::BigInt, "spark", &divs);
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "ceil_floor_double");
+    }
+
+    #[test]
+    fn finds_cast_float_as_double_divergence_spark() {
+        // Regression: CI caught `CAST(DECIMAL AS FLOAT)` failing against the
+        // Spark oracle because cast_float_as_double only listed a duckdb_type,
+        // even though Spark also returns FLOAT (not DOUBLE) here.
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::Double, &DataType::Float, "spark", &divs);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "cast_float_as_double");
     }
 
     #[test]
