@@ -79,8 +79,8 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
 | W0 | Extremal-aggregate nullability: `MIN`/`MAX` over a NOT NULL argument infers NOT NULL in grouped context (unblocks W1) | done (2026-07-18) |
-| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending (reopened 2026-07-18 — was blocked on the MIN/MAX inference gap; W0 resolves it) |
-| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending (reopened 2026-07-18 — precondition W1 reopened) |
+| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | blocked (2026-07-18 — new gap found: `derive_fold_spec` single-non-key-aggregate limit, distinct from the MIN/MAX nullability gap W0 fixed) |
+| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | blocked (2026-07-18 — transitively blocked on W1) |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | done (2026-07-18) |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | done (2026-07-18) |
@@ -208,6 +208,45 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
   `pending` with W0 added to W1's pre-conditions. The two blocked entries above are retained
   for the record; do not re-block on the same cause — if W0 lands and the repro still fails,
   that is a new finding.
+
+- **2026-07-18 — W1, NEW FINDING (W0 fix confirmed working; second independent gap
+  surfaced).** With W0 landed, staging the exact flagship repro from the first W1 blocked
+  entry (`events_deduped.sql` with `key_recurrence` on the raw events source) advances past
+  the nullability error — confirmed by trimming to a single-aggregate variant
+  (`SELECT event_id, MIN(CAST(event_date AS DATE)) AS first_seen_date FROM
+  smelt.sources.raw.events GROUP BY event_id`), which passes `example_diagnostics` cleanly.
+  But the full six-column flagship shape (`MIN(device_id)`, `MIN(user_id)`, `MIN(event_ts)`,
+  `MIN(first_seen_date)`, `MIN(utm_campaign)`, `MIN(payload)`) still fails:
+  ```
+  [Error] models/silver/events_deduped.sql: no maintenance technique admits trigger
+  NewData { source: "raw.events" }: keyed grain with no fold specification
+  ```
+  Root cause is independent of nullability: `derive_fold_spec` in
+  `crates/smelt-db/src/queries/maintenance.rs` (~line 128-151) admits a `grain: key` model's
+  `NewData` cell only when the outermost `SELECT` has **exactly one** non-key aggregate
+  column (`if aggregates.len() != 1 { return None; }`). `derive_new_data`'s `Grain::Key`
+  branch (`crates/smelt-logical/src/maintenance/derive.rs:311-317`) refuses the cell when
+  `inputs.fold` is `None`, which is what happens for any multi-aggregate `SELECT`. The prior
+  blocked-phase note misdiagnosed this second diagnostic as "a downstream consequence of the
+  same failed [nullability] classification" — it is not; it reproduces identically with a
+  fully NOT-NULL, single-column fold once more than one aggregate column is added.
+  `silver/device_user_edges.sql` (3 aggregates: COUNT/MIN/MAX) is not a counterexample — it
+  reads from an upstream **model** (`silver.events_parsed`), reaching maintenance derivation
+  via a different trigger path than a raw-source-driven `NewData` cell, not because
+  multi-aggregate folds are generally supported on this route. There is no declarative
+  escape hatch: `maintenance.cells[].technique` only pins a technique on an already-derived
+  cell, and no cell exists here to pin. All investigation changes were reverted; tree is
+  clean and matches HEAD. **Candidate options:** (a) extend `derive_fold_spec` /
+  `FoldSpec` to support a per-column combiner list for the source-driven `NewData` path
+  (mirroring the comment already in `device_user_edges.sql` describing
+  COUNT→SUM/MIN→MIN/MAX→MAX composition) — production code, needs its own phase; (b) narrow
+  W1's flagship SQL to a single-aggregate shape — loses the multi-column payload-carrying
+  demonstration the tracer is meant to show; (c) explain-only admission demo, no real
+  `smelt run`/e2e leg, pending the fix. **Recommendation:** (a) — same shape as the first W1
+  blocker's resolution: fix the shared production-code gap in a dedicated phase (a new W0b
+  or similarly-scoped phase extending `derive_fold_spec` to multi-column extremal folds),
+  then resume W1 with the flagship shape intact. This is a human plan-scaffolding decision,
+  not something this iteration should pick unilaterally.
 
 ---
 
