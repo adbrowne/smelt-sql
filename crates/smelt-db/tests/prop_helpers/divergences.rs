@@ -101,6 +101,20 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
+            id: "median_decimal",
+            description:
+                "MEDIAN(DECIMAL) — smelt infers Decimal, unchanged (matches DuckDB, which \
+                preserves the input Decimal type). Spark's MEDIAN is implemented via \
+                percentile_cont, which always returns DOUBLE regardless of input type.",
+            smelt_type: DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            },
+            duckdb_type: None,
+            spark_type: Some(DataType::Double),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
             id: "sign_double",
             description:
                 "SIGN(DOUBLE) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Double",
@@ -343,6 +357,25 @@ mod tests {
         );
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "decimal_arithmetic_model");
+    }
+
+    #[test]
+    fn finds_median_decimal_divergence_spark() {
+        // Regression: a soak run at 10000 cases caught `MEDIAN(DECIMAL(10,2))`
+        // diverging against Spark — smelt/DuckDB preserve the Decimal type,
+        // Spark's percentile_cont-backed MEDIAN always returns DOUBLE.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            &DataType::Double,
+            "spark",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "median_decimal");
     }
 
     #[test]
