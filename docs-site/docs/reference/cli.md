@@ -177,7 +177,7 @@ Every `refresh: incremental` model with a declared `grain:` derives a maintenanc
 
 An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (`bronze`), with its `sources.` breadcrumb (`sources.bronze`), or with the full `smelt.` prefix (`smelt.sources.bronze`) — all three resolve identically.
 
-`--source` also accepts an **upstream maintained model** as the delta origin — a model's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp `smelt explain` reports for it), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op.
+`--source` accepts any **clocked provider** as the delta origin — a declared source, or an upstream maintained model, whether ordinary (`grain: partition`/`key_per_partition`) or a **locality-admitted composed model** (`grain: key` plus an admitted `timeseries:` block — see [the composed shape](../guide/incremental-models.md#the-composed-shape-key-time)). A model origin's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp `smelt explain` reports for it — a composed origin's edge carries its admitted route's own margin), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op. A **bare** keyed model (no admitted `timeseries:`) still refuses fail-loud as a `--source` origin, the same as anywhere else in the propagation graph — it has no partition axis for interval dirt to propagate over.
 
 ```bash
 # silver.events_parsed finished a run over Jan 3; propagate that landed
@@ -186,7 +186,7 @@ smelt run --since-upstream \
   --source silver.events_parsed --landed 2026-01-03..2026-01-04
 ```
 
-A model whose dependency graph contains a cycle, a self-reference, or a keyed-grain node (no partition axis for interval dirt) refuses the whole `--since-upstream` invocation with a named error rather than guessing.
+A model whose dependency graph contains a cycle, a self-reference, or a **bare** keyed-grain node (no admitted time axis, so no partition axis for interval dirt to propagate over) refuses the whole `--since-upstream` invocation with a named error rather than guessing. A locality-admitted composed node is not refused — it participates in propagation like any other clocked node, both as an intermediate stage and as the `--source` origin itself.
 
 ```bash
 # Two sources landed data since the last propagation; run exactly the

@@ -1767,7 +1767,30 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   contributes, unchanged by this narrowing. No key-level dirt representation exists anywhere;
   intervals stay the graph's only currency (`10-dependency-propagation.md` §6, S12 — a
   key-addressed dirt-set representation remains designed but unbuilt for any node this interval
-  projection cannot cover).
+  projection cannot cover). The CLI loop is now closed end to end: `--source <address>` accepts
+  a locality-admitted composed model as the delta origin exactly like any other maintained-model
+  origin (the origin is never re-run; its landed delta reflects through the composed node's own
+  outbound edge), and `smelt build --include-upstreams` walks *through* a composed node as an
+  ordinary ancestor in its build order. Reaching this required threading a declared
+  `key_recurrence` bound into the graph-layer's own per-model derivation
+  (`crates/smelt-runtime/src/propagation.rs::build_forward_graph` now builds the same
+  `(bare source name, key_recurrence)` list `smelt-db`'s `derive_model_maintenance_plan_with_edges`
+  call site does, via `smelt_db::queries::maintenance::build_key_recurrences`) — previously this
+  call site passed an empty list unconditionally, so a route-3 declared-sub-route composed node
+  (the flagship `examples/web_analytics/models/silver/events_deduped.sql`) never established
+  locality in the graph layer at all and its bare `PartitionGrain::Keyed` classification made
+  `refuse_keyed_nodes` fail-loud refuse any graph containing it, origin or not. A **bare** keyed
+  model named directly as a `--source` origin now also refuses fail-loud with the same "without
+  an admitted time axis" message even when it has no edge in the assembled graph (an isolated or
+  edge-less bare keyed origin was previously a silent no-op instead of a refusal, since the
+  edge-only `refuse_keyed_nodes` check never visits a node with no edge touching it). What
+  remains open: the real `examples/web_analytics` workspace is not yet fully
+  `--since-upstream`-compatible end to end — `silver.sessions_chained` (a self-referential
+  recursive-accumulation model) and `silver.device_user_edges` (a bare keyed model with real
+  downstream readers) each independently refuse the whole-workspace graph today, since
+  `--since-upstream`/`--include-upstreams` build the graph over every discovered model
+  unconditionally with no `--select` scoping — both are the same pre-existing, explicitly
+  deferred limitations named above (time-unrolled self-edges; bare keyed dirt-sets), not new.
 - **Delta detection for `--since-upstream` is explicit, not automatic, for v1.** The runner (or an
   external poller) supplies each source's landed delta directly on the command line
   (`--source <address> --landed <start>..<end>`, §CLI); the graph layer reflects exactly the

@@ -216,6 +216,60 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
 
+    let ClampAndLocality {
+        clamp_days,
+        locality_admitted,
+    } = derive_clamp_and_locality(models, source_infos)?;
+
+    let mut edges = Vec::with_capacity(clamp_days.len());
+    for ((upstream, downstream), (before_days, after_days)) in clamp_days {
+        let upstream_grain = if let Some(info) = source_infos
+            .iter()
+            .find(|s| bare_name(&s.address_segments) == upstream)
+        {
+            source_grain(info)?
+        } else if let Some(m) = model_by_addr.get(&upstream) {
+            model_grain(m, &locality_admitted)?
+        } else {
+            PartitionGrain::Unclocked
+        };
+        let downstream_model = model_by_addr.get(&downstream).with_context(|| {
+            format!("internal: '{downstream}' not found among discovered models")
+        })?;
+        let downstream_grain = model_grain(downstream_model, &locality_admitted)?;
+        edges.push(Edge {
+            upstream,
+            downstream,
+            before_days,
+            after_days,
+            upstream_grain,
+            downstream_grain,
+        });
+    }
+    Ok(edges)
+}
+
+/// The per-workspace facts [`build_forward_graph`] derives from every
+/// model's `MaintenancePlan` in one pass: the widest scan-clamp margin seen
+/// per `(upstream, downstream)` edge, and the key-temporal-locality
+/// admission verdict for every `grain: key` model this workspace derives a
+/// plan for. Factored out of `build_forward_graph` so
+/// [`refuse_bare_keyed_origins`] can consult the SAME admission verdicts —
+/// never re-deriving them — without threading a new field through
+/// `build_forward_graph`'s own `Vec<Edge>` return type (which several
+/// existing callers, including tests, already destructure directly).
+struct ClampAndLocality {
+    clamp_days: BTreeMap<(String, String), (i64, i64)>,
+    locality_admitted: BTreeMap<String, bool>,
+}
+
+fn derive_clamp_and_locality(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+) -> Result<ClampAndLocality> {
+    let model_by_addr: BTreeMap<String, &ModelFile> =
+        models.iter().map(|m| (m.canonical_path(), m)).collect();
+
     // (upstream, downstream) -> widest (before_days, after_days) seen across
     // every cell that derives a clamp for that pair.
     let mut clamp_days: BTreeMap<(String, String), (i64, i64)> = BTreeMap::new();
@@ -242,6 +296,19 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         let mut model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = Vec::new();
         let mut explicitly_mutable: HashSet<String> = HashSet::new();
         let mut seen: BTreeSet<String> = BTreeSet::new();
+        // `(bare name, SourceInfo)` pairs for every declared `sources.*` ref
+        // this model reads — the same shape `smelt-db::queries::maintenance::
+        // build_key_recurrences` consumes (`smelt-db`'s own
+        // `derive_model_maintenance_plan_with_edges` call site,
+        // `crates/smelt-db/src/lib.rs`) — so route 3's declared
+        // `key_recurrence` sub-route admits identically here as it does for
+        // `smelt explain` (previously this call site passed `&[]`
+        // unconditionally, so a route-3 declared-sub-route composed node —
+        // `examples/web_analytics`'s own flagship `silver.events_deduped` —
+        // never established locality in the graph layer and its own bare
+        // `PartitionGrain::Keyed` classification made `refuse_keyed_nodes`
+        // fail-loud refuse ANY graph containing it, origin or not).
+        let mut source_refs: Vec<(String, Option<SourceInfo>)> = Vec::new();
         for r in &model.refs {
             let segs = r.smelt_ref.to_path();
             let bare = bare_name(&segs);
@@ -262,6 +329,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
                     {
                         explicitly_mutable.insert(bare.clone());
                     }
+                    source_refs.push((bare.clone(), Some(info.clone())));
                 }
                 continue;
             }
@@ -356,12 +424,15 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             &explicitly_mutable,
             &model_edges,
             driving_source_granularity,
-            // Not (yet) plumbed with declared `key_recurrence` bounds at
-            // this call site (the graph-propagation walk does not resolve
-            // route 3's declared fallback today) — a locality-admitted
-            // model here still admits via a statically-derived bound or
-            // routes 1/2; only the declared route 3 sub-route is narrowed.
-            &[],
+            // Route 3's declared `key_recurrence` fallback (B3,
+            // `incremental_models.md` §"Key temporal locality" route 3): the
+            // SAME `(bare name, key_recurrence)` list `smelt-db`'s own
+            // `derive_model_maintenance_plan_with_edges` call site builds
+            // via `build_key_recurrences` over the declared `sources.*`
+            // refs this model reads, so a route-3 declared-sub-route
+            // composed node admits identically here as it does for `smelt
+            // explain` — never a separately re-derived admission.
+            &smelt_db::queries::maintenance::build_key_recurrences(&source_refs),
         ) else {
             continue;
         };
@@ -446,32 +517,71 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
         }
     }
 
-    let mut edges = Vec::with_capacity(clamp_days.len());
-    for ((upstream, downstream), (before_days, after_days)) in clamp_days {
-        let upstream_grain = if let Some(info) = source_infos
-            .iter()
-            .find(|s| bare_name(&s.address_segments) == upstream)
-        {
-            source_grain(info)?
-        } else if let Some(m) = model_by_addr.get(&upstream) {
-            model_grain(m, &locality_admitted)?
-        } else {
-            PartitionGrain::Unclocked
+    Ok(ClampAndLocality {
+        clamp_days,
+        locality_admitted,
+    })
+}
+
+/// Refuse fail-loud when a `--source`/`--landed` delta origin names a
+/// **bare** keyed model (`grain: key`, no `timeseries:` declared, or one
+/// declared but locality not established) — even when the origin has no
+/// edge in the assembled graph at all. A bare keyed model whose only
+/// downstream reader can't derive a clock for it contributes no walkable
+/// edge (`build_forward_graph`'s own "underivable upstream clock is a
+/// recorded refusal" behaviour), so without this check an origin naming
+/// such a model would otherwise be a **silent no-op** — the delta seeds a
+/// dirty entry `propagate` never reflects through any edge, and
+/// `plan_since_upstream` prints "nothing to run" and exits 0. That is wrong
+/// for the same reason [`smelt_logical::maintenance::propagate`]'s own
+/// `refuse_keyed_nodes` fail-loud refuses a bare keyed node reached through
+/// an edge (`incremental_models.md` §"The graph layer" — a keyed node
+/// without an admitted time axis has no partition axis for interval dirt to
+/// propagate over) — the origin case just isn't reachable by that edge-only
+/// check, since an edge-less origin is never visited by it. Consults the
+/// SAME `locality_admitted` verdict [`build_forward_graph`] derives (never
+/// re-implementing admission); a **locality-admitted** composed origin
+/// (B1–B3, `incremental_models.md` §"Key temporal locality") passes through
+/// untouched — this refusal only ever fires on the bare case.
+fn refuse_bare_keyed_origins(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    deltas: &[SourceDelta],
+) -> Result<()> {
+    let model_by_addr: BTreeMap<String, &ModelFile> =
+        models.iter().map(|m| (m.canonical_path(), m)).collect();
+    let ClampAndLocality {
+        locality_admitted, ..
+    } = derive_clamp_and_locality(models, source_infos)?;
+
+    for delta in deltas {
+        let Some(model) = model_by_addr.get(&delta.source) else {
+            continue;
         };
-        let downstream_model = model_by_addr.get(&downstream).with_context(|| {
-            format!("internal: '{downstream}' not found among discovered models")
-        })?;
-        let downstream_grain = model_grain(downstream_model, &locality_admitted)?;
-        edges.push(Edge {
-            upstream,
-            downstream,
-            before_days,
-            after_days,
-            upstream_grain,
-            downstream_grain,
-        });
+        let Some(metadata) = model.metadata.as_deref() else {
+            continue;
+        };
+        if metadata.grain != Some(ConfigGrain::Key) {
+            continue;
+        }
+        let admitted = locality_admitted
+            .get(&delta.source)
+            .copied()
+            .unwrap_or(false);
+        if !admitted {
+            bail!(
+                "MaintenanceGraphUnsupportedNode: '{}' is keyed-grain without an admitted time \
+                 axis: it has no partition axis for interval dirt to propagate over. Declare a \
+                 timeseries: block and establish key temporal locality \
+                 (docs/specs/incremental_models.md §\"Key temporal locality\") to admit it as a \
+                 locality-admitted composed node that participates in propagation like any other \
+                 clocked node — keyed dirt-sets over a bare keyed node are not yet supported \
+                 (S12)",
+                delta.source
+            );
+        }
     }
-    Ok(edges)
+    Ok(())
 }
 
 /// One propagated run: `model` must run over `[start, end)` (ISO dates), or
@@ -515,6 +625,7 @@ pub fn plan_since_upstream(
     order: &[String],
     deltas: &[SourceDelta],
 ) -> Result<SinceUpstreamPlan> {
+    refuse_bare_keyed_origins(models, source_infos, deltas)?;
     let edges = build_forward_graph(models, source_infos)?;
 
     let mut source_deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();

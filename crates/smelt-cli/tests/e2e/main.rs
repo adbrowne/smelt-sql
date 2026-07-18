@@ -38,6 +38,7 @@ mod scope_integration;
 mod select_parse_gate;
 mod selector_resolution;
 mod show_plan;
+mod since_upstream_composed_web_analytics;
 mod smelt_shop_idempotency;
 mod source_diagnostics;
 mod source_pushdown_e2e;

@@ -86,7 +86,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | done (2026-07-18) |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | done (2026-07-18) |
 | B2 | Key→partition dirt projection (exact routes 1–2; widen-by-`r` route 3) in forward propagation + backward resolution | done (2026-07-18) |
-| B3 | `--since-upstream` accepts a composed node as `--source`; adjointness tests extended | pending |
+| B3 | `--since-upstream` accepts a composed node as `--source`; adjointness tests extended | done (2026-07-18) |
 | C1 | Spec diff: `model_transforms.md` T1/T2 variants; `multi_backend.md` capability flags (incl. `supports_column_scoped_merge` into the capability struct) | pending |
 | C2 | P3 change-comparability per column (walk lattice fold; `plausible`/pinned-`NOW()` ⇒ Incomparable) | pending |
 | C3 | P2 region row identity (declared `unique_key` → proven grain key → `WholeRow` multiset) | pending |

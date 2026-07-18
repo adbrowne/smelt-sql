@@ -537,3 +537,183 @@ fn model_address_unknown_is_error() {
     );
     assert!(!stderr.contains("panicked at"), "{stderr}");
 }
+
+/// Stage a workspace whose middle model is a **locality-admitted composed
+/// node** (`grain: key` + `timeseries:`, route 1 key-embedded — the
+/// partition column `d` is itself part of the `GROUP BY` key, the same
+/// admission shape `examples/timeseries/models/user_daily_spend.sql` uses):
+/// `bronze -> composed [grain: key, timeseries: d] -> gold [grain:
+/// partition]`. Returns the project dir.
+fn stage_composed_origin_workspace(parent: &Path) -> PathBuf {
+    let root = parent.join("proj");
+    write(
+        &root,
+        "smelt.yml",
+        "name: composed_origin_ws\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    );
+    write(
+        &root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: event_id\n  type: INTEGER\n\
+         - name: d\n  type: DATE\n- name: val\n  type: INTEGER\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        &root,
+        "models/composed.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT event_id, d, MIN(val) AS val\nFROM smelt.sources.bronze\n\
+         GROUP BY event_id, d\n",
+    );
+    write(
+        &root,
+        "models/gold.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT event_id, d, val FROM smelt.composed\n",
+    );
+    std::fs::create_dir_all(root.join("target")).unwrap();
+    root
+}
+
+/// Pre-populate `main.composed` (the composed model's own output) with 10
+/// days of data — the delta origin's completed run is already materialized,
+/// so `--since-upstream --source composed` reads it directly.
+fn seed_composed(db_path: &Path) {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    conn.execute_batch(
+        "CREATE SCHEMA IF NOT EXISTS main;\n\
+         CREATE TABLE main.composed (event_id INTEGER, d DATE, val INTEGER);\n\
+         INSERT INTO main.composed \
+           SELECT i, DATE '2026-01-01' + CAST(i - 1 AS INTEGER), i \
+           FROM range(1, 11) t(i);\n",
+    )
+    .expect("seed composed table");
+}
+
+fn gold_dates_composed(db_path: &Path) -> Vec<String> {
+    let conn = Connection::open(db_path).expect("open duckdb");
+    let mut stmt = conn
+        .prepare("SELECT CAST(d AS VARCHAR) FROM main.gold ORDER BY d")
+        .expect("prepare");
+    stmt.query_map([], |row| row.get::<_, String>(0))
+        .expect("query")
+        .map(|r| r.expect("row"))
+        .collect()
+}
+
+/// Phase B3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// `--source <address>` accepts a **locality-admitted composed model**
+/// (`grain: key` + `timeseries:`) as the delta origin, not just a bare
+/// `grain: partition`/`grain: key_per_partition` model
+/// (`model_address_landed_delta_propagates` already covers the latter). A
+/// landed window declared directly on `composed`'s own declared output axis
+/// dirties only its downstream `gold`; the composed origin itself is never
+/// re-run.
+#[test]
+fn composed_model_address_landed_delta_propagates() {
+    let tmp = TempDir::new().unwrap();
+    let project_dir = stage_composed_origin_workspace(tmp.path());
+    let db_path = project_dir.join("target/dev.duckdb");
+    seed_composed(&db_path);
+
+    let output = run_smelt(
+        &project_dir,
+        &[
+            "--since-upstream",
+            "--source",
+            "composed",
+            "--landed",
+            "2026-01-03..2026-01-04",
+        ],
+    );
+    assert!(
+        output.status.success(),
+        "composed-origin since-upstream run must succeed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    assert!(
+        stdout.contains("gold <- composed"),
+        "the dirty set must show the composed model edge: {stdout}"
+    );
+    assert!(
+        !stdout.contains("RUN composed"),
+        "the composed origin must not be re-run: {stdout}"
+    );
+
+    // composed's delta [Jan3,Jan4) reflects zero-margin to gold day Jan3.
+    assert_eq!(
+        gold_dates_composed(&db_path),
+        vec!["2026-01-03".to_string()],
+        "only the propagated region of gold may be materialized"
+    );
+}
+
+/// A **bare** keyed model (`grain: key`, no `timeseries:` — never locality-
+/// admitted) named as `--source` still refuses fail-loud, even though the
+/// address itself resolves (`RefKind::Model`) and so passes the CLI's
+/// resolution precondition: the graph-layer refusal (S12, `"without an
+/// admitted time axis"`) is what actually surfaces, the same message
+/// `resolve_ref_path`-adjacent `bare_keyed_upstream_still_refuses`
+/// (`crates/smelt-runtime/tests/since_upstream_propagation.rs`) pins at the
+/// assembly level — this test is the CLI's own end-to-end leg of the same
+/// refusal.
+#[test]
+fn bare_keyed_source_still_refuses() {
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("proj");
+    write(
+        &root,
+        "smelt.yml",
+        "name: bare_keyed_origin_ws\nversion: 1\npaths:\n  - models\n\
+         targets:\n  dev:\n    type: duckdb\n    database: target/dev.duckdb\n    schema: main\n\
+         default_materialization: view\n",
+    );
+    write(
+        &root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n\
+         mutation_profile:\n  kind: append_only\n",
+    );
+    write(
+        &root,
+        "models/bare_keyed.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT user_id, SUM(amount) AS total\nFROM smelt.sources.payments\nGROUP BY user_id\n",
+    );
+    write(
+        &root,
+        "models/downstream.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: partition\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT user_id, total, CAST('2026-01-01' AS DATE) AS d FROM smelt.bare_keyed\n",
+    );
+    std::fs::create_dir_all(root.join("target")).unwrap();
+
+    let output = run_smelt(
+        &root,
+        &[
+            "--since-upstream",
+            "--source",
+            "bare_keyed",
+            "--landed",
+            "2026-01-03..2026-01-04",
+        ],
+    );
+    assert!(
+        !output.status.success(),
+        "a bare keyed --source origin must refuse, not silently no-op"
+    );
+    let stderr = String::from_utf8_lossy(&output.stderr);
+    assert!(
+        stderr.contains("without an admitted time axis"),
+        "must surface the graph-layer keyed refusal: {stderr}"
+    );
+    assert!(!stderr.contains("panicked at"), "{stderr}");
+}

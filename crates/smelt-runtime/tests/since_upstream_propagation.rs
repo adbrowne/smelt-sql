@@ -11,7 +11,9 @@
 use std::path::Path;
 
 use smelt_core::{discover_source_infos, ModelDiscovery};
-use smelt_runtime::propagation::{build_forward_graph, plan_since_upstream, SourceDelta};
+use smelt_runtime::propagation::{
+    build_forward_graph, plan_since_upstream, resolve_build_plan, SourceDelta,
+};
 
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
@@ -510,4 +512,122 @@ fn bare_keyed_upstream_still_refuses() {
     assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
     assert!(msg.contains("without an admitted time axis"), "{msg}");
     assert!(msg.contains("bare_keyed"), "{msg}");
+}
+
+/// Phase B3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// a **locality-admitted composed node** itself — not its driving source —
+/// is the `--source` delta origin. `examples/timeseries`'s already-landed
+/// composed chain (`raw.transactions -> user_daily_spend [grain: key +
+/// timeseries, route 1] -> user_spend_rollup`, the same fixture
+/// `composed_node_in_the_chain` uses mid-chain) is reused here with the
+/// delta seeded directly on `user_daily_spend`'s own declared output axis
+/// (`spend_date`) instead of on `raw.transactions`: its landed window
+/// reflects through the real (zero-margin) outbound edge to
+/// `user_spend_rollup`, and the composed origin itself is never re-run —
+/// exactly the same "origin is not re-run" contract
+/// `model_delta_origin_propagates_to_downstreams_without_rerunning_origin`
+/// pins for a bare `grain: partition` origin, now exercised for a composed
+/// keyed+timeseries origin.
+#[test]
+fn composed_model_as_source() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect(
+        "a landed delta declared directly on a locality-admitted composed model must \
+         propagate through its outbound edge",
+    );
+
+    assert!(
+        plan.runs.iter().any(|r| r.model == "user_spend_rollup"),
+        "user_daily_spend's landed delta must propagate to user_spend_rollup: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "user_daily_spend"),
+        "the composed origin itself must NOT be re-run — its landed delta is already \
+         written: {:?}",
+        plan.runs
+    );
+    assert!(
+        plan.dirty_set_report
+            .contains("user_spend_rollup <- user_daily_spend"),
+        "the dirty set must show the composed model edge: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        !plan.dirty_set_report.contains("RUN user_daily_spend"),
+        "the composed origin must not appear as a scheduled run: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// Phase B3: `resolve_build_plan` (the `smelt build --include-upstreams`
+/// backward-resolution assembly) walks *through* a locality-admitted
+/// composed ancestor exactly like any other clocked model — the composed
+/// node appears in the build order (built before its consumer,
+/// `user_spend_rollup`, and after its own upstream source), and its
+/// required slice is a real bounded region, not a whole-table fallback.
+/// Shares the graph layer's "one edge object, both directions" law with
+/// [`composed_node_in_the_chain`] (forward) and B2's pure-math
+/// `required_inputs_resolves_route_aware_through_a_composed_edge`
+/// (`crates/smelt-logical/tests/maintenance_tracer_propagation.rs`) — this
+/// test is the real per-workspace assembly's own leg of that same coverage.
+#[test]
+fn resolve_build_plan_walks_through_a_composed_ancestor() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let period = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let resolved = resolve_build_plan(&models, &source_infos, "user_spend_rollup", period)
+        .expect("backward resolution must walk through the composed ancestor without refusing");
+
+    let names: Vec<&str> = resolved
+        .build_order
+        .iter()
+        .map(|r| r.model.as_str())
+        .collect();
+    assert!(
+        names.contains(&"user_daily_spend"),
+        "the composed ancestor must be a build step, not silently skipped: {names:?}"
+    );
+    assert!(
+        names.contains(&"user_spend_rollup"),
+        "the target itself must be a build step: {names:?}"
+    );
+    let composed_pos = names.iter().position(|n| *n == "user_daily_spend").unwrap();
+    let target_pos = names
+        .iter()
+        .position(|n| *n == "user_spend_rollup")
+        .unwrap();
+    assert!(
+        composed_pos < target_pos,
+        "the composed ancestor must build before its consumer: {names:?}"
+    );
+    assert!(
+        resolved.report.contains("BUILD user_daily_spend"),
+        "the report must show the composed ancestor as a build step: {}",
+        resolved.report
+    );
 }
