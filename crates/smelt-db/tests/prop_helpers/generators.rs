@@ -1411,7 +1411,12 @@ fn generate_binary_op_expr(
 
     // ---- Temporal arithmetic (spec §16: tz-transparent) ----
     if let (Some(iv), Some(d)) = (interval_cols.first(), date_cols.first()) {
-        // DATE ± INTERVAL → Timestamp (DuckDB/Spark agree).
+        // DATE ± INTERVAL → Timestamp (matches DuckDB). Spark instead returns
+        // DATE for a day/year-month-granularity interval (only TIMESTAMP once
+        // the interval carries a time component) — see the `date_plus_interval`
+        // divergence entry in divergences.rs. The generator only ever emits a
+        // day-granularity interval literal, so this expectation matches smelt's
+        // own (DuckDB-aligned) inference, not what Spark actually returns.
         candidates.push((
             format!("{} + {}", d.name, iv.name),
             DataType::Timestamp {

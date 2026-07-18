@@ -197,6 +197,14 @@ fn spark_type_to_smelt(type_str: &str) -> DataType {
         }
     }
 
+    // Interval types report as e.g. "interval", "interval day", "interval year",
+    // "interval day to second", "interval year to month" — never just "interval"
+    // alone in practice, since Spark always qualifies year-month vs day-time
+    // granularity. Match the family by prefix rather than a single exact string.
+    if lower.starts_with("interval") {
+        return DataType::Interval;
+    }
+
     match lower {
         "boolean" => DataType::Boolean,
         "tinyint" | "byte" => DataType::SmallInt,
@@ -218,7 +226,6 @@ fn spark_type_to_smelt(type_str: &str) -> DataType {
             precision: 10,
             scale: 0,
         },
-        "interval" => DataType::Interval,
         "void" | "null" => DataType::Null,
         _ => DataType::unknown_dynamic(),
     }
@@ -245,6 +252,25 @@ mod tests {
             DataType::Timestamp {
                 with_timezone: false
             }
+        );
+    }
+
+    #[test]
+    fn parse_interval_variants() {
+        // Regression: a local soak run caught `TIMESTAMP - TIMESTAMP` mapping to
+        // Unknown(Dynamic) instead of Interval because Spark's `typeof` never
+        // reports a bare "interval" — it always qualifies year-month vs
+        // day-time granularity (e.g. "interval day to second").
+        assert_eq!(spark_type_to_smelt("interval"), DataType::Interval);
+        assert_eq!(spark_type_to_smelt("interval day"), DataType::Interval);
+        assert_eq!(spark_type_to_smelt("interval year"), DataType::Interval);
+        assert_eq!(
+            spark_type_to_smelt("interval day to second"),
+            DataType::Interval
+        );
+        assert_eq!(
+            spark_type_to_smelt("interval year to month"),
+            DataType::Interval
         );
     }
 
