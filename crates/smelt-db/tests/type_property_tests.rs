@@ -1335,6 +1335,7 @@ mod reachability {
             "CORR",
             "COVAR_POP",
             "COVAR_SAMP",
+            "REGR_SLOPE",
             "MODE",
             "LISTAGG",
             "PERCENTILE_CONT",
@@ -1365,6 +1366,52 @@ mod reachability {
     }
 
     #[test]
+    fn reaches_two_column_aggregates_with_distinct_columns() {
+        // CORR/COVAR_POP/COVAR_SAMP/REGR_SLOPE take two column arguments.
+        // `ExtraArg::SecondNumericColumn` (see prop_helpers/generators.rs) is
+        // meant to pick a *different* numeric column than the first argument
+        // — guards against a regression back to `agg(col, col)`, which would
+        // never exercise the generator's multi-column selection path.
+        use super::generators::{BaseType, ExprKind, TypedSource};
+        let pool: Vec<TypedSource> = BaseType::all()
+            .iter()
+            .enumerate()
+            .map(|(i, bt)| TypedSource {
+                name: format!("{}_{}", bt.col_prefix(), i),
+                data_type: bt.to_smelt_type(),
+                cast_sql: bt.cast_sql().to_string(),
+            })
+            .collect();
+
+        let n_funcs = super::generators::core_functions().len();
+        let mut corpus: Vec<String> = Vec::new();
+        for expr_idx in 0..n_funcs {
+            for func_idx in 0..(n_funcs * 3) {
+                if let Some(e) = generate_expr(&pool, ExprKind::Function, expr_idx, func_idx) {
+                    corpus.push(e.sql);
+                }
+            }
+        }
+
+        for name in ["CORR", "COVAR_POP", "COVAR_SAMP", "REGR_SLOPE"] {
+            let prefix = format!("{name}(");
+            let distinct_pair = corpus.iter().any(|sql| {
+                sql.find(&prefix)
+                    .and_then(|pos| sql[pos + prefix.len()..].split_once(')'))
+                    .map(|(args, _)| match args.split_once(", ") {
+                        Some((a, b)) => a != b,
+                        None => false,
+                    })
+                    .unwrap_or(false)
+            });
+            assert!(
+                distinct_pair,
+                "{name} was never generated with two distinct column arguments"
+            );
+        }
+    }
+
+    #[test]
     fn reaches_percentile_within_group() {
         // PERCENTILE_CONT/PERCENTILE_DISC are only valid in DuckDB via the
         // `WITHIN GROUP (ORDER BY ...)` ordered-set-aggregate form (probed
@@ -1372,14 +1419,19 @@ mod reachability {
         // against the generator silently dropping the WITHIN GROUP wrapper.
         // (Per-function reachability for PERCENTILE_CONT/PERCENTILE_DISC
         // specifically is covered exhaustively by `reaches_extended_functions`
-        // above — this statistical 500-case sample isn't guaranteed to draw
-        // both of two adjacent list entries.)
-        let corpus = sample_generated_sql(N);
+        // above.) The deterministic weighted selection (`func_idx * 7 +
+        // expr_idx * 3`, modulo the function-list length) shifts which
+        // entries a fixed-N sample draws whenever `core_functions()` grows —
+        // this test uses a larger sample than the shared `N` so it stays
+        // robust to list-length changes instead of silently flaking whenever
+        // a new function is added.
+        const LARGER_N: usize = 5 * N;
+        let corpus = sample_generated_sql(LARGER_N);
         assert!(
             corpus
                 .iter()
                 .any(|sql| sql.contains("WITHIN GROUP (ORDER BY")),
-            "generators never produced a WITHIN GROUP ordered-set aggregate over {N} cases"
+            "generators never produced a WITHIN GROUP ordered-set aggregate over {LARGER_N} cases"
         );
     }
 }

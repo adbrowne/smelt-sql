@@ -191,6 +191,11 @@ pub enum ExprKind {
 pub enum ExtraArg {
     /// Re-use the same column as the first argument.
     SameAsFirst,
+    /// A different numeric column than the first argument, for true
+    /// two-column aggregates (CORR, COVAR_POP, COVAR_SAMP, REGR_SLOPE). Falls
+    /// back to the first argument's column when no second numeric column
+    /// exists in scope.
+    SecondNumericColumn,
     /// An integer literal.
     IntLiteral(&'static str),
     /// A string literal (will be single-quoted).
@@ -817,24 +822,35 @@ pub fn core_functions() -> Vec<FuncDesc> {
             output_type: DataType::Text,
         },
         // Two-argument statistical aggregates → Double (DuckDB and smelt agree).
+        // The second argument is a genuinely different numeric column
+        // (`SecondNumericColumn`), not the same column twice — DuckDB accepts
+        // same-column calls too, but that would never exercise the generator's
+        // multi-column selection path.
         FuncDesc {
             name: "CORR",
             input: FuncInput::NumericAggregate,
-            extra_args: &[ExtraArg::SameAsFirst],
+            extra_args: &[ExtraArg::SecondNumericColumn],
             prepend_literal: None,
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "COVAR_POP",
             input: FuncInput::NumericAggregate,
-            extra_args: &[ExtraArg::SameAsFirst],
+            extra_args: &[ExtraArg::SecondNumericColumn],
             prepend_literal: None,
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "COVAR_SAMP",
             input: FuncInput::NumericAggregate,
-            extra_args: &[ExtraArg::SameAsFirst],
+            extra_args: &[ExtraArg::SecondNumericColumn],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "REGR_SLOPE",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[ExtraArg::SecondNumericColumn],
             prepend_literal: None,
             output_type: DataType::Double,
         },
@@ -942,9 +958,8 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         // compute the real answer. The resulting divergences are registered in
         // divergences.rs (`percentile_ordered_set_decimal`, `percentile_disc_integer`,
         // `percentile_disc_bigint`) rather than fixed here.
-        "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP" | "COVAR_SAMP" => {
-            DataType::Double
-        }
+        "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP" | "COVAR_SAMP"
+        | "REGR_SLOPE" => DataType::Double,
         "ARRAY_AGG" => DataType::Array(Box::new(arg_type.clone())),
         "AGE" => DataType::Interval,
         "MODE" => arg_type.clone(),
@@ -1185,6 +1200,13 @@ pub fn generate_expr(
                 for extra in func.extra_args {
                     match extra {
                         ExtraArg::SameAsFirst => args.push(compatible_col.name.clone()),
+                        ExtraArg::SecondNumericColumn => {
+                            let second = columns
+                                .iter()
+                                .find(|c| c.data_type.is_numeric() && c.name != compatible_col.name)
+                                .unwrap_or(compatible_col);
+                            args.push(second.name.clone());
+                        }
                         ExtraArg::IntLiteral(v) => args.push(v.to_string()),
                         ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
                     }

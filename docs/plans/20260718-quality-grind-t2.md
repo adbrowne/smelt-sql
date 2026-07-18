@@ -59,7 +59,7 @@ since 2026-07-09.
 |-------|---------|--------|------|
 | 1     | done    | test(props): generate aggregate FILTER clauses against the DuckDB oracle | 2026-07-19 |
 | 2     | done    | test(props): generate ordered-set aggregates (MEDIAN/MODE/PERCENTILE_*) and WITHIN GROUP | 2026-07-19 |
-| 3     | pending |        |      |
+| 3     | done    | test(props): generate two-column aggregates (CORR/COVAR/REGR_SLOPE) | 2026-07-19 |
 | 4     | pending |        |      |
 | 5     | pending |        |      |
 | 6     | pending |        |      |
