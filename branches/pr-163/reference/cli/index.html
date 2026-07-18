@@ -4590,6 +4590,23 @@ derived per-source scan clamps, each source's partition-locality verdict, any ad
 the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label), and one
 contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
 incremental</code> with a <code>grain:</code> declared) — other models print a one-line notice instead.</p>
+<p>A <code>ColumnScopedMerge</code> cell's block additionally prints an <code>observed-delta recording:</code> line —
+the only technique family recording is wired for today (<code>KeyedFold</code> and the staged-candidate
+write family do not record yet, so their cells print no such line at all). The line still says
+<code>yes</code> or <code>no</code>: recording only actually fires when the cell's matched arm can suppress the write
+for unchanged rows, which needs a proven per-row identity (<code>region key:</code> must be <code>Key(...)</code>,
+never <code>WholeRow</code>) over columns all proven comparable across runs — a cell that fails either
+check falls back to an unconditional rewrite at runtime and has nothing to record, so its line
+reads <code>no</code>. For a composed (key + time)
+model, the <code>Key temporal locality:</code> block prints an <code>observed-delta projection:</code> line alongside
+its route and settle bound: <code>exact (key-embedded)</code> / <code>exact (key-determined)</code> for locality
+routes 1–2, <code>widened by `r` + margins</code> for route 3, since a key's stored partition can move
+under that route. A bare keyed model (no established locality) prints no <code>Key temporal
+locality:</code> block and no projection line — see <a href="../../guide/incremental-models/#observed-deltas-and-no-op-cascades">Observed deltas and no-op
+cascades</a>. Both lines are
+static facts about the derived plan, not about a specific past run: <code>smelt explain</code> never opens
+a backend connection, so it reports what a cell's technique <em>would</em> record and how its route
+<em>would</em> project.</p>
 <p>An inbound edge is either a declared source (<code>sources.*</code>) or an upstream maintained model —
 both render through the identical <code>clock:</code> / <code>identity:</code> / <code>derived grain:</code> rows, labelled
 <code>(source)</code> or <code>(model)</code> so it's clear which provider filled them. A row prints <code>(none)</code> when

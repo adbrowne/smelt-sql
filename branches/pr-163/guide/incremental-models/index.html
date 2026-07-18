@@ -1960,6 +1960,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#observed-deltas-and-no-op-cascades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observed deltas and no-op cascades
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#schema-evolution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3623,6 +3634,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#observed-deltas-and-no-op-cascades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Observed deltas and no-op cascades
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#schema-evolution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4330,6 +4352,16 @@
 <p><code>maintenance.defaults.prefer</code>, <code>maintenance.cells[].prefer</code>, and <code>maintenance.cells[].technique</code> (see <a href="../../reference/smelt-yml/#maintenance-configuration">Maintenance Configuration</a>) choose among the techniques a cell's plan admits — fold vs. region recompute vs. rederiving columns. They don't reach inside a chosen technique to force or forbid suppression: whether a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's matched arm is suppressed is decided automatically from the two proofs above, the same way for every occurrence of that technique.</p>
 <h3 id="known-limitation-smelt-explain-doesnt-show-which-cells-suppress">Known limitation: <code>smelt explain</code> doesn't show which cells suppress<a class="headerlink" href="#known-limitation-smelt-explain-doesnt-show-which-cells-suppress" title="Permanent link">&para;</a></h3>
 <p><code>smelt explain &lt;model&gt; --show-sql</code> renders every <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's unconditional matched arm today, even for a cell that resolves to suppressed at run time — the reporting path hasn't been wired to the same check the live run already applies. The <code>region key:</code> line is still a reliable signal for the row-identity half of the rule (<code>WholeRow</code> means that cell never suppresses); there is no equivalent surface yet for the column-comparability half.</p>
+<h2 id="observed-deltas-and-no-op-cascades">Observed deltas and no-op cascades<a class="headerlink" href="#observed-deltas-and-no-op-cascades" title="Permanent link">&para;</a></h2>
+<p>A suppressed write (above) still has to decide, <em>downstream</em>, which regions actually need recomputing — a re-run that wrote nothing changed nothing for its own consumers either. smelt records this directly: when a column-scoped <code>MERGE</code> cell runs, it records the changed-row set — restricted to the columns whose flutter is actually comparable, the same proof write suppression itself relies on — in the same backend transaction as the write. A run that suppressed every row records a <strong>present-but-empty</strong> delta, distinct from no record at all; a run that never went through a recording cell (or predates this feature) leaves the delta <strong>absent</strong>. This asymmetry matters to every consumer: an empty delta means "ran, changed nothing"; an absent delta means "assume the worst" and falls back to the full written window (widen-never-narrow — a missing record never narrows what a downstream run treats as dirty).</p>
+<p>On a <a href="#the-composed-shape-key-time">composed (key + time)</a> output, a recorded delta is more than a yes/no — smelt projects it onto the model's own partition axis so forward propagation (<code>smelt run --since-upstream</code>) can dirty exactly the touched partitions instead of the whole written window:</p>
+<ul>
+<li><strong>Routes 1–2 (key-embedded, key-determined)</strong> project <strong>exactly</strong>: under these routes a stored row's partition value is a per-key constant, so the changed keys' own partitions are the whole story.</li>
+<li><strong>Route 3 (recurrence-bounded)</strong> widens the projection backward by the recurrence bound plus the route's own margins, since a key's partition value can move under this route (a later, out-of-order row can supersede an earlier partition assignment).</li>
+</ul>
+<p>Chain a few of these stages together and the payoff compounds: a stable upstream that keeps suppressing its own writes hands its consumers an empty delta, which the graph turns into zero scheduled work, run after run — a <strong>no-op cascade</strong> with a provable horizon behind it, not a heuristic short-circuit. This composes with each composed output's derived <strong>settle bound</strong> (<a href="#the-composed-shape-key-time">above</a>): a downstream consumer can skip a settled slice unconditionally (it provably can't change again) and skip an unsettled slice whose recorded delta happens to be empty (nothing changed <em>this</em> run, even though it still could next run). Together, a quiet upstream degenerates the whole chain to no-op propagation, and the settle bound bounds how long that quiet has to hold before it's provably permanent.</p>
+<p><code>smelt explain &lt;model&gt;</code> surfaces both halves directly. Each <code>ColumnScopedMerge</code> cell — the only technique family recording is wired for today; <code>KeyedFold</code> and the staged-candidate write family do not record yet, so their cells print no such line at all — prints an <code>observed-delta recording:</code> line. That line reads <code>yes</code> only when the cell's matched arm actually suppresses (the same two proofs above: a proven per-row identity, <code>region key: Key(...)</code>, over columns all proven comparable across runs); a <code>WholeRow</code>-identity cell, or one with an incomparable compared column, prints <code>no</code> — there's nothing to record when the write always rewrites every matched row unconditionally. A composed model's <code>Key temporal locality:</code> block prints an <code>observed-delta projection:</code> line alongside its route and settle bound: <code>exact (key-embedded)</code> / <code>exact (key-determined)</code> for routes 1–2, <code>widened by `r` + margins</code> for route 3. A bare keyed model (no established locality) prints no projection line at all — there's no partition axis to project onto.</p>
+<p>Recording and projection are both static facts about the derived plan — <code>smelt explain</code> never opens a backend connection, so it reports what a cell's technique <em>would</em> record and how its route <em>would</em> project, not what a specific past run actually recorded. Reading the live recorded delta for a specific run is <code>smelt run --since-upstream</code>'s job, not <code>explain</code>'s.</p>
 <h2 id="schema-evolution">Schema evolution<a class="headerlink" href="#schema-evolution" title="Permanent link">&para;</a></h2>
 <p>When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See <a href="../schema-evolution/">Schema Evolution</a> for full details on:</p>
 <ul>

@@ -2796,19 +2796,20 @@ happens to see. There's nothing left to order.</p>
 <a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>  route: route 3 (recurrence-bounded, declared key_recurrence)
 <a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>  slice: RecurrenceBounded { partition_column: &quot;first_seen_date&quot;, margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }
 <a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>  settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
-<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>
-<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>Refusals: (none)
-<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>
-<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>Relation contract:
-<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>  clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day
-<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>  identity: event_id
-<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>  derived grain: key
-<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>
-<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>Inbound edges: sources.raw.events
-<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>  - sources.raw.events (source)
-<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
-<a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a>      identity: (none)
-<a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a>      derived grain: partition
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>  observed-delta projection: widened by `r` + margins
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>Refusals: (none)
+<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>
+<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>Relation contract:
+<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>  clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day
+<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>  identity: event_id
+<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>  derived grain: key
+<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>
+<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>  - sources.raw.events (source)
+<a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
+<a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a>      identity: (none)
+<a id="__codelineno-3-40" name="__codelineno-3-40" href="#__codelineno-3-40"></a>      derived grain: partition
 </code></pre></div>
 <p>Two things the previous page's refusal didn't have:</p>
 <ul>
