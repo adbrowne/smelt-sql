@@ -57,7 +57,7 @@ since 2026-07-09.
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| 1     | pending |        |      |
+| 1     | done    | test(props): generate aggregate FILTER clauses against the DuckDB oracle | 2026-07-19 |
 | 2     | pending |        |      |
 | 3     | pending |        |      |
 | 4     | pending |        |      |

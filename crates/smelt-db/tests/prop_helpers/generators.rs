@@ -1126,7 +1126,22 @@ pub fn generate_expr(
                     ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
                 }
             }
-            let sql = format!("{}({})", func.name, args.join(", "));
+            let mut sql = format!("{}({})", func.name, args.join(", "));
+
+            // Aggregates: sometimes wrap in FILTER (WHERE ...) to exercise the
+            // possibly-empty-group path (DuckDB already accepts this on every
+            // aggregate; see crates/smelt-parser/src/parser/tests.rs FILTER tests).
+            if matches!(
+                func.input,
+                FuncInput::AnyAggregate
+                    | FuncInput::NumericAggregate
+                    | FuncInput::BooleanAggregate
+                    | FuncInput::IntegerAggregate
+            ) && (expr_idx + func_idx).is_multiple_of(3)
+            {
+                let predicate = generate_filter_predicate(columns, &compatible_col.name);
+                sql = format!("{sql} FILTER (WHERE {predicate})");
+            }
 
             Some(TypedExpr {
                 sql,
@@ -1942,6 +1957,21 @@ pub fn assemble_cte_query(
 /// query's. This stresses type propagation through a nested CTE boundary.
 pub fn wrap_in_outer_cte(inner_sql: &str) -> String {
     format!("WITH wrapped AS ({inner_sql}) SELECT * FROM wrapped")
+}
+
+/// Generate a per-row boolean predicate for an aggregate's `FILTER (WHERE ...)`
+/// clause. Unlike `generate_having_predicate`, this must NOT reference an
+/// aggregate — FILTER's WHERE is evaluated per input row, before aggregation.
+fn generate_filter_predicate(columns: &[TypedSource], exclude: &str) -> String {
+    let pred_col = columns
+        .iter()
+        .find(|c| c.name != exclude)
+        .unwrap_or(&columns[0]);
+    match &pred_col.data_type {
+        DataType::Boolean => pred_col.name.clone(),
+        dt if dt.is_numeric() => format!("{} > 0", pred_col.name),
+        _ => format!("{} IS NOT NULL", pred_col.name),
+    }
 }
 
 /// Generate a HAVING predicate for GROUP BY queries.

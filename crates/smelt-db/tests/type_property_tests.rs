@@ -1147,6 +1147,19 @@ mod reachability {
             "extended functions not reachable from the generator: {missing:?}"
         );
     }
+
+    #[test]
+    fn reaches_aggregate_filter() {
+        // `agg(x) FILTER (WHERE cond)` is already parsed (see
+        // crates/smelt-parser/src/parser/tests.rs FILTER tests) but was never
+        // generated. Guards against the generator silently dropping the
+        // FILTER wrapper it now attaches to a fraction of aggregate calls.
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|sql| sql.contains(") FILTER (WHERE ")),
+            "generators never produced an aggregate FILTER clause over {N} cases"
+        );
+    }
 }
 
 // ---- Known-unknowns staleness report ----
