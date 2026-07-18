@@ -96,7 +96,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | C7 | Docs: conditional writes (explain output, cost notes, `prefer`/`technique` steering) | done (2026-07-18) |
 | R1 | Open write-pattern registry + `maintenance.cells[].write` pin + the two write-addressing refusal diagnostics | done (2026-07-18) |
 | D1 | Spec diff: `sources.md` landed-delta refinement; storage home + transactionality of recorded deltas | done (2026-07-18) |
-| D2 | T5 observed output delta recording (comparable columns only; byproduct of C4/C5 writes) | pending |
+| D2 | T5 observed output delta recording (comparable columns only; byproduct of C4/C5 writes) | done (2026-07-18) |
 | D3 | Partition projection of observed deltas via locality → exact `--landed` for model edges | pending |
 | D4 | `smelt explain` observed-delta/settle surface; docs | pending |
 | E1 | Spec diff: `model_properties.md` P1 skeleton-source closure; `sources.md` referential-integrity world-fact + count-preservation tripwire | pending |

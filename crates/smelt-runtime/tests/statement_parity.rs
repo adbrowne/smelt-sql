@@ -1634,6 +1634,11 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         compared_columns: vec!["tier".to_string()],
     };
 
+    let window = smelt_backend::PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
     smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
         &backend,
         "main",
@@ -1641,6 +1646,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         &["user_id".to_string()],
         dimension_batch_sql,
         &suppression,
+        &window,
     )
     .await
     .expect("suppressed column-scoped merge must succeed");
@@ -1678,6 +1684,70 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         )
         .await,
         "the suppressed MERGE must reproduce a full refresh"
+    );
+}
+
+/// T5 (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// D2) — structural no-authoring gate extension for observed-delta
+/// recording. `docs/specs/incremental_models.md` §"The graph layer" —
+/// "Observed deltas on model edges" places the recorded delta in the SAME
+/// warehouse-resident, "bookkeeping" class as the reconciliation ledger
+/// (`smelt_state::ddl_duckdb::generate_ledger_table_ddl`/
+/// `generate_ledger_insert_sql`): D1's ruling is that this is smelt-state
+/// storage for a run's own byproduct, not a maintenance statement the run's
+/// *write* executes, so `smelt_logical::maintenance::emit`'s single-owner
+/// rule does not apply to it, and `no_maintenance_statement_authoring_
+/// outside_the_emitter` above is not extended with an allowlist entry (the
+/// recording query is a `SELECT ... LEFT JOIN`, not one of that gate's
+/// forbidden `DELETE FROM `/`MERGE INTO `/`CREATE TABLE {}.{} AS`/
+/// `CREATE TEMP TABLE ` shapes — confirmed by that test's own green run,
+/// unmodified by this phase).
+///
+/// What IS asserted here, as the phase's own structural gate: the "one
+/// comparison, two consumers" claim
+/// (`crate::maintenance_driver::changed_row_predicate`'s doc comment) — the
+/// observed-delta recording query's `IS DISTINCT FROM` guard must be
+/// BYTE-IDENTICAL to the suppressed MERGE's own matched-arm guard over the
+/// same `compared_columns`, so change-suppression and delta-recording can
+/// never silently diverge on what counts as "changed".
+#[test]
+fn observed_delta_predicate_matches_suppressed_merge_guard_byte_for_byte() {
+    let compared_columns = vec!["tier".to_string(), "email".to_string()];
+
+    let merge_group = smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed(
+        "main.dim_users",
+        &["user_id".to_string()],
+        "SELECT * FROM main.sources_users",
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    let merge_sql = &merge_group.statements[0].sql;
+
+    let record_sql = smelt_runtime::maintenance_driver::changed_row_predicate(
+        "target",
+        "source",
+        &compared_columns,
+    );
+
+    assert!(
+        merge_sql.contains(&record_sql),
+        "the recorded-delta predicate must appear byte-identical inside the suppressed MERGE's \
+         own matched-arm guard — predicate: {record_sql:?}, MERGE: {merge_sql:?}"
+    );
+
+    // The recording query built off the SAME predicate carries it verbatim
+    // too — a second cross-check at the query-assembly level, not just the
+    // bare predicate.
+    let changed_keys_query = smelt_runtime::maintenance_driver::changed_keys_select(
+        "main.dim_users",
+        &["user_id".to_string()],
+        "SELECT * FROM main.sources_users",
+        &compared_columns,
+        None,
+    );
+    assert!(
+        changed_keys_query.contains(&record_sql),
+        "changed_keys_select must carry the identical predicate text, got: {changed_keys_query:?}"
     );
 }
 

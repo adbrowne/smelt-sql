@@ -349,14 +349,19 @@ classification = "legitimate"
 reason = "resolve_struct_return_type: row-var name mismatch between param and return — unresolvable"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:771"]
+["crates/smelt-db/src/type_inference/function_call.rs:788"]
 classification = "legitimate"
 reason = "Coalesce: all args Unknown/Null — result type genuinely unknown; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:791"]
+["crates/smelt-db/src/type_inference/function_call.rs:805"]
 classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
+discriminant = "dynamic"
+
+["crates/smelt-db/src/type_inference/function_call.rs:1075"]
+classification = "legitimate"
+reason = "Greatest/Least: promote_arg_types fallback — all args Unknown/Null; result type genuinely unknown, same rationale as Coalesce above"
 discriminant = "dynamic"
 
 # ── smelt-db / type_inference/hof ─────────────────────────────────────────────

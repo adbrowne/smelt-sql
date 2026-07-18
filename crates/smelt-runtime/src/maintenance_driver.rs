@@ -16,6 +16,7 @@ use crate::transformer::{add_seconds_to_date, subtract_seconds_from_date, TimeRa
 use anyhow::{bail, Context, Result};
 use smelt_backend::{
     maintenance_dialect, Backend, BackendError, ExecutionResult, IncrementalStrategy,
+    PartitionRange,
 };
 use smelt_core::config::{CellTechnique, Granularity};
 use smelt_dialect::SqlDialect;
@@ -25,7 +26,7 @@ use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
-    MaintenanceStatement, StatementGroup, TargetSlicePredicate,
+    MaintenanceDialect, MaintenanceStatement, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
@@ -839,26 +840,23 @@ pub async fn execute_column_scoped_merge_full(
     unique_key: &[String],
     dimension_batch_sql: &str,
     suppression: &WriteSuppression,
+    window: &PartitionRange,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
     let dialect = maintenance_dialect(backend.dialect());
-    let group = match suppression {
-        WriteSuppression::Suppressed { compared_columns } => emit_column_scoped_merge_suppressed(
-            &full_table,
-            unique_key,
-            dimension_batch_sql,
-            compared_columns,
-            dialect,
-        ),
-        WriteSuppression::Unconditional { .. } => {
-            emit_column_scoped_merge(&full_table, unique_key, dimension_batch_sql, dialect)
-        }
-    };
-    backend
-        .execute_statement_group(&group)
-        .await
-        .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
+    execute_column_scoped_write_with_observed_delta(
+        backend,
+        schema,
+        table,
+        unique_key,
+        dimension_batch_sql,
+        suppression,
+        dialect,
+        window,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {
         model_name: table.to_string(),
@@ -866,6 +864,155 @@ pub async fn execute_column_scoped_merge_full(
         row_count,
         preview: None,
     })
+}
+
+/// Build the `IS DISTINCT FROM` OR-predicate over `compared_columns` — the
+/// SAME shape [`emit_column_scoped_merge_suppressed`]
+/// (`smelt_logical::maintenance::emit`) guards its matched arm with. Not a
+/// shared emitter export: D1 ruled observed-delta recording is smelt-state
+/// bookkeeping (warehouse-resident, alongside the reconciliation ledger),
+/// not emitter-authored maintenance-statement text
+/// (`docs/specs/incremental_models.md` §"The graph layer" — "Observed
+/// deltas on model edges"), so it sits outside
+/// `smelt_logical::maintenance::emit`'s single-owner rule the same way
+/// `Backend::fold_ledger_delta`'s ledger DML does. Kept from drifting off
+/// the write's own guard by a dedicated cross-check test
+/// (`crates/smelt-runtime/tests/statement_parity.rs`).
+pub fn changed_row_predicate(left: &str, right: &str, compared_columns: &[String]) -> String {
+    compared_columns
+        .iter()
+        .map(|c| format!("{left}.{c} IS DISTINCT FROM {right}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ")
+}
+
+/// The changed-key `SELECT` a conditional column-scoped MERGE's observed
+/// delta is recorded from: every row the guarded matched arm actually
+/// updates (its compared columns differ) plus every unmatched row the
+/// always-unconditional insert arm inserts — exactly the rowset
+/// [`emit_column_scoped_merge_suppressed`] writes, restricted to
+/// **comparable columns only** (P3's change-comparability verdict is the
+/// only membership authority — an Incomparable column's own flutter, e.g.
+/// a `plausible` audit stamp, never appears in `compared_columns`, so it
+/// can never dirty this query). `partition_column`, when `Some`, names a
+/// column present in `source_select`'s own full-row projection (the
+/// model's declared partition column) to report as the touched partition;
+/// `None` records every row's partition as `NULL` (folded to an empty
+/// `partitions` array by the upsert) — a bare keyed model with no
+/// partition axis.
+pub fn changed_keys_select(
+    table: &str,
+    unique_key: &[String],
+    source_select: &str,
+    compared_columns: &[String],
+    partition_column: Option<&str>,
+) -> String {
+    let on = unique_key
+        .iter()
+        .map(|k| format!("target.{k} = source.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_expr = if unique_key.len() == 1 {
+        format!("CAST(source.{} AS VARCHAR)", unique_key[0])
+    } else {
+        let parts = unique_key
+            .iter()
+            .map(|k| format!("CAST(source.{k} AS VARCHAR)"))
+            .collect::<Vec<_>>()
+            .join(", '\u{1}', ");
+        format!("CONCAT({parts})")
+    };
+    let partition_expr = match partition_column {
+        Some(col) => format!("CAST(source.{col} AS VARCHAR)"),
+        None => "NULL".to_string(),
+    };
+    let first_key = &unique_key[0];
+    let suppression = changed_row_predicate("target", "source", compared_columns);
+    format!(
+        "SELECT {key_expr} AS delta_key, {partition_expr} AS delta_partition FROM \
+         ({source_select}) AS source LEFT JOIN {table} AS target ON {on} \
+         WHERE target.{first_key} IS NULL OR ({suppression})"
+    )
+}
+
+/// Execute a live `ColumnScopedMerge` cell's write, and — when the cell's
+/// [`WriteSuppression`] verdict is `Suppressed` — record its observed
+/// output delta in the SAME backend transaction (T5,
+/// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+/// deltas on model edges"). `Unconditional` writes are not recorded — the
+/// record is a byproduct of the conditional write's already-computed
+/// changed-row set, never derived after the fact for an unconditional one.
+/// `window` identifies the run window this write covers (the observed-
+/// delta table's own idempotent-replace key, `PRIMARY KEY (model_name,
+/// window_start, window_end)`); `window.column`, when non-empty, is also
+/// the partition-column projection `changed_keys_select` reports as the
+/// touched partition.
+///
+/// Only DuckDB has an observed-delta storage implementation today — the
+/// same DuckDB-only posture `Backend::fold_ledger_delta`'s doc comment
+/// documents for the reconciliation ledger (`smelt_state::ddl_duckdb` is
+/// the only dialect implemented); a non-DuckDB backend fails loudly rather
+/// than being handed DuckDB-flavored SQL it cannot run.
+#[allow(clippy::too_many_arguments)]
+async fn execute_column_scoped_write_with_observed_delta(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    unique_key: &[String],
+    source_select: &str,
+    suppression: &WriteSuppression,
+    dialect: MaintenanceDialect,
+    window: &PartitionRange,
+) -> std::result::Result<(), BackendError> {
+    let full_table = format!("{schema}.{table}");
+    match suppression {
+        WriteSuppression::Suppressed { compared_columns } => {
+            let group = emit_column_scoped_merge_suppressed(
+                &full_table,
+                unique_key,
+                source_select,
+                compared_columns,
+                dialect,
+            );
+            if backend.dialect() != SqlDialect::DuckDB {
+                return Err(BackendError::unsupported(
+                    backend.dialect().name(),
+                    "observed-delta recording for a change-suppressed column-scoped MERGE (T5)",
+                ));
+            }
+            let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+            let partition_column = if window.column.is_empty() {
+                None
+            } else {
+                Some(window.column.as_str())
+            };
+            let changed_keys_query = changed_keys_select(
+                &full_table,
+                unique_key,
+                source_select,
+                compared_columns,
+                partition_column,
+            );
+            let record_sql = ddl_duckdb::generate_observed_delta_upsert_sql(
+                schema,
+                table,
+                &window.start,
+                &window.end,
+                &changed_keys_query,
+            );
+            backend
+                .execute_conditional_write_and_record_observed_delta(
+                    &ensure_sql,
+                    &group,
+                    &record_sql,
+                )
+                .await
+        }
+        WriteSuppression::Unconditional { .. } => {
+            let group = emit_column_scoped_merge(&full_table, unique_key, source_select, dialect);
+            backend.execute_statement_group(&group).await
+        }
+    }
 }
 
 /// Execute one live `ColumnScopedMerge` cell: build the horizon-clamped
@@ -905,6 +1052,7 @@ pub async fn execute_column_scoped_merge(
     conv_ts: &str,
     dimension_batch_sql: &str,
     suppression: &WriteSuppression,
+    window: &PartitionRange,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -919,22 +1067,18 @@ pub async fn execute_column_scoped_merge(
     .map_err(|reason| anyhow::anyhow!("{reason}"))?;
 
     let dialect = maintenance_dialect(backend.dialect());
-    let group = match suppression {
-        WriteSuppression::Suppressed { compared_columns } => emit_column_scoped_merge_suppressed(
-            &full_table,
-            unique_key,
-            &source_sql,
-            compared_columns,
-            dialect,
-        ),
-        WriteSuppression::Unconditional { .. } => {
-            emit_column_scoped_merge(&full_table, unique_key, &source_sql, dialect)
-        }
-    };
-    backend
-        .execute_statement_group(&group)
-        .await
-        .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
+    execute_column_scoped_write_with_observed_delta(
+        backend,
+        schema,
+        table,
+        unique_key,
+        &source_sql,
+        suppression,
+        dialect,
+        window,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
 
     let row_count = backend.get_row_count(schema, table).await.unwrap_or(0);
     Ok(ExecutionResult {

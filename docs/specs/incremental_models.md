@@ -798,10 +798,14 @@ blocking dispatch) and never author maintenance-statement text of their own; dia
 column-list `SET`) live in the emitters as dialect-keyed variants, not in backend string
 construction.
 
-Two deliberate exclusions: the reconciliation ledger's DDL/DML (§"The reconciliation ledger") is
+Three deliberate exclusions: the reconciliation ledger's DDL/DML (§"The reconciliation ledger") is
 state bookkeeping owned per dialect by `smelt-state` — it is *interleaved* transactionally with
-an emitted fold statement but is not itself a maintenance statement; and non-maintenance SQL
-(introspection, seed loading, schema-evolution DDL) is outside this rule.
+an emitted fold statement but is not itself a maintenance statement; the observed-output-delta
+record (§"The graph layer" — "Observed deltas on model edges") sits in the same excluded class,
+warehouse-resident and owned per dialect by `smelt-state` alongside the reconciliation ledger,
+interleaved transactionally with the conditional write whose changed-row set it captures but never
+itself a maintenance statement; and non-maintenance SQL (introspection, seed loading,
+schema-evolution DDL) is outside this rule.
 
 Single ownership is what makes maintenance SQL *observable*: the same emitters serve execution,
 the conformance equivalence gates, and `smelt explain <model> --show-sql`, so printed SQL cannot
@@ -892,8 +896,10 @@ alongside the reconciliation ledger (§"The reconciliation ledger"), and is writ
 backend transaction as the write it records** — a delta visible without its write, or a write
 without its delta, breaks propagation soundness (a downstream consumer would schedule against a
 delta that does not correspond to any committed state). **Trust boundary:** an observed delta is
-trusted because the state is smelt-owned, written only by smelt's own conditional-write emitters,
-mirroring the trust rule sources.md applies to declared world-facts; there is no out-of-band-edit
+trusted because the state is smelt-owned, written only by smelt's own conditional-write execution
+path — bookkeeping alongside the write, per §"Statement emission (single owner)"'s third
+exclusion, not an emitter-authored maintenance statement — mirroring the trust rule sources.md
+applies to declared world-facts; there is no out-of-band-edit
 tripwire in v1 — an external mutation to the target table between runs is not detected. This is an
 explicit Open Question (§Known Divergences), not a silently-assumed absence. Empty and absent are
 distinct: an empty recorded delta means the run executed and changed nothing (a real,
@@ -1609,19 +1615,22 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   remaining two flags in that section). Design derivation:
   `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; the Relation Contract that
   reframes the declared facts is `models.md` §"The Relation Contract".
-- **The observed-output-delta record (§"The graph layer" — "Observed deltas on model edges") is
-  spec'd; recording, storage, and consumption are all unbuilt.** The refined landed-delta notion —
-  a changed-row set with a partition projection, falling back to the run's written window when no
-  set was recorded — is now normative for both source edges (`sources.md` §"Landed-delta (derived,
-  recorded)") and model edges (above), including the warehouse-resident, same-transaction storage
-  posture and the smelt-owned trust boundary with no out-of-band-edit tripwire in v1. None of it
-  exists yet: no conditional write records its changed-row set anywhere, the graph layer's forward
-  propagation and backward resolution do not consume a recorded delta (every model edge still
-  propagates the full written window), and the settle-bound × observed-delta composition named in
-  §"What the composed shape uniquely enables" has no observed-delta leg to compose with. Tracked by
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md` (T5 recording; the partition
-  projection via locality; the `smelt explain` surface; and, for external sources, the M3-input
-  fingerprint-sidecar variant in §Future Extensions).
+- **Observed-delta recording is built for the change-suppressed column-scoped MERGE family
+  (§"The graph layer" — "Observed deltas on model edges"); the partition projection and graph-layer
+  consumption are not.** A change-suppressed column-scoped MERGE records its changed-row set —
+  the same `IS DISTINCT FROM` comparison predicate that guards the write's matched arm, restricted
+  to comparable columns only — into a warehouse-resident table alongside the reconciliation ledger,
+  in the same backend transaction as the write itself: a failed write leaves no delta row, and a
+  fully-suppressed run records a present-but-empty delta, distinct from no record at all. Recording
+  is scoped to DuckDB today, matching the reconciliation ledger's own DuckDB-only posture. What
+  remains unbuilt: the graph layer's forward propagation and backward resolution do not yet consume
+  a recorded delta (every model edge still propagates the full written window, the always-correct
+  widen-never-narrow fallback), the keyed-fold and staged-candidate write families do not yet
+  record, and the settle-bound × observed-delta composition named in §"What the composed shape
+  uniquely enables" has no observed-delta leg to compose with. Tracked by `docs/plans/
+  20260715-composed-axes-conditional-maintenance.md` (the partition projection via locality; the
+  `smelt explain` surface; and, for external sources, the M3-input fingerprint-sidecar variant in
+  §Future Extensions).
 - **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
   is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
   graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a

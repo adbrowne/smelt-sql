@@ -1364,6 +1364,7 @@ pub async fn execute_project(
                                     &inc_plan.config.unique_key,
                                     &compiled.sql,
                                     suppression,
+                                    &partition,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1400,6 +1401,7 @@ pub async fn execute_project(
                                     &conv_ts,
                                     &compiled.sql,
                                     suppression,
+                                    &partition,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?

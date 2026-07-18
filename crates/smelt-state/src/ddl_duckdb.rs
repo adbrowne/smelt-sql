@@ -402,6 +402,90 @@ fn escape_sql_literal(s: &str) -> String {
     s.replace('\'', "''")
 }
 
+// ── Warehouse-resident observed output delta (T5) ───────────────────────
+//
+// `docs/specs/incremental_models.md` §"The graph layer" — "Observed deltas
+// on model edges": a conditional write (`WriteSuppression::Suppressed`)
+// already computes the changed-row set it actually touched; this table
+// records it — key-level v1 (the model's `unique_key` values plus the
+// touched partition value, comparable columns only). It is warehouse-
+// resident, alongside the reconciliation ledger above, and — per the D1
+// spec ruling — in the SAME excluded "bookkeeping" class as that ledger:
+// this is smelt-state storage for a run's own byproduct, not a maintenance
+// statement a run's *write* executes, so it sits outside
+// `smelt_logical::maintenance::emit`'s single-owner rule
+// (`crates/smelt-runtime/tests/statement_parity.rs`'s structural
+// no-authoring gate does not scan `smelt-state`, matching the ledger's own
+// precedent).
+//
+// One row per `(model_name, window_start, window_end)` — a re-run of the
+// same window is an idempotent REPLACE (`ON CONFLICT ... DO UPDATE`), never
+// a duplicate: this is a **recorded snapshot of the last run's delta for
+// that window**, not an append-only log. `changed_keys`/`partitions` are
+// `VARCHAR[]` (never `NULL` — an empty array is a real, present-and-empty
+// delta; a `NULL` never appears because the upsert always coalesces to
+// `[]`). Absent a row for a window is the "no delta was ever recorded"
+// case a consumer must not conflate with an empty delta
+// (`incremental_models.md` §"The graph layer" — "Empty and absent are
+// distinct").
+
+/// Table name for the warehouse-resident observed-output-delta record.
+pub const OBSERVED_DELTA_TABLE_NAME: &str = "_smelt_observed_delta";
+
+/// DDL creating the observed-delta table if it does not already exist.
+/// Idempotent — safe to run before every conditional write.
+pub fn generate_observed_delta_table_ddl(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\
+         model_name VARCHAR NOT NULL, \
+         window_start VARCHAR NOT NULL, \
+         window_end VARCHAR NOT NULL, \
+         changed_keys VARCHAR[] NOT NULL, \
+         partitions VARCHAR[] NOT NULL, \
+         PRIMARY KEY (model_name, window_start, window_end))",
+        quote_identifier(schema),
+        OBSERVED_DELTA_TABLE_NAME,
+    )
+}
+
+/// Upsert one `(model, run window)`'s observed delta: `changed_keys_query`
+/// is the caller's already-built SELECT of every changed row's `unique_key`
+/// value(s), collapsed to one `VARCHAR` column named `delta_key`;
+/// `partition_expr` is `Some("<column-or-expr>")` naming the touched-
+/// partition projection carried by that same query as a `delta_partition`
+/// column (only meaningful for a composed, locality-admitted model), or
+/// `None` when the write has no partition axis (a bare keyed model's
+/// dimension MERGE) — in that case `partitions` is always recorded empty.
+/// `ARRAY_AGG` over zero rows is `NULL` in DuckDB; `COALESCE` folds that
+/// back to `[]` so a fully-suppressed run (nothing changed) still inserts a
+/// row — present-and-empty, not absent. Re-running the same window replaces
+/// via `ON CONFLICT ... DO UPDATE`, never duplicating
+/// (`PRIMARY KEY (model_name, window_start, window_end)` is the same
+/// window's own replace key).
+pub fn generate_observed_delta_upsert_sql(
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+    changed_keys_query: &str,
+) -> String {
+    format!(
+        "INSERT INTO {schema}.{table} (model_name, window_start, window_end, changed_keys, partitions) \
+         SELECT '{model}', '{window_start}', '{window_end}', \
+         COALESCE(ARRAY_AGG(DISTINCT __smelt_delta.delta_key) FILTER (WHERE __smelt_delta.delta_key IS NOT NULL), []::VARCHAR[]), \
+         COALESCE(ARRAY_AGG(DISTINCT __smelt_delta.delta_partition) FILTER (WHERE __smelt_delta.delta_partition IS NOT NULL), []::VARCHAR[]) \
+         FROM ({changed_keys_query}) AS __smelt_delta \
+         ON CONFLICT (model_name, window_start, window_end) DO UPDATE SET \
+         changed_keys = excluded.changed_keys, partitions = excluded.partitions",
+        schema = quote_identifier(schema),
+        table = OBSERVED_DELTA_TABLE_NAME,
+        model = escape_sql_literal(model),
+        window_start = escape_sql_literal(window_start),
+        window_end = escape_sql_literal(window_end),
+        changed_keys_query = changed_keys_query,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -906,5 +990,63 @@ mod tests {
         assert!(sql.contains("grp = '{*}'"));
         assert!(sql.contains("input_name = 'smelt.events'"));
         assert!(sql.contains("delta_id = '2026-01-01'"));
+    }
+
+    // ── warehouse-resident observed-output-delta DDL/DML (T5) ──────────
+
+    #[test]
+    fn observed_delta_table_ddl_is_idempotent_and_windows_never_duplicate() {
+        let ddl = generate_observed_delta_table_ddl("main");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_observed_delta"));
+        assert!(ddl.contains("changed_keys VARCHAR[] NOT NULL"));
+        assert!(ddl.contains("partitions VARCHAR[] NOT NULL"));
+        assert!(ddl.contains("PRIMARY KEY (model_name, window_start, window_end)"));
+    }
+
+    #[test]
+    fn observed_delta_upsert_replaces_on_conflict_never_duplicates() {
+        let sql = generate_observed_delta_upsert_sql(
+            "main",
+            "dim_users",
+            "2026-01-01",
+            "2026-01-02",
+            "SELECT id AS delta_key, NULL AS delta_partition FROM changed",
+        );
+        assert!(sql.contains("INSERT INTO main._smelt_observed_delta"));
+        assert!(sql.contains("'dim_users'"));
+        assert!(sql.contains("'2026-01-01'"));
+        assert!(sql.contains("'2026-01-02'"));
+        assert!(sql.contains("ON CONFLICT (model_name, window_start, window_end) DO UPDATE SET"));
+        assert!(sql.contains("SELECT id AS delta_key, NULL AS delta_partition FROM changed"));
+    }
+
+    #[test]
+    fn observed_delta_upsert_coalesces_empty_delta_to_present_empty_arrays() {
+        // A fully-suppressed run's changed-keys query returns zero rows;
+        // ARRAY_AGG over zero rows is NULL in DuckDB, so the upsert must
+        // COALESCE to `[]` — the row still gets inserted (present), just
+        // with empty arrays, never a NULL array (which would collapse the
+        // empty/absent distinction the spec requires).
+        let sql = generate_observed_delta_upsert_sql(
+            "main",
+            "dim_users",
+            "2026-01-01",
+            "2026-01-02",
+            "SELECT id AS delta_key, NULL AS delta_partition FROM changed WHERE FALSE",
+        );
+        assert!(sql.contains("COALESCE(ARRAY_AGG(DISTINCT __smelt_delta.delta_key)"));
+        assert!(sql.contains("[]::VARCHAR[]"));
+    }
+
+    #[test]
+    fn observed_delta_upsert_escapes_single_quotes_in_model_name() {
+        let sql = generate_observed_delta_upsert_sql(
+            "main",
+            "model's_name",
+            "2026-01-01",
+            "2026-01-02",
+            "SELECT id AS delta_key, NULL AS delta_partition FROM changed",
+        );
+        assert!(sql.contains("'model''s_name'"));
     }
 }

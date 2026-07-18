@@ -458,6 +458,46 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
 
+    /// Record a conditional write's observed output delta, THEN execute the
+    /// write itself, both in the same backend transaction (T5,
+    /// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+    /// deltas on model edges"): a delta visible without its write, or a
+    /// write without its delta, breaks propagation soundness. `record_sql`
+    /// must run **before** `write_group` — it reads the target table's
+    /// pre-write state to compute the changed-row set (`target` vs.
+    /// `source` in the same `IS DISTINCT FROM` shape the write's own
+    /// suppression guard uses); running it after the write would compare
+    /// the target against itself and record nothing. `ensure_sql` creates
+    /// the observed-delta table if absent (idempotent DDL, safe
+    /// standalone); `write_group` is the conditional write's own
+    /// already-emitted [`StatementGroup`] (unchanged — this method does not
+    /// alter what gets written); `record_sql` is the warehouse-resident
+    /// upsert of the changed-key/partition set this write is about to touch
+    /// (`smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql`). All
+    /// three strings/groups come from a caller with the `smelt-state`
+    /// dependency — this trait does not depend on it, only executes the SQL
+    /// text a caller built, same precedent as [`Backend::fold_ledger_delta`].
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `record_sql`, then each of `write_group`'s
+    /// statements) for any backend that does not override it — the same
+    /// precedent as [`Backend::fold_ledger_delta`]'s default. A backend that
+    /// can wrap the record and the write in a native transaction (DuckDB)
+    /// should override this so a failed write never leaves a stale delta
+    /// record behind, and a failed record never lets the write proceed
+    /// unrecorded.
+    async fn execute_conditional_write_and_record_observed_delta(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        record_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        self.execute_sql(record_sql).await?;
+        self.execute_statement_group(write_group).await?;
+        Ok(())
+    }
+
     /// Create a materialized view from a SQL query.
     ///
     /// Default implementation falls back to `create_table_as` with a warning.

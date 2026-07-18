@@ -69,6 +69,18 @@ fn unconditional() -> WriteSuppression {
     }
 }
 
+/// A run-window identity for `execute_column_scoped_merge`/`_full`'s
+/// observed-delta record (T5) — these dimension-shape fixtures have no
+/// partition axis, so `column` is empty (the record's `partitions` array is
+/// always empty for this shape).
+fn test_window() -> smelt_backend::PartitionRange {
+    smelt_backend::PartitionRange {
+        column: String::new(),
+        start: "2024-01-01".to_string(),
+        end: "2024-01-02".to_string(),
+    }
+}
+
 /// A plan whose only cell is an admitted `ColumnScopedMerge` for `source`'s
 /// mutation trigger over the `{tier}` column group — the enrichment shape's
 /// live cell.
@@ -266,6 +278,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         "2024-01-01 12:00:00",
         dimension_batch_sql,
         &unconditional(),
+        &test_window(),
     )
     .await
     .expect("column-scoped merge must succeed");
@@ -431,6 +444,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         "2024-01-01 00:00:00",
         dimension_batch_sql,
         &unconditional(),
+        &test_window(),
     )
     .await
     .expect("horizon-clamped column-scoped merge must succeed");
@@ -539,6 +553,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         &["user_id".to_string()],
         dimension_batch_sql,
         &suppression,
+        &test_window(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed");
@@ -569,6 +584,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         &["user_id".to_string()],
         dimension_batch_sql,
         &suppression,
+        &test_window(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed after mutation");
