@@ -880,6 +880,29 @@ source slices, build bottom-up, and the target period equals a build over comple
 required slice of an unclocked source is the whole table. The two directions are **adjoint, not
 inverse**: `forward(backward(P)) ⊇ P`.
 
+**Observed deltas on model edges.** A model edge's propagated delta follows the same landed-delta
+refinement as a source edge (`sources.md` §"Landed-delta (derived, recorded)"): where a run
+recorded an **observed output delta** — the changed-row set a conditional write (§"Windowed
+maintenance and the horizon", category 2) actually touched, restricted to comparable columns
+(the per-column change-comparability proof, `model_properties.md`) — that changed-row set,
+projected onto the model's own partition axis, is the edge's delta; absent a recorded delta the
+edge falls back to the run's written window, the coarser and always-correct form
+(**widen-never-narrow**, same rule as the source hierarchy). The record is warehouse-resident,
+alongside the reconciliation ledger (§"The reconciliation ledger"), and is written in the **same
+backend transaction as the write it records** — a delta visible without its write, or a write
+without its delta, breaks propagation soundness (a downstream consumer would schedule against a
+delta that does not correspond to any committed state). **Trust boundary:** an observed delta is
+trusted because the state is smelt-owned, written only by smelt's own conditional-write emitters,
+mirroring the trust rule sources.md applies to declared world-facts; there is no out-of-band-edit
+tripwire in v1 — an external mutation to the target table between runs is not detected. This is an
+explicit Open Question (§Known Divergences), not a silently-assumed absence. Empty and absent are
+distinct: an empty recorded delta means the run executed and changed nothing (a real,
+propagatable fact); an absent record means no delta was ever recorded for that write, and a
+consumer must not conflate the two. This composes with the derived settle bound exactly as named
+in §"What the composed shape uniquely enables" ("Settle-bound × observed-delta composition"): once
+both legs are built, a stable upstream chain degenerates to empty-delta no-op propagation with a
+provable horizon behind it.
+
 **Refusals.** The graph refuses fail-loud (`MaintenanceGraphUnsupportedNode`) on: a cyclic edge
 set; a **self-referential** model (a table-graph cycle that is a DAG only when time-unrolled —
 admissible in principle iff its self-clamp is strictly time-backward, with forward dirt running
@@ -1586,6 +1609,19 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   remaining two flags in that section). Design derivation:
   `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; the Relation Contract that
   reframes the declared facts is `models.md` §"The Relation Contract".
+- **The observed-output-delta record (§"The graph layer" — "Observed deltas on model edges") is
+  spec'd; recording, storage, and consumption are all unbuilt.** The refined landed-delta notion —
+  a changed-row set with a partition projection, falling back to the run's written window when no
+  set was recorded — is now normative for both source edges (`sources.md` §"Landed-delta (derived,
+  recorded)") and model edges (above), including the warehouse-resident, same-transaction storage
+  posture and the smelt-owned trust boundary with no out-of-band-edit tripwire in v1. None of it
+  exists yet: no conditional write records its changed-row set anywhere, the graph layer's forward
+  propagation and backward resolution do not consume a recorded delta (every model edge still
+  propagates the full written window), and the settle-bound × observed-delta composition named in
+  §"What the composed shape uniquely enables" has no observed-delta leg to compose with. Tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md` (T5 recording; the partition
+  projection via locality; the `smelt explain` surface; and, for external sources, the M3-input
+  fingerprint-sidecar variant in §Future Extensions).
 - **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
   is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
   graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a
