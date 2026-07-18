@@ -116,41 +116,38 @@ pub fn effective_scan_bounds(
     (allow, require)
 }
 
-/// Detect a single-aggregate fold candidate for a `grain: key` model's own
-/// outermost `SELECT`: exactly one non-key-by column that is a direct call
-/// to a recognised aggregate function.
+/// Detect a fold candidate for a `grain: key` model's own outermost
+/// `SELECT`: every non-key-by column that is a direct call to a recognised
+/// aggregate function, each carrying **its own** combiner (a mixed fold —
+/// `COUNT`→`SUM` alongside `MIN`→`MIN`/`MAX`→`MAX` over the same key — is
+/// the common multi-column shape, not a single shared combiner).
 ///
 /// This is *input assembly*, not admission: a wrong or missing guess here
 /// only ever narrows to "no fold candidate" (the derivation then refuses
 /// the `NewData` cell rather than fabricate one), never admits a fold the
 /// derivation doesn't independently re-check via `combiner_discriminants`
-/// and the source-posture obligation.
+/// and the source-posture obligation. Fail-closed: any non-key-by column
+/// that is an aggregate but does not resolve to a recognised combiner
+/// refuses the *whole* derivation (`None`), never a partial fold over just
+/// the columns that did resolve.
 pub fn derive_fold_spec(sql: &str) -> Option<FoldSpec> {
     let parse = smelt_parser::parse(sql);
     let file = smelt_parser::File::cast(parse.syntax())?;
     let select = file.select_stmt()?;
     let items = select_stmt_items(&select)?;
-    let mut aggregates: Vec<(String, SqlFunction)> = Vec::new();
+    let mut add_columns: Vec<(String, SqlFunction)> = Vec::new();
     for item in &items {
         if let SelectItemKind::OtherAggregate { alias, expr, .. } = item {
-            let Some(func) = expr.as_function_call() else {
-                continue;
-            };
-            let Some(name) = func.name() else { continue };
-            let Some(combiner) = SqlFunction::from_name(&name.to_uppercase()) else {
-                continue;
-            };
-            aggregates.push((alias.clone(), combiner));
+            let func = expr.as_function_call()?;
+            let name = func.name()?;
+            let combiner = SqlFunction::from_name(&name.to_uppercase())?;
+            add_columns.push((alias.clone(), combiner));
         }
     }
-    if aggregates.len() != 1 {
+    if add_columns.is_empty() {
         return None;
     }
-    let (alias, combiner) = aggregates.into_iter().next()?;
-    Some(FoldSpec {
-        add_columns: vec![alias],
-        combiner,
-    })
+    Some(FoldSpec { add_columns })
 }
 
 /// Assemble [`ModelInputs`] from already-resolved facts and derive the
@@ -861,8 +858,55 @@ mod tests {
         let sql =
             "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
         let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
-        assert_eq!(fold.add_columns, vec!["total".to_string()]);
-        assert_eq!(fold.combiner, SqlFunction::Sum);
+        assert_eq!(
+            fold.add_columns,
+            vec![("total".to_string(), SqlFunction::Sum)]
+        );
+    }
+
+    #[test]
+    fn grain_mismatch_detects_multiple_aggregates_with_mixed_combiners() {
+        let sql = "SELECT user_id, COUNT(*) AS n, MIN(event_ts) AS first_seen, \
+                    MAX(event_ts) AS last_seen FROM smelt.sources.events GROUP BY user_id";
+        let fold =
+            derive_fold_spec(sql).expect("multi-aggregate SELECT should be a fold candidate");
+        assert_eq!(
+            fold.add_columns,
+            vec![
+                ("n".to_string(), SqlFunction::Count),
+                ("first_seen".to_string(), SqlFunction::Min),
+                ("last_seen".to_string(), SqlFunction::Max),
+            ]
+        );
+    }
+
+    #[test]
+    fn grain_mismatch_single_aggregate_shape_unchanged_at_n_equals_1() {
+        // Regression: a single-aggregate SELECT derives the exact same
+        // `FoldSpec` shape it did before multi-column folds were supported.
+        let sql =
+            "SELECT user_id, SUM(amount) AS total FROM smelt.sources.payments GROUP BY user_id";
+        let fold = derive_fold_spec(sql).expect("single SUM aggregate should be a fold candidate");
+        assert_eq!(fold.add_columns.len(), 1);
+        assert_eq!(fold.add_columns[0], ("total".to_string(), SqlFunction::Sum));
+    }
+
+    #[test]
+    fn grain_mismatch_unrecognized_aggregate_among_set_refuses_whole_derivation() {
+        // Fail-closed: one recognised aggregate (SUM) alongside one
+        // unresolvable projection (an unregistered window function — the
+        // classifier's window-item branch admits it into `OtherAggregate`
+        // without requiring the function name to resolve, unlike the
+        // aggregate branch) must refuse the *whole* derivation, not
+        // silently fold only the recognised column.
+        let sql = "SELECT user_id, SUM(amount) AS total, \
+                    NOT_A_REAL_FUNCTION() OVER (ORDER BY amount) AS weird \
+                    FROM smelt.sources.payments GROUP BY user_id";
+        assert!(
+            derive_fold_spec(sql).is_none(),
+            "an unresolvable aggregate/window item among the set must refuse the whole \
+             derivation, not a partial fold"
+        );
     }
 
     /// A `grain: key` model's derived plan carries the classifier's real
@@ -905,6 +949,48 @@ mod tests {
                 smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
             )),
             "no timeseries: block declared — must not hit the locality gate: {:?}",
+            result.plan.refusals
+        );
+    }
+
+    /// The W1 flagship repro (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Blocked-phases entry): six `MIN`-folded payload columns over one key. Before this
+    /// phase, `derive_fold_spec` only admitted a single aggregate column, so `inputs.fold`
+    /// stayed `None` and the `NewData` cell refused with "keyed grain with no fold
+    /// specification" — reproduced here at the unit level (no example workspace staged).
+    #[test]
+    fn keyed_six_column_extremal_fold_no_longer_refuses_for_missing_fold_spec() {
+        let sql = "SELECT event_id, MIN(device_id) AS device_id, MIN(user_id) AS user_id, \
+                    MIN(event_time) AS event_ts, MIN(event_date) AS first_seen_date, \
+                    MIN(utm_campaign) AS utm_campaign, MIN(payload) AS payload \
+                    FROM smelt.sources.raw.events GROUP BY event_id";
+        let fold = derive_fold_spec(sql).expect("six-column MIN fold should be a fold candidate");
+        assert_eq!(fold.add_columns.len(), 6);
+        assert!(fold.add_columns.iter().all(|(_, c)| *c == SqlFunction::Min));
+
+        let metadata = ModelMetadata {
+            refresh: Some(RefreshStrategy::Incremental),
+            grain: Some(ConfigGrain::Key),
+            ..Default::default()
+        };
+        let result = derive_model_maintenance_plan(
+            sql,
+            "main.events_deduped",
+            &metadata,
+            &[],
+            &std::collections::HashSet::new(),
+            None,
+            &[],
+        )
+        .expect("grain: key model must derive a plan");
+        assert!(
+            !result.plan.refusals.iter().any(|r| matches!(
+                r,
+                smelt_logical::maintenance::Refusal::NoAdmissibleTechnique { why, .. }
+                    if why.contains("no fold specification")
+            )),
+            "multi-column fold must be derived — the 'no fold specification' refusal must not \
+             recur: {:?}",
             result.plan.refusals
         );
     }

@@ -184,8 +184,7 @@ fn ex14_change_feed_sum_recompute_only() {
             mutation_sensitivity: set(&["ledger_cdc"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner: SqlFunction::Sum,
+            add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         column_add_proof: None,
     };
@@ -297,8 +296,7 @@ fn ex26_change_feed_latest_writer_recompute_only() {
         // it refuses before combiner algebra (obligation 3) is even
         // consulted, so the choice of monoid combiner here doesn't matter.
         fold: Some(FoldSpec {
-            add_columns: strings(&["status"]),
-            combiner: SqlFunction::Max,
+            add_columns: vec![("status".to_string(), SqlFunction::Max)],
         }),
         column_add_proof: None,
     };
@@ -420,8 +418,7 @@ fn ex35_correlated_first_value_recompute_only() {
             mutation_sensitivity: set(&["events"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["first_seen"]),
-            combiner: SqlFunction::ArgMax,
+            add_columns: vec![("first_seen".to_string(), SqlFunction::ArgMax)],
         }),
         column_add_proof: None,
     };

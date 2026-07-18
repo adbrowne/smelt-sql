@@ -354,8 +354,7 @@ fn ex24_inputs(
             mutation_sensitivity: set(&["payments"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner,
+            add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
         column_add_proof: None,
     };

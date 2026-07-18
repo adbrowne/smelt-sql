@@ -403,8 +403,7 @@ fn ex24_keyed_fold_of_a_delta_equals_full_refresh_at_the_advanced_s() {
             mutation_sensitivity: set(&["payments"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner: SqlFunction::Sum,
+            add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         column_add_proof: None,
     };

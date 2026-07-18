@@ -194,8 +194,7 @@ fn described_technique_matches_execution_keyed_fold() {
             mutation_sensitivity: set(&["payments"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner: SqlFunction::Sum,
+            add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         column_add_proof: None,
     };

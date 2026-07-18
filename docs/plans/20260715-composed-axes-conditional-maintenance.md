@@ -79,7 +79,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
 | W0 | Extremal-aggregate nullability: `MIN`/`MAX` over a NOT NULL argument infers NOT NULL in grouped context (unblocks W1) | done (2026-07-18) |
-| W0b | Multi-column extremal fold: `derive_fold_spec`/`FoldSpec` support a per-column combiner list for the source-driven `NewData` path (unblocks W1's six-column flagship) | pending |
+| W0b | Multi-column extremal fold: `derive_fold_spec`/`FoldSpec` support a per-column combiner list for the source-driven `NewData` path (unblocks W1's six-column flagship) | done (2026-07-18) |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending (reopened 2026-07-18 — was blocked on the `derive_fold_spec` single-aggregate limit; W0b resolves it) |
 | W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending (transitively gated on W1) |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |

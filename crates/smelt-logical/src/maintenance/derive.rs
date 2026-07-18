@@ -40,13 +40,15 @@ fn source_shape(facts: &SourceFacts) -> SourceShape {
     }
 }
 
-/// Caller-supplied fold admission input for a keyed-grain model: which key
-/// the fold addresses and which columns fold additively under `combiner`.
-/// Checked against the combiner-algebra classifier — never trusted bare.
+/// Caller-supplied fold admission input for a keyed-grain model: which
+/// columns fold additively, each under its **own** combiner (a mixed fold —
+/// e.g. `COUNT`→`SUM`, `MIN`→`MIN`, `MAX`→`MAX` composed over the same
+/// key — is the common shape, not a single shared combiner across every
+/// column). Checked against the combiner-algebra classifier per column —
+/// never trusted bare.
 #[derive(Debug, Clone)]
 pub struct FoldSpec {
-    pub add_columns: Vec<String>,
-    pub combiner: SqlFunction,
+    pub add_columns: Vec<(String, SqlFunction)>,
 }
 
 /// One upstream **maintained-model** edge (`incremental_models.md` §"Upstream
@@ -337,8 +339,10 @@ fn derive_new_data(
             // `derive_backfill`/a declared `full` refresh is that family's
             // representative today; wiring the fallback as an alternate
             // technique inside the same cell is deferred, since v0 admits at
-            // most one technique per cell).
-            let disc = combiner_discriminants(fold.combiner, false);
+            // most one technique per cell). Checked per column below —
+            // obligation 3 is independent per combiner, so a mixed fold
+            // (e.g. `SUM` alongside `MIN`/`MAX`) refuses as a whole the
+            // moment any one column's combiner fails it.
 
             // Obligation 2, source-posture half: `input_delta_discovery` is
             // the SC-2 tripwire's (`docs/research/property-discovery/
@@ -377,10 +381,10 @@ fn derive_new_data(
                              so an in-place update to an already-processed partition would \
                              go entirely unseen by the next run, not merely un-undoable; no \
                              un-fold mechanism exists to undo an already-folded contribution \
-                             either, so this refuses the fold family whether or not combiner \
-                             {:?} is itself a monoid — the two faithful-fold conditions are \
-                             independent and either alone refuses",
-                            fold.combiner
+                             either, so this refuses the fold family whether or not any of the \
+                             fold's combiners ({:?}) are themselves monoids — the two \
+                             faithful-fold conditions are independent and either alone refuses",
+                            fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                         ),
                     });
                 } else {
@@ -391,10 +395,10 @@ fn derive_new_data(
                              condition: the source is not append-only and may carry \
                              retractions (input-delta discovery = {discovery:?}); no un-fold \
                              mechanism exists to undo an already-folded contribution, so this \
-                             refuses the fold family whether or not combiner {:?} is itself a \
-                             monoid — the two faithful-fold conditions are independent and \
-                             either alone refuses",
-                            fold.combiner
+                             refuses the fold family whether or not any of the fold's combiners \
+                             ({:?}) are themselves monoids — the two faithful-fold conditions \
+                             are independent and either alone refuses",
+                            fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                         ),
                     });
                 }
@@ -402,21 +406,32 @@ fn derive_new_data(
             }
 
             // Obligation 3: combiner algebra class, checked independently of
-            // the (already-passed) source-posture condition above.
-            if !disc.is_monoid {
+            // the (already-passed) source-posture condition above, per
+            // column — a mixed-combiner fold refuses as a whole (fail-closed,
+            // not a partial fold) the moment any one column's combiner is
+            // not a monoid.
+            if let Some((column, combiner)) = fold.add_columns.iter().find_map(|(name, c)| {
+                (!combiner_discriminants(*c, false).is_monoid).then_some((name.clone(), *c))
+            }) {
                 plan.refusals.push(Refusal::NoAdmissibleTechnique {
                     trigger: format!("{trigger:?}"),
                     why: format!(
-                        "combiner {:?} is holistic or unrecognised (not a monoid) — no \
-                         delta+state read exists; only the recompute family (a full \
-                         rebuild) can serve this cell",
-                        fold.combiner
+                        "combiner {combiner:?} for column '{column}' is holistic or \
+                         unrecognised (not a monoid) — no delta+state read exists; only the \
+                         recompute family (a full rebuild) can serve this cell",
                     ),
                 });
                 return;
             }
             plan.cells.push(PlanCell {
-                group: format!("{{{}}}", fold.add_columns.join(", ")),
+                group: format!(
+                    "{{{}}}",
+                    fold.add_columns
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 trigger,
                 corner: Corner::FoldDelta,
                 technique: Technique::KeyedFold,
