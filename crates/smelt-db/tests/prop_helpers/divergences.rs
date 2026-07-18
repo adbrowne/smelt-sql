@@ -278,6 +278,12 @@ pub fn find_divergence<'a>(
     backend: &str,
     divergences: &'a [TypeDivergence],
 ) -> Option<&'a TypeDivergence> {
+    // Unwrap one level of Array (e.g. ARRAY_AGG(expr) results) so element-level
+    // divergences (like decimal growth) are still recognized under wrapping —
+    // the registry has no separate Array-of-Decimal entries to maintain.
+    if let (DataType::Array(smelt_elem), DataType::Array(actual_elem)) = (smelt, actual) {
+        return find_divergence(smelt_elem, actual_elem, backend, divergences);
+    }
     divergences.iter().find(|d| {
         types_match(&d.smelt_type, smelt) && {
             let expected = match backend {
@@ -353,6 +359,29 @@ mod tests {
                 scale: 2,
             },
             "spark",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "decimal_arithmetic_model");
+    }
+
+    #[test]
+    fn finds_decimal_arithmetic_model_divergence_under_array_wrapping_duckdb() {
+        // Regression: a soak run caught `ARRAY_AGG(dec_col * dec_col)` diverging
+        // against DuckDB — the existing decimal_arithmetic_model wildcard covers
+        // bare Decimal-vs-Decimal, but ARRAY_AGG wraps the result in Array, and
+        // the matcher didn't unwrap it before comparing.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Array(Box::new(DataType::Decimal {
+                precision: 21,
+                scale: 4,
+            })),
+            &DataType::Array(Box::new(DataType::Decimal {
+                precision: 18,
+                scale: 4,
+            })),
+            "duckdb",
             &divs,
         );
         assert!(found.is_some());
