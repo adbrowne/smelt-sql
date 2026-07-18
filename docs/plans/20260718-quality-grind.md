@@ -41,6 +41,7 @@ top-to-bottom; the first sub-plan whose Status is **not** `done` and that still 
 |----------|------------------|--------|
 | [`docs/plans/20260718-quality-grind-t1.md`](20260718-quality-grind-t1.md) | **Tier 1 — small, root-caused fixes.** Parser ledger categories triaged "Small" (`NOT`-prefixed binary operators, `==`, quoted table names in FROM, `RANGE` as identifier/function, `NULL::TYPE`, parenthesized set-op trailing ORDER BY), the TABLESAMPLE/alias ordering bug, VALUES-body CTE arity, sub-day interval mis-parse, UTF-8 diagnostic positions + smelt-ui LineIndex, registry gaps (`to_seconds`, `md5`), and the documentation-gap batch. | pending |
 | [`docs/plans/20260718-quality-grind-t2.md`](20260718-quality-grind-t2.md) | **Tier 2 — well-understood, larger.** Property-test generator deferred items (aggregate FILTER, ordered-set aggregates / WITHIN GROUP, two-column aggregates, ARRAY, ROW/STRUCT), the smelt-planner↔smelt-logical duplicated-module consolidation, the cold-Salsa 2000-model benchmark regression investigation, and two CLI ergonomics fixes. | pending |
+| [`docs/plans/20260718-quality-grind-t3.md`](20260718-quality-grind-t3.md) | **Tier 3 — ratified decisions (2026-07-18).** Comma-join = cross join (grammar + printer, then join-type classification + oracle-verified schema expansion, closing the 25-entry ledger category), and P7d close-out hygiene (stale `meta_config_e2e.rs` comment, stale `docs/TODO.md` §P7c section — the Map-consumption surface chosen under D-QG-1 was found already landed as P7d). | pending |
 
 ## Progress tracking (human-facing overview)
 
@@ -48,6 +49,7 @@ top-to-bottom; the first sub-plan whose Status is **not** `done` and that still 
 |------|----------|--------|--------|
 | 1 | 20260718-quality-grind-t1.md | 12 | pending |
 | 2 | 20260718-quality-grind-t2.md | 9 | pending |
+| 3 | 20260718-quality-grind-t3.md | 3 | pending |
 
 ## Tier 3 — decision queue (NOT loop work)
 
@@ -57,10 +59,10 @@ explicitly parked. Decisions recorded inline as they are made.
 
 | # | Item | Decision needed | Status |
 |---|------|-----------------|--------|
-| D-QG-1 | P7c Map-loader direction (`docs/TODO.md` §P7c, paused 2026-06-03) | Pick (A) drop Map-in-model, (B) wire Map consumption (`keys()`/`entries()`), or (C) exempt bare loaders | open |
-| D-QG-2 | Implicit comma-join semantics (25 ledger entries) | Whether `FROM a, b` becomes a first-class cross-join in `JoinClause::join_type()` (inference semantics, not grammar) | open |
-| D-QG-3 | ON-join `SELECT *` right-side expansion (`docs/TODO.md` 2026-07-12) | Admitting duplicate column names into inferred schemas — affects find-by-name consumers, LSP completion, input-constraint keying | open |
-| D-QG-4 | `smelt bakeoff` CLI (ROADMAP §10, deferred) | Three design questions: single-technique force-execute plumbing, `--pin` frontmatter round-trip, `smelt-cli` commands-module visibility | open |
+| D-QG-1 | P7c Map-loader direction (`docs/TODO.md` §P7c, paused 2026-06-03) | Pick (A) drop Map-in-model, (B) wire Map consumption (`keys()`/`entries()`), or (C) exempt bare loaders | **decided 2026-07-18: (B)** — then found **already landed** as P7d (`ab22f990`: `MAP_METHOD_CALL` postfix on loader calls, `meta_eval.rs` lowering, `tenants.sql` green, `meta_config` off `KNOWN_UNBUILDABLE`). Only stale-state close-out remains → [`20260718-quality-grind-t3.md`](20260718-quality-grind-t3.md) Phase 3 |
+| D-QG-2 | Implicit comma-join semantics (25 ledger entries) | Whether `FROM a, b` becomes a first-class cross-join in `JoinClause::join_type()` (inference semantics, not grammar) | **decided 2026-07-18: implement** (comma-join = cross join) — scaffolded into [`20260718-quality-grind-t3.md`](20260718-quality-grind-t3.md) |
+| D-QG-3 | ON-join `SELECT *` right-side expansion (`docs/TODO.md` 2026-07-12) | Admitting duplicate column names into inferred schemas — affects find-by-name consumers, LSP completion, input-constraint keying | **decided 2026-07-18: defer** — current left-side-only behavior stays pinned by `on_join_star_current_behavior_left_side_only`; revisit when it bites a real workspace |
+| D-QG-4 | `smelt bakeoff` CLI (ROADMAP §10, deferred) | Three design questions: single-technique force-execute plumbing, `--pin` frontmatter round-trip, `smelt-cli` commands-module visibility | **decided 2026-07-18: keep parked** — nothing else blocks on it |
 | D-QG-5 | Cold-Salsa benchmark ceiling (fed by T2 Phase 8's profile) | Optimize the offending analysis vs raise the 10s ceiling | open — awaiting T2·P8 findings |
 
 ## Deferred during implementation

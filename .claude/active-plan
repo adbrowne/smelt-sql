@@ -23,6 +23,7 @@
 #   Master:   docs/plans/20260718-quality-grind.md
 #   Sub-plans: docs/plans/20260718-quality-grind-t1.md (12 phases)
 #              docs/plans/20260718-quality-grind-t2.md (9 phases)
+#              docs/plans/20260718-quality-grind-t3.md (3 phases — ratified decisions)
 # Tier 3 decision items live in the master's "## Tier 3 — decision queue" —
 # the loop NEVER picks those up.
 #
