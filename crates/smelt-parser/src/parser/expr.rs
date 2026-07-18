@@ -2084,6 +2084,18 @@ impl<'a> super::Parser<'a> {
 
     /// Check if current token is a keyword that can also be used as a function name
     pub(super) fn at_keyword_as_function_name(&self) -> bool {
+        // RANGE is the window-frame unit keyword (`RANGE BETWEEN …`), but
+        // that form is parsed by a dedicated frame-clause dispatch that
+        // checks for RANGE_KW before expression parsing is ever reached
+        // (see parse_window_frame). Everywhere else RANGE is either
+        // DuckDB's range(...) table/scalar function or a plain column
+        // name (e.g. `SELECT range AS id, range % 5 FROM range(13)`), so —
+        // unlike the LPAREN-gated keywords below — it is accepted here
+        // even without a following `(`; the caller's bare-keyword branch
+        // then wraps it as a plain identifier expression.
+        if self.at(RANGE_KW) {
+            return true;
+        }
         if !self.at_any(&[
             FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW, VALUES_KW, LEFT_KW, RIGHT_KW,
             // Phase B: FN_KW — `fn(args)` where `fn` is used as a SQL function name.

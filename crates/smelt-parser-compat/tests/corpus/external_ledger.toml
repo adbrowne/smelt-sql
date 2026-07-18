@@ -131,14 +131,6 @@ note = "Dollar-quoted string or backslash-escape string literal form is not pars
 category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
 
-["e7f8101e8ebcb4aa"]
-category = "sqllogictest_template_placeholder"
-note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
-
-["4d1c47594b381d8e"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
-
 ["fe081f2437428f8a"]
 category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
@@ -192,8 +184,8 @@ category = "file_glob_or_path_literal_from"
 note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["4b5f29a8027c361a"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
+category = "file_glob_or_path_literal_from"
+note = "A single-quoted file-path string literal used directly as a FROM target is not parsed (the statement's original RANGE-keyword failure was fixed by the quality-grind range_keyword_as_identifier_or_function phase; this is the distinct root cause left once that one is gone)"
 
 ["3156d5843df8e3df"]
 category = "file_glob_or_path_literal_from"
@@ -243,13 +235,9 @@ note = "sqllogictest ${...} template placeholder substituted at test-run time by
 category = "if_function_vs_ternary_ambiguity"
 note = "SQL IF(cond, a, b) 3-argument function call is not parsed; IF is reserved for the meta-language ternary and is not in at_keyword_as_function_name's list"
 
-["0a525a0e6cb3124d"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
-
 ["11364d332cae94d5"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
+category = "interval_string_literal_unit_in_arg_list"
+note = "A DuckDB-style `interval '1' day` typed string literal with a trailing unit keyword is only consumed correctly at SELECT-item top level (where the unit is accidentally swallowed as an implicit column alias); inside a function argument list the unit keyword is left dangling and fails with 'Expected RPAREN'. The statement's original RANGE-keyword failure was fixed by the quality-grind range_keyword_as_identifier_or_function phase; this is the distinct root cause left once that one is gone."
 
 ["bb786c3a21b69bb3"]
 category = "lambda_or_lateral_syntax"
@@ -582,10 +570,6 @@ note = "A window-frame bound that is a column/expression rather than a literal (
 ["2eeeab6e1921780c"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
-
-["a8c6b4e0e85d910f"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["f7fd82844d7f1224"]
 category = "multidim_array_type_literal"

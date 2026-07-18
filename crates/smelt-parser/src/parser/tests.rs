@@ -10019,6 +10019,44 @@ fn first_last_parse_as_aggregate_function_names() {
 }
 
 #[test]
+fn range_parses_as_function_name_and_bare_identifier() {
+    // RANGE is the window-frame unit keyword (`RANGE BETWEEN …`), but
+    // DuckDB also ships a range(...) table/scalar function and allows a
+    // bare `range` column reference outside frame-spec context.
+    // `at_keyword_as_function_name` in parser/expr.rs must accept RANGE_KW
+    // both as a call (followed by `(`) and as a plain identifier
+    // (external-corpus regression: `select my_agg(range) OVER () from
+    // range(2)` and `select range AS id, range % 5 AS part … from
+    // range(13)` previously failed with "Expected expression, found
+    // RANGE_KW").
+    for sql in [
+        "SELECT range(5)",
+        "SELECT range(1, 10) AS r",
+        "SELECT range FROM t",
+        "SELECT my_agg(range) FROM range(2)",
+        "SELECT range AS id, range % 5 AS part FROM range(13)",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+
+    // Window-frame `RANGE BETWEEN …` must still parse (the keyword's
+    // pre-existing, structurally distinct role) — this fix must not
+    // regress it.
+    let sql = "SELECT a, SUM(a) OVER (ORDER BY a RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
 fn null_literal_supports_cast_and_subscript_postfix() {
     for sql in [
         "SELECT NULL::INTEGER",

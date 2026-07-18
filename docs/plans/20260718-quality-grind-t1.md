@@ -76,7 +76,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 1     | done    | fix(parser): NOT-prefixed binary operators | 2026-07-18 |
 | 2     | done    | fix(lexer): accept == as equality operator alias | 2026-07-18 |
 | 3     | done    | fix(parser): double-quoted table/schema names in FROM | 2026-07-18 |
-| 4     | pending |        |      |
+| 4     | done    | fix(parser): RANGE as function name/identifier outside frame specs | 2026-07-18 |
 | 5     | pending |        |      |
 | 6     | pending |        |      |
 | 7     | pending |        |      |
@@ -474,6 +474,24 @@ Timeless-oracle wording throughout.
 ## Deferred during implementation
 
 (Append-only.)
+
+- **2026-07-18, Phase 4.** Closing `range_keyword_as_identifier_or_function`
+  surfaced that 2 of its 5 ledger entries were multi-cause: the RANGE
+  failure was masking a second, unrelated gap that reproduces once RANGE
+  itself parses. Re-categorized rather than closed:
+  - `4b5f29a8027c361a` → `file_glob_or_path_literal_from` (single-quoted
+    file-path literal as a FROM target — pre-existing, unrelated to RANGE).
+  - `11364d332cae94d5` → `interval_string_literal_unit_in_arg_list` (new
+    category: `interval '1' day`'s trailing unit keyword is only consumed
+    via an accidental implicit-column-alias at SELECT-item top level;
+    inside a function argument list it's left dangling — "Expected
+    RPAREN". Root cause is in `is_typed_literal`'s INTERVAL branch, not
+    RANGE; out of scope for this phase).
+  - Also removed one unrelated stale entry `e7f8101e8ebcb4aa`
+    (`sqllogictest_template_placeholder`) that `ledger_has_no_stale_entries`
+    flagged as now-passing — a side effect of the combined Phase 1/2/4
+    fixes (NOT-prefixed operators, `==`, and RANGE) unblocking a statement
+    that happened to use all three.
 
 ## Verification
 
