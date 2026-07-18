@@ -14,6 +14,7 @@
 
 use crate::transformer::{add_seconds_to_date, subtract_seconds_from_date, TimeRange};
 use anyhow::{bail, Context, Result};
+use arrow::array::Array;
 use smelt_backend::{
     maintenance_dialect, Backend, BackendError, ExecutionResult, IncrementalStrategy,
     PartitionRange,
@@ -23,15 +24,19 @@ use smelt_dialect::SqlDialect;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
-use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
+use smelt_logical::maintenance::choice::{
+    resolve_recompute_restriction, resolve_write_suppression, RecomputeRestriction,
+    WriteSuppression,
+};
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
-    MaintenanceDialect, MaintenanceStatement, StatementGroup, TargetSlicePredicate,
+    emit_delete_insert, emit_delete_insert_delta_restricted, MaintenanceDialect,
+    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
-    MaintenancePlan, PartitionLocal, PlanCell, ScanClamp, SourceFacts, Technique, Trigger,
-    WritePattern, WriteSelection,
+    MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, ScanClamp, SkeletonSourceClosure,
+    SourceFacts, Technique, Trigger, WritePattern, WriteSelection,
 };
 use smelt_state::ddl_duckdb;
 use smelt_state::reconciliation::Grade;
@@ -1014,6 +1019,241 @@ async fn execute_column_scoped_write_with_observed_delta(
             backend.execute_statement_group(&group).await
         }
     }
+}
+
+// ── T3: delta-restricted region recompute over a model edge ────────────
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase E3)
+
+/// Read the exact observed-delta changed-key set an upstream driving model
+/// edge recorded for `[window_start, window_end)` (T5, Group D). `None` = no
+/// row was ever recorded for this window — the "pre-D2 upstream" / never-
+/// recorded case, the trigger for the widen-never-narrow fallback — distinct
+/// from `Some(&[])`'s "recorded and present-and-empty" (a fully-suppressed
+/// upstream run; `incremental_models.md` §"The graph layer" — "Empty and
+/// absent are distinct").
+///
+/// DuckDB-only, matching every other `_smelt_observed_delta` consumer in
+/// this module (`execute_column_scoped_write_with_observed_delta` above).
+/// Unlike that function's *write*-side capability gap (a hard error — the
+/// caller asked for a technique the backend cannot provide), a missing
+/// delta on the *read* side is always a legal fallback trigger, so a non-
+/// DuckDB backend reads back `None` rather than erroring.
+pub async fn read_observed_delta_changed_keys(
+    backend: &dyn Backend,
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> std::result::Result<Option<Vec<String>>, BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Ok(None);
+    }
+    let ensure_sql = ddl_duckdb::generate_observed_delta_table_ddl(schema);
+    backend.execute_sql(&ensure_sql).await?;
+
+    let select_sql =
+        ddl_duckdb::generate_observed_delta_select_sql(schema, model, window_start, window_end);
+    let batches = backend.execute_sql(&select_sql).await?;
+    let total_rows: usize = batches.iter().map(|b| b.num_rows()).sum();
+    if total_rows == 0 {
+        return Ok(None);
+    }
+
+    let mut keys = Vec::new();
+    for batch in &batches {
+        let Some(col) = batch.column_by_name("changed_keys") else {
+            continue;
+        };
+        let Some(list) = col.as_any().downcast_ref::<arrow::array::ListArray>() else {
+            continue;
+        };
+        for i in 0..list.len() {
+            if list.is_null(i) {
+                continue;
+            }
+            let values = list.value(i);
+            let Some(strings) = values.as_any().downcast_ref::<arrow::array::StringArray>() else {
+                continue;
+            };
+            for j in 0..strings.len() {
+                if !strings.is_null(j) {
+                    keys.push(strings.value(j).to_string());
+                }
+            }
+        }
+    }
+    Ok(Some(keys))
+}
+
+/// Pure: decide the [`RecomputeRestriction`] verdict and build the
+/// resulting [`StatementGroup`] — the single decision-and-emit call site
+/// both [`execute_delete_insert_with_delta_restriction`]'s live executor
+/// AND the `--dry-run`/`smelt explain` reporting path in
+/// `crate::execute::execute_project` route through, so a dry-run's reported
+/// statement can never structurally diverge from what a live run with the
+/// same inputs would emit (`docs/specs/cli.md` §"`--dry-run` prints the
+/// maintenance statements"). A dry-run has no backend to consult, so it
+/// always calls this with `observed_delta: None` — [`resolve_recompute_
+/// restriction`] then always resolves `Unrestricted`, so a dry-run's
+/// reported text is always the ordinary widened scan (the honest choice:
+/// a dry-run cannot know whether a live run's delta read would restrict).
+#[allow(clippy::too_many_arguments)]
+pub fn build_delete_insert_group_dispatched(
+    table: &str,
+    partition_col: &str,
+    region: &Region,
+    body: &str,
+    restrict_column: Option<&str>,
+    skeleton_source_closure: Option<&SkeletonSourceClosure>,
+    observed_delta: Option<&[String]>,
+    dialect: MaintenanceDialect,
+) -> StatementGroup {
+    let restriction = resolve_recompute_restriction(skeleton_source_closure, observed_delta);
+    match (restrict_column, restriction) {
+        (Some(col), RecomputeRestriction::Restricted { delta_keys }) => {
+            emit_delete_insert_delta_restricted(
+                table,
+                partition_col,
+                region,
+                body,
+                col,
+                &delta_keys,
+                dialect,
+            )
+        }
+        _ => emit_delete_insert(table, partition_col, region, body, dialect),
+    }
+}
+
+/// Execute a model-edge creation-trigger region recompute, restricting it to
+/// an exact upstream delta's changed-key set when licensed
+/// ([`resolve_recompute_restriction`]'s two-factor admission: P1 skeleton-
+/// source closure `Closed` ∧ a non-empty recorded delta). Falls back to the
+/// ordinary widened-scan [`emit_delete_insert`] — byte-identical to today's
+/// unrestricted region recompute — for an `Open`/absent `skeleton_source_
+/// closure`, no `restrict_column` (the cell has no proven row identity to
+/// restrict on), an absent delta, or a present-but-empty one.
+///
+/// Returns the [`StatementGroup`] actually executed, mirroring
+/// `execute_column_scoped_write_with_observed_delta`'s shape so a caller
+/// (and a test) can assert on exactly what ran.
+#[allow(clippy::too_many_arguments)]
+pub async fn execute_delete_insert_with_delta_restriction(
+    backend: &dyn Backend,
+    schema: &str,
+    table: &str,
+    partition_col: &str,
+    region: &Region,
+    body: &str,
+    restrict_column: Option<&str>,
+    skeleton_source_closure: Option<&SkeletonSourceClosure>,
+    upstream_model: &str,
+    window_start: &str,
+    window_end: &str,
+    dialect: MaintenanceDialect,
+) -> std::result::Result<StatementGroup, BackendError> {
+    let full_table = format!("{schema}.{table}");
+    let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
+    let delta = if restrict_column.is_some() && closed {
+        read_observed_delta_changed_keys(backend, schema, upstream_model, window_start, window_end)
+            .await?
+    } else {
+        None
+    };
+    let group = build_delete_insert_group_dispatched(
+        &full_table,
+        partition_col,
+        region,
+        body,
+        restrict_column,
+        skeleton_source_closure,
+        delta.as_deref(),
+        dialect,
+    );
+    backend.execute_statement_group(&group).await?;
+    Ok(group)
+}
+
+/// The facts [`build_delete_insert_group_dispatched`]/
+/// [`execute_delete_insert_with_delta_restriction`] need to attempt T3 delta
+/// restriction for a model-edge-sourced creation cell, resolved by
+/// [`resolve_live_delta_restriction_facts`].
+#[derive(Debug, Clone)]
+pub struct DeltaRestrictionFacts {
+    /// The driving model edge's bare address (`Trigger::NewData`'s `source`
+    /// name) — the upstream whose observed-delta table is read.
+    pub upstream_model: String,
+    /// The model's own region row identity, when it resolves to exactly one
+    /// column (`RowIdentity::Key(_)` with one element) — this phase's
+    /// semi-join restriction is single-column only. `None` for a composite
+    /// key or `RowIdentity::WholeRow`, in which case the caller must fall
+    /// back to the ordinary widened scan (matching an absent P1 closure).
+    pub restrict_column: Option<String>,
+    /// The cell's P1 skeleton-source-closure verdict, carried through
+    /// unchanged for [`resolve_recompute_restriction`] to consult.
+    pub skeleton_source_closure: Option<SkeletonSourceClosure>,
+}
+
+/// Resolve [`DeltaRestrictionFacts`] for a model driven (at least in part)
+/// by an upstream **maintained-model** edge (`model_edges`, built by the
+/// caller mirroring `crate::propagation::derive_clamp_and_locality`'s own
+/// edge extraction — never re-derived here). Routes through the SAME
+/// edge-aware derivation `smelt explain`/the propagation graph already
+/// consume (`derive_model_maintenance_plan_with_edges` →
+/// `append_model_edge_cells`) rather than re-implementing admission
+/// (`CLAUDE.md` §"Maintenance-plan purity").
+///
+/// `model_edges.first()` is this call's driving edge: `append_model_edge_
+/// cells` derives ONE shared P1 closure verdict for every edge of a model
+/// (see that function's own doc comment — the verdict is a property of the
+/// model's own query shape, not of which edge triggered the recompute), so
+/// picking any one edge's cell yields the same closure either way; the
+/// first edge is simply the one whose observed-delta table the caller then
+/// reads. A model with more than one maintained-model upstream restricts
+/// only against this first edge's delta in this phase — a later phase may
+/// widen this to try every edge in turn.
+///
+/// Returns `None` when `model_edges` is empty, the plan derives no creation
+/// cell for the driving edge (e.g. `Refusal::ReachNotDerivable`), or
+/// `metadata`'s resolved grain has no partition axis for a model edge to
+/// clamp to — the caller's safe default in every `None` case is the
+/// ordinary widened scan.
+pub fn resolve_live_delta_restriction_facts(
+    sql: &str,
+    table: &str,
+    metadata: &smelt_core::ModelMetadata,
+    sources: &[SourceFacts],
+    explicitly_mutable: &HashSet<String>,
+    model_edges: &[smelt_logical::maintenance::derive::ModelEdge],
+) -> Option<DeltaRestrictionFacts> {
+    let driving_edge = model_edges.first()?;
+    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan_with_edges(
+        sql,
+        table,
+        metadata,
+        sources,
+        explicitly_mutable,
+        model_edges,
+        // See `resolve_incremental_strategy`'s analogous call: not (yet)
+        // plumbed with a driving-source granularity or declared
+        // `key_recurrence` bounds at this call site — this resolver only
+        // reads the model-edge creation cell's closure/row-identity facts,
+        // which key temporal locality's routes do not gate.
+        None,
+        &[],
+    )?;
+    let cell = result.plan.cell_for(&Trigger::NewData {
+        source: driving_edge.name.clone(),
+    })?;
+    let restrict_column = match &cell.row_identity.identity {
+        RowIdentity::Key(cols) if cols.len() == 1 => Some(cols[0].clone()),
+        _ => None,
+    };
+    Some(DeltaRestrictionFacts {
+        upstream_model: driving_edge.name.clone(),
+        restrict_column,
+        skeleton_source_closure: cell.skeleton_source_closure.clone(),
+    })
 }
 
 /// Execute one live `ColumnScopedMerge` cell: build the horizon-clamped

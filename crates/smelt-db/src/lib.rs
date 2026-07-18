@@ -1339,9 +1339,16 @@ fn ref_model_edge(
         return None;
     }
     let clock_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    // The upstream's own declared top-level `unique_key:` (`models.md`
+    // §"The Relation Contract"), threaded through so a downstream's P1
+    // skeleton-source-closure proof over this edge can prove the join
+    // one-to-one (T3, `docs/plans/20260715-composed-axes-conditional-
+    // maintenance.md` Phase E3) — `ModelEdge::unique_key`'s doc comment.
+    let unique_key = meta.unique_key.clone().unwrap_or_default();
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
+        unique_key,
     })
 }
 

@@ -376,9 +376,13 @@ fn derive_clamp_and_locality(
                     let clock_col = up_meta
                         .and_then(|m| m.timeseries.as_ref())
                         .map(|ts| ts.partition_column.clone());
+                    let unique_key = up_meta
+                        .and_then(|m| m.unique_key.clone())
+                        .unwrap_or_default();
                     model_edges.push(smelt_logical::maintenance::derive::ModelEdge {
                         name: bare.clone(),
                         clock_col,
+                        unique_key,
                     });
                 } else {
                     // A `full`-mode or view upstream delivers no incremental

@@ -231,6 +231,28 @@ pub fn skeleton_source_closure(
     SkeletonSourceClosure::Closed
 }
 
+/// Resolve the alias (or bare identifier, when unaliased) that `sql`'s
+/// outermost query scope qualifies `enrichment_source`'s columns with, if it
+/// is joined at all in that scope's own `FROM`/`JOIN` clauses. `None` when
+/// `sql` doesn't parse, has no top-level `SELECT`/`FROM`, or
+/// `enrichment_source` is not the target of a join there (e.g. it is itself
+/// the `FROM`-clause driving table, or is not referenced in this scope at
+/// all).
+///
+/// Used by `maintenance::derive::append_model_edge_cells` (T3, `docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` Phase E3) to build the
+/// [`JoinContext`] the one-to-one conjunct (3) needs from a model edge's own
+/// declared `unique_key`, without duplicating this module's private
+/// join-finding logic in a second parse of the same SQL.
+pub(crate) fn enrichment_join_alias(sql: &str, enrichment_source: &str) -> Option<String> {
+    let stripped = crate::types::Frontmatter::strip(sql);
+    let parse = smelt_parser::parse(stripped);
+    let file = smelt_parser::File::cast(parse.syntax())?;
+    let select = file.select_stmt()?;
+    let from_clause = select.from_clause()?;
+    find_enrichment_join(&from_clause, enrichment_source).map(|(_, alias)| alias)
+}
+
 /// Find the top-level join in `from_clause` whose `smelt.<path>` table ref
 /// resolves to `enrichment_source` (`sources.`-prefix optional, matching
 /// [`resolve_table_ref_source_name`]'s convention), plus the alias (or bare

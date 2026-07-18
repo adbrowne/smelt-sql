@@ -2055,9 +2055,33 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   `DELETE`+`INSERT` family has no conditional
   variant yet (every region overwrite still rewrites unchanged rows), the whole-row (keyless,
   `EXCEPT ALL`-both-ways) staged-candidate realisation does not exist, a `write:` pin over the
-  keyed `MERGE`/staged-candidate choice does not exist, no observed output delta is recorded
-  anywhere, and no technique restricts its own compute to an observed delta rather than a full
-  column-group re-evaluation. Mechanisms and sequencing:
+  keyed `MERGE`/staged-candidate choice does not exist, and no observed output delta is recorded
+  anywhere except a maintained-model edge's own conditional write. A maintained-model edge's
+  region recompute (creation-trigger cell, `Technique::DeleteInsert`) now **does** restrict its
+  own compute to an observed delta where licensed: `maintenance::derive::append_model_edge_cells`
+  derives the P1 skeleton-source-closure verdict shared by every model edge of a downstream model
+  (proving every OTHER edge's enrichment join preserves the driving edge's row skeleton —
+  `model_properties.md` §"Skeleton-source closure"), `maintenance::choice::
+  resolve_recompute_restriction` admits the delta-restricted variant only when that verdict is
+  `Closed` *and* the driving edge's own observed delta (Group D, T5) is present and non-empty, and
+  `maintenance::emit::emit_delete_insert_delta_restricted` emits the semi-joined `DELETE`+`INSERT`
+  — byte-identical to the ordinary widened-scan `emit_delete_insert` whenever either factor is
+  absent, never a partial restriction. `smelt_runtime::maintenance_driver::
+  execute_delete_insert_with_delta_restriction` reads the recorded delta and dispatches between
+  the two emitted forms against a real backend, and `execute_project`'s own per-batch execution
+  loop (`crates/smelt-runtime/src/execute.rs`) now dispatches every model-edge-sourced,
+  `DeleteInsert`-strategy creation cell (over an already-materialized target, on a DuckDB target)
+  through this path — both the live executor and the `--dry-run`/`smelt explain` reporting branch
+  route through the same `resolve_live_delta_restriction_facts` derivation and `build_delete_
+  insert_group_dispatched` decide-and-emit call, so a real `smelt run` actually restricts recompute
+  breadth when P1 closes and an exact delta exists, not only a direct call of the executor. This
+  restriction is licensed independently of write suppression (Group C) — it narrows recompute
+  *breadth*, never what is scanned into `S` — and today only reaches a maintained-model-edge
+  driving source (an external `mutable_snapshot` source's own synthesized delta, M3's
+  input-fingerprint sidecar, is unbuilt — see the sidecar paragraph above); a non-DuckDB target
+  keeps the ordinary widened-scan region recompute unchanged (the observed-delta read is
+  DuckDB-only, so the live dispatch falls back rather than reaching for a capability that target
+  doesn't have). Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly
@@ -2207,10 +2231,12 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     the driving source alone (payload-only 1:1 enrichment joins), the expensive joins run only
     over rows whose enrichment inputs changed — the classical delta-join algebra, licensed by
     the skeleton-source-closure proof (`model_properties.md` §"Skeleton-source closure", P1) plus
-    an exact input delta. The proof and the transform (`model_transforms.md` — delta-restricted
-    enrichment join) are now specified; both remain unbuilt, and so does the `referential_integrity`
-    world-fact (`sources.md`) the proof's row-preservation conjunct consumes for an inner-join
-    enrichment.
+    an exact input delta. The proof, the transform (`model_transforms.md` — delta-restricted
+    enrichment join), and the `referential_integrity` world-fact (`sources.md`) the proof's
+    row-preservation conjunct consumes for an inner-join enrichment are all built and reach a
+    maintained-model edge's own driving-source recompute (see the maintained-model-edge paragraph
+    above); an external `mutable_snapshot` source's own delta (requiring M3's fingerprint sidecar
+    first) is unbuilt.
   - **M3 — derived change feeds**: snapshot-diff made real on both boundaries — a fingerprint
     sidecar synthesizes a change feed for an external `mutable_snapshot` source, and the
     conditional write's own changed-row set is recorded as the model's **observed output

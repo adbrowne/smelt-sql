@@ -481,6 +481,125 @@ pub fn resolve_keyed_write_mechanism(
     }
 }
 
+/// Whether a model-edge creation cell's region recompute (`Technique::
+/// DeleteInsert`, the `RecomputeRegion` corner) may restrict its scan to an
+/// exact upstream delta's changed-key set (T3, `docs/specs/model_transforms.md`
+/// §"Delta-restricted enrichment join"; `docs/plans/20260715-composed-axes-
+/// conditional-maintenance.md` Phase E3). Licensed only by the conjunction of
+/// two independent facts — either alone falls back to the ordinary widened
+/// scan, never a partial restriction:
+/// - **P1, skeleton-source closure** (`super::SkeletonSourceClosure`,
+///   `crate::analysis::skeleton_closure`): every enrichment join in the
+///   cell's model must be proven `Closed`, so the driving edge's changed
+///   keys are provably the *only* rows whose output can have changed.
+/// - **An exact, non-empty observed delta** on the driving edge for this
+///   cell's run window (Group D, T5's recorded delta) — an absent delta
+///   (pre-D2 upstream, or a window never recorded) and a present-but-empty
+///   delta (nothing changed — the payoff belongs to the empty-delta no-op
+///   cascade, a later phase's scope, not this restriction) both fall back
+///   to the widened scan.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RecomputeRestriction {
+    /// Both factors hold: restrict the region recompute to `delta_keys` via
+    /// [`super::emit::emit_delete_insert_delta_restricted`]'s semi-join.
+    Restricted { delta_keys: Vec<String> },
+    /// Either factor is absent — run the ordinary widened scan
+    /// ([`super::emit::emit_delete_insert`]), byte-identical to today's
+    /// unrestricted form. `why` names which factor was missing (never
+    /// silently indistinguishable from the restricted case).
+    Unrestricted { why: String },
+}
+
+/// Resolve [`RecomputeRestriction`] for one model-edge creation cell.
+///
+/// `skeleton_source_closure` is the cell's own `PlanCell::
+/// skeleton_source_closure` verdict — `None` (no enrichment join to close
+/// over) is treated exactly like `Some(Open { .. })`: restriction needs a
+/// *proven* closed skeleton, not the mere absence of an enrichment join
+/// fact. `observed_delta` is the driving edge's recorded changed-key set for
+/// this run's window, `None` distinguishing "never recorded" from
+/// `Some(&[])`'s "recorded and empty" (`incremental_models.md` §"The graph
+/// layer" — "Empty and absent are distinct").
+pub fn resolve_recompute_restriction(
+    skeleton_source_closure: Option<&super::SkeletonSourceClosure>,
+    observed_delta: Option<&[String]>,
+) -> RecomputeRestriction {
+    let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
+    if !closed {
+        return RecomputeRestriction::Unrestricted {
+            why: "skeleton-source closure (P1) is not proven Closed for this cell's enrichment \
+                  join(s) — the delta-restricted recompute is not licensed"
+                .to_string(),
+        };
+    }
+    match observed_delta {
+        Some(keys) if !keys.is_empty() => RecomputeRestriction::Restricted {
+            delta_keys: keys.to_vec(),
+        },
+        Some(_) => RecomputeRestriction::Unrestricted {
+            why: "the recorded observed delta for this window is empty — nothing changed \
+                  upstream, so there is no key set to restrict to"
+                .to_string(),
+        },
+        None => RecomputeRestriction::Unrestricted {
+            why: "no observed delta is recorded for this window — the ordinary widened scan \
+                  is the fail-closed default (widen-never-narrow)"
+                .to_string(),
+        },
+    }
+}
+
+#[cfg(test)]
+mod recompute_restriction_tests {
+    use super::*;
+    use crate::maintenance::SkeletonSourceClosure;
+
+    #[test]
+    fn closed_with_nonempty_delta_restricts() {
+        let closure = SkeletonSourceClosure::Closed;
+        let delta = vec!["ev-1".to_string(), "ev-2".to_string()];
+        let verdict = resolve_recompute_restriction(Some(&closure), Some(&delta));
+        assert_eq!(
+            verdict,
+            RecomputeRestriction::Restricted {
+                delta_keys: delta.clone()
+            }
+        );
+    }
+
+    #[test]
+    fn open_closure_never_restricts_even_with_a_delta() {
+        let closure = SkeletonSourceClosure::Open {
+            reason: "test".to_string(),
+        };
+        let delta = vec!["ev-1".to_string()];
+        let verdict = resolve_recompute_restriction(Some(&closure), Some(&delta));
+        assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
+    }
+
+    #[test]
+    fn absent_closure_fact_never_restricts() {
+        let delta = vec!["ev-1".to_string()];
+        let verdict = resolve_recompute_restriction(None, Some(&delta));
+        assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
+    }
+
+    #[test]
+    fn closed_with_absent_delta_falls_back_unrestricted() {
+        let closure = SkeletonSourceClosure::Closed;
+        let verdict = resolve_recompute_restriction(Some(&closure), None);
+        assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
+    }
+
+    #[test]
+    fn closed_with_empty_delta_falls_back_unrestricted() {
+        let closure = SkeletonSourceClosure::Closed;
+        let empty: Vec<String> = vec![];
+        let verdict = resolve_recompute_restriction(Some(&closure), Some(&empty));
+        assert!(matches!(verdict, RecomputeRestriction::Unrestricted { .. }));
+    }
+}
+
 #[cfg(test)]
 mod keyed_write_mechanism_tests {
     use super::*;

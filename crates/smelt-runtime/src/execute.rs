@@ -377,6 +377,17 @@ pub async fn execute_project(
             static EMPTY_RESOLVER: std::sync::OnceLock<EphemeralResolver> =
                 std::sync::OnceLock::new();
 
+            // T3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+            // Phase E3): resolved once per dry-run, keyed by canonical
+            // address, so the per-model loop below can build each model's
+            // `ModelEdge` list without re-scanning every model in the
+            // workspace per ref. Mirrors `propagation.rs::
+            // derive_clamp_and_locality`'s own `model_by_addr` map.
+            let model_by_addr_dry: HashMap<String, smelt_core::ModelFile> = graph_lock
+                .iter_models()
+                .map(|(_, m)| (m.canonical_path(), m.clone()))
+                .collect();
+
             for model_name in &selected {
                 let Ok(model_file) = graph_lock.get_model(model_name) else {
                     reporter.model_compiled(&run_id, model_name, "");
@@ -432,6 +443,40 @@ pub async fn execute_project(
                 let table_name = format!("{schema}.{}", model_file.db_name_owned());
                 let per_model_source_bounds =
                     build_model_source_bounds(model_file, &source_timeseries, model_name);
+                // T3 (`docs/plans/20260715-composed-axes-conditional-
+                // maintenance.md` Phase E3): resolved once per model (not
+                // per batch — the facts don't vary across this model's own
+                // batches). A dry-run has no backend to read the
+                // observed-delta table from (`docs/specs/architecture.md`
+                // §"Run pipeline parity rule" — dry-run never calls
+                // `BackendFactory::create`), so the reported statement
+                // below is always the ordinary widened scan (honest: a
+                // dry-run cannot know whether a live run's delta read would
+                // restrict) — but it is reached through the SAME dispatch
+                // call (`build_delete_insert_group_dispatched`) the live
+                // executor uses, never a hand-picked `emit_delete_insert`
+                // call, so the two paths cannot structurally diverge.
+                let model_edges_dry = model_edges_for(model_file, &model_by_addr_dry);
+                let delta_facts_dry = if model_edges_dry.is_empty() {
+                    None
+                } else {
+                    model_file.metadata.as_deref().and_then(|metadata| {
+                        let (sources, explicitly_mutable) =
+                            build_maint_source_facts(model_file, &source_infos);
+                        crate::maintenance_driver::resolve_live_delta_restriction_facts(
+                            &clean_sql,
+                            &model_file.db_name_owned(),
+                            metadata,
+                            &sources,
+                            &explicitly_mutable,
+                            &model_edges_dry,
+                        )
+                    })
+                };
+                let (restrict_column_dry, skeleton_source_closure_dry) = match delta_facts_dry {
+                    Some(facts) => (facts.restrict_column, facts.skeleton_source_closure),
+                    None => (None, None),
+                };
                 for (batch_idx, batch) in inc.batches.iter().enumerate() {
                     let start = batch.partition_start.format("%Y-%m-%d").to_string();
                     let end = batch.partition_end.format("%Y-%m-%d").to_string();
@@ -457,11 +502,14 @@ pub async fn execute_project(
                         start: format!("'{}'", start.replace('\'', "''")),
                         end: format!("'{}'", end.replace('\'', "''")),
                     };
-                    let group = smelt_logical::maintenance::emit::emit_delete_insert(
+                    let group = crate::maintenance_driver::build_delete_insert_group_dispatched(
                         &table_name,
                         partition_col,
                         &region,
                         &compiled.sql,
+                        restrict_column_dry.as_deref(),
+                        skeleton_source_closure_dry.as_ref(),
+                        None,
                         dialect,
                     );
                     let chunk = crate::reporter::ChunkInfo {
@@ -509,6 +557,14 @@ pub async fn execute_project(
 
     let all_models: Vec<smelt_core::ModelFile> =
         graph_lock.iter_models().map(|(_, m)| m.clone()).collect();
+    // T3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // Phase E3): keyed by canonical address so the real per-batch loop
+    // below can build each model's `ModelEdge` list (`model_edges_for`)
+    // without re-scanning every model per ref.
+    let model_by_addr: HashMap<String, smelt_core::ModelFile> = all_models
+        .iter()
+        .map(|m| (m.canonical_path(), m.clone()))
+        .collect();
     let mut ephemeral_models_by_target: HashMap<String, Vec<(String, String)>> = HashMap::new();
     {
         let exec_order = graph_lock.execution_order()?;
@@ -1073,6 +1129,49 @@ pub async fn execute_project(
                     None => backend_default_strategy,
                 };
 
+                // T3 (`docs/plans/20260715-composed-axes-conditional-
+                // maintenance.md` Phase E3): the model-edge-sourced creation
+                // cell's delta-restriction facts, resolved once per model
+                // (not per batch — they don't vary across this model's own
+                // batches). `model_edges_for` mirrors `crate::propagation::
+                // derive_clamp_and_locality`'s own edge extraction; `None`
+                // when this model reads no maintained-model upstream, the
+                // plan derives no creation cell for the driving edge, or the
+                // model's own row identity is not a single column — the
+                // batch loop below then always takes the ordinary widened
+                // scan, unchanged from before this phase.
+                let model_edges = model_edges_for(&plan.model_file, &model_by_addr);
+                let delta_restriction_facts = if model_edges.is_empty() {
+                    None
+                } else {
+                    plan.model_file.metadata.as_deref().and_then(|metadata| {
+                        crate::maintenance_driver::resolve_live_delta_restriction_facts(
+                            &sql_for_bounds,
+                            &plan.model_file.db_name_owned(),
+                            metadata,
+                            &maint_source_facts,
+                            &explicitly_mutable,
+                            &model_edges,
+                        )
+                    })
+                };
+                // Live dispatch is licensed only for a DuckDB target running
+                // the creation trigger's `DeleteInsert` strategy — the same
+                // scoping the existing report-and-execute branch below
+                // already uses (`read_observed_delta_changed_keys` is
+                // DuckDB-only, and `execute_delete_insert_with_delta_
+                // restriction` calls `Backend::execute_statement_group`
+                // directly rather than `Backend::execute_model_incremental`,
+                // so a non-DuckDB backend's own `delete_and_insert_
+                // transactional` override — e.g. Spark's — must stay
+                // reachable unchanged).
+                let use_delta_restricted_dispatch = delta_restriction_facts.is_some()
+                    && backend.dialect() == smelt_backend::SqlDialect::DuckDB
+                    && matches!(
+                        resolved_strategy,
+                        smelt_backend::IncrementalStrategy::DeleteInsert
+                    );
+
                 // MP11 (`incremental_models.md` §"Per-cell admission"): consult
                 // the SAME derived `MaintenancePlan` for a live
                 // `ColumnScopedMerge` cell on one of the model's
@@ -1335,6 +1434,32 @@ pub async fn execute_project(
                         end: batch.partition_end.format("%Y-%m-%d").to_string(),
                     };
 
+                    // T3: re-checked per batch (not hoisted with
+                    // `use_delta_restricted_dispatch` above) because
+                    // `table_exists` genuinely varies across batches of the
+                    // SAME model — a non-self-referential model's first
+                    // batch finds no target yet (the bootstrap `CREATE
+                    // TABLE AS` case below), later batches find one.
+                    // `None` here — rather than a fact-implies-Some
+                    // `.expect()` below — is what lets the `if let`
+                    // dispatch beneath fall through to the ordinary
+                    // widened-scan branch with no unwrap at all.
+                    let restricted_facts_this_batch: Option<
+                        &crate::maintenance_driver::DeltaRestrictionFacts,
+                    > = if use_delta_restricted_dispatch {
+                        let exists = backend
+                            .table_exists(schema, &plan.model_file.db_name_owned())
+                            .await
+                            .unwrap_or(false);
+                        if exists {
+                            delta_restriction_facts.as_ref()
+                        } else {
+                            None
+                        }
+                    } else {
+                        None
+                    };
+
                     let exec_result = if let Some(dispatch) = column_merge_dispatch.as_ref() {
                         // MP11 (`incremental_models.md` §"Per-cell admission"):
                         // the live `UpstreamMutation` cell resolved to
@@ -1406,6 +1531,69 @@ pub async fn execute_project(
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
                             }
+                        }
+                    } else if let Some(facts) = restricted_facts_this_batch {
+                        // T3 (`docs/plans/20260715-composed-axes-
+                        // conditional-maintenance.md` Phase E3): this
+                        // model's creation cell is sourced (at least in
+                        // part) by a maintained-model upstream edge whose
+                        // recorded observed delta may license restricting
+                        // this batch's recompute to the changed-key set
+                        // (`resolve_recompute_restriction`'s two-factor
+                        // admission: P1 skeleton-source closure `Closed` ∧ a
+                        // non-empty delta — resolved inside
+                        // `execute_delete_insert_with_delta_restriction`
+                        // itself, reading the SAME `_smelt_observed_delta`
+                        // table T5 writes). `restricted_facts_this_batch` is
+                        // `None` (falling through to the ordinary branch
+                        // below) whenever the target doesn't exist yet
+                        // (the bootstrap `CREATE TABLE AS` case — restriction
+                        // only ever applies to the ordinary incremental
+                        // recompute over an already-materialized target,
+                        // never the first-run materialization), the backend
+                        // isn't DuckDB, or the resolved strategy isn't
+                        // `DeleteInsert`. Falls back to the ordinary widened
+                        // scan (byte-identical to the branch below) whenever
+                        // the closure is `Open`/absent, the delta is absent
+                        // or empty, or the model's row identity is not a
+                        // single column — never a silent skip.
+                        let region = smelt_logical::maintenance::emit::Region {
+                            start: format!("'{}'", partition.start.replace('\'', "''")),
+                            end: format!("'{}'", partition.end.replace('\'', "''")),
+                        };
+                        let group =
+                            crate::maintenance_driver::execute_delete_insert_with_delta_restriction(
+                                backend,
+                                schema,
+                                &plan.model_file.db_name_owned(),
+                                &partition.column,
+                                &region,
+                                &compiled.sql,
+                                facts.restrict_column.as_deref(),
+                                facts.skeleton_source_closure.as_ref(),
+                                &facts.upstream_model,
+                                &partition.start,
+                                &partition.end,
+                                smelt_backend::maintenance_dialect(backend.dialect()),
+                            )
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        let chunk = crate::reporter::ChunkInfo {
+                            index: batch_idx,
+                            total: inc_plan.batches.len(),
+                            start: partition.start.clone(),
+                            end: partition.end.clone(),
+                        };
+                        reporter.maintenance_statements(&run_id, &plan.name, Some(&chunk), &group);
+                        let row_count = backend
+                            .get_row_count(schema, &plan.model_file.db_name_owned())
+                            .await
+                            .map_err(|e| anyhow::anyhow!("{}", e))?;
+                        smelt_backend::ExecutionResult {
+                            model_name: plan.name.clone(),
+                            duration: batch_start_time.elapsed(),
+                            row_count,
+                            preview: None,
                         }
                     } else {
                         // Observability: report the region DELETE+INSERT
@@ -2161,6 +2349,101 @@ fn maintenance_dialect_for_target(
         })
         .map(smelt_backend::maintenance_dialect)
         .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb)
+}
+
+/// Build `model_file`'s upstream **maintained-model** edge list
+/// (`docs/specs/incremental_models.md` §"Upstream model edges") — the input
+/// T3 delta restriction (`docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase E3) needs to attempt restricting a model-edge-
+/// sourced creation cell's recompute. Mirrors `crate::propagation::
+/// derive_clamp_and_locality`'s own model-edge extraction exactly (that
+/// module's already-shipped precedent for this same shape): a raw
+/// `sources.*` ref contributes no edge (that's `maint_source_facts`'/
+/// `SourceFacts`' job, built separately), and a ref this workspace does not
+/// resolve to another model at all — or resolves to one whose own
+/// `refresh:` is not `incremental` (a `full`-mode or view upstream delivers
+/// no incremental delta) — contributes no edge either, never a spurious
+/// permissive whole-table synthesis.
+fn model_edges_for(
+    model_file: &smelt_core::ModelFile,
+    model_by_addr: &HashMap<String, smelt_core::ModelFile>,
+) -> Vec<smelt_logical::maintenance::derive::ModelEdge> {
+    let mut edges = Vec::new();
+    let mut seen: HashSet<String> = HashSet::new();
+    for r in &model_file.refs {
+        let segs = r.smelt_ref.to_path();
+        if segs.first().map(|s| s.as_str()) == Some("sources") {
+            continue;
+        }
+        let addr = segs.join(".");
+        if !seen.insert(addr.clone()) {
+            continue;
+        }
+        let Some(upstream) = model_by_addr.get(&addr) else {
+            continue;
+        };
+        let up_meta = upstream.metadata.as_deref();
+        let is_maintained = up_meta
+            .map(|m| m.refresh == Some(smelt_core::config::RefreshStrategy::Incremental))
+            == Some(true);
+        if !is_maintained {
+            continue;
+        }
+        let clock_col = up_meta
+            .and_then(|m| m.timeseries.as_ref())
+            .map(|ts| ts.partition_column.clone());
+        let unique_key = up_meta
+            .and_then(|m| m.unique_key.clone())
+            .unwrap_or_default();
+        edges.push(smelt_logical::maintenance::derive::ModelEdge {
+            name: addr,
+            clock_col,
+            unique_key,
+        });
+    }
+    edges
+}
+
+/// Build the per-model `SourceFacts` list and the explicitly-mutable
+/// source-name set MP11's live-cell resolvers consume
+/// (`resolve_incremental_strategy`, `resolve_live_column_scoped_cell`,
+/// `resolve_live_delta_restriction_facts`), for a caller (the dry-run
+/// reporting branch) that has not already built them inline. Mirrors the
+/// real execution loop's own inline construction exactly (same bare-name
+/// convention, same `mutation_profile.kind == Mutable` test) — factored out
+/// here so the two call sites cannot silently drift apart.
+fn build_maint_source_facts(
+    model_file: &smelt_core::ModelFile,
+    source_infos: &[smelt_core::sources::SourceInfo],
+) -> (
+    Vec<smelt_logical::maintenance::SourceFacts>,
+    HashSet<String>,
+) {
+    let mut sources = Vec::new();
+    let mut explicitly_mutable = HashSet::new();
+    for r in &model_file.refs {
+        let segs = r.smelt_ref.to_path();
+        let Some(info) = source_infos.iter().find(|s| s.address_segments == segs) else {
+            continue;
+        };
+        let bare = match segs.split_first() {
+            Some((first, rest)) if first == "sources" => rest.join("."),
+            _ => segs.join("."),
+        };
+        sources.push(smelt_db::queries::maintenance::source_facts(
+            &bare,
+            Some(info),
+            true,
+        ));
+        if info
+            .mutation_profile
+            .as_ref()
+            .is_some_and(|m| m.kind == smelt_core::sources::MutationProfile::Mutable)
+        {
+            explicitly_mutable.insert(bare);
+        }
+    }
+    (sources, explicitly_mutable)
 }
 
 /// Per-model source-scan bound map (INTERVAL-derived lookback per upstream

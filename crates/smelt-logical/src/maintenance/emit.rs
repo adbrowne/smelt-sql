@@ -129,6 +129,72 @@ pub fn emit_delete_insert(
     }
 }
 
+/// Delta-restricted region recompute (T3, `docs/specs/model_transforms.md`
+/// §"Delta-restricted enrichment join"): identical to [`emit_delete_insert`]
+/// except both the `DELETE` and the `INSERT` gain an extra `restrict_column
+/// IN (...)` semi-join predicate over `delta_keys` — the exact upstream
+/// observed delta on this cell's driving model edge
+/// (`crate::maintenance::choice::resolve_recompute_restriction`, licensed
+/// only when P1 skeleton-source closure is `Closed` for the cell's
+/// enrichment join(s) *and* a non-empty delta was recorded).
+///
+/// This restricts recompute **breadth** only: `body` is exactly the same
+/// already-clamped compiled SELECT [`emit_delete_insert`] would have
+/// received — the caller's read of upstream state (`S`) is untouched; the
+/// semi-join filters candidate *output* rows after `body` evaluates them,
+/// never the source scan itself (`docs/plans/20260715-composed-axes-
+/// conditional-maintenance.md` Phase E3's "no scope creep" note, mirroring
+/// C4's for write suppression). Wrapping `body` in an outer `SELECT … WHERE`
+/// (rather than injecting the predicate into `body`'s own text) keeps this
+/// emitter agnostic to `body`'s internal shape, the same way
+/// [`emit_column_scoped_merge`]'s `USING (source_select)` wrapping does.
+///
+/// A caller with `RecomputeRestriction::Unrestricted` (`Open` closure, an
+/// absent delta, or a present-but-empty one) must call
+/// [`emit_delete_insert`] directly instead of this function with a vacuous
+/// key set — the two emitted statement groups are then byte-identical to
+/// today's unrestricted form, never a partially-restricted one.
+///
+/// # Panics
+/// Panics if `delta_keys` is empty — an empty delta means nothing changed
+/// upstream and should never reach this emitter (the caller's fail-closed
+/// admission, `resolve_recompute_restriction`, treats an empty delta as
+/// `Unrestricted`, matching the change-suppressed emitters' non-empty-set
+/// contract).
+pub fn emit_delete_insert_delta_restricted(
+    table: &str,
+    partition_col: &str,
+    region: &Region,
+    body: &str,
+    restrict_column: &str,
+    delta_keys: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !delta_keys.is_empty(),
+        "emit_delete_insert_delta_restricted requires a non-empty delta key set for {table} — \
+         an empty delta must fall back to emit_delete_insert, never a vacuous restriction"
+    );
+    let pred = region.predicate(None, partition_col);
+    let key_list = delta_keys
+        .iter()
+        .map(|k| format!("'{}'", k.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(format!(
+                "DELETE FROM {table} WHERE {pred} AND {restrict_column} IN ({key_list})"
+            )),
+            MaintenanceStatement::new(format!(
+                "INSERT INTO {table} SELECT * FROM ({body}) AS _smelt_delta_scope WHERE \
+                 _smelt_delta_scope.{restrict_column} IN ({key_list})"
+            )),
+        ],
+        transactional: true,
+    }
+}
+
 /// Column-scoped re-derivation (bottom-left): the keyed `MERGE` production
 /// actually executes for `Technique::ColumnScopedMerge`
 /// (`crate::maintenance_driver::execute_column_scoped_merge`/
@@ -1049,5 +1115,97 @@ mod staged_candidate_conditional_tests {
             &[],
             MaintenanceDialect::DuckDb,
         );
+    }
+}
+
+#[cfg(test)]
+mod delta_restricted_delete_insert_tests {
+    use super::*;
+
+    fn region() -> Region {
+        Region {
+            start: "'2026-07-01'".to_string(),
+            end: "'2026-07-02'".to_string(),
+        }
+    }
+
+    #[test]
+    fn restricted_group_gains_the_semi_join_on_both_statements() {
+        let group = emit_delete_insert_delta_restricted(
+            "main.events_enriched",
+            "event_date",
+            &region(),
+            "SELECT event_id, event_date, session_id FROM events_enriched_recompute",
+            "event_id",
+            &["ev-1".to_string(), "ev-2".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 2);
+        assert_eq!(
+            group.statements[0].sql,
+            "DELETE FROM main.events_enriched WHERE event_date >= '2026-07-01' AND event_date < \
+             '2026-07-02' AND event_id IN ('ev-1', 'ev-2')"
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "INSERT INTO main.events_enriched SELECT * FROM (SELECT event_id, event_date, \
+             session_id FROM events_enriched_recompute) AS _smelt_delta_scope WHERE \
+             _smelt_delta_scope.event_id IN ('ev-1', 'ev-2')"
+        );
+    }
+
+    #[test]
+    fn restricted_group_escapes_single_quotes_in_delta_keys() {
+        let group = emit_delete_insert_delta_restricted(
+            "main.t",
+            "d",
+            &region(),
+            "SELECT 1",
+            "k",
+            &["o'brien".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(group.statements[0].sql.contains("k IN ('o''brien')"));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty delta key set")]
+    fn restricted_group_panics_on_empty_delta_keys() {
+        emit_delete_insert_delta_restricted(
+            "main.t",
+            "d",
+            &region(),
+            "SELECT 1",
+            "k",
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    /// The fallback path (`Open` closure or no recorded delta) must call
+    /// `emit_delete_insert` directly rather than this function — asserting
+    /// the two are byte-identical when the same inputs would otherwise
+    /// apply (E3 review checklist: "either absent -> byte-identical
+    /// unrestricted statement").
+    #[test]
+    fn unrestricted_fallback_is_byte_identical_to_emit_delete_insert() {
+        let body = "SELECT event_id, event_date FROM events_enriched_recompute";
+        let restricted_fallback = emit_delete_insert(
+            "main.events_enriched",
+            "event_date",
+            &region(),
+            body,
+            MaintenanceDialect::DuckDb,
+        );
+        let direct = emit_delete_insert(
+            "main.events_enriched",
+            "event_date",
+            &region(),
+            body,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(restricted_fallback, direct);
     }
 }

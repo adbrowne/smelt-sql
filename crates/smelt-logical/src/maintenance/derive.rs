@@ -37,7 +37,27 @@ use crate::analysis::walk::model_property_vector;
 /// carried in [`RowIdentityVerdict::proven_mismatch`] rather than silently
 /// dropped.
 pub fn row_identity(declared_unique_key: &[String], sql: &str) -> RowIdentityVerdict {
-    let proven_key = model_property_vector(sql, &JoinContext::new()).and_then(|vector| {
+    row_identity_with_context(declared_unique_key, sql, &JoinContext::new())
+}
+
+/// [`row_identity`], but folding an explicit [`JoinContext`] into the walk's
+/// fan-out check instead of an always-empty one. Used by
+/// [`append_model_edge_cells`] (T3, `docs/plans/20260715-composed-axes-
+/// conditional-maintenance.md` Phase E3) so a model-edge cell's row-identity
+/// proof can trust a proven grain key across an enrichment join whose
+/// partner's row-uniqueness is already an established fact — the SAME
+/// per-edge declared `unique_key` fact [`model_edge_enrichment_closure`]'s
+/// P1 proof already folds into its own `ctx` for the identical join, never a
+/// second, independent guess at the partner's uniqueness. Every other caller
+/// (via [`row_identity`]) is unaffected — an empty `ctx` reproduces exactly
+/// the pre-existing fail-closed behaviour (any join is untrusted absent an
+/// external fact).
+pub fn row_identity_with_context(
+    declared_unique_key: &[String],
+    sql: &str,
+    ctx: &JoinContext,
+) -> RowIdentityVerdict {
+    let proven_key = model_property_vector(sql, ctx).and_then(|vector| {
         if vector.has_fan_out_join {
             None
         } else {
@@ -120,6 +140,15 @@ pub struct ModelEdge {
     /// recorded [`Refusal::ReachNotDerivable`] naming the edge, never a
     /// silent drop.
     pub clock_col: Option<String>,
+    /// The upstream's own declared top-level `unique_key:`
+    /// (`docs/specs/models.md` §"The Relation Contract"), when any. Empty
+    /// when the upstream declares none — this edge then contributes no
+    /// [`crate::analysis::join_shape::JoinContext`] fact and a join against
+    /// it cannot be proven one-to-one, so P1 skeleton-source closure
+    /// (T3, `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase E3) stays `Open` for it rather than optimistically assuming
+    /// uniqueness.
+    pub unique_key: Vec<String>,
 }
 
 /// Append the creation-trigger cells (and refusals) for `model_edges` to an
@@ -152,7 +181,14 @@ pub fn append_model_edge_cells(
     if model_edges.is_empty() {
         return;
     }
-    let identity = row_identity(declared_unique_key, sql);
+    // The `JoinContext` built from every joined edge's own declared
+    // `unique_key` (see `model_edges_join_context`'s doc comment) — shared
+    // by the row-identity proof below AND `model_edge_enrichment_closure`'s
+    // P1 proof, so both properties of this SAME model-edge cell see the
+    // SAME declared facts rather than the row-identity proof working from a
+    // second, independent (and always-empty) context.
+    let join_ctx = model_edges_join_context(sql, model_edges);
+    let identity = row_identity_with_context(declared_unique_key, sql, &join_ctx);
     // A key-addressed downstream has no partition axis to clamp a creation
     // cell to; its model-edge creation would be a keyed fold, deferred.
     let Some(output_partition_col) = output_partition_col else {
@@ -168,6 +204,21 @@ pub fn append_model_edge_cells(
         }
     }
     let bounds = derive_model_bounds(sql, &ctx);
+
+    // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
+    // closure"; T3, `docs/plans/20260715-composed-axes-conditional-
+    // maintenance.md` Phase E3): whether every OTHER model edge this SQL
+    // joins in (relative to whichever edge is this loop's own driving
+    // trigger) provably preserves the driving side's row skeleton. This is a
+    // property of the model's own query shape, not of which edge happened to
+    // trigger the recompute, so it is derived once and shared by every
+    // edge's cell below — an edge that is itself the `FROM`-clause driving
+    // table (never found by `enrichment_join_alias`, since it is not the
+    // target of a join) contributes no conjunct of its own; only edges
+    // actually joined in are checked. `None` when no model edge is joined in
+    // at all (a single-edge model with no enrichment join to close over,
+    // matching `PlanCell::skeleton_source_closure`'s documented `None` case).
+    let enrichment_closure = model_edge_enrichment_closure(sql, model_edges, &join_ctx);
 
     for edge in model_edges {
         let Some(clock) = &edge.clock_col else {
@@ -223,9 +274,67 @@ pub fn append_model_edge_cells(
             scans,
             ledger_catch_up: false,
             row_identity: identity.clone(),
-            skeleton_source_closure: None,
+            skeleton_source_closure: enrichment_closure.clone(),
         });
     }
+}
+
+/// Build the [`JoinContext`] `analysis::join_shape::fan_out`'s one-to-one
+/// conjunct needs from every one of `model_edges` that is actually joined in
+/// `sql` (resolved via `analysis::skeleton_closure::enrichment_join_alias`,
+/// never guessed), keyed by each joined edge's own declared `unique_key`.
+/// Shared by [`model_edge_enrichment_closure`]'s P1 proof and
+/// [`append_model_edge_cells`]'s P2 row-identity proof — both properties of
+/// the SAME model-edge cell see the SAME declared-unique-key facts. An edge
+/// whose `unique_key` is undeclared, or whose alias this resolves to `None`
+/// for (it is not actually joined in this scope, e.g. it is the
+/// `FROM`-clause driving table), contributes no key fact — a join against it
+/// fails closed exactly as it would with no `JoinContext` entry at all.
+fn model_edges_join_context(sql: &str, model_edges: &[ModelEdge]) -> JoinContext {
+    use crate::analysis::skeleton_closure::enrichment_join_alias;
+
+    let mut ctx = JoinContext::new();
+    for edge in model_edges {
+        let Some(alias) = enrichment_join_alias(sql, &edge.name) else {
+            continue;
+        };
+        if !edge.unique_key.is_empty() {
+            let cols: Vec<&str> = edge.unique_key.iter().map(String::as_str).collect();
+            ctx = ctx.with_composite_unique_key(&alias, &cols);
+        }
+    }
+    ctx
+}
+
+/// Derive the shared P1 skeleton-source-closure verdict for a model's
+/// upstream model edges (see [`append_model_edge_cells`]'s call site doc
+/// comment for why this is one derivation shared across every edge's cell,
+/// not a per-edge one). `join_ctx` is [`model_edges_join_context`]'s output
+/// — the same one the caller also feeds to the row-identity proof, never a
+/// second, independently-built context.
+fn model_edge_enrichment_closure(
+    sql: &str,
+    model_edges: &[ModelEdge],
+    join_ctx: &JoinContext,
+) -> Option<crate::analysis::skeleton_closure::SkeletonSourceClosure> {
+    use crate::analysis::skeleton_closure::{enrichment_join_alias, skeleton_source_closure};
+
+    let joined_edges: Vec<&ModelEdge> = model_edges
+        .iter()
+        .filter(|edge| enrichment_join_alias(sql, &edge.name).is_some())
+        .collect();
+    if joined_edges.is_empty() {
+        return None;
+    }
+    let mut verdict = crate::analysis::skeleton_closure::SkeletonSourceClosure::Closed;
+    for edge in joined_edges {
+        let v = skeleton_source_closure(sql, &edge.name, None, join_ctx);
+        if !v.is_closed() {
+            verdict = v;
+            break;
+        }
+    }
+    Some(verdict)
 }
 
 /// Everything the v0 derivation reads. `column_groups` and
