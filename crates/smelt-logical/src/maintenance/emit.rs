@@ -370,6 +370,208 @@ pub fn emit_keyed_fold(
     }
 }
 
+/// Change-suppressed keyed fold `MERGE` (T1, `docs/specs/model_transforms.md`
+/// §"Change-suppressed MERGE and the staged-candidate conditional
+/// DELETE+INSERT"): identical to [`emit_keyed_fold`] except the matched arm
+/// is guarded by an `IS DISTINCT FROM` predicate comparing each compared
+/// fold column's **current stored value** against **what the fold's own
+/// combine expression would write** — `WHEN MATCHED AND (target.c1 IS
+/// DISTINCT FROM (<c1's combine expr>) OR …) THEN UPDATE SET …` — so a delta
+/// whose combine result reproduces the stored value exactly (an idempotent
+/// re-merge of already-reflected rows) writes nothing for that row. This
+/// mirrors [`emit_column_scoped_merge_suppressed`]'s suppression shape, but
+/// the RHS of each comparison is the column's own fold expression (already
+/// written in terms of `target.*`/`delta.*`) rather than a plain
+/// `source.<col>` reference, since a keyed fold's matched arm never copies
+/// the delta's column verbatim — it combines it with the stored value via a
+/// `CrossPartitionCombiner`.
+///
+/// `compared_columns` must name a subset of `folds`'s own output columns
+/// (the caller's already fail-closed-admitted set, `crate::maintenance::
+/// choice::resolve_write_suppression`'s `WriteSuppression::Suppressed` —
+/// every member proven `Comparable` by the P3 change-comparability walk,
+/// over a P2-proven row identity): this emitter does no admission of its
+/// own, only string assembly, matching every other function in this module.
+///
+/// # Panics
+/// Panics if `compared_columns` is empty (a vacuous `OR` predicate would
+/// suppress every write silently), or if any member of `compared_columns`
+/// does not name a column present in `folds` (the caller handed this
+/// emitter a compare set that does not match the fold it is suppressing).
+pub fn emit_keyed_fold_suppressed(
+    schema_table: &str,
+    key: &[String],
+    folds: &[(String, String)],
+    delta_select: &str,
+    slice: Option<&TargetSlicePredicate>,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_keyed_fold_suppressed requires a non-empty compared-column set for {schema_table}"
+    );
+    let mut on = key
+        .iter()
+        .map(|k| format!("target.{k} = delta.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    if let Some(slice) = slice {
+        match slice {
+            TargetSlicePredicate::Range {
+                partition_column,
+                lower,
+                upper,
+            } => {
+                let safe_lower = lower.replace('\'', "''");
+                let safe_upper = upper.replace('\'', "''");
+                on.push_str(&format!(
+                    " AND target.{partition_column} BETWEEN '{safe_lower}' AND '{safe_upper}'"
+                ));
+            }
+            TargetSlicePredicate::DeltaValues {
+                partition_column,
+                delta_select,
+            } => {
+                on.push_str(&format!(
+                    " AND target.{partition_column} IN (SELECT DISTINCT {partition_column} FROM \
+                     ({delta_select}) AS __locality_delta_values)"
+                ));
+            }
+        }
+    }
+    let suppression = compared_columns
+        .iter()
+        .map(|c| {
+            let expr = folds
+                .iter()
+                .find(|(col, _)| col == c)
+                .map(|(_, expr)| expr.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "emit_keyed_fold_suppressed: compared column '{c}' for {schema_table} is \
+                         not among the fold's own columns"
+                    )
+                });
+            format!("target.{c} IS DISTINCT FROM ({expr})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sets = folds
+        .iter()
+        .map(|(col, expr)| format!("{col} = {expr}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
+             WHEN MATCHED AND ({suppression}) THEN UPDATE SET {sets} \
+             WHEN NOT MATCHED THEN INSERT *"
+        ))],
+        transactional: false,
+    }
+}
+
+/// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
+/// model_transforms.md` §"Change-suppressed MERGE and the staged-candidate
+/// conditional DELETE+INSERT"): the merge-less realisation of the same
+/// no-op-write-elimination licence, for a backend that cannot run `MERGE` at
+/// all (a documented gap: Spark-over-Parquet). One transaction:
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0` —
+///    stage an empty relation shaped like the candidate rows.
+/// 2. `INSERT INTO <staged_relation> <candidate_select>` — populate it with
+///    this run's computed candidate rows (the caller's already-compiled
+///    delta/re-derivation SELECT, full-row projection, same contract as
+///    [`emit_column_scoped_merge`]'s `source_select`).
+/// 3. `DELETE FROM <table> USING <staged_relation> WHERE <key join> AND
+///    (<IS DISTINCT FROM over compared_columns>)` — remove exactly the
+///    stored rows whose staged candidate differs from what is stored (never
+///    a row whose applied effect is the identity).
+/// 4. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
+///    EXISTS (target row still present for this key)` — reinsert the rows
+///    just deleted, plus any brand-new key the target never had. A row
+///    whose staged candidate matched the stored state was never deleted in
+///    step 3, so it is correctly skipped here too — it still "exists" in
+///    the target under its own key.
+/// 5. `DROP TABLE <staged_relation>` — cleanup.
+///
+/// Every statement is transactional as one unit
+/// (`StatementGroup::transactional`): the group is only ever handed to
+/// [`crate::maintenance`]'s consumers via `Backend::execute_statement_group`,
+/// whose real (DuckDB) implementation runs it inside one native transaction,
+/// so a failure at any step (including a candidate-select error) rolls back
+/// every earlier statement — the temp relation's own `CREATE` included —
+/// leaving both the target table and the temp-relation namespace exactly as
+/// they were before the group started.
+///
+/// This phase's realisation is the **keyed-shaped** path only — `key` is a
+/// declared/proven row identity (`RowIdentity::Key`, never `WholeRow`); the
+/// whole-row `EXCEPT ALL`-both-ways realisation for a keyless region remains
+/// unbuilt (`docs/specs/model_transforms.md` §Known Divergences).
+///
+/// # Panics
+/// Panics if `key` or `compared_columns` is empty — an identity-free or
+/// vacuous-compare call has no sound conditional shape to emit (the caller
+/// must fail closed to the unconditional region `DELETE`+`INSERT`
+/// ([`emit_delete_insert`]) instead of reaching this emitter).
+pub fn emit_staged_candidate_conditional(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_staged_candidate_conditional requires a non-empty row identity (key) for {table}"
+    );
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_staged_candidate_conditional requires a non-empty compared-column set for {table}"
+    );
+    let key_join_table_staged = key
+        .iter()
+        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_t_s = key
+        .iter()
+        .map(|k| format!("t.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let delete = format!(
+        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
+         ({suppression})"
+    );
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
+         FROM {table} AS t WHERE {key_join_t_s})"
+    );
+    let drop = format!("DROP TABLE {staged_relation}");
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(delete),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
 /// The out-of-slice match probe for a **checked** route-3 (recurrence-
 /// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
 /// §"Key temporal locality", route 3): a read-only query the caller
@@ -583,6 +785,188 @@ mod column_scoped_merge_tests {
             "warehouse.dim_users",
             &keys(),
             "SELECT * FROM delta",
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyed_fold_suppressed_tests {
+    use super::*;
+
+    fn key() -> Vec<String> {
+        vec!["device_id".to_string()]
+    }
+
+    fn folds() -> Vec<(String, String)> {
+        vec![
+            (
+                "event_count".to_string(),
+                "target.event_count + delta.event_count".to_string(),
+            ),
+            (
+                "last_seen".to_string(),
+                "GREATEST(target.last_seen, delta.last_seen)".to_string(),
+            ),
+        ]
+    }
+
+    /// The suppressed variant's matched arm carries `IS DISTINCT FROM` over
+    /// exactly the compared fold columns, comparing the stored value against
+    /// the fold's own combine expression (not a plain `delta.<col>`).
+    #[test]
+    fn suppressed_variant_carries_is_distinct_from_over_compared_fold_columns() {
+        let group = emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &["event_count".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO main.device_daily AS target USING (SELECT * FROM delta) AS delta ON \
+             target.device_id = delta.device_id WHEN MATCHED AND (target.event_count IS DISTINCT \
+             FROM (target.event_count + delta.event_count)) THEN UPDATE SET event_count = \
+             target.event_count + delta.event_count, last_seen = GREATEST(target.last_seen, \
+             delta.last_seen) WHEN NOT MATCHED THEN INSERT *"
+        );
+        assert!(!group.transactional);
+    }
+
+    /// Composes with a locality slice predicate on the `ON` condition,
+    /// exactly like the unconditional `emit_keyed_fold`.
+    #[test]
+    fn suppressed_variant_composes_with_slice_predicate() {
+        let slice = TargetSlicePredicate::Range {
+            partition_column: "event_date".to_string(),
+            lower: "2026-01-01".to_string(),
+            upper: "2026-01-02".to_string(),
+        };
+        let group = emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            Some(&slice),
+            &["event_count".to_string(), "last_seen".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let sql = &group.statements[0].sql;
+        assert!(sql.contains(
+            "target.device_id = delta.device_id AND target.event_date BETWEEN '2026-01-01' AND \
+             '2026-01-02'"
+        ));
+        assert!(sql.contains(
+            "target.event_count IS DISTINCT FROM (target.event_count + delta.event_count)"
+        ));
+        assert!(sql.contains(
+            "target.last_seen IS DISTINCT FROM (GREATEST(target.last_seen, delta.last_seen))"
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty compared-column set")]
+    fn suppressed_variant_panics_on_empty_compare_set() {
+        emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "is not among the fold's own columns")]
+    fn suppressed_variant_panics_on_unknown_compared_column() {
+        emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &["not_a_fold_column".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod staged_candidate_conditional_tests {
+    use super::*;
+
+    /// The staged-candidate group emits exactly the five statements in
+    /// order: temp-relation CREATE, candidate INSERT, conditional
+    /// DELETE+INSERT reading the staged relation with an `IS DISTINCT FROM`
+    /// restriction, DROP — flagged one-transaction.
+    #[test]
+    fn staged_group_emits_ordered_statements_as_one_transaction() {
+        let group = emit_staged_candidate_conditional(
+            "main.dim_users",
+            "__smelt_staged_dim_users",
+            &["user_id".to_string()],
+            "SELECT user_id, tier, email FROM source_delta",
+            &["tier".to_string(), "email".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 5);
+        assert_eq!(
+            group.statements[0].sql,
+            "CREATE TEMP TABLE __smelt_staged_dim_users AS SELECT * FROM (SELECT user_id, tier, \
+             email FROM source_delta) AS __smelt_staged_shape LIMIT 0"
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "INSERT INTO __smelt_staged_dim_users SELECT user_id, tier, email FROM source_delta"
+        );
+        assert_eq!(
+            group.statements[2].sql,
+            "DELETE FROM main.dim_users USING __smelt_staged_dim_users WHERE main.dim_users.user_id \
+             = __smelt_staged_dim_users.user_id AND (main.dim_users.tier IS DISTINCT FROM \
+             __smelt_staged_dim_users.tier OR main.dim_users.email IS DISTINCT FROM \
+             __smelt_staged_dim_users.email)"
+        );
+        assert_eq!(
+            group.statements[3].sql,
+            "INSERT INTO main.dim_users SELECT s.* FROM __smelt_staged_dim_users AS s WHERE NOT \
+             EXISTS (SELECT 1 FROM main.dim_users AS t WHERE t.user_id = s.user_id)"
+        );
+        assert_eq!(
+            group.statements[4].sql,
+            "DROP TABLE __smelt_staged_dim_users"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty row identity")]
+    fn staged_group_panics_on_empty_key() {
+        emit_staged_candidate_conditional(
+            "main.dim_users",
+            "__smelt_staged_dim_users",
+            &[],
+            "SELECT user_id, tier FROM source_delta",
+            &["tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty compared-column set")]
+    fn staged_group_panics_on_empty_compare_set() {
+        emit_staged_candidate_conditional(
+            "main.dim_users",
+            "__smelt_staged_dim_users",
+            &["user_id".to_string()],
+            "SELECT user_id, tier FROM source_delta",
             &[],
             MaintenanceDialect::DuckDb,
         );

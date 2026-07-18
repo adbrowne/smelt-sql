@@ -325,6 +325,124 @@ pub fn resolve_write_suppression(
     }
 }
 
+/// Which physical write mechanism realizes a keyed-fold cell's conditional
+/// write (T1/T2, `docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase C5): the ordinary keyed `MERGE`
+/// ([`super::emit::emit_keyed_fold`]/[`super::emit::
+/// emit_keyed_fold_suppressed`]) on a backend that can run `MERGE` at all,
+/// else the merge-less **staged-candidate conditional DELETE+INSERT**
+/// ([`super::emit::emit_staged_candidate_conditional`]) — the keyed-shaped
+/// realisation for a backend without `MERGE` (a documented gap:
+/// Spark-over-Parquet). `MERGE` is preferred whenever the backend has it;
+/// the staged-candidate mechanism is never a silent substitute on a backend
+/// that *can* run `MERGE` (`docs/specs/model_transforms.md` §"Change-
+/// suppressed MERGE and the staged-candidate conditional DELETE+INSERT").
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum KeyedWriteMechanism {
+    /// The keyed `MERGE`, carrying its own resolved [`WriteSuppression`]
+    /// verdict (suppressed or the plain unconditional matched arm).
+    Merge(WriteSuppression),
+    /// The merge-less staged-candidate conditional write, over exactly
+    /// `compared_columns` — only ever produced when [`resolve_write_suppression`]
+    /// proved the group fully comparable over a proven row identity (this
+    /// phase's staged-candidate emitter has no unconditional shape, so an
+    /// `Unconditional` verdict on a `MERGE`-less backend cannot resolve to
+    /// this mechanism — see [`resolve_keyed_write_mechanism`]'s doc comment
+    /// for the fallback that case requires from the caller).
+    StagedCandidate { compared_columns: Vec<String> },
+}
+
+/// Resolve which mechanism realizes a keyed-fold cell's write, given its
+/// already-resolved [`WriteSuppression`] verdict
+/// ([`resolve_write_suppression`]) and whether the target backend can run
+/// `MERGE` at all.
+///
+/// `None` means neither mechanism this function knows about is admissible:
+/// the backend cannot run `MERGE`, and the compare group was not fully
+/// comparable (or no row identity was proven) — `WriteSuppression::
+/// Unconditional`. There is no merge-less *unconditional* keyed-fold emitter
+/// in this catalogue (the staged-candidate shape's `DELETE`+`INSERT` only
+/// makes sense restricted to the rows whose effect is not the identity —
+/// see [`super::emit::emit_staged_candidate_conditional`]'s panic contract);
+/// a caller reaching `None` must fall back to a backend-agnostic mechanism
+/// outside this function's scope (e.g. the always-available whole-region
+/// recompute, [`ChosenTechnique::RegionRecompute`]), never invent a
+/// merge-less unconditional MERGE substitute.
+///
+/// This does not yet consult a `write:` pin (the open write-pattern
+/// registry and `maintenance.cells[].write` — tracked by a later phase);
+/// today it always prefers `MERGE` when the backend has it, matching
+/// "never a silent substitution" — the staged-candidate mechanism is
+/// reachable *only* through a genuine capability gap, not a preference.
+pub fn resolve_keyed_write_mechanism(
+    suppression: &WriteSuppression,
+    backend_supports_merge: bool,
+) -> Option<KeyedWriteMechanism> {
+    if backend_supports_merge {
+        return Some(KeyedWriteMechanism::Merge(suppression.clone()));
+    }
+    match suppression {
+        WriteSuppression::Suppressed { compared_columns } => {
+            Some(KeyedWriteMechanism::StagedCandidate {
+                compared_columns: compared_columns.clone(),
+            })
+        }
+        WriteSuppression::Unconditional { .. } => None,
+    }
+}
+
+#[cfg(test)]
+mod keyed_write_mechanism_tests {
+    use super::*;
+
+    fn suppressed() -> WriteSuppression {
+        WriteSuppression::Suppressed {
+            compared_columns: vec!["event_count".to_string()],
+        }
+    }
+
+    fn unconditional() -> WriteSuppression {
+        WriteSuppression::Unconditional {
+            why: "column(s) notes are not proven comparable".to_string(),
+        }
+    }
+
+    #[test]
+    fn merge_capable_backend_always_resolves_to_merge_never_staged_candidate() {
+        // Even a fully-comparable group stays on MERGE when the backend
+        // can run one — the staged-candidate mechanism is never a silent
+        // substitute for a MERGE the backend could have executed.
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), true);
+        assert_eq!(resolved, Some(KeyedWriteMechanism::Merge(suppressed())));
+
+        let resolved_unconditional = resolve_keyed_write_mechanism(&unconditional(), true);
+        assert_eq!(
+            resolved_unconditional,
+            Some(KeyedWriteMechanism::Merge(unconditional()))
+        );
+    }
+
+    #[test]
+    fn merge_less_backend_with_comparable_group_admits_staged_candidate() {
+        let resolved = resolve_keyed_write_mechanism(&suppressed(), false);
+        assert_eq!(
+            resolved,
+            Some(KeyedWriteMechanism::StagedCandidate {
+                compared_columns: vec!["event_count".to_string()]
+            })
+        );
+    }
+
+    #[test]
+    fn merge_less_backend_with_no_admissible_suppression_resolves_to_none() {
+        // Fail-closed: no merge-less unconditional keyed-fold mechanism
+        // exists in this catalogue — the caller must fall back further
+        // (e.g. region recompute), never invent a substitute here.
+        let resolved = resolve_keyed_write_mechanism(&unconditional(), false);
+        assert_eq!(resolved, None);
+    }
+}
+
 #[cfg(test)]
 mod write_suppression_tests {
     use super::*;

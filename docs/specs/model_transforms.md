@@ -46,8 +46,8 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
-| Change-suppressed MERGE (keyed `merge_into` / column-scoped merge variant) | region row identity + change comparability on every compared column | matched-arm gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the cell's comparable mutation-sensitive columns, so a row whose applied effect is the identity is never written; the unmatched side is dialect-keyed (`WHEN NOT MATCHED BY SOURCE` where the dialect has it, else a separate scoped `DELETE` in the same statement group) | unbuilt |
-| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | unbuilt |
+| Change-suppressed MERGE (keyed `merge_into` / column-scoped merge variant) | region row identity + change comparability on every compared column | matched-arm gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the cell's comparable mutation-sensitive columns, so a row whose applied effect is the identity is never written; the unmatched side is dialect-keyed (`WHEN NOT MATCHED BY SOURCE` where the dialect has it, else a separate scoped `DELETE` in the same statement group) | **built** (column-scoped and keyed-fold) |
+| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | *partial* (keyed identity only) |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
 | Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
@@ -454,16 +454,27 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
-- **Change-suppressed MERGE is built for the column-scoped family only; the keyed-fold MERGE
-  and the staged-candidate conditional DELETE+INSERT remain unbuilt.** The column-scoped
-  `MERGE` emitter (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) now
-  gains a matched-arm `IS DISTINCT FROM` predicate over the cell's comparable mutation-sensitive
-  columns, admitted fail-closed by `maintenance::choice::resolve_write_suppression` over the
-  region row identity (P2) and per-column change comparability (P3) proofs — an unchanged-input
-  re-run of a column-scoped MERGE writes zero rows. The keyed-fold `MERGE` and the region
-  DELETE+INSERT family still write/rewrite unconditionally, and the merge-less staged-candidate
-  conditional DELETE+INSERT (for a backend without `MERGE`) does not exist yet; tracked by
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Change-suppressed MERGE is built for the column-scoped and keyed-fold families; the region
+  DELETE+INSERT family stays unconditional.** The column-scoped `MERGE` emitter
+  (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) and the keyed-fold
+  `MERGE` emitter (`emit_keyed_fold_suppressed`) both gain a matched-arm `IS DISTINCT FROM`
+  predicate over the cell's comparable columns — the keyed-fold variant compares the stored
+  value against the fold's own combine expression, since a keyed fold's matched arm never copies
+  a delta column verbatim — admitted fail-closed by `maintenance::choice::resolve_write_suppression`
+  over the region row identity (P2) and per-column change comparability (P3) proofs. The region
+  DELETE+INSERT family still rewrites its whole window unconditionally.
+- **The staged-candidate conditional DELETE+INSERT is built for the keyed-identity realisation
+  only; the whole-row `EXCEPT ALL` realisation remains unbuilt.** `smelt_logical::maintenance::
+  emit::emit_staged_candidate_conditional` emits the merge-less keyed-shaped write — stage the
+  candidate region into a temp relation, `DELETE` the rows a declared/proven key identifies as
+  changed, `INSERT` the changed-or-new rows read back from the staged relation, `DROP` the temp
+  relation — as one transaction, so a mid-group failure leaves both the target and the temp-
+  relation namespace untouched. `maintenance::choice::resolve_keyed_write_mechanism` chooses
+  between the keyed `MERGE` and this mechanism from a backend-capability flag alone (never a
+  silent substitution on a `MERGE`-capable backend); a `write:` pin over this choice, the
+  whole-row (`EXCEPT ALL`-both-ways) realisation for a keyless region, and wiring this choice
+  into the live `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) all
+  remain open, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
   bounded-domain multiset, compile-time pinning; the reconciliation-ledger
   fold/recompute-reset pair (no `(output-region × column-group)` ledger

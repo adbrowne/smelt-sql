@@ -30,7 +30,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Int64Array, RecordBatch};
+use arrow::array::{Array, Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 
@@ -1654,6 +1654,345 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
     );
 }
 
+/// Phase C5 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the change-suppressed keyed-fold `MERGE` (T1 for `refresh: keyed`
+/// models): `emit_keyed_fold_suppressed` carries the same suppression
+/// predicate machinery as C4's `emit_column_scoped_merge_suppressed`, but
+/// compares the stored value against the fold's own combine expression.
+/// This is a direct-dispatch leg (no `execute_project` model pipeline
+/// involved, matching this phase's "runtime e2e" test — the abstract
+/// `MaintenancePlan`/`choice::resolve_keyed_write_mechanism` this phase adds
+/// is not yet wired into the live `refresh: keyed` per-partition loop
+/// (`smelt_runtime::cumulative`); that wiring is out of this phase's file
+/// scope). It proves two things over a real DuckDB connection:
+///
+/// - The executed `StatementGroup` is byte-identical to a direct
+///   `emit_keyed_fold_suppressed` call over the same inputs.
+/// - A `run_marker` fold column — only ever overwritten when the matched
+///   arm's `UPDATE SET` actually fires — proves the suppressed row was
+///   never written at all (not merely that it landed on the same bits): a
+///   device whose delta contributes zero new events (`event_count`
+///   unchanged after the additive combine) keeps its **prior** run's
+///   marker, while a device whose combined result differs gets the new
+///   run's marker, and a brand-new device is inserted with it.
+#[tokio::test]
+async fn suppressed_keyed_fold_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.device_daily (device_id BIGINT, event_count BIGINT, run_marker \
+             VARCHAR)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.device_daily VALUES (1, 5, 'run1'), (2, 3, 'run1')")
+        .await
+        .expect("seed target table");
+
+    // Device 1's delta contributes zero new events (an unchanged-effect
+    // re-run); device 2's delta genuinely adds events; device 3 is brand
+    // new.
+    let delta_select = "SELECT * FROM (VALUES (1, 0, 'run2'), (2, 4, 'run2'), (3, 10, 'run2')) AS \
+                         t(device_id, event_count, run_marker)";
+    let folds = vec![
+        (
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        ),
+        ("run_marker".to_string(), "delta.run_marker".to_string()),
+    ];
+    let key = vec!["device_id".to_string()];
+    let compared_columns = vec!["event_count".to_string()];
+
+    let group = smelt_logical::maintenance::emit::emit_keyed_fold_suppressed(
+        "main.device_daily",
+        &key,
+        &folds,
+        delta_select,
+        None,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&group)
+        .await
+        .expect("suppressed keyed-fold merge must succeed");
+
+    let recorded = backend.recorded_groups();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(&recorded[0], &group);
+    let expected = smelt_logical::maintenance::emit::emit_keyed_fold_suppressed(
+        "main.device_daily",
+        &key,
+        &folds,
+        delta_select,
+        None,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &recorded[0],
+        "executed suppressed keyed-fold group must be byte-identical to a direct emitter call \
+         over the same inputs"
+    );
+
+    let rows = backend
+        .execute_sql(
+            "SELECT device_id, event_count, run_marker FROM main.device_daily ORDER BY device_id",
+        )
+        .await
+        .expect("read back target");
+    let batch = &rows[0];
+    let markers: Vec<String> = {
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("run_marker is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    assert_eq!(
+        markers,
+        vec!["run1".to_string(), "run2".to_string(), "run2".to_string()],
+        "device 1's suppressed row must keep its prior run's marker (never written); device 2 \
+         (changed) and device 3 (new) must carry the new run's marker"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT device_id, event_count FROM main.device_daily",
+            "SELECT device_id, event_count FROM (VALUES (1, 5), (2, 7), (3, 10)) AS \
+             t(device_id, event_count)"
+        )
+        .await,
+        "the suppressed keyed-fold merge must reproduce the full-refresh oracle's combined state"
+    );
+}
+
+/// Phase C5 — the staged-candidate conditional `DELETE`+`INSERT` (T2): the
+/// merge-less keyed-shaped realisation. Proves the executed `StatementGroup`
+/// is byte-identical to a direct `emit_staged_candidate_conditional` call,
+/// that the same `run_marker` technique proves an unchanged row is never
+/// touched (its prior marker survives), and that a mid-group failure rolls
+/// back the whole transaction — including the staged temp relation's own
+/// `CREATE` — leaving no temp relation behind.
+#[tokio::test]
+async fn staged_candidate_conditional_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR, run_marker VARCHAR)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_users VALUES (1, 'bronze', 'run1'), (2, 'silver', 'run1'), (3, \
+             'gold', 'run1')",
+        )
+        .await
+        .expect("seed target table");
+
+    // user 1: unchanged tier ('bronze' -> 'bronze'); user 2: changed tier;
+    // user 4: brand new. user 3 is absent from the candidate set (out of
+    // this run's touched region) and must be left untouched entirely.
+    let candidate_select = "SELECT * FROM (VALUES (1, 'bronze', 'run2'), (2, 'platinum', \
+                             'run2'), (4, 'new', 'run2')) AS t(user_id, tier, run_marker)";
+    let key = vec!["user_id".to_string()];
+    let compared_columns = vec!["tier".to_string()];
+
+    let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&group)
+        .await
+        .expect("staged-candidate conditional write must succeed");
+
+    let recorded = backend.recorded_groups();
+    assert_eq!(recorded.len(), 1);
+    let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &recorded[0],
+        "executed staged-candidate group must be byte-identical to a direct emitter call over \
+         the same inputs"
+    );
+
+    let rows = backend
+        .execute_sql("SELECT user_id, tier, run_marker FROM main.dim_users ORDER BY user_id")
+        .await
+        .expect("read back target");
+    let batch = &rows[0];
+    let tiers: Vec<String> = {
+        let col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("tier is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    let markers: Vec<String> = {
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("run_marker is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    assert_eq!(
+        tiers,
+        vec![
+            "bronze".to_string(),
+            "platinum".to_string(),
+            "gold".to_string(),
+            "new".to_string()
+        ]
+    );
+    assert_eq!(
+        markers,
+        vec![
+            "run1".to_string(), // user 1: suppressed, never deleted/reinserted
+            "run2".to_string(), // user 2: changed, deleted+reinserted
+            "run1".to_string(), // user 3: absent from candidate set, untouched
+            "run2".to_string(), // user 4: new, inserted
+        ],
+        "an unchanged staged candidate must never delete/reinsert its row (prior marker \
+         survives); a changed or new row must carry the new run's marker"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT user_id, tier FROM main.dim_users",
+            "SELECT user_id, tier FROM (VALUES (1, 'bronze'), (2, 'platinum'), (3, 'gold'), (4, \
+             'new')) AS t(user_id, tier)"
+        )
+        .await,
+        "the staged-candidate conditional write must reproduce the full-refresh oracle"
+    );
+
+    let staged_relations = backend
+        .execute_sql(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = \
+             '__smelt_staged_dim_users'",
+        )
+        .await
+        .expect("query duckdb_tables");
+    let count = staged_relations[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("count(*) is Int64")
+        .value(0);
+    assert_eq!(
+        count, 0,
+        "the staged temp relation must be dropped by the end of a successful group"
+    );
+}
+
+/// A mid-group failure (the candidate `INSERT`'s projection does not match
+/// the staged relation's own `CREATE`-derived shape — a column-count
+/// mismatch DuckDB rejects) must roll back the **entire** transaction,
+/// including the temp relation's own `CREATE`: no temp relation is left
+/// behind, and the target table is completely untouched.
+#[tokio::test]
+async fn staged_candidate_interrupted_run_leaves_no_temp_relation_behind() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze')")
+        .await
+        .expect("seed target table");
+
+    // Hand-build a group whose CREATE (shape-only, `LIMIT 0` over a 2-column
+    // projection) disagrees with its own INSERT (a 3-column projection) —
+    // the same shape `emit_staged_candidate_conditional` would build if a
+    // caller ever violated its full-row-projection contract. DuckDB rejects
+    // the INSERT with a column-count mismatch mid-transaction.
+    let mut group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_broken",
+        &["user_id".to_string()],
+        "SELECT user_id, tier FROM (VALUES (1, 'bronze')) AS t(user_id, tier)",
+        &["tier".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    group.statements[1] = smelt_logical::maintenance::emit::MaintenanceStatement {
+        sql: "INSERT INTO __smelt_staged_broken SELECT user_id, tier, 'extra' FROM (VALUES (1, \
+              'bronze')) AS t(user_id, tier, junk)"
+            .to_string(),
+    };
+
+    let result = backend.execute_statement_group(&group).await;
+    assert!(
+        result.is_err(),
+        "the deliberately-broken INSERT must fail: {result:?}"
+    );
+
+    let staged_relations = backend
+        .execute_sql(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = '__smelt_staged_broken'",
+        )
+        .await
+        .expect("query duckdb_tables");
+    let count = staged_relations[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("count(*) is Int64")
+        .value(0);
+    assert_eq!(
+        count, 0,
+        "a rolled-back transaction must leave no staged temp relation behind — its own CREATE \
+         is part of the same failed transaction"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT user_id, tier FROM main.dim_users",
+            "SELECT user_id, tier FROM (VALUES (1, 'bronze')) AS t(user_id, tier)"
+        )
+        .await,
+        "the target table must be completely untouched by a rolled-back staged-candidate group"
+    );
+}
+
 // =============================================================================
 // Structural gate: no maintenance-statement authoring outside the emitter
 // (`docs/specs/incremental_models.md` §"Statement emission (single owner)";
@@ -1747,7 +2086,15 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
         }
         let forbidden = line.contains("DELETE FROM ")
             || line.contains("MERGE INTO ")
-            || line.contains("CREATE TABLE {}.{} AS");
+            || line.contains("CREATE TABLE {}.{} AS")
+            // The staged-candidate conditional DELETE+INSERT's temp
+            // relation (T2, `docs/plans/20260715-composed-axes-conditional-
+            // maintenance.md` Phase C5) — a distinctive shape with no
+            // pre-existing production match, unlike a bare `DROP TABLE `
+            // (which the generic table-lifecycle helpers already construct
+            // legitimately, outside any maintenance-statement family — see
+            // `Backend::drop_table_if_exists`'s own implementations).
+            || line.contains("CREATE TEMP TABLE ");
         if !forbidden {
             continue;
         }

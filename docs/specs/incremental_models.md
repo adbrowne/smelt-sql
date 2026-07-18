@@ -1936,19 +1936,31 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   no cells are derived and no executor runs. Full trajectory support (the locality routes, a
   real emitted plan, and graph-layer admission of the shape) is tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **Conditional maintenance technique: column-scoped MERGE only, so far.** §"Windowed
-  maintenance and the horizon" category 2 (no-op write elimination) is now partly built: the
-  column-scoped `MERGE` (`Technique::ColumnScopedMerge`) admits a change-suppressed matched arm
-  (`AND (target.c IS DISTINCT FROM source.c OR …)` over the cell's mutation-sensitive group) that
-  writes zero rows for an unchanged-input re-run — admission is fail-closed over the P2 row-identity
-  verdict (a `WholeRow` cell never suppresses) and the P3 per-column change-comparability verdict
-  (one `Incomparable` column in the group refuses the whole cell's suppression, falling back to the
-  pre-existing unconditional matched arm). Still unbuilt: the keyed-fold `MERGE` and the region
-  `DELETE`+`INSERT` family have no conditional variant yet (every region overwrite still rewrites
-  unchanged rows), the merge-less staged-candidate conditional `DELETE`+`INSERT` (for backends
-  without `MERGE`) does not exist, and no observed output delta is recorded anywhere — the recorded
-  "dispatch fires on every run unconditionally" divergence above is the operational face of the
-  remaining gap. Mechanisms and sequencing:
+- **Conditional maintenance technique: column-scoped and keyed-fold MERGE, plus a merge-less
+  keyed realisation; the region DELETE+INSERT family and the whole-row merge-less realisation
+  remain unbuilt.** §"Windowed maintenance and the horizon" category 2 (no-op write elimination)
+  is now partly built: both the column-scoped `MERGE` (`Technique::ColumnScopedMerge`) and the
+  keyed-fold `MERGE` admit a change-suppressed matched arm (`AND (target.c IS DISTINCT FROM
+  source.c OR …)` — the keyed-fold variant compares the stored value against the fold's own
+  combine expression rather than a plain source column) that writes zero rows for an
+  unchanged-input re-run — admission is fail-closed over the P2 row-identity verdict (a
+  `WholeRow` cell never suppresses) and the P3 per-column change-comparability verdict (one
+  `Incomparable` column in the group refuses the whole cell's suppression, falling back to the
+  pre-existing unconditional matched arm). For a backend that cannot run `MERGE` at all, the
+  keyed-identity **staged-candidate conditional DELETE+INSERT**
+  (`smelt_logical::maintenance::emit::emit_staged_candidate_conditional`) realises the same
+  no-op-write-elimination as one transaction (stage the candidates, conditionally `DELETE`+
+  `INSERT` only the rows whose effect is not the identity, `DROP` the staged relation) —
+  `maintenance::choice::resolve_keyed_write_mechanism` chooses between the keyed `MERGE` and this
+  mechanism purely from a backend-capability flag, never a silent substitution on a
+  `MERGE`-capable backend. Still unbuilt: the region `DELETE`+`INSERT` family has no conditional
+  variant yet (every region overwrite still rewrites unchanged rows), the whole-row (keyless,
+  `EXCEPT ALL`-both-ways) staged-candidate realisation does not exist, a `write:` pin over the
+  keyed `MERGE`/staged-candidate choice does not exist, wiring that choice into the live
+  `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) has not happened —
+  the emitters and the choice-layer admission are built and tested directly, but the per-run
+  dispatch still always emits the unconditional keyed-fold `MERGE` — and no observed output delta
+  is recorded anywhere. Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly
