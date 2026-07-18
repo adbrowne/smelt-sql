@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784353955200,
+  "lastUpdate": 1784353957568,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -464,6 +464,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.313618837962686,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "25a34a152bc59c6f95fefbb05f2807860d5a5b94",
+          "message": "fix(test): register cast_float_as_double divergence for Spark oracle\n\nCI's dual-target property test failed against Spark: CAST(DECIMAL AS\nFLOAT) returns FLOAT there too (smelt normalizes to DOUBLE), but the\nexisting cast_float_as_double divergence only listed a duckdb_type.\nAdd the matching spark_type and a regression test.",
+          "timestamp": "2026-07-18T15:48:10+10:00",
+          "tree_id": "35058021b526be54fb85b802fb4b3cad9b470eed",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/25a34a152bc59c6f95fefbb05f2807860d5a5b94"
+        },
+        "date": 1784353956881,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 25.275268486397625,
             "unit": "MB/s"
           }
         ]
