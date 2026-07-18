@@ -153,12 +153,14 @@ Cells (2):
       corner:    FoldDelta
       technique: KeyedFold
       ledger_catch_up: false
+      region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert
       ledger_catch_up: false
+      region key: Key(["event_id"])
       locality:  partition_local
       scan clamps: (none)
 

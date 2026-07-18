@@ -12,14 +12,68 @@ use smelt_types::SqlFunction;
 
 use super::{
     ColumnGroup, Corner, Grain, MaintenancePlan, MutationProfile, OutputSpec, PartitionLocal,
-    PlanCell, Refusal, ScanClamp, SourceFacts, Technique, Trigger,
+    PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts, Technique, Trigger,
 };
 use crate::analysis::discriminants::combiner_discriminants;
 use crate::analysis::input_delta::{
     input_delta_discovery, InputDeltaKind, MutationProfile as DeltaMutationProfile, SourceShape,
 };
+use crate::analysis::join_shape::JoinContext;
 use crate::analysis::model_diff::ModelDiff;
 use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult, Seconds};
+use crate::analysis::walk::model_property_vector;
+
+/// Derive the region row identity (P2, `model_properties.md` §"Region row
+/// identity") for a model: the declared `unique_key` off the output's own
+/// `Grain::Key` when present, else the proven grain key the composition walk
+/// establishes over `sql` (`analysis::walk::PropertyVector::grain`), else the
+/// identity-free `WholeRow` fallback.
+///
+/// Fail-closed: a proven key is only trusted when the walk also proves no
+/// input join fans the output out (`PropertyVector::has_fan_out_join`) — a
+/// key that does not cover every output row is never used, not even as a
+/// partial key. `declared_unique_key` and a differing proven key may both be
+/// present at once; declared wins the precedence, but the disagreement is
+/// carried in [`RowIdentityVerdict::proven_mismatch`] rather than silently
+/// dropped.
+pub fn row_identity(declared_unique_key: &[String], sql: &str) -> RowIdentityVerdict {
+    let proven_key = model_property_vector(sql, &JoinContext::new()).and_then(|vector| {
+        if vector.has_fan_out_join {
+            None
+        } else {
+            vector.grain.keys.into_iter().next()
+        }
+    });
+
+    if !declared_unique_key.is_empty() {
+        let declared = declared_unique_key.to_vec();
+        let proven_mismatch = proven_key.filter(|proven| !same_key_set(proven, &declared));
+        return RowIdentityVerdict {
+            identity: RowIdentity::Key(declared),
+            proven_mismatch,
+        };
+    }
+
+    match proven_key {
+        Some(key) => RowIdentityVerdict {
+            identity: RowIdentity::Key(key),
+            proven_mismatch: None,
+        },
+        None => RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
+    }
+}
+
+/// Order-independent, case-insensitive key-set equality — the same
+/// convention `Grain::has_subset_key` and the key-temporal-locality route's
+/// `unique_key` comparison use.
+fn same_key_set(a: &[String], b: &[String]) -> bool {
+    let a: BTreeSet<String> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let b: BTreeSet<String> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+    a == b
+}
 
 /// The [`SourceShape`] [`input_delta_discovery`] reads for `facts`: a
 /// clocked source's own partition column stands in for
@@ -82,15 +136,23 @@ pub struct ModelEdge {
 /// contribute to a **partition-addressed** downstream (`output_partition_col`
 /// is `Some`); a key-addressed downstream's model-edge creation is a keyed
 /// fold, out of scope here.
+///
+/// `declared_unique_key` is the downstream's own declared `unique_key:`
+/// (`docs/specs/models.md` §"Refresh axis"), threaded into the same
+/// [`row_identity`] derivation `derive_maintenance_plan` uses for this
+/// model's other cells, so a model-edge creation cell carries the identical
+/// row-identity verdict as every other cell of the same output.
 pub fn append_model_edge_cells(
     plan: &mut MaintenancePlan,
     sql: &str,
     output_partition_col: Option<&str>,
     model_edges: &[ModelEdge],
+    declared_unique_key: &[String],
 ) {
     if model_edges.is_empty() {
         return;
     }
+    let identity = row_identity(declared_unique_key, sql);
     // A key-addressed downstream has no partition axis to clamp a creation
     // cell to; its model-edge creation would be a keyed fold, deferred.
     let Some(output_partition_col) = output_partition_col else {
@@ -160,6 +222,7 @@ pub fn append_model_edge_cells(
             partition_local,
             scans,
             ledger_catch_up: false,
+            row_identity: identity.clone(),
         });
     }
 }
@@ -201,6 +264,17 @@ impl ModelInputs<'_> {
         match &self.output.grain {
             Grain::Partition { partition_col } => Some(partition_col),
             Grain::Key { .. } => None,
+        }
+    }
+
+    /// The declared identity off the output's own grain (P2, `row_identity`):
+    /// `Grain::Key`'s `unique_key`, or nothing for `Grain::Partition` — a
+    /// partition-grain output declares no row-level identity through
+    /// `Grain` itself.
+    fn declared_unique_key(&self) -> &[String] {
+        match &self.output.grain {
+            Grain::Key { unique_key } => unique_key,
+            Grain::Partition { .. } => &[],
         }
     }
 }
@@ -267,17 +341,20 @@ fn link_source(
 pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
+    let identity = row_identity(inputs.declared_unique_key(), inputs.sql);
 
     for trigger in triggers {
         match trigger {
-            Trigger::NewData { source } => derive_new_data(inputs, &bounds, source, &mut plan),
+            Trigger::NewData { source } => {
+                derive_new_data(inputs, &bounds, source, &identity, &mut plan)
+            }
             Trigger::UpstreamMutation { source } => {
-                derive_mutation(inputs, &bounds, source, &mut plan)
+                derive_mutation(inputs, &bounds, source, &identity, &mut plan)
             }
             Trigger::ColumnAdded { columns } => {
-                derive_column_added(inputs, &bounds, columns, &mut plan)
+                derive_column_added(inputs, &bounds, columns, &identity, &mut plan)
             }
-            Trigger::Backfill => derive_backfill(inputs, &bounds, &mut plan),
+            Trigger::Backfill => derive_backfill(inputs, &bounds, &identity, &mut plan),
         }
     }
     plan
@@ -292,6 +369,7 @@ fn derive_new_data(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     source: &str,
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::NewData {
@@ -308,6 +386,7 @@ fn derive_new_data(
                 partition_local,
                 scans,
                 ledger_catch_up: false,
+                row_identity: identity.clone(),
             });
         }
         Grain::Key { .. } => {
@@ -440,6 +519,7 @@ fn derive_new_data(
                 partition_local: PartitionLocal::Yes,
                 scans: vec![],
                 ledger_catch_up: false,
+                row_identity: identity.clone(),
             });
         }
     }
@@ -455,6 +535,7 @@ fn derive_mutation(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     source: &str,
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::UpstreamMutation {
@@ -511,6 +592,7 @@ fn derive_mutation(
             partition_local: locality,
             scans,
             ledger_catch_up: false,
+            row_identity: identity.clone(),
         });
     }
 }
@@ -523,6 +605,7 @@ fn derive_column_added(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     columns: &[String],
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::ColumnAdded {
@@ -557,6 +640,7 @@ fn derive_column_added(
                     partition_local: PartitionLocal::Yes,
                     scans: vec![],
                     ledger_catch_up: true,
+                    row_identity: identity.clone(),
                 }),
                 Some(ModelDiff::NotAdditive { reason }) => {
                     plan.refusals.push(Refusal::NoAdmissibleTechnique {
@@ -630,6 +714,7 @@ fn derive_column_added(
             partition_local: locality,
             scans,
             ledger_catch_up: true,
+            row_identity: identity.clone(),
         });
     }
 }
@@ -639,6 +724,7 @@ fn derive_column_added(
 fn derive_backfill(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let (partition_local, scans) = read_locality(inputs, bounds);
@@ -650,6 +736,7 @@ fn derive_backfill(
         partition_local,
         scans,
         ledger_catch_up: false,
+        row_identity: identity.clone(),
     });
 }
 

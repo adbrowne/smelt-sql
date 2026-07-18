@@ -246,6 +246,10 @@ mod tests {
                 partition_local: PartitionLocal::Yes,
                 scans: vec![],
                 ledger_catch_up: false,
+                row_identity: crate::maintenance::RowIdentityVerdict {
+                    identity: crate::maintenance::RowIdentity::WholeRow,
+                    proven_mismatch: None,
+                },
             }],
             refusals: vec![],
             key_locality: None,

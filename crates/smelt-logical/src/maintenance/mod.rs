@@ -188,6 +188,38 @@ impl ScanClamp {
     }
 }
 
+/// A cell's region row identity (P2, `model_properties.md` §"Region row
+/// identity"): what a conditional write joins stored rows to candidate rows
+/// on. Precedence is declared `unique_key` → proven grain key (the walk's
+/// `PropertyVector.grain`) → the identity-free `WholeRow` fallback, derived
+/// once by [`derive::row_identity`] and carried here as plain data — no
+/// consumer re-derives it (`CLAUDE.md` §"Maintenance-plan purity").
+/// Fail-closed: a proven key that does not cover the output (a fan-out join)
+/// is never trusted, even as a partial key — `WholeRow` instead.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum RowIdentity {
+    /// Rows are addressed individually by this key.
+    Key(Vec<String>),
+    /// No usable key: rows are addressed as a whole — a conditional write
+    /// degenerates to a multiset diff (delete-the-disappeared,
+    /// insert-the-appeared), never a targeted update.
+    WholeRow,
+}
+
+/// The row-identity verdict plus whether a declared key and a proven grain
+/// key disagreed while both were present. Declared always wins the
+/// precedence, but the disagreement is surfaced here rather than silently
+/// dropped, so a caller (`smelt explain`, a future admission audit) can see
+/// that the two facts disagree instead of only ever seeing the winner.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RowIdentityVerdict {
+    pub identity: RowIdentity,
+    /// `Some(proven)` exactly when a declared key was used *and* the walk
+    /// separately proved a different (non-fan-out) grain key for the same
+    /// output — the proven key that was overridden by precedence.
+    pub proven_mismatch: Option<Vec<String>>,
+}
+
 /// One `(column-group × trigger)` cell of the plan.
 #[derive(Debug, Clone)]
 pub struct PlanCell {
@@ -205,6 +237,11 @@ pub struct PlanCell {
     /// at `S = ∅` over existing regions and this op catches them up
     /// (`01-framework.md` §8; EX-40's group-convergence rule).
     pub ledger_catch_up: bool,
+    /// The region row identity a conditional write over this cell would join
+    /// on (P2, `model_properties.md` §"Region row identity"). Plain data,
+    /// derived once by [`derive::row_identity`] — no emitter or admission
+    /// consumes it yet (that is a later phase's scope).
+    pub row_identity: RowIdentityVerdict,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting

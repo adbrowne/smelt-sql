@@ -472,6 +472,7 @@ pub fn derive_model_maintenance_plan_with_edges(
         sql,
         output_partition_col,
         model_edges,
+        metadata.unique_key.as_deref().unwrap_or(&[]),
     );
     Some(result)
 }

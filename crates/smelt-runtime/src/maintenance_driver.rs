@@ -1419,6 +1419,10 @@ mod tests {
             partition_local: PartitionLocal::Yes,
             scans: vec![scan],
             ledger_catch_up: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
         }
     }
 
@@ -1436,6 +1440,10 @@ mod tests {
             },
             scans: vec![],
             ledger_catch_up: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
         }
     }
 

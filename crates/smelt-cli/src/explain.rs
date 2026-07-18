@@ -366,6 +366,19 @@ pub fn build_maintenance_plan_report(
             let _ = writeln!(out, "      corner:    {:?}", cell.corner);
             let _ = writeln!(out, "      technique: {:?}", cell.technique);
             let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
+            // Region row identity (P2, `model_properties.md` §"Region row
+            // identity") — plain data carried on the cell
+            // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+            // Phase C3), reported alongside the technique it will drive a
+            // future conditional write's compare-join for.
+            let _ = writeln!(out, "      region key: {:?}", cell.row_identity.identity);
+            if let Some(proven) = &cell.row_identity.proven_mismatch {
+                let _ = writeln!(
+                    out,
+                    "      region key: NOTE declared key wins over a differing proven grain \
+                     key {proven:?}"
+                );
+            }
             match &cell.partition_local {
                 PartitionLocal::Yes => {
                     let _ = writeln!(out, "      locality:  partition_local");
@@ -861,6 +874,14 @@ pub struct ExplainCellJson {
     pub trigger: String,
     pub corner: String,
     pub technique: String,
+    /// The region row identity (P2, `model_properties.md` §"Region row
+    /// identity"): `"Key([...])"` or `"WholeRow"`.
+    pub row_identity: String,
+    /// The proven grain key that a declared `unique_key` overrode, when the
+    /// two disagreed while both were present — surfaced rather than
+    /// silently dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_identity_proven_mismatch: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_statements_reason: Option<String>,
     pub statements: Vec<ExplainStatementJson>,
@@ -920,6 +941,8 @@ pub fn build_maintenance_plan_json(
                 trigger: format!("{:?}", cell.trigger),
                 corner: format!("{:?}", cell.corner),
                 technique: format!("{:?}", cell.technique),
+                row_identity: format!("{:?}", cell.row_identity.identity),
+                row_identity_proven_mismatch: cell.row_identity.proven_mismatch.clone(),
                 no_statements_reason,
                 statements,
             }
@@ -1587,6 +1610,10 @@ mod tests {
             partition_local: PartitionLocal::Yes,
             scans: vec![],
             ledger_catch_up: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
         };
 
         let source_timeseries = smelt_planner::SourceTimeseriesMap::new();

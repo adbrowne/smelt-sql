@@ -17,7 +17,8 @@ use smelt_logical::maintenance::choice::{
     effective_override, resolve_cell_choice, ChosenTechnique, EffectiveOverride,
 };
 use smelt_logical::maintenance::{
-    Corner, MaintenancePlan, PartitionLocal, PlanCell, Technique, Trigger,
+    Corner, MaintenancePlan, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, Technique,
+    Trigger,
 };
 
 /// A plan admitting exactly one `ColumnScopedMerge` cell for `source`'s
@@ -36,6 +37,10 @@ fn admitted_column_merge_plan(source: &str) -> MaintenancePlan {
             partition_local: PartitionLocal::Yes,
             scans: vec![],
             ledger_catch_up: false,
+            row_identity: RowIdentityVerdict {
+                identity: RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
         }],
         refusals: vec![],
         key_locality: None,

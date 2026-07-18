@@ -33,7 +33,8 @@ use smelt_core::config::CellTechnique;
 use smelt_logical::analysis::join_shape::ContributionVerdict;
 use smelt_logical::analysis::source_bounds::{BoundResult, Seconds};
 use smelt_logical::maintenance::{
-    Corner, MaintenancePlan, PartitionLocal, PlanCell, Refusal, ScanClamp, Technique, Trigger,
+    Corner, MaintenancePlan, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict,
+    ScanClamp, Technique, Trigger,
 };
 use smelt_runtime::maintenance_driver::{
     decide_column_merge_dispatch, execute_column_scoped_merge, resolve_cell_technique,
@@ -55,6 +56,10 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             partition_local: PartitionLocal::Yes,
             scans: vec![],
             ledger_catch_up: false,
+            row_identity: RowIdentityVerdict {
+                identity: RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
         }],
         refusals: vec![],
         key_locality: None,
@@ -353,6 +358,10 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
             after: Seconds::hours(24),
         }],
         ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
     };
 
     let dispatch = decide_column_merge_dispatch(

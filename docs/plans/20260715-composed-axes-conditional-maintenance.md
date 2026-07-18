@@ -89,7 +89,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | B3 | `--since-upstream` accepts a composed node as `--source`; adjointness tests extended | done (2026-07-18) |
 | C1 | Spec diff: `model_transforms.md` T1/T2 variants; `multi_backend.md` capability flags (incl. `supports_column_scoped_merge` into the capability struct) | done (2026-07-18) |
 | C2 | P3 change-comparability per column (walk lattice fold; `plausible`/pinned-`NOW()` ⇒ Incomparable) | done (2026-07-18) |
-| C3 | P2 region row identity (declared `unique_key` → proven grain key → `WholeRow` multiset) | pending |
+| C3 | P2 region row identity (declared `unique_key` → proven grain key → `WholeRow` multiset) | done (2026-07-18) |
 | C4 | T1 change-suppressed column-scoped MERGE (+ statement-parity leg; suppressed-vs-unconditional bit-equality at fixed `S`) | pending |
 | C5 | T1 on the keyed fold; T2 staged-candidate conditional DELETE+INSERT (staged temp relation in the statement group) | pending |
 | C6 | Slice-bounded compare on composed models (compose C4/C5 with A2) | pending |
