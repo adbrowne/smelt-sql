@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784366719568,
+  "lastUpdate": 1784367448225,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -563,6 +563,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 14.371056,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "036775a57e668b65bc7f6b76ae74294b058c3162",
+          "message": "fix(test): register decimal_add_overflow known-unknown, unwrap Array in find_divergence\n\n10k-case soak run found two more genuine gaps:\n\n- `up_0 + up_0` (Decimal(38,10), already at max precision from a prior SUM)\n  overflows past precision 38 and smelt correctly returns Unknown\n  (fail-loud, spec §15) — but only *´ and / had known_unknowns.rs entries,\n  not +. Register decimal_add_overflow, mirroring the existing pattern.\n- ARRAY_AGG(dec_col * dec_col) diverges against DuckDB the same way bare\n  decimal multiplication does (decimal_arithmetic_model), but the\n  divergence matcher didn't unwrap the Array wrapping ARRAY_AGG adds.\n  find_divergence now unwraps one level of Array before matching, so\n  existing element-level entries apply under aggregation without needing\n  duplicate Array-of-X entries.",
+          "timestamp": "2026-07-18T19:32:43+10:00",
+          "tree_id": "c85be82069bd9e54bdd4e00f2b3ce07fef44a425",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/036775a57e668b65bc7f6b76ae74294b058c3162"
+        },
+        "date": 1784367445982,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 60.00886,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 57.411898,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.241405,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.661548,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.385531,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 925.366556,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.5045520000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.254401,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.158782,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.642213,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 761.7589879999999,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.17115,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 34.15525,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.944558,
             "unit": "ms"
           }
         ]
