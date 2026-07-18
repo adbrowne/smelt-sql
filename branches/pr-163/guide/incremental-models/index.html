@@ -1888,6 +1888,78 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#conditional-writes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conditional writes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Conditional writes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-gets-suppressed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What gets suppressed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-it-costs-and-what-it-saves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs and what it saves
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-its-refused" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When it's refused
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#steering-prefer-technique" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Steering: prefer / technique
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#known-limitation-smelt-explain-doesnt-show-which-cells-suppress" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known limitation: smelt explain doesn't show which cells suppress
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#schema-evolution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3479,6 +3551,78 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#conditional-writes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Conditional writes
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Conditional writes">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#what-gets-suppressed" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What gets suppressed
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#what-it-costs-and-what-it-saves" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What it costs and what it saves
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#when-its-refused" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        When it's refused
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#steering-prefer-technique" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Steering: prefer / technique
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#known-limitation-smelt-explain-doesnt-show-which-cells-suppress" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Known limitation: smelt explain doesn't show which cells suppress
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#schema-evolution" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -4164,6 +4308,28 @@
 <p>When none of the three applies, the <code>timeseries:</code> block is refused (<code>KeyedForbidsTimeseries</code>), naming the missing route.</p>
 <p>Establishing locality is worth it: a bare keyed table is a dead end for the rest of the pipeline — nothing downstream can window over it. A composed table is a clocked source in its own right, so a keyed stage can sit inside a propagation chain instead of terminating it, and a key-level change projects downstream instead of an unbounded lookup scan — <strong>exactly</strong>, to the keys' own partitions, under routes 1–2; under route 3 (recurrence-bounded) the projection widens backward by the recurrence bound plus any derived margins, per widen-never-narrow. <code>smelt explain</code> reports the established route, the pruned merge target slice, and the derived <strong>settle bound</strong> — how long a written slice can still change.</p>
 <p>The <a href="../../examples/web-analytics/deduplication/">deduplication tutorial page</a> walks this shape end to end: a redelivery-prone event feed deduplicated by a keyed <code>MIN</code> fold instead of a <code>QUALIFY</code> window, with the recurrence bound doing the work a <code>safety_overrides</code> comment would otherwise have to.</p>
+<h2 id="conditional-writes">Conditional writes<a class="headerlink" href="#conditional-writes" title="Permanent link">&para;</a></h2>
+<p>Some maintenance cells write nothing when a re-run's inputs haven't actually changed. This is an automatic, fail-closed refinement of whichever technique the plan already derived — a column-scoped <code>MERGE</code>, a keyed fold <code>MERGE</code> (<code>grain: key</code>), or their <code>MERGE</code>-less staged-candidate equivalents — not a separate strategy you opt into.</p>
+<h3 id="what-gets-suppressed">What gets suppressed<a class="headerlink" href="#what-gets-suppressed" title="Permanent link">&para;</a></h3>
+<ul>
+<li>A column-scoped <code>MERGE</code>'s matched arm normally does <code>WHEN MATCHED THEN UPDATE SET *</code> — every matched row is rewritten, even one whose incoming value is identical to what's already stored. The suppressed form guards the matched arm with an <code>IS DISTINCT FROM</code> predicate over the group's own columns instead: <code>WHEN MATCHED AND (target.c1 IS DISTINCT FROM source.c1 OR …) THEN UPDATE SET *</code>. A re-run whose delta reproduces the stored state writes zero rows.</li>
+<li>A <a href="#the-composed-shape-key-time">keyed fold</a> (<code>grain: key</code>) compares the stored value against what the fold's own combine expression <em>would</em> write, rather than a plain source column, since a keyed fold's matched arm never copies a delta column verbatim. This is how a redelivery-prone feed deduplicated with a <code>MIN</code>/<code>MAX</code> fold settles to zero writes once a key has seen every duplicate: the combiner is idempotent, so re-merging an already-seen duplicate reproduces the stored value exactly.</li>
+<li>On a backend without <code>MERGE</code>, the same no-op elimination is realized as a staged-candidate conditional <code>DELETE</code>+<code>INSERT</code> inside one transaction: candidates are staged, only the rows whose effect isn't the identity are deleted and re-inserted, and the staging relation is dropped.</li>
+</ul>
+<p>On a <a href="#the-composed-shape-key-time">composed (key + time)</a> output, the suppression compare's target read carries the same locality slice the merge itself uses, so compare cost stays proportional to the slice rather than the whole key space, even at high key cardinality.</p>
+<h3 id="what-it-costs-and-what-it-saves">What it costs and what it saves<a class="headerlink" href="#what-it-costs-and-what-it-saves" title="Permanent link">&para;</a></h3>
+<p>The saving is write volume: a retried batch, a redelivery storm, or any other idempotent replay writes nothing instead of rewriting every matched row. The cost is one extra <code>IS DISTINCT FROM</code> comparison per compared column, evaluated during the merge itself rather than as a separate pass.</p>
+<h3 id="when-its-refused">When it's refused<a class="headerlink" href="#when-its-refused" title="Permanent link">&para;</a></h3>
+<p>Write suppression is fail-closed over two independent proofs; either one refusing falls back to the plain, always-write matched arm:</p>
+<ul>
+<li><strong>No proven row identity.</strong> A cell whose row identity is <code>WholeRow</code> — no declared <code>unique_key</code>, no proven grain key — has no way to address an individual row, so there's no safe way to compare "this row" across runs. <code>smelt explain &lt;model&gt;</code> prints this as the cell's <code>region key:</code> line (<code>WholeRow</code> vs. a named key).</li>
+<li><strong>An incomparable column.</strong> A column whose value isn't a pure function of the processed inputs — a <code>columns.&lt;c&gt;.contract: plausible</code> payload, or a run-pinned clock like <code>NOW()</code>/<code>CURRENT_*</code> — can legitimately differ from last run's value even though nothing about the inputs changed, so diffing it would either manufacture a false change or mask a real one. One incomparable column in the group refuses suppression for the <em>whole</em> cell, not just that column — a partial guard would silently drop that column's real changes.</li>
+</ul>
+<p>Refusal never errors — the cell keeps working, falling back to the unconditional matched arm.</p>
+<h3 id="steering-prefer-technique">Steering: <code>prefer</code> / <code>technique</code><a class="headerlink" href="#steering-prefer-technique" title="Permanent link">&para;</a></h3>
+<p><code>maintenance.defaults.prefer</code>, <code>maintenance.cells[].prefer</code>, and <code>maintenance.cells[].technique</code> (see <a href="../../reference/smelt-yml/#maintenance-configuration">Maintenance Configuration</a>) choose among the techniques a cell's plan admits — fold vs. region recompute vs. rederiving columns. They don't reach inside a chosen technique to force or forbid suppression: whether a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's matched arm is suppressed is decided automatically from the two proofs above, the same way for every occurrence of that technique.</p>
+<h3 id="known-limitation-smelt-explain-doesnt-show-which-cells-suppress">Known limitation: <code>smelt explain</code> doesn't show which cells suppress<a class="headerlink" href="#known-limitation-smelt-explain-doesnt-show-which-cells-suppress" title="Permanent link">&para;</a></h3>
+<p><code>smelt explain &lt;model&gt; --show-sql</code> renders every <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's unconditional matched arm today, even for a cell that resolves to suppressed at run time — the reporting path hasn't been wired to the same check the live run already applies. The <code>region key:</code> line is still a reliable signal for the row-identity half of the rule (<code>WholeRow</code> means that cell never suppresses); there is no equivalent surface yet for the column-comparability half.</p>
 <h2 id="schema-evolution">Schema evolution<a class="headerlink" href="#schema-evolution" title="Permanent link">&para;</a></h2>
 <p>When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See <a href="../schema-evolution/">Schema Evolution</a> for full details on:</p>
 <ul>

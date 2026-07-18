@@ -3474,6 +3474,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 </tbody>
 </table>
 <p>A project-level <code>maintenance.scan_bounds</code> block in <code>smelt.yml</code>'s top level sets the baseline; a per-model <code>maintenance:</code> block in the SQL frontmatter refines it (narrower wins).</p>
+<p><code>maintenance.defaults.prefer</code>, <code>maintenance.cells[].prefer</code>, and <code>maintenance.cells[].technique</code> choose among the <em>techniques</em> a cell's derived plan admits (fold vs. region recompute vs. rederiving columns) — they never reach inside whichever technique is chosen to force or forbid a <a href="../../guide/incremental-models/#conditional-writes">conditional (write-suppressed) matched arm</a>. Whether a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's write is suppressed for unchanged rows is decided automatically, the same way for every occurrence of that technique, and is not a <code>prefer</code>/<code>technique</code> setting.</p>
 <hr />
 <h2 id="validation-rules">Validation Rules<a class="headerlink" href="#validation-rules" title="Permanent link">&para;</a></h2>
 <p>Smelt validates model configurations and reports errors or warnings:</p>

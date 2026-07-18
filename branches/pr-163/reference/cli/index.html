@@ -4614,6 +4614,13 @@ directly off an ephemeral ref (e.g. <code>SUM(rate)</code> where <code>rate</cod
 ephemeral model) casts to the <code>BIGINT</code> default rather than its real type — this is a compile-order
 limitation in the shared compiler that a real run hits identically, so <code>--show-sql</code> still matches
 what a run executes, casting quirk included. See <code>docs/specs/cli.md</code> Known Divergences.</p>
+<p>A second, currently wider divergence: for a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell whose write is
+<a href="../../guide/incremental-models/#conditional-writes">conditionally suppressed</a> at run time, <code>--show-sql</code>
+always renders the unconditional matched arm (<code>WHEN MATCHED THEN UPDATE SET *</code>/the plain fold), never
+the <code>IS DISTINCT FROM</code>-guarded suppressed form the live run actually executes — the report hasn't been
+wired to the same suppression check yet. The cell's <code>region key:</code> row (<code>WholeRow</code> vs. a named key) is
+still a reliable signal for one half of the admission rule: a <code>WholeRow</code> region key means that cell
+never suppresses, regardless of what <code>--show-sql</code> prints.</p>
 <p><strong>Examples:</strong></p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="c1"># Show the explain output</span>
 <a id="__codelineno-41-2" name="__codelineno-41-2" href="#__codelineno-41-2"></a>smelt<span class="w"> </span>explain
