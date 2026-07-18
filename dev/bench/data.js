@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784368492966,
+  "lastUpdate": 1784368495003,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -956,6 +956,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.721185139034166,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "1b271266e08add7c2c003cd230012c75adb8d931",
+          "message": "fix(types): promote across mixed numeric args in COALESCE/IFNULL/GREATEST/LEAST/MOD\n\nAdd a dedicated, deterministic property test (prop_numeric_function_types.rs)\nthat cross-products every numeric function this file knows about against\nevery numeric DataType variant (and, for two-arg functions, every pairing) —\ntargeting exactly the class of bug the general fuzzer only finds after\nthousands of random cases. Factor the shared \"run smelt inference, compare\nagainst a live oracle\" logic out of type_property_tests.rs into\nprop_helpers/oracle_check.rs so both test binaries share it.\n\nThe new test immediately found a real bug: COALESCE, IFNULL, GREATEST,\nLEAST, and MOD returned the first argument's type verbatim instead of\npromoting across mixed numeric argument types (e.g. IFNULL(SMALLINT,\nINTEGER) inferred SmallInt when DuckDB itself returns Integer — not a\ncross-engine divergence, a real inference bug). Fixed by folding every\nargument's type through the existing promote_types (the same widening\nCASE/UNION already use) instead of short-circuiting on the first concrete\ntype. Added regression unit tests in type_inference/tests.rs (red-green).\n\nFixing the promotion surfaced one genuine new Spark-specific divergence:\nFLOAT combined with another numeric type keeps FLOAT in smelt/DuckDB but\nwidens to DOUBLE in Spark for these functions — registered as\nfloat_promotes_to_double_spark.",
+          "timestamp": "2026-07-18T19:50:06+10:00",
+          "tree_id": "a0bf4f0ac968dfe1c39f10529eb44d7bd3c40ec5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/1b271266e08add7c2c003cd230012c75adb8d931"
+        },
+        "date": 1784368494440,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.697581331269028,
             "unit": "MB/s"
           }
         ]
