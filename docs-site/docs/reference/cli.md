@@ -954,6 +954,14 @@ ephemeral model) casts to the `BIGINT` default rather than its real type — thi
 limitation in the shared compiler that a real run hits identically, so `--show-sql` still matches
 what a run executes, casting quirk included. See `docs/specs/cli.md` Known Divergences.
 
+A second, currently wider divergence: for a `ColumnScopedMerge`/`KeyedFold` cell whose write is
+[conditionally suppressed](../guide/incremental-models.md#conditional-writes) at run time, `--show-sql`
+always renders the unconditional matched arm (`WHEN MATCHED THEN UPDATE SET *`/the plain fold), never
+the `IS DISTINCT FROM`-guarded suppressed form the live run actually executes — the report hasn't been
+wired to the same suppression check yet. The cell's `region key:` row (`WholeRow` vs. a named key) is
+still a reliable signal for one half of the admission rule: a `WholeRow` region key means that cell
+never suppresses, regardless of what `--show-sql` prints.
+
 **Examples:**
 
 ```bash

@@ -788,6 +788,39 @@ Establishing locality is worth it: a bare keyed table is a dead end for the rest
 
 The [deduplication tutorial page](../examples/web-analytics/deduplication.md) walks this shape end to end: a redelivery-prone event feed deduplicated by a keyed `MIN` fold instead of a `QUALIFY` window, with the recurrence bound doing the work a `safety_overrides` comment would otherwise have to.
 
+## Conditional writes
+
+Some maintenance cells write nothing when a re-run's inputs haven't actually changed. This is an automatic, fail-closed refinement of whichever technique the plan already derived — a column-scoped `MERGE`, a keyed fold `MERGE` (`grain: key`), or their `MERGE`-less staged-candidate equivalents — not a separate strategy you opt into.
+
+### What gets suppressed
+
+- A column-scoped `MERGE`'s matched arm normally does `WHEN MATCHED THEN UPDATE SET *` — every matched row is rewritten, even one whose incoming value is identical to what's already stored. The suppressed form guards the matched arm with an `IS DISTINCT FROM` predicate over the group's own columns instead: `WHEN MATCHED AND (target.c1 IS DISTINCT FROM source.c1 OR …) THEN UPDATE SET *`. A re-run whose delta reproduces the stored state writes zero rows.
+- A [keyed fold](#the-composed-shape-key-time) (`grain: key`) compares the stored value against what the fold's own combine expression *would* write, rather than a plain source column, since a keyed fold's matched arm never copies a delta column verbatim. This is how a redelivery-prone feed deduplicated with a `MIN`/`MAX` fold settles to zero writes once a key has seen every duplicate: the combiner is idempotent, so re-merging an already-seen duplicate reproduces the stored value exactly.
+- On a backend without `MERGE`, the same no-op elimination is realized as a staged-candidate conditional `DELETE`+`INSERT` inside one transaction: candidates are staged, only the rows whose effect isn't the identity are deleted and re-inserted, and the staging relation is dropped.
+
+On a [composed (key + time)](#the-composed-shape-key-time) output, the suppression compare's target read carries the same locality slice the merge itself uses, so compare cost stays proportional to the slice rather than the whole key space, even at high key cardinality.
+
+### What it costs and what it saves
+
+The saving is write volume: a retried batch, a redelivery storm, or any other idempotent replay writes nothing instead of rewriting every matched row. The cost is one extra `IS DISTINCT FROM` comparison per compared column, evaluated during the merge itself rather than as a separate pass.
+
+### When it's refused
+
+Write suppression is fail-closed over two independent proofs; either one refusing falls back to the plain, always-write matched arm:
+
+- **No proven row identity.** A cell whose row identity is `WholeRow` — no declared `unique_key`, no proven grain key — has no way to address an individual row, so there's no safe way to compare "this row" across runs. `smelt explain <model>` prints this as the cell's `region key:` line (`WholeRow` vs. a named key).
+- **An incomparable column.** A column whose value isn't a pure function of the processed inputs — a `columns.<c>.contract: plausible` payload, or a run-pinned clock like `NOW()`/`CURRENT_*` — can legitimately differ from last run's value even though nothing about the inputs changed, so diffing it would either manufacture a false change or mask a real one. One incomparable column in the group refuses suppression for the *whole* cell, not just that column — a partial guard would silently drop that column's real changes.
+
+Refusal never errors — the cell keeps working, falling back to the unconditional matched arm.
+
+### Steering: `prefer` / `technique`
+
+`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` (see [Maintenance Configuration](../reference/smelt-yml.md#maintenance-configuration)) choose among the techniques a cell's plan admits — fold vs. region recompute vs. rederiving columns. They don't reach inside a chosen technique to force or forbid suppression: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed is decided automatically from the two proofs above, the same way for every occurrence of that technique.
+
+### Known limitation: `smelt explain` doesn't show which cells suppress
+
+`smelt explain <model> --show-sql` renders every `ColumnScopedMerge`/`KeyedFold` cell's unconditional matched arm today, even for a cell that resolves to suppressed at run time — the reporting path hasn't been wired to the same check the live run already applies. The `region key:` line is still a reliable signal for the row-identity half of the rule (`WholeRow` means that cell never suppresses); there is no equivalent surface yet for the column-comparability half.
+
 ## Schema evolution
 
 When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See [Schema Evolution](schema-evolution.md) for full details on:

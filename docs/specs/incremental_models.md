@@ -1963,12 +1963,17 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   once per run, from the same P2 row-identity and P3 change-comparability facts the column-scoped
   path uses, and dispatches the keyed-fold `MERGE` to its suppressed or unconditional matched arm
   accordingly — composing with a locality-admitted model's target-scan slice unchanged (both
-  predicates land on the same `MERGE`, never one displacing the other). Still unbuilt: the region
+  predicates land on the same `MERGE`, never one displacing the other). `smelt explain <model>
+  --show-sql` does not yet reflect any of this: it always renders a `ColumnScopedMerge`/`KeyedFold`
+  cell's unconditional matched arm, never the suppressed form the live run actually executes for a
+  cell that resolves `Suppressed` — the reporting path hasn't been wired to the same
+  `resolve_write_suppression` check the executor already runs. Still unbuilt: the region
   `DELETE`+`INSERT` family has no conditional
   variant yet (every region overwrite still rewrites unchanged rows), the whole-row (keyless,
   `EXCEPT ALL`-both-ways) staged-candidate realisation does not exist, a `write:` pin over the
-  keyed `MERGE`/staged-candidate choice does not exist, and no observed output delta
-  is recorded anywhere. Mechanisms and sequencing:
+  keyed `MERGE`/staged-candidate choice does not exist, no observed output delta is recorded
+  anywhere, and no technique restricts its own compute to an observed delta rather than a full
+  column-group re-evaluation. Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly

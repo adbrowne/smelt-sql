@@ -268,6 +268,8 @@ The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, 
 
 A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
 
+`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns) — they never reach inside whichever technique is chosen to force or forbid a [conditional (write-suppressed) matched arm](../guide/incremental-models.md#conditional-writes). Whether a `ColumnScopedMerge`/`KeyedFold` cell's write is suppressed for unchanged rows is decided automatically, the same way for every occurrence of that technique, and is not a `prefer`/`technique` setting.
+
 ---
 
 ## Validation Rules

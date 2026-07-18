@@ -93,7 +93,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | C4 | T1 change-suppressed column-scoped MERGE (+ statement-parity leg; suppressed-vs-unconditional bit-equality at fixed `S`) | done (2026-07-18) |
 | C5 | T1 on the keyed fold; T2 staged-candidate conditional DELETE+INSERT (staged temp relation in the statement group) | done (2026-07-18) |
 | C6 | Slice-bounded compare on composed models (compose C4/C5 with A2) | done (2026-07-18) |
-| C7 | Docs: conditional writes (explain output, cost notes, `prefer`/`technique` steering) | pending |
+| C7 | Docs: conditional writes (explain output, cost notes, `prefer`/`technique` steering) | done (2026-07-18) |
 | R1 | Open write-pattern registry + `maintenance.cells[].write` pin + the two write-addressing refusal diagnostics | pending |
 | D1 | Spec diff: `sources.md` landed-delta refinement; storage home + transactionality of recorded deltas | pending |
 | D2 | T5 observed output delta recording (comparable columns only; byproduct of C4/C5 writes) | pending |
