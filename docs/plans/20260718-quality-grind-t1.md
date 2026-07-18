@@ -78,7 +78,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 3     | done    | fix(parser): double-quoted table/schema names in FROM | 2026-07-18 |
 | 4     | done    | fix(parser): RANGE as function name/identifier outside frame specs | 2026-07-18 |
 | 5     | blocked |        |      |
-| 6     | pending |        |      |
+| 6     | done    | fix(parser): trailing ORDER BY/LIMIT after parenthesized set-op operand | 2026-07-19 |
 | 7     | pending |        |      |
 | 8     | pending |        |      |
 | 9     | pending |        |      |

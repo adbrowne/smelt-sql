@@ -133,44 +133,98 @@ impl<'a> super::Parser<'a> {
 
         // Set operations: UNION / INTERSECT / EXCEPT
         self.skip_trivia();
-        if self.at_any(&[UNION_KW, INTERSECT_KW, EXCEPT_KW]) {
-            self.advance(); // consume UNION/INTERSECT/EXCEPT
-            self.skip_trivia();
-            // Optional ALL
-            if self.at(ALL_KW) {
-                self.advance();
-            }
-            self.skip_trivia();
-            // Optional BY NAME (DuckDB): unify operands by column name
-            // rather than position. `BY` is the reserved `BY_KW` (shared
-            // with `GROUP BY`/`ORDER BY`); `NAME` is a contextual keyword
-            // (lexed as plain IDENT), matched only in this exact sequence
-            // so it stays an ordinary identifier everywhere else
-            // (`SELECT name FROM t`).
-            if self.at(BY_KW)
-                && self
-                    .peek_nth_non_trivia_text(1)
-                    .is_some_and(|t| t.eq_ignore_ascii_case("NAME"))
-            {
-                self.advance(); // BY
-                self.skip_trivia();
-                self.advance(); // NAME
-                self.skip_trivia();
-            }
-            // Parse next operand: a plain SELECT/WITH statement, or a
-            // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
-            // arbitrarily nested. The parenthesized form recurses through
-            // `parse_query_expr`, so it carries its own set-op tail and
-            // ORDER BY/LIMIT inside the parens.
-            if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(LPAREN) {
-                self.parse_query_expr();
-            } else {
-                self.error("Expected SELECT after set operation".to_string());
-            }
-        }
+        self.parse_set_op_tail();
 
         self.depth -= 1;
         self.finish_node();
+    }
+
+    /// Parses a trailing `UNION`/`INTERSECT`/`EXCEPT` set-op tail (operator,
+    /// optional `ALL`/`BY NAME`, right-hand operand) directly onto whatever
+    /// node is currently open, plus — when the right-hand operand is
+    /// parenthesized — any trailing `ORDER BY`/`LIMIT`/`OFFSET` that follows
+    /// it. Does nothing if the current token isn't a set-op keyword.
+    ///
+    /// Shared by `parse_select_stmt` (the common `A UNION B` case, where the
+    /// "currently open node" is the `SELECT_STMT` itself) and the
+    /// expression-level parenthesized-query primary in `expr.rs` (the
+    /// `((A) UNION B)` case, where the first operand is itself parenthesized
+    /// and the whole thing is a scalar-subquery expression).
+    pub(super) fn parse_set_op_tail(&mut self) {
+        if !self.at_any(&[UNION_KW, INTERSECT_KW, EXCEPT_KW]) {
+            return;
+        }
+        self.advance(); // consume UNION/INTERSECT/EXCEPT
+        self.skip_trivia();
+        // Optional ALL
+        if self.at(ALL_KW) {
+            self.advance();
+        }
+        self.skip_trivia();
+        // Optional BY NAME (DuckDB): unify operands by column name
+        // rather than position. `BY` is the reserved `BY_KW` (shared
+        // with `GROUP BY`/`ORDER BY`); `NAME` is a contextual keyword
+        // (lexed as plain IDENT), matched only in this exact sequence
+        // so it stays an ordinary identifier everywhere else
+        // (`SELECT name FROM t`).
+        if self.at(BY_KW)
+            && self
+                .peek_nth_non_trivia_text(1)
+                .is_some_and(|t| t.eq_ignore_ascii_case("NAME"))
+        {
+            self.advance(); // BY
+            self.skip_trivia();
+            self.advance(); // NAME
+            self.skip_trivia();
+        }
+        // Parse next operand: a plain SELECT/WITH statement, or a
+        // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
+        // arbitrarily nested. The parenthesized form recurses through
+        // `parse_query_expr`, so it carries its own set-op tail and
+        // ORDER BY/LIMIT inside the parens.
+        let operand_was_parenthesized = self.at(LPAREN);
+        if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(LPAREN) {
+            self.parse_query_expr();
+        } else {
+            self.error("Expected SELECT after set operation".to_string());
+        }
+
+        // DuckDB semantics: a trailing ORDER BY/LIMIT/OFFSET *after* a
+        // parenthesized set-op operand binds to the whole set operation,
+        // not to the parenthesized operand — `A UNION (B) ORDER BY x`
+        // orders the union's result, it does not reach inside `(B)`'s
+        // own (already-closed) parens. When the operand is unparenthesized
+        // (`A UNION B ORDER BY x`), the recursive `parse_select_stmt` call
+        // above already consumed the trailing ORDER BY/LIMIT as part of
+        // operand B's own grammar, which is equivalent since B is the
+        // last operand either way — so this block only needs to run for
+        // the parenthesized case, where the parens already closed the
+        // operand off from anything that follows.
+        if operand_was_parenthesized {
+            self.skip_trivia();
+            if self.at(ORDER_KW) {
+                self.parse_order_by_clause();
+            }
+
+            self.skip_trivia();
+            let has_limit = self.at(LIMIT_KW);
+            if has_limit {
+                self.parse_limit_clause();
+            }
+
+            self.skip_trivia();
+            if self.at(OFFSET_KW) && !has_limit {
+                self.start_node(LIMIT_CLAUSE);
+                self.advance(); // OFFSET
+                self.skip_trivia();
+                if self.at(NUMBER) {
+                    self.advance();
+                } else {
+                    self.error("Expected number after OFFSET".to_string());
+                }
+                self.finish_node();
+            }
+        }
     }
 
     /// Parses a full query expression: either a plain `SELECT`/`WITH`

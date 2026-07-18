@@ -988,6 +988,61 @@ fn test_union_parenthesized_operand_in_from_subquery() {
 }
 
 #[test]
+fn union_paren_operand_trailing_order_by() {
+    // `A UNION (B) ORDER BY ...` — the trailing ORDER BY after a
+    // parenthesized set-op operand binds to the whole set operation
+    // (DuckDB semantics), not to the parenthesized operand. It must show
+    // up as the outer SELECT_STMT's own order_by_clause(), not the inner
+    // one's.
+    let input = "SELECT a FROM t UNION (SELECT a FROM t) ORDER BY a";
+    let (_, select) = parse_select(input);
+
+    assert!(select.has_union(), "should have UNION");
+    assert!(
+        select.order_by_clause().is_some(),
+        "trailing ORDER BY should attach to the outer set-op statement"
+    );
+    let right = select
+        .union_select()
+        .expect("should unwrap the parenthesized right operand");
+    assert!(
+        right.order_by_clause().is_none(),
+        "the parenthesized operand itself must not swallow the trailing ORDER BY"
+    );
+}
+
+#[test]
+fn union_paren_operand_trailing_limit() {
+    // Same as above but for a trailing LIMIT.
+    let input = "SELECT a FROM t UNION (SELECT a FROM t) LIMIT 5";
+    let (_, select) = parse_select(input);
+
+    assert!(select.has_union(), "should have UNION");
+    assert!(
+        select.limit_clause().is_some(),
+        "trailing LIMIT should attach to the outer set-op statement"
+    );
+    let right = select
+        .union_select()
+        .expect("should unwrap the parenthesized right operand");
+    assert!(
+        right.limit_clause().is_none(),
+        "the parenthesized operand itself must not swallow the trailing LIMIT"
+    );
+}
+
+#[test]
+fn union_scalar_subquery_paren_first_operand() {
+    // `((SELECT …) UNION SELECT …)` used as a scalar-subquery expression —
+    // the parenthesized query's *own* first operand is itself
+    // parenthesized. Corpus regression (external_ledger.toml
+    // `set_operation_nesting`, postgres.sql:618).
+    let input = "SELECT ((SELECT 2) UNION SELECT 2)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
 fn test_union_chain_still_parses_without_parens() {
     // Regression guard: a plain (unparenthesized) UNION ALL chain with a
     // trailing LIMIT must still parse exactly as before.

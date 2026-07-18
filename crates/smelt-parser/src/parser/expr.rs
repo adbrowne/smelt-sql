@@ -645,8 +645,16 @@ impl<'a> super::Parser<'a> {
                 self.expect(RPAREN);
                 self.finish_node();
             } else if self.at(LPAREN) && self.at_parenthesized_query_start() {
+                // `((A) UNION B)` — the query inside these outer parens has
+                // a parenthesized *first* operand of its own set-op tail,
+                // e.g. `((SELECT 2) UNION SELECT 2)` used as a scalar
+                // subquery. `parse_query_expr` only consumes the leading
+                // `(A)`; the set-op tail (`UNION B`, plus any trailing
+                // ORDER BY/LIMIT after a parenthesized `B`) is parsed here.
                 self.start_node_at(checkpoint, SUBQUERY);
                 self.parse_query_expr();
+                self.skip_trivia();
+                self.parse_set_op_tail();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();

@@ -1147,10 +1147,6 @@ note = "LIKE ... ESCAPE 'char' custom escape-character clause is not parsed"
 category = "like_escape_clause"
 note = "LIKE ... ESCAPE 'char' custom escape-character clause is not parsed"
 
-["3419183ec6d2f76e"]
-category = "set_operation_nesting"
-note = "A parenthesized query used as a scalar-subquery expression whose *own* first (unparenthesized) operand is itself parenthesized — `((SELECT …) UNION SELECT …)` — is not parsed; the parenthesized right-hand operand of an explicit UNION/EXCEPT/INTERSECT (`A UNION (B)`) and nested `(((SELECT …)))` forms now parse"
-
 ["96df5cd72067098a"]
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
