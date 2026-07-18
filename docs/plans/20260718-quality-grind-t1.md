@@ -74,7 +74,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
 | 1     | done    | fix(parser): NOT-prefixed binary operators | 2026-07-18 |
-| 2     | pending |        |      |
+| 2     | done    | fix(lexer): accept == as equality operator alias | 2026-07-18 |
 | 3     | pending |        |      |
 | 4     | pending |        |      |
 | 5     | pending |        |      |

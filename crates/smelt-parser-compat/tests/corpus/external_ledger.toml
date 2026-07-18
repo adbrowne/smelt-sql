@@ -143,10 +143,6 @@ note = "sqllogictest ${...} template placeholder substituted at test-run time by
 category = "range_keyword_as_identifier_or_function"
 note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
-["f4f84f035bf107c7"]
-category = "double_equals_operator"
-note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
-
 ["fe081f2437428f8a"]
 category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
@@ -486,14 +482,6 @@ note = "A DuckDB typed-string-literal prefix outside the recognized keyword set 
 ["8150a207f52fa0e4"]
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
-
-["bedcd41917f4c6be"]
-category = "double_equals_operator"
-note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
-
-["55e2372801d9d8d6"]
-category = "double_equals_operator"
-note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
 
 ["adbd9123def3a1ae"]
 category = "postfix_dot_field_access_on_parenthesized_expr"

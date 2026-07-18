@@ -1535,6 +1535,14 @@ fn test_brace_struct_literal_comparison_is_boolean() {
 }
 
 #[test]
+fn test_double_equals_operator_is_boolean() {
+    // The `double_equals_operator` ledger class: DuckDB's `==` alias for `=`
+    // must infer identically to `=`, i.e. Boolean.
+    let types = infer_sql("SELECT 1 == 1");
+    assert_eq!(types[0].data_type, DataType::Boolean);
+}
+
+#[test]
 fn test_identifier_keyed_brace_literal_not_typed_as_struct_here() {
     // Guard: `{a: 1}` is parsed by the record-literal path (pre-existing
     // behavior, not a BRACE_STRUCT_LITERAL), so it is NOT expected to infer

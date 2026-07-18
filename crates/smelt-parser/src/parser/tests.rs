@@ -1392,6 +1392,35 @@ fn test_not_equal_operator_sql() {
 }
 
 #[test]
+fn double_equals_parses_as_eq() {
+    // DuckDB accepts `==` as an alias for `=`. It must lex/parse as the same
+    // EQ token/operator as `=` — `BinaryExpr::operator()` (the semantic,
+    // canonical operator text consumed by type inference and downstream
+    // analyses) reports "=" regardless of which spelling was used in source.
+    let input = "SELECT 1 == 1";
+    let parsed = parse(input);
+    assert_eq!(parsed.errors.len(), 0, "parse errors: {:?}", parsed.errors);
+    let file = File::cast(parsed.syntax()).expect("FILE node");
+    let binary = file
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("should have a BinaryExpr");
+    assert_eq!(binary.operator().as_deref(), Some("="));
+
+    // Round-trip: the printed SQL (whichever spelling is preserved) must
+    // still parse cleanly.
+    let printed = file.to_string();
+    let reparsed = parse(&printed);
+    assert_eq!(
+        reparsed.errors.len(),
+        0,
+        "round-trip failed: printed={printed:?}, errors={:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
 fn test_string_concat_simple() {
     // Basic string concatenation
     let input = "SELECT 'a' || 'b' FROM t";
