@@ -1178,7 +1178,11 @@ mod reachability {
         out
     }
 
-    const N: usize = 500;
+    // 1000 (bumped from 500 when the RowConstructor/BraceStructLiteral arms
+    // were added — with more ExprKind branches, the deterministic sampling
+    // stream shifts and low-weight kinds like the decimal CAST option need a
+    // larger sample to stay reliably reachable within N).
+    const N: usize = 1000;
 
     /// A binary operation between two columns whose names start with the given
     /// prefixes joined by one of `ops`, in either operand order.
@@ -1512,6 +1516,26 @@ mod reachability {
         assert!(
             corpus.iter().any(|sql| sql.contains("][1:2]")),
             "generators never produced an array slice over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_row_constructor() {
+        // `ROW(<lit1>, <lit2>)` (ExprKind::RowConstructor).
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|sql| sql.contains("ROW(")),
+            "generators never produced a ROW constructor over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_brace_struct_literal() {
+        // `{'a': <lit1>, 'b': <lit2>}` (ExprKind::BraceStructLiteral).
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|sql| sql.contains("{'a': ")),
+            "generators never produced a brace struct literal over {N} cases"
         );
     }
 }

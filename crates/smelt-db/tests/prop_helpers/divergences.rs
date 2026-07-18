@@ -52,6 +52,24 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Varchar { max_length: None }),
             status: DivergenceStatus::ByDesign,
         },
+        // Names the struct-field-naming blanket leniency in `type_comparison.rs`
+        // (`compare_struct_fields`). DuckDB's own `ROW(...)` constructor leaves
+        // fields anonymous (empty name); smelt names positional struct fields
+        // v1, v2, ... for ergonomic dot-access (`infer_row_constructor_type`).
+        // `compare_types` returns Compatible for this pattern and cites this
+        // entry; it never reaches `find_divergence` (struct fields are compared
+        // structurally, not via this registry's exact-type matching), but the
+        // entry exists so the leniency is named and greppable.
+        TypeDivergence {
+            id: "row_constructor_field_naming",
+            description: "ROW(...) — smelt names positional struct fields v1, v2, ...; \
+                DuckDB leaves them anonymous (empty name). Authorises the struct \
+                field-naming Compatible verdict in type_comparison.rs.",
+            smelt_type: DataType::Struct(vec![("v1".to_string(), DataType::Integer)]),
+            duckdb_type: Some(DataType::Struct(vec![(String::new(), DataType::Integer)])),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
         TypeDivergence {
             id: "sum_integer",
             description: "SUM(INTEGER/BIGINT) — smelt infers BigInt, DuckDB returns Decimal(38,0) (HUGEINT via Arrow)",

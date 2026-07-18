@@ -1306,7 +1306,11 @@ mod reachability {
         out
     }
 
-    const N: usize = 500;
+    // 1000 (bumped from 500 alongside `type_property_tests.rs`'s reachability
+    // module when the RowConstructor/BraceStructLiteral ExprKind arms were
+    // added — more branches shift the deterministic sampling stream, so
+    // low-weight kinds need a larger sample to stay reliably reachable).
+    const N: usize = 1000;
 
     fn has_binop(corpus: &[String], left_prefix: &str, ops: &[&str], right_prefix: &str) -> bool {
         corpus.iter().any(|sql| {

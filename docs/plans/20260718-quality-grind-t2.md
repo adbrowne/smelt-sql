@@ -61,7 +61,7 @@ since 2026-07-09.
 | 2     | done    | test(props): generate ordered-set aggregates (MEDIAN/MODE/PERCENTILE_*) and WITHIN GROUP | 2026-07-19 |
 | 3     | done    | test(props): generate two-column aggregates (CORR/COVAR/REGR_SLOPE) | 2026-07-19 |
 | 4     | done    | test(props): generate ARRAY literals, ARRAY_AGG, subscript and slice | 2026-07-19 |
-| 5     | pending |        |      |
+| 5     | done    | test(props): generate ROW/STRUCT constructors with field-exact comparison | 2026-07-19 |
 | 6     | pending |        |      |
 | 7     | pending |        |      |
 | 8     | pending |        |      |
@@ -350,7 +350,30 @@ if it documents the flag (timeless wording).
 
 ## Deferred during implementation
 
-(Append-only.)
+- **Phase 5**: the `STRUCT(1 AS a, 2 AS b)` / `STRUCT(1, 2, 3)` literal syntax
+  (smelt's own parser/inference support it, per existing unit tests in
+  `type_inference/tests.rs`) is not valid DuckDB SQL — verified against a real
+  DuckDB 1.4.4: `SELECT STRUCT(1 AS a, 2 AS b)` is a parser error there
+  (DuckDB's actual named-struct constructor is `struct_pack(a := 1, b := 2)`,
+  which smelt has no dedicated inference for). Generating it would break
+  oracle execution, so only `ROW(...)` and the `{'k': v}` brace/dict literal
+  — both DuckDB-native — were added to the generators. `struct_pack(...)`
+  named-arg inference is out of scope (new inference work, not generator
+  coverage).
+- **Phase 5**: `ROW(...)`'s field naming is a documented `ByDesign` divergence,
+  not a bug: DuckDB's own `ROW(...)` leaves fields anonymous (empty name);
+  smelt names them positionally (v1, v2, ...) for ergonomic dot-access. Added
+  as the `row_constructor_field_naming` divergence and a matching blanket
+  leniency in `type_comparison.rs`'s new `compare_struct_fields`, mirroring
+  the existing `text_varchar_compat` string-family rule.
+- Two pre-existing, unrelated issues found and fixed as prerequisites for a
+  green gate (not part of Phase 5's own scope): (1) `.claude/unknown-census.toml`
+  had 7 dispatch.rs line numbers off by exactly one (stale from a prior
+  commit's line shift) — corrected. (2) `per_partition_equivalence::events_enriched_dual_ids_replay_matches_rebuild`
+  (smelt-cli e2e) failed once under full-suite parallel load but passes
+  standalone on both the base commit and this phase's tree — pre-existing
+  flake, unrelated to this phase's diff (which touches only `smelt-db` test
+  helpers).
 
 ## Verification
 

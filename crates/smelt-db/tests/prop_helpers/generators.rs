@@ -188,6 +188,14 @@ pub enum ExprKind {
     ArraySubscript,
     /// Array slice, e.g. `arr[1:2]` → Array<T>.
     ArraySlice,
+    /// ROW constructor, e.g. `ROW(1, 'x')` → Struct with positional fields.
+    /// DuckDB's own `ROW(...)` yields anonymous ("") field names; smelt names
+    /// them positionally (v1, v2, ...) — a documented `ByDesign` divergence
+    /// (see `row_constructor_field_naming` in `divergences.rs`).
+    RowConstructor,
+    /// DuckDB struct/dict literal, e.g. `{'a': 1, 'b': 'x'}` → Struct with
+    /// the literal's own key names as field names (field-exact, no leniency).
+    BraceStructLiteral,
 }
 
 // ---- Function descriptors ----
@@ -1071,6 +1079,8 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::ArrayLiteral),
         1 => Just(ExprKind::ArraySubscript),
         1 => Just(ExprKind::ArraySlice),
+        1 => Just(ExprKind::RowConstructor),
+        1 => Just(ExprKind::BraceStructLiteral),
     ]
 }
 
@@ -1518,6 +1528,44 @@ pub fn generate_expr(
                 sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}][1:2]"),
                 alias,
                 expected_smelt_type: DataType::Array(Box::new(base.to_smelt_type())),
+            })
+        }
+
+        ExprKind::RowConstructor => {
+            // ROW(<lit1>, <lit2>) — two distinct base types so the fields are
+            // typed differently. DuckDB itself accepts ROW(...); the STRUCT(...)
+            // literal syntax smelt also parses does NOT parse in real DuckDB
+            // (verified against DuckDB 1.4.4: `STRUCT(1 AS a, 2 AS b)` is a
+            // parser error there — struct_pack's named-arg form is its actual
+            // equivalent), so only ROW(...) and the brace form below are safe
+            // to generate against the oracle.
+            let bases = BaseType::all();
+            let base1 = bases[func_idx % bases.len()];
+            let base2 = bases[(func_idx + 1) % bases.len()];
+            Some(TypedExpr {
+                sql: format!("ROW({}, {})", base1.cast_sql(), base2.cast_sql()),
+                alias,
+                expected_smelt_type: DataType::Struct(vec![
+                    ("v1".to_string(), base1.to_smelt_type()),
+                    ("v2".to_string(), base2.to_smelt_type()),
+                ]),
+            })
+        }
+
+        ExprKind::BraceStructLiteral => {
+            // {'a': <lit1>, 'b': <lit2>} — DuckDB's native struct/dict literal;
+            // smelt extracts the quoted key text verbatim as the field name, so
+            // (unlike ROW) this is field-exact against DuckDB with no leniency.
+            let bases = BaseType::all();
+            let base1 = bases[func_idx % bases.len()];
+            let base2 = bases[(func_idx + 1) % bases.len()];
+            Some(TypedExpr {
+                sql: format!("{{'a': {}, 'b': {}}}", base1.cast_sql(), base2.cast_sql()),
+                alias,
+                expected_smelt_type: DataType::Struct(vec![
+                    ("a".to_string(), base1.to_smelt_type()),
+                    ("b".to_string(), base2.to_smelt_type()),
+                ]),
             })
         }
     }

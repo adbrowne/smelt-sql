@@ -187,4 +187,52 @@ mod tests {
     fn null_mapping() {
         assert_eq!(arrow_to_smelt(&ArrowType::Null), DataType::Null);
     }
+
+    /// `STRUCT` → `Struct(fields)`, field-name- and type-exact — guards the
+    /// field-recursive `arrow_to_smelt` call in the Struct branch (used by the
+    /// property-test generators' ROW(...)/`{'k': v}` coverage).
+    #[test]
+    fn struct_mapping() {
+        let struct_type = ArrowType::Struct(
+            vec![
+                Field::new("a", ArrowType::Int32, true),
+                Field::new("b", ArrowType::Utf8, true),
+            ]
+            .into(),
+        );
+        assert_eq!(
+            arrow_to_smelt(&struct_type),
+            DataType::Struct(vec![
+                ("a".to_string(), DataType::Integer),
+                ("b".to_string(), DataType::Varchar { max_length: None }),
+            ])
+        );
+    }
+
+    /// `STRUCT` with an anonymous field name (DuckDB's `ROW(...)` result) maps
+    /// its empty Arrow field name straight through — the naming leniency lives
+    /// in `type_comparison.rs`, not here.
+    #[test]
+    fn struct_mapping_anonymous_field() {
+        let struct_type = ArrowType::Struct(vec![Field::new("", ArrowType::Int32, true)].into());
+        assert_eq!(
+            arrow_to_smelt(&struct_type),
+            DataType::Struct(vec![(String::new(), DataType::Integer)])
+        );
+    }
+
+    /// Nested `Struct<Struct<T>>` — element-type-aware recursion should reach
+    /// two levels deep (e.g. `{'a': {'b': 1}}`-shaped results).
+    #[test]
+    fn nested_struct_mapping() {
+        let inner = ArrowType::Struct(vec![Field::new("b", ArrowType::Int32, true)].into());
+        let outer = ArrowType::Struct(vec![Field::new("a", inner, true)].into());
+        assert_eq!(
+            arrow_to_smelt(&outer),
+            DataType::Struct(vec![(
+                "a".to_string(),
+                DataType::Struct(vec![("b".to_string(), DataType::Integer)])
+            )])
+        );
+    }
 }
