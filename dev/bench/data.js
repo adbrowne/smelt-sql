@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784366717181,
+  "lastUpdate": 1784366719568,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -710,6 +710,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.86405142828045,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "61b4673dc6323a6baaf8a08c9ca683ff9559b919",
+          "message": "fix(test): register median_decimal Spark type divergence\n\n10k-case local soak run caught MEDIAN(DECIMAL) diverging against Spark:\nsmelt/DuckDB preserve the input Decimal type, but Spark's MEDIAN is\nimplemented via percentile_cont and always returns DOUBLE.",
+          "timestamp": "2026-07-18T19:20:52+10:00",
+          "tree_id": "ecc81a026d48dfd3b944e2b28ff2eed2710a1c03",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/61b4673dc6323a6baaf8a08c9ca683ff9559b919"
+        },
+        "date": 1784366719158,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.98752047170368,
             "unit": "MB/s"
           }
         ]
