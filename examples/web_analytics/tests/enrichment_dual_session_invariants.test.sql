@@ -53,14 +53,14 @@ smelt.test test_enrichment_dual_session_invariants AS (
         session_utm_campaign_chained
     FROM smelt.silver.events_enriched
 )
-PASSING silver.events_parsed AS (
+PASSING silver.events_deduped AS (
     -- device 3: no boundary, no cap in play — both tables agree.
-    {event_id: 1, device_id: 3, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-01 12:00:00', event_date: '2026-04-01', event_name: 'view', platform: 'web', url: NULL, utm_campaign: 'spring_sale'},
-    {event_id: 2, device_id: 3, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-01 12:05:00', event_date: '2026-04-01', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL},
+    {event_id: 1, device_id: 3, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-01 12:00:00', event_date: '2026-04-01', first_seen_date: '2026-04-01', event_name: 'view', platform: 'web', url: NULL, utm_campaign: 'spring_sale'},
+    {event_id: 2, device_id: 3, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-01 12:05:00', event_date: '2026-04-01', first_seen_date: '2026-04-01', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL},
     -- device 8: the cap-divergence fixture (see header comment).
-    {event_id: 3, device_id: 8, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-10 23:55:00', event_date: '2026-04-10', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL},
-    {event_id: 4, device_id: 8, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-11 00:10:00', event_date: '2026-04-11', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL},
-    {event_id: 5, device_id: 8, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-11 00:35:00', event_date: '2026-04-11', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL}
+    {event_id: 3, device_id: 8, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-10 23:55:00', event_date: '2026-04-10', first_seen_date: '2026-04-10', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL},
+    {event_id: 4, device_id: 8, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-11 00:10:00', event_date: '2026-04-11', first_seen_date: '2026-04-11', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL},
+    {event_id: 5, device_id: 8, user_id: NULL, amplitude_id: NULL, event_ts: '2026-04-11 00:35:00', event_date: '2026-04-11', first_seen_date: '2026-04-11', event_name: 'view', platform: 'web', url: NULL, utm_campaign: NULL}
 )
 PASSING silver.sessions AS (
     -- device 3: single session, no cap fired.

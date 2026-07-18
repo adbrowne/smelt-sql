@@ -21,7 +21,7 @@ timeseries:
 -- identity and declares its lookback via `RANGE BETWEEN INTERVAL '2 days'
 -- PRECEDING` frames in its body — `max_lookback`, named in the comments here
 -- and in the function. The planner derives that bound from the expanded SQL
--- and widens the events_parsed read accordingly, so a session whose events
+-- and widens the events_deduped read accordingly, so a session whose events
 -- straddle midnight is reconstructed as one row instead of being split at
 -- the partition boundary.
 --
@@ -49,7 +49,7 @@ WITH sessionized AS (
         session_start_ts,
         CAST(session_start_ts AS DATE) AS session_start_date
     FROM smelt.functions.sessionize(
-        source => smelt.silver.events_parsed,
+        source => smelt.silver.events_deduped,
         partition_col => device_id,
         ts_col => event_ts,
         platform_col => platform

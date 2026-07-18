@@ -8,7 +8,7 @@ timeseries:
   granularity: day
 # The local gap/platform-boundary detection windows partition by device_id,
 # not session_start_date — the analyzer cannot statically prove they are
-# partition-aligned (same shape as `silver/events_parsed.sql`'s own
+# partition-aligned (same shape as `silver/events_deduped.sql`'s own
 # redelivery-dedup window). It is safe in practice: each window's own
 # `_local_root_ts` output feeds only the epoch-bucketing and self-read gate
 # below, both scoped to that same event's own row, never chunked across a
@@ -53,7 +53,7 @@ batched:
 -- same identity scheme as `silver.sessions`.
 WITH events AS (
     SELECT device_id, event_ts, event_date, platform, utm_campaign
-    FROM smelt.silver.events_parsed
+    FROM smelt.silver.events_deduped
 ),
 -- Local (in-batch) natural-boundary detection: identical gap/platform rule
 -- to `sessionize`'s own `_marked`/`_bounded`/candidate steps, but with no

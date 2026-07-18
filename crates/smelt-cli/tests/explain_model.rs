@@ -77,7 +77,7 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
 }
 
 /// `gold.eventstream_with_identity` in `examples/web_analytics` joins its
-/// clocked silver upstream `silver.events_parsed`. The maintenance-plan
+/// clocked silver upstream `silver.events_deduped`. The maintenance-plan
 /// report must show a creation cell for that model edge.
 #[test]
 fn eventstream_shows_creation_cell_for_silver_upstream() {
@@ -90,18 +90,18 @@ fn eventstream_shows_creation_cell_for_silver_upstream() {
         .expect("eventstream_with_identity has a maintenance plan");
 
     assert!(
-        report.contains("NewData { source: \"silver.events_parsed\" }"),
-        "expected a creation cell for the model upstream silver.events_parsed: {report}"
+        report.contains("NewData { source: \"silver.events_deduped\" }"),
+        "expected a creation cell for the model upstream silver.events_deduped: {report}"
     );
 }
 
 /// `silver.events_enriched` (`docs/plans/20260710-web-analytics-maintenance-demo.md`
 /// Phase 7) refs **two** maintained-model upstreams in the same body:
-/// `silver.events_parsed` (its own `event_date` clock, read 1:1) and
-/// `silver.sessions` (clocked by `session_start_date`, joined across the
-/// session boundary via the 1-day session-cap Form B filter). The
-/// maintenance-plan report must show a creation cell — each with its own
-/// derived scan clamp — for BOTH upstreams, demonstrating that the
+/// `silver.events_deduped` (the composed keyed+timeseries dedupe stage,
+/// read 1:1) and `silver.sessions` (clocked by `session_start_date`, joined
+/// across the session boundary via the 1-day session-cap Form B filter).
+/// The maintenance-plan report must show a creation cell — each with its
+/// own derived scan clamp — for BOTH upstreams, demonstrating that the
 /// model-upstream edge derivation (`incremental_models.md` §"Upstream model
 /// edges") composes across more than one model-to-model ref.
 #[test]
@@ -115,8 +115,8 @@ fn events_enriched_shows_creation_cells_for_both_model_upstreams() {
         .expect("events_enriched has a maintenance plan");
 
     assert!(
-        report.contains("NewData { source: \"silver.events_parsed\" }"),
-        "expected a creation cell for the model upstream silver.events_parsed: {report}"
+        report.contains("NewData { source: \"silver.events_deduped\" }"),
+        "expected a creation cell for the model upstream silver.events_deduped: {report}"
     );
     assert!(
         report.contains("NewData { source: \"silver.sessions\" }"),
@@ -137,8 +137,10 @@ fn events_enriched_shows_creation_cells_for_both_model_upstreams() {
 /// "failed to inject the output clamp: No FROM clause found" refusal a
 /// compile-then-clamp ordering bug produced against a `TableExpr` FROM — with
 /// the DELETE range and output clamp at the skew-inverted window and the
-/// source-scan pushdown filter widened a further two days backward and one
-/// day forward beyond it (`[2026-04-07, 2026-04-12)`, `sessionize`'s own
+/// source-scan pushdown filter (against `silver.events_deduped`, the
+/// composed keyed+timeseries dedupe stage — `docs/specs/
+/// incremental_models.md` §"Key temporal locality") widened a further two
+/// days backward beyond it (`[2026-04-07, 2026-04-11)`, `sessionize`'s own
 /// `max_lookback` reach applied on top of the already-widened output
 /// window, per the two-layer widened-scan design). No backend is opened —
 /// `--show-sql` never connects to one.
@@ -223,10 +225,10 @@ fn sessions_show_sql_emits_statements() {
         );
         assert!(
             joined.contains(
-                "main.silver_events_parsed WHERE event_date >= '2026-04-07' \
-                 AND event_date < '2026-04-12'"
+                "main.silver_events_deduped WHERE first_seen_date >= '2026-04-07' \
+                 AND first_seen_date < '2026-04-11'"
             ),
-            "expected the widened source scan [2026-04-07, 2026-04-12) for cell {:?}: {joined}",
+            "expected the widened source scan [2026-04-07, 2026-04-11) for cell {:?}: {joined}",
             cell["trigger"]
         );
         saw_delete_insert_group = true;

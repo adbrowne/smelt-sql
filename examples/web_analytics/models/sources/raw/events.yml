@@ -1,5 +1,29 @@
 description: Raw web analytics events with a JSON-encoded payload.
 name: raw.events
+# At-least-once delivery, redelivery-prone (`datagen.yaml`'s `redelivery:`
+# block on this source — ~2% of events arrive twice, byte-identical except
+# `arrival_time`). `key_recurrence` declares the delivery-contract recurrence
+# bound `silver.events_deduped` (`docs/specs/incremental_models.md` §"Key
+# temporal locality (the time-partitioned output)") consumes for its route 3
+# (recurrence-bounded) admission: every pair of rows sharing `event_id` lies
+# within `window` of each other on the event-time axis. A redelivered
+# duplicate carries the identical `event_time`/`event_date` as the original
+# (only `arrival_time` differs), so the true recurrence is zero; the 3-day
+# window declared here is a generous, conservative bound — matching the same
+# 3-day lateness tail `silver.events_parsed`'s own acceptance filter absorbs
+# — never a tight fit. Any violation fails the run transactionally
+# (`KeyedRecurrenceBoundViolated`); it can never silently drop data.
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+mutation_profile:
+  kind: append_only
+  lateness: '3 days'
+  redelivery: at_least_once
+  key_recurrence:
+    key: [event_id]
+    window: '3 days'
 columns:
   - name: event_id
     type: BIGINT

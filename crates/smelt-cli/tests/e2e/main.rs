@@ -15,6 +15,7 @@ mod cross_midnight_rebase;
 mod cumulative_classifier_gate;
 mod diagnostic_gate;
 mod dry_run_visibility;
+mod events_deduped_redelivery_equivalence;
 mod example_builds;
 mod fn_body_wiring;
 mod fn_incremental_ts_e2e;

@@ -17,6 +17,6 @@ SELECT
     COUNT(*) AS event_count,
     MIN(event_ts) AS first_seen,
     MAX(event_ts) AS last_seen
-FROM smelt.silver.events_parsed
+FROM smelt.silver.events_deduped
 WHERE user_id IS NOT NULL
 GROUP BY device_id, user_id
