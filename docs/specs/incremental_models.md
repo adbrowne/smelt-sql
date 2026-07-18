@@ -1756,12 +1756,18 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`,
   `crates/smelt-logical/src/maintenance/propagate.rs::refuse_keyed_nodes`). Time-unrolled
   self-edges are still designed and unbuilt (`10-dependency-propagation.md` §6). The composed
-  node's own key→partition dirt projection is not yet exact: its inbound edge (from its own
-  driving source) and outbound edge (to its consumers) both carry a placeholder-exact
-  zero-derived margin rather than the real key-level footprint (`10-dependency-propagation.md`
-  §6, S12; designed but unbuilt — the exact projection under locality routes 1–2, and the
-  `r`-widened one under route 3, is `docs/plans/20260715-composed-axes-conditional-
-  maintenance.md`'s next graph-layer phase).
+  node's own key→partition dirt projection is now derived, route-aware, for the inbound edge
+  (from its own driving source): exact under locality routes 1–2 (a per-key-constant partition
+  value projects to its own partitions, no widening —
+  `smelt_logical::maintenance::propagate::locality_margin_days`), widened backward by `r` plus
+  the derived lateness/skew margins under route 3, reading the SAME admitted `KeyLocality`
+  verdict the plan and `smelt explain` already carry (`crates/smelt-runtime/src/propagation.rs::
+  build_forward_graph`). The composed node's outbound edge (to its consumers) was never a
+  placeholder — it derives through the ordinary per-cell `ScanClamp` path any downstream reader
+  contributes, unchanged by this narrowing. No key-level dirt representation exists anywhere;
+  intervals stay the graph's only currency (`10-dependency-propagation.md` §6, S12 — a
+  key-addressed dirt-set representation remains designed but unbuilt for any node this interval
+  projection cannot cover).
 - **Delta detection for `--since-upstream` is explicit, not automatic, for v1.** The runner (or an
   external poller) supplies each source's landed delta directly on the command line
   (`--source <address> --landed <start>..<end>`, §CLI); the graph layer reflects exactly the
@@ -1891,11 +1897,10 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   plan made where the spec text underdetermines them.
 
   The slice-pruned merge is the
-  prerequisite every bullet of §"What the composed shape uniquely enables" builds on, but none of
-  the four bullets themselves are realized yet: the graph-layer bullets (propagation
-  admissibility, key→partition dirt projection) need the Group B phases, and slice-bounded write
-  suppression needs the Group C phases composed with this one (tracked as its own phase, C6).
-  Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+  prerequisite every bullet of §"What the composed shape uniquely enables" builds on. The two
+  graph-layer bullets (propagation admissibility, key→partition dirt projection) are realized;
+  slice-bounded write suppression and the settle-bound × observed-delta composition remain
+  unbuilt, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **`grain: key_per_partition` derives no plan yet.** The value parses and passes declaration
   validation, but maintenance-plan derivation has no trajectory/backfill machinery to back the
   per-`(key, partition)` shape, so a `refresh: incremental` model declaring it refuses fail-loud

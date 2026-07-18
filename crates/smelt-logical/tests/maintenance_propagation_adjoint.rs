@@ -195,6 +195,66 @@ fn admitted_composed_node_is_not_refused() {
     required_inputs(&edges, "rollup", iv(1, 2)).expect("admitted composed node resolves");
 }
 
+// ---------------------------------------------------------------------------
+// Phase B2 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// the composed node's own inbound edge carries a REAL route-derived margin
+// (`smelt_logical::maintenance::propagate::locality_margin_days`) rather
+// than B1's placeholder-exact zero — routes 1–2 project exactly, route 3
+// widens backward by `r` + margins. `composed_projection_adjoint` pins the
+// adjointness law over both shapes; the containment law extends to a strict
+// superset (not equality) for the widened case.
+// ---------------------------------------------------------------------------
+
+/// The adjointness law `forward(backward(P)) ⊇ P` over a composed node,
+/// route-parameterised: an exact (route 1/2, zero-margin) inbound edge and a
+/// widened (route-3-style, nonzero-margin) inbound edge both satisfy the
+/// law, through the same `source -> composed -> rollup` chain shape.
+#[test]
+fn composed_projection_adjoint() {
+    for (before_days, after_days) in [(0, 0), (3, 1)] {
+        let into_composed = edge("source", "composed", before_days, after_days);
+        let out_of_composed = edge("composed", "rollup", 0, 0);
+        let edges = vec![into_composed, out_of_composed];
+        assert_forward_backward_containment(&edges, "rollup", iv(100, 103));
+    }
+}
+
+/// Route 1/2 (exact, zero margin): the composed node's forward-projected
+/// dirt from a replayed upstream delta equals the delta exactly — no
+/// widening at all through the composed edge.
+#[test]
+fn composed_projection_exact_route_has_no_widening() {
+    let edges = vec![edge("source", "composed", 0, 0)];
+    let delta = iv(10, 12);
+    let forward = propagate(&edges, &deltas(&[("source", delta)])).expect("propagate");
+    assert_eq!(
+        forward.dirty.get("composed"),
+        Some(&vec![delta]),
+        "a zero-margin composed edge must project the exact delta, not a widened one"
+    );
+}
+
+/// Route 3 (widened by `r` + margins): the composed node's forward-projected
+/// dirt from a replayed upstream delta strictly CONTAINS the exact delta —
+/// the plan's own wording, "route 3 asserts the r-widened containment, not
+/// equality."
+#[test]
+fn composed_projection_widened_route_is_a_strict_superset_of_the_exact_delta() {
+    let edges = vec![edge("source", "composed", 3, 1)];
+    let delta = iv(10, 12);
+    let forward = propagate(&edges, &deltas(&[("source", delta)])).expect("propagate");
+    let dirty = forward
+        .dirty
+        .get("composed")
+        .expect("composed must be dirty");
+    assert_eq!(dirty, &vec![iv(9, 15)]);
+    assert!(
+        dirty[0].start <= delta.start && delta.end <= dirty[0].end && dirty[0] != delta,
+        "route 3's widened projection must strictly contain (not equal) the exact delta: \
+         {dirty:?} vs {delta:?}"
+    );
+}
+
 /// A bare keyed node (no admitted time axis) still refuses fail-loud, in
 /// both directions, with a message naming the missing time axis and the
 /// composed-shape fix rather than the old bare "keyed-grain" wording.

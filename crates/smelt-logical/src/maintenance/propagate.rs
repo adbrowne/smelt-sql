@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::ScanClamp;
+use super::{locality, ScanClamp};
 use crate::analysis::source_bounds::Seconds;
 
 const DAY_SECONDS: u64 = 86_400;
@@ -175,6 +175,37 @@ impl PartitionGrain {
             // interval math runs (`refuse_keyed_nodes`).
             PartitionGrain::Keyed => *iv,
         }
+    }
+}
+
+/// Route-aware day-margin projection for a locality-admitted composed
+/// node's own inbound (driving-source → composed-output) edge
+/// (`incremental_models.md` §"What the composed shape uniquely enables"):
+/// routes 1–2 project **exactly** — [`locality::LocalitySlice::DeltaValues`]
+/// (route 2, key-determined) carries no margin at all, and
+/// [`locality::LocalitySlice::Window`] (route 1 key-embedded, or route 3
+/// with a statically-derived `r` already folded in) projects only the
+/// driving source's own derived read margin. Route 3 with a **declared**
+/// `r` ([`locality::LocalitySlice::RecurrenceBounded`]) widens backward by
+/// the declared/derived recurrence bound plus lateness/skew margins —
+/// already folded into that variant's own `margin_before` by
+/// `locality::establish_locality`'s route-3 derivation, so no separate `r`
+/// arithmetic is needed here. Never narrows — a route this function doesn't
+/// recognize is a compile error (exhaustive match), not a silent default.
+pub fn locality_margin_days(slice: &locality::LocalitySlice) -> (i64, i64) {
+    use locality::LocalitySlice;
+    match slice {
+        LocalitySlice::DeltaValues { .. } => (0, 0),
+        LocalitySlice::Window {
+            margin_before,
+            margin_after,
+            ..
+        }
+        | LocalitySlice::RecurrenceBounded {
+            margin_before,
+            margin_after,
+            ..
+        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
     }
 }
 
@@ -463,4 +494,133 @@ pub fn required_inputs(
         required,
         build_order,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase B2 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// `locality_margin_days`'s route-aware mapping, and the composed-node
+// forward/backward projection it feeds (`propagate`/`required_inputs`
+// already generically apply an edge's `(before_days, after_days)` margin —
+// this module's own composition math — so these tests exercise that SAME
+// machinery with margins actually derived from a [`locality::LocalitySlice`]
+// rather than a hand-typed clamp, pinning that routes 1–2 project exactly
+// and route 3 widens, and that widening never narrows the exact result.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod locality_margin_tests {
+    use super::*;
+
+    fn edge(before_days: i64, after_days: i64) -> Edge {
+        Edge {
+            upstream: "source".to_string(),
+            downstream: "composed".to_string(),
+            before_days,
+            after_days,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+        }
+    }
+
+    #[test]
+    fn delta_values_route_2_projects_zero_margin() {
+        let slice = locality::LocalitySlice::DeltaValues {
+            partition_column: "d".to_string(),
+        };
+        assert_eq!(locality_margin_days(&slice), (0, 0));
+    }
+
+    #[test]
+    fn window_route_1_or_static_route_3_projects_the_derived_margin() {
+        let slice = locality::LocalitySlice::Window {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(2),
+            margin_after: Seconds::days(1),
+        };
+        assert_eq!(locality_margin_days(&slice), (2, 1));
+    }
+
+    #[test]
+    fn window_route_projects_ceil_of_a_partial_day_margin() {
+        // A 36h backward margin must widen to 2 whole days — a partial-day
+        // margin widens to the whole partition it touches (this module's
+        // own `clamp_days` rule, reused here rather than reimplemented).
+        let slice = locality::LocalitySlice::Window {
+            partition_column: "d".to_string(),
+            margin_before: Seconds(36 * 3600),
+            margin_after: Seconds::ZERO,
+        };
+        assert_eq!(locality_margin_days(&slice), (2, 0));
+    }
+
+    #[test]
+    fn recurrence_bounded_route_3_declared_projects_the_folded_margin() {
+        // `margin_before` already has `r` folded in per the variant's own
+        // doc comment — no separate `r` arithmetic in `locality_margin_days`.
+        let slice = locality::LocalitySlice::RecurrenceBounded {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(7),
+            margin_after: Seconds::ZERO,
+            r: Seconds::days(5),
+        };
+        assert_eq!(locality_margin_days(&slice), (7, 0));
+    }
+
+    /// An upstream delta `[a, b)` through a zero-margin (route 1/2, no
+    /// lookback) composed edge dirties downstream exactly the same interval
+    /// (mod grain alignment, which is a no-op at Day grain).
+    #[test]
+    fn zero_margin_edge_projects_the_exact_delta_forward() {
+        let e = edge(0, 0);
+        let delta = DayInterval::new(10, 12);
+        assert_eq!(e.reflect(&delta), delta);
+    }
+
+    /// The same delta through a nonzero-margin (route 3) edge dirties the
+    /// widened interval — strictly larger than the exact delta.
+    #[test]
+    fn nonzero_margin_edge_widens_the_delta_forward() {
+        let e = edge(3, 1);
+        let delta = DayInterval::new(10, 12);
+        let widened = e.reflect(&delta);
+        assert_eq!(widened, DayInterval::new(9, 15));
+        assert!(widened.start <= delta.start && delta.end <= widened.end);
+        assert_ne!(widened, delta, "a nonzero margin must actually widen");
+    }
+
+    /// Property (table-driven over a few margin values, not a single
+    /// example): the projected forward interval always **contains** the
+    /// exact delta — widen-never-narrow holds regardless of which margin a
+    /// route derives.
+    #[test]
+    fn forward_projection_always_contains_the_exact_delta() {
+        let delta = DayInterval::new(100, 103);
+        for (before, after) in [(0, 0), (1, 0), (0, 1), (2, 3), (7, 5)] {
+            let e = edge(before, after);
+            let projected = e.reflect(&delta);
+            assert!(
+                projected.start <= delta.start && delta.end <= projected.end,
+                "margin ({before}, {after}): projected {projected:?} must contain exact {delta:?}"
+            );
+        }
+    }
+
+    /// Backward resolution (`required_inputs`) is route-aware the same way:
+    /// a zero-margin composed edge resolves a downstream period to the exact
+    /// same upstream slice; a nonzero-margin edge resolves to the widened
+    /// slice.
+    #[test]
+    fn required_inputs_resolves_route_aware_through_a_composed_edge() {
+        let period = DayInterval::new(20, 21);
+
+        let exact_edges = vec![edge(0, 0)];
+        let exact = required_inputs(&exact_edges, "composed", period).expect("resolve");
+        assert_eq!(exact.required.get("source"), Some(&vec![period]));
+
+        let widened_edges = vec![edge(3, 1)];
+        let widened = required_inputs(&widened_edges, "composed", period).expect("resolve");
+        assert_eq!(
+            widened.required.get("source"),
+            Some(&vec![DayInterval::new(17, 22)])
+        );
+    }
 }

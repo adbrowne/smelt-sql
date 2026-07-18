@@ -79,12 +79,13 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | A5 | Output as clocked source; settle-bound derivation + `smelt explain` surface | done (2026-07-18) |
 | A6 | Composed-shape conformance recipes (testkit family + generative gate legs) | done (2026-07-18) |
 | W0 | Extremal-aggregate nullability: `MIN`/`MAX` over a NOT NULL argument infers NOT NULL in grouped context (unblocks W1) | done (2026-07-18) |
-| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | blocked (2026-07-18 — new gap found: `derive_fold_spec` single-non-key-aggregate limit, distinct from the MIN/MAX nullability gap W0 fixed) |
-| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | blocked (2026-07-18 — transitively blocked on W1) |
+| W0b | Multi-column extremal fold: `derive_fold_spec`/`FoldSpec` support a per-column combiner list for the source-driven `NewData` path (unblocks W1's six-column flagship) | pending |
+| W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | pending (reopened 2026-07-18 — was blocked on the `derive_fold_spec` single-aggregate limit; W0b resolves it) |
+| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending (transitively gated on W1) |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | done (2026-07-18) |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | done (2026-07-18) |
-| B2 | Key→partition dirt projection (exact routes 1–2; widen-by-`r` route 3) in forward propagation + backward resolution | pending |
+| B2 | Key→partition dirt projection (exact routes 1–2; widen-by-`r` route 3) in forward propagation + backward resolution | done (2026-07-18) |
 | B3 | `--since-upstream` accepts a composed node as `--source`; adjointness tests extended | pending |
 | C1 | Spec diff: `model_transforms.md` T1/T2 variants; `multi_backend.md` capability flags (incl. `supports_column_scoped_merge` into the capability struct) | pending |
 | C2 | P3 change-comparability per column (walk lattice fold; `plausible`/pinned-`NOW()` ⇒ Incomparable) | pending |
@@ -247,6 +248,15 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
   or similarly-scoped phase extending `derive_fold_spec` to multi-column extremal folds),
   then resume W1 with the flagship shape intact. This is a human plan-scaffolding decision,
   not something this iteration should pick unilaterally.
+
+- **2026-07-18 — RESOLVED (W1, W2): option (a) taken, same shape as the first W1
+  blocker's resolution.** Phase **W0b** (multi-column extremal fold: `derive_fold_spec`/
+  `FoldSpec` support a per-column combiner list for the source-driven `NewData` path) is
+  scaffolded in Group W and registered `pending` in the Progress table; W1 and W2 are
+  flipped back to `pending` with W0b added to W1's pre-conditions (alongside W0, already
+  landed). The blocked entries above are retained for the record; do not re-block on the
+  same cause — if W0b lands and the six-column flagship repro still fails, that is a new
+  finding.
 
 ---
 

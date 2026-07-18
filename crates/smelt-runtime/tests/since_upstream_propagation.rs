@@ -363,9 +363,13 @@ fn composed_node_in_the_chain() {
          locality-admitted composed node, not a bare keyed refusal",
     );
 
-    // Inbound: the composed node's own driving-source edge
-    // (placeholder-exact zero margin in this phase — B2 derives the real
-    // key→partition projection).
+    // Inbound: the composed node's own driving-source edge. Phase B2
+    // ("Key→partition dirt projection through composed nodes") derives this
+    // margin for real from the model's admitted `KeyLocality` verdict
+    // (`locality_margin_days`) rather than a placeholder — it genuinely IS
+    // `(0, 0)` here because `user_daily_spend`'s SQL reads no lookback
+    // window against its driving source (route 1 key-embedded, zero
+    // derived read margin; see the model's own doc comment).
     let inbound = edges
         .iter()
         .find(|e| e.upstream == "raw.transactions" && e.downstream == "user_daily_spend")
@@ -374,6 +378,11 @@ fn composed_node_in_the_chain() {
         inbound.downstream_grain,
         smelt_logical::maintenance::propagate::PartitionGrain::Day,
         "the composed node classifies by its declared granularity, not PartitionGrain::Keyed"
+    );
+    assert_eq!(
+        (inbound.before_days, inbound.after_days),
+        (0, 0),
+        "user_daily_spend's real derived margin is genuinely zero: {inbound:?}"
     );
 
     // Outbound: the composed node feeds an ordinary downstream consumer.
@@ -400,6 +409,57 @@ fn composed_node_in_the_chain() {
     }];
     plan_since_upstream(&models, &source_infos, &order, &deltas)
         .expect("a delta on the composed node's driving source must propagate through it");
+}
+
+/// Phase B2: a locality-admitted composed node whose own SQL reads a
+/// **nonzero** lookback window against its driving source (route 1
+/// key-embedded, mirroring `examples/timeseries`'s own `user_spend_rollup.sql`
+/// pushdown-margin construct — a `WHERE col >= CAST(col AS DATE) - INTERVAL
+/// '…days'` Form B relation — but here applied directly on the composed
+/// model's own driving-source read) must derive a genuinely nonzero
+/// `before_days` on its inbound edge, proving `locality_margin_days` pulls a
+/// real margin through end to end rather than only ever seeing the
+/// (coincidentally zero) `user_daily_spend` case.
+#[test]
+fn composed_node_with_a_lookback_window_derives_a_nonzero_inbound_margin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: ts\n  type: TIMESTAMP\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: ts\n  event_time_column: ts\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/composed.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT\n    user_id,\n    CAST(ts AS DATE) AS d,\n    SUM(amount) AS total\n\
+         FROM smelt.sources.bronze\n\
+         WHERE ts >= CAST(ts AS DATE) - INTERVAL '3 days'\n\
+         GROUP BY 1, 2\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the graph must build: composed's WHERE clause admits route 1 with a derived \
+                 nonzero read margin",
+    );
+    let inbound = edges
+        .iter()
+        .find(|e| e.upstream == "bronze" && e.downstream == "composed")
+        .unwrap_or_else(|| panic!("expected an inbound edge into composed: {edges:?}"));
+    assert!(
+        inbound.before_days > 0,
+        "a 3-day lookback WHERE clause must derive a nonzero before_days margin: {inbound:?}"
+    );
 }
 
 /// A **bare** keyed model (no `timeseries:` declared at all) that another

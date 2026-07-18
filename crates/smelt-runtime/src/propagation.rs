@@ -409,25 +409,38 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
             // key-addressed, not partition-addressed: it structurally never
             // carries a `ScanClamp` (`partition_local: PartitionLocal::Yes,
             // scans: vec![]` unconditionally — there is no partition axis
-            // for `link_source` to bound against). Deriving the model's
-            // *real* key→partition inbound margin from its own SQL is B2's
-            // scope ("Key→partition dirt projection through composed
-            // nodes"); this phase only makes the edge itself walkable, at a
-            // placeholder-exact zero margin, so the composed node
-            // participates in the graph as a clocked node with a real
-            // inbound edge instead of silently having none (the pre-B1
-            // state for every `grain: key` model, composed or bare).
-            // Gated on the admitted locality verdict — never on the mere
-            // presence of a `timeseries:` block — so a bare keyed model's
-            // own creation cell still contributes no edge at all (unchanged
-            // from before this phase; its refusal is `NoAdmissibleTechnique`
-            // at plan-derivation time or `MaintenanceGraphUnsupportedNode`
-            // if it's otherwise reached as a graph node).
+            // for `link_source` to bound against). This edge's real
+            // key→partition inbound margin (B2, "Key→partition dirt
+            // projection through composed nodes") is derived from the SAME
+            // admitted `KeyLocality` verdict `locality_admitted` above was
+            // folded from — `smelt_logical::maintenance::propagate::
+            // locality_margin_days` maps the verdict's route (exact for
+            // routes 1–2, widened by `r` + margins for route 3) to the day
+            // margin this edge carries, so the composed node participates
+            // in the graph as a clocked node with a REAL inbound edge
+            // instead of the placeholder-exact zero margin the pre-B2 state
+            // used (and, before B1, no edge at all). Gated on the admitted
+            // locality verdict — never on the mere presence of a
+            // `timeseries:` block — so a bare keyed model's own creation
+            // cell still contributes no edge at all (unchanged from before
+            // this phase; its refusal is `NoAdmissibleTechnique` at
+            // plan-derivation time or `MaintenanceGraphUnsupportedNode` if
+            // it's otherwise reached as a graph node).
             if cell.scans.is_empty() && locality_admitted.get(&table).copied() == Some(true) {
                 if let smelt_logical::maintenance::Trigger::NewData { source } = &cell.trigger {
-                    clamp_days
+                    let key_locality = result.plan.key_locality.as_ref().expect(
+                        "locality_admitted[table] == Some(true) is set (a few lines above) from \
+                         result.plan.key_locality.is_some(), so key_locality must be Some here",
+                    );
+                    let (before_days, after_days) =
+                        smelt_logical::maintenance::propagate::locality_margin_days(
+                            &key_locality.slice,
+                        );
+                    let entry = clamp_days
                         .entry((source.clone(), table.clone()))
                         .or_insert((0, 0));
+                    entry.0 = entry.0.max(before_days);
+                    entry.1 = entry.1.max(after_days);
                 }
             }
         }
