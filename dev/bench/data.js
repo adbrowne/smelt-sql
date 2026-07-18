@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784357866647,
+  "lastUpdate": 1784357869670,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -587,6 +587,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 25.275268486397625,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9dec8f69845856f4cae43aa0a1ecab4a25ccd9f5",
+          "message": "fix(test): register date_plus_interval Spark divergence, fix interval oracle parsing\n\nLocal soak run (PROPTEST_CASES beyond CI's 256) surfaced two more issues in\nthe type_property_tests dual-target oracle:\n\n- DATE + INTERVAL infers Timestamp in smelt (matches DuckDB), but Spark\n  returns DATE for a day/year-month-granularity interval. Register as\n  date_plus_interval.\n- spark_type_to_smelt only exact-matched the string \"interval\", but Spark's\n  typeof() always qualifies granularity (e.g. \"interval day to second\"),\n  so TIMESTAMP - TIMESTAMP misreported as Unknown(Dynamic) instead of\n  Interval. Fixed to prefix-match \"interval*\".\n\nEach fix includes a regression test.",
+          "timestamp": "2026-07-18T16:53:36+10:00",
+          "tree_id": "43713079368705677f0ab94beebb4a71923bc58d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9dec8f69845856f4cae43aa0a1ecab4a25ccd9f5"
+        },
+        "date": 1784357868701,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.86405142828045,
             "unit": "MB/s"
           }
         ]
