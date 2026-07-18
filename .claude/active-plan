@@ -1,156 +1,38 @@
-# Active multi-session plan pointer
+# Active multi-session plan pointer (branch worktree-roadmap_todo)
 #
-# This file is read by the autonomy loop's iteration prompt (see
-# .claude/scripts/autonomy-loop.sh) and by a fresh-context Claude that
-# typed `continue` after `/clear`. Both paths must work.
+# Read by the autonomy loop's iteration prompt (.claude/scripts/autonomy-loop.sh)
+# and by a fresh-context Claude that typed `continue` after `/clear`.
 #
-# STRUCTURE — the work is two-level:
-#   master_plan     the top-level feature backlog (the feature sweep). Its
-#                   bug ledger is the master to-do list; remediation clusters
-#                   become focused sub-plans.
-#   active_subplan  the focused sub-plan the loop is currently working,
-#                   phase by phase. The loop only touches the master when the
-#                   active sub-plan has no `pending` rows left (see the loop's
-#                   ROLL-UP rule — conservative: it advances only to an
-#                   EXISTING sibling sub-plan with pending work, never scaffolds
-#                   a new one autonomously).
+# STRUCTURE: master_plan is the registry-driven backlog; the loop executes the
+# first READY sub-plan in its "## Spawned sub-plans" table (Status not `done`
+# AND a `pending` phase exists), top-to-bottom. active_subplan is vestigial
+# under unified mode (the registry table wins) — kept for fresh-context flows.
 #
-# When the active sub-plan changes:
-#   1. Update active_subplan below (the loop also rewrites this on roll-up).
-#   2. Update the LOG_DIR + "Currently active" comment in
-#      .claude/scripts/autonomy-loop.sh if the log bucket should change.
-#   3. Commit together.
-#
-# When the active sub-plan's phases are all `done`/`blocked`: the loop rolls
-# up to the master and either advances to a sibling sub-plan (<<SUBPLAN_ADVANCED>>)
-# or, if none has pending work, emits <<MASTER_EXHAUSTED>> and surfaces to a
-# human to scaffold the next sub-plan. <<ALL_DONE>> only when the master
-# backlog is fully remediated.
-
 # ─────────────────────────────────────────────────────────────────────────────
-# CURRENT MODE: UNIFIED PRIORITY (adopted 2026-06-05).
-# There is no manual probe-vs-remediation switch any more. The loop's default
-# prompt (.claude/sweep-loop-prompt.txt) dispatches each iteration by priority:
-#   1. READY REMEDIATION — the master plan's "## Spawned sub-plans" registry
-#      table is the source of truth. Any sub-plan there whose Status is not
-#      `done` AND that has a `pending` phase runs FIRST (its own per-phase
-#      routine), top-to-bottom in registry order.
-#   2. SCAN — only when no sub-plan is ready, the next `pending` probe row in
-#      master_plan's Progress-tracking table (D2–D8) runs via the probe routine
-#      in .claude/bug-hunt-prompt.txt.
-#   3. NOTHING READY — emits <<MASTER_EXHAUSTED>> to surface to you.
-# So a bare `bash .claude/scripts/autonomy-loop.sh` does the right thing: it
-# fixes everything ready (currently docs/plans/20260605-address-collision.md,
-# BUG-002/063/064), then resumes scanning. To queue more: review a cluster,
-# scaffold its sub-plan, add a NOT-`done` row to the registry table — the next
-# run picks it up first.
+# THIS BRANCH runs the QUALITY-GRIND programme ONLY (adopted 2026-07-18).
+# It deliberately diverges from main's active-plan (which drives the
+# maintenance-conformance programme in a DIFFERENT worktree). Two loops run
+# concurrently; this one must never pick up the other's master. On merge
+# conflicts with origin/main over this file, keep THIS branch's version
+# (the quality-grind pointer).
 #
-# `active_subplan` below is VESTIGIAL under unified mode (the registry table
-# replaces it) — kept only so older fresh-context `continue` flows that read it
-# still resolve to a real file. The loop ignores it.
+# ACTIVE (2026-07-18): the quality-grind programme — small root-caused fixes
+# (parser ledger categories, TABLESAMPLE ordering, VALUES arity, UTF-8
+# positions, registry gaps, doc gaps) then generator coverage + planner/logical
+# consolidation + bench-regression profiling. Registry-driven, no probe rows.
+#   Master:   docs/plans/20260718-quality-grind.md
+#   Sub-plans: docs/plans/20260718-quality-grind-t1.md (12 phases)
+#              docs/plans/20260718-quality-grind-t2.md (9 phases)
+# Tier 3 decision items live in the master's "## Tier 3 — decision queue" —
+# the loop NEVER picks those up.
+#
+# PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
+# (unset → DuckDB legs skip green, which is a silent hole — the parser
+# differential and property-oracle gates are DuckDB-backed).
 # ─────────────────────────────────────────────────────────────────────────────
+master_plan: docs/plans/20260718-quality-grind.md
+active_subplan: docs/plans/20260718-quality-grind-t1.md
 
-# ACTIVE (2026-06-28): the Spark → DuckDB parity backlog. Brings the existing-but-
-# largely-unverified Spark backend to verified parity with DuckDB via a dual-target
-# test matrix + a real local Spark Connect server. Design:
-# docs/research/20260628-spark-duckdb-parity.md; spec: docs/specs/multi_backend.md.
-# PURE FEATURE BACKLOG (no probe rows). Just-in-time wave scaffolding: only W1
-# (runtime + harness + smoke + break-list capture) is registered; when the loop
-# reports <<MASTER_EXHAUSTED>> a human scaffolds W2+ (the dialect/exec fixes) FROM
-# W1's recorded break list and adds the registry row.
-#
-# PREREQUISITE: a Spark Connect server must be live at SPARK_CONNECT_URL before the
-# loop runs Spark phases (the loop's stateless iterations do not stand Spark up).
-# Bring it up once with scripts/spark-up.sh (created in W1·P1) + export
-# SPARK_CONNECT_URL into the loop's env. When unset, Spark assertions skip (green).
-# ACTIVE (2026-07-02): the incremental-model eligibility expansion. Lands and
-# exhaustively tests the shared event-time monotonicity trace primitive (audit
-# Part 6) before any consumer is wired. Master:
-# docs/plans/20260702-incremental-eligibility-expansion.md (registry-driven, no
-# probe rows); design: docs/research/20260701-expanding-incremental-eligibility.md;
-# spec: docs/specs/incremental_models.md.
-#
-# ACTIVE (2026-07-04): the model-updates master — batched rename + refresh-axis
-# reshape, batched eligibility relaxations, keyed-mode maintenance rungs, and the
-# new keyed refresh modes. Master (registry-driven, no probe rows):
-# docs/plans/20260704-model-updates.md; design:
-# docs/research/20260703-model-updates.md; specs: models.md, batched_models.md,
-# cumulative_aggregate.md, versioned_models.md, latest_value_models.md,
-# materialized_view.md, multi_backend.md. It CONSOLIDATES and supersedes the
-# 20260702 predecessor below (its W1 monotonicity primitive is done and consumed,
-# NOT re-run — do not run both masters against this branch). First registered
-# sub-plan: Group A (docs/plans/20260704-model-updates-group-a.md). When the loop
-# reports <<MASTER_EXHAUSTED>>, a human scaffolds Group B/C/D's sub-plan.
-# PREREQUISITE for the property/equivalence suites: DUCKDB_LIB_DIR +
-# LD_LIBRARY_PATH exported into the loop env (unset → DuckDB tests skip green).
-# ACTIVE (2026-07-04, fundamentals-first): the loop works the shared proofs +
-# transforms FIRST. The master's "## Spawned sub-plans" registry now lists
-# docs/plans/20260704-model-updates-fundamentals.md as its first row (L1 derived
-# proofs + L2 transforms: F1–F3 consolidate the six code duplications, F4–F10 the
-# new proof classifiers, F11–F15 the transforms). The loop runs it to completion
-# before reaching Group B; Groups B/C/D are re-scaffolded as L4 mode-composition
-# sub-plans afterwards. Design: docs/research/20260704-maintenance-fundamentals.md
-# §"Target plan architecture"; specs: model_properties.md, model_transforms.md,
-# model_maintenance.md.
-# SUPERSEDED (2026-07-07): the 2026-07-05 keyed-collapse-first ordering below.
-# The refresh-as-maintenance-plan spec set landed (maintenance_plan.md new;
-# models.md trichotomy rewrite; sources.md world-facts) and every pending
-# registry row written against the old mode surface (keyed-collapse K3–K6,
-# keyed-time-partitioned-output, L4 batched/versioned/materialized_view) is
-# marked `done (superseded 2026-07-07)` in the master registry — do not run
-# them; surviving scope is re-homed (see the master's 2026-07-07 note).
-#
-# ACTIVE (2026-07-07): the refresh-as-maintenance-plan programme. Research:
-# docs/research/20260705-refresh-as-maintenance-plan/ (ratified 09 §1); specs:
-# docs/specs/maintenance_plan.md, models.md, sources.md. Two registered
-# sub-plans run in order:
-#   1. docs/plans/20260707-maintenance-plan-spec-alignment.md (SA1–SA7,
-#      docs-only: shape-profile demotions, transform contracts, architecture
-#      invariant, Maintenance* diagnostics catalogue, model_properties sync)
-#   2. docs/plans/20260707-maintenance-plan-impl.md (MP1–MP17: refresh-axis
-#      surface cut, docs-site rewrite, plan derivation + diagnostics +
-#      smelt explain, testkit graduation, reconciliation ledger, targeted-write
-#      + fold cells closing G-12, bakeoff, forward/backward propagation)
-# PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
-# (unset → the DuckDB equivalence legs skip green, which is a silent hole).
-#
-# ACTIVE (2026-07-12): the generative-maintenance-conformance programme — the
-# standing generative regression net for maintenance_plan.md §"The equivalence
-# invariant". One registered sub-plan (Phases 1–11):
-#   docs/plans/20260712-generative-maintenance-conformance.md
-#   (ModelRecipe generation over the Link-C harness, admitted/refused verdict
-#   protocol, S-tracked dual-mode full-refresh oracle, plan-claim probes,
-#   simulated change feeds, definition-change steps, generated-DAG propagation
-#   checks, graduation/retirement of the disposable property_discovery probes
-#   into `cargo test -p smelt-cli --test maintenance_conformance`).
-# Design: docs/research/20260711-generative-maintenance-conformance.md.
-# DISCOVERED-BUG POLICY (from the plan's execution prompt): a generated case
-# exposing a real production divergence is a deliverable, not a blocker — pin
-# the shrunk recipe as a failing regression test, register it KnownBug, record
-# it under "Deferred during implementation", continue.
-# PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
-# (unset → DuckDB legs skip green, which is a silent hole for this plan in
-# particular — its entire gate is DuckDB-backed).
-# SOAK SESSION registered (docs/autonomy_loop.md §"Soak sessions", not a
-# phased sub-plan — runs outside this state machine):
-#   SMELT_CONFORMANCE_CASES=200 cargo test -p smelt-cli --test
-#   maintenance_conformance --quiet 2>&1 | tail -40
-# Automated nightly via the `maintenance-conformance-soak` job in
-# .github/workflows/compat.yml; run it locally/ad hoc the same way.
-master_plan: docs/plans/20260704-model-updates.md
-active_subplan: docs/plans/20260712-generative-maintenance-conformance.md
-
-# Back-compat aliases (older fresh-context flows read these names) — mirror the
-# active master + sub-plan.
-in_repo_plan: docs/plans/20260704-model-updates.md
-meta_plan: docs/plans/20260704-model-updates.md
-
-# PAUSED (2026-07-04): docs/plans/20260702-incremental-eligibility-expansion.md —
-# the predecessor incremental-eligibility master. Its queued waves W2–W7 are
-# re-homed into the 20260704 master's Group B; do NOT run it against this branch.
-# PAUSED: docs/plans/20260613-spec-impl.md (the spec-remediation backlog). All of
-# its registry sub-plans are `done` (the loop would emit <<MASTER_EXHAUSTED>>); the
-# 28 reviewed specs are clean. To resume that work, repoint master_plan back to it.
-# PAUSED: docs/plans/20260530-feature-sweep.md (the bug-hunting feature sweep).
-# Its registry sub-plans are all done; its probe rows D1–D8 are all done. To
-# resume probe scanning later, repoint master_plan back to it.
+# Back-compat aliases (older fresh-context flows read these names).
+in_repo_plan: docs/plans/20260718-quality-grind.md
+meta_plan: docs/plans/20260718-quality-grind.md

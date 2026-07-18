@@ -111,13 +111,11 @@ REPO_ROOT="$(cd "${SCRIPT_DIR}/../.." && pwd)"
 # stop-autonomy.sh; it is removed automatically when the loop acts on it.
 STOP_FLAG="${STOP_FLAG:-${SCRIPT_DIR}/../autonomy.stop}"
 
-# Currently active: the generative-maintenance-conformance programme —
-# docs/plans/20260712-generative-maintenance-conformance.md (Phases 1–11:
-# ModelRecipe generation, verdict protocol, S-tracked oracle, plan-claim
-# probes, simulated change feeds, generated DAGs, probe graduation), under
-# the model-updates master (docs/plans/20260704-model-updates.md via
-# .claude/active-plan).
-LOG_DIR="${HOME}/.claude/logs/maintenance-conformance"
+# Currently active (THIS branch/worktree): the quality-grind programme —
+# docs/plans/20260718-quality-grind.md master with T1/T2 sub-plans, via
+# .claude/active-plan. LOG_DIR is env-overridable so concurrent loops in
+# other worktrees keep separate buckets.
+LOG_DIR="${LOG_DIR:-${HOME}/.claude/logs/quality-grind}"
 mkdir -p "${LOG_DIR}"
 
 # Tunables (env vars override).
