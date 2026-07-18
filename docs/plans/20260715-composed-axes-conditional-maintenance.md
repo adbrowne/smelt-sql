@@ -531,11 +531,45 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 
 ---
 
+### Phase W0b: Multi-column extremal fold (unblock the tracer, part 2)
+
+**Goal.** Fix the second, independent gap the W0b repro surfaced: `derive_fold_spec` (`crates/smelt-db/src/queries/maintenance.rs:128-154`) admits a `grain: key` model's `NewData` cell only when the outermost `SELECT` has **exactly one** non-key aggregate column (`if aggregates.len() != 1 { return None; }`), and `FoldSpec` (`crates/smelt-logical/src/maintenance/derive.rs:47-50`) carries a single `combiner: SqlFunction` applied uniformly across `add_columns`. W1's flagship needs six columns folded with per-column combiners (`MIN`→`MIN`, in this case uniformly, but the general shape — mirrored by the existing hand-written comment in `device_user_edges.sql` describing `COUNT`→`SUM`/`MIN`→`MIN`/`MAX`→`MAX` composition — requires a **combiner per column**, not one combiner for the whole fold group). Extend the source-driven `NewData` fold path to a per-column combiner list.
+
+**Pre-conditions.** W0 (this phase is independent of nullability but scheduled after W0 since W0's fix is what exposed this as the *next* blocker).
+
+**TDD tests to write first.**
+- `crates/smelt-db/src/queries/maintenance.rs` unit tests (alongside the existing `derive_fold_spec` tests) — a multi-aggregate `SELECT` with mixed combiners (`MIN`, `MAX`, `COUNT`) each produce their own `(column, combiner)` pair in the derived fold spec, in `SELECT` column order; a `SELECT` with a single aggregate still derives the same `FoldSpec` shape as before (no behavior change at n=1); an unsupported/unrecognized aggregate function among the set still causes the whole derivation to refuse (fail-closed, not partial-fold).
+- `crates/smelt-logical/src/maintenance/derive.rs` unit tests — `derive_new_data`'s `Grain::Key` branch admits the cell when `fold` carries multiple columns, and the emitted statement plan combines each column with *its own* combiner (not the first/last one applied to all).
+- `cargo test -p smelt-runtime --test statement_parity` — stays green; the per-family executed-vs-emitted parity leg covers the new multi-combiner MERGE/UPDATE shape (no author-vs-executor drift).
+- The W1 six-column flagship repro from the second Blocked-phases entry (`events_deduped.sql` with `MIN(device_id)`, `MIN(user_id)`, `MIN(event_ts)`, `MIN(first_seen_date)`, `MIN(utm_campaign)`, `MIN(payload)`) — staged locally, now passes `example_diagnostics` cleanly (temporary fixture or unit-level admission test; W1 lands the real fixture).
+
+**Implementation shape.** Change `FoldSpec.combiner: SqlFunction` to a per-column combiner (e.g. `add_columns: Vec<(String, SqlFunction)>`, replacing the parallel `add_columns`/single-`combiner` pair — audit all four consumer sites in `crates/smelt-logical/src/maintenance/derive.rs` lines ~341, 383, 397, 413, 419 for the uniform-combiner assumption). Relax `derive_fold_spec`'s `aggregates.len() != 1` guard to accept N ≥ 1 aggregates, collecting each `(alias, combiner)` pair instead of requiring exactly one. Preserve fail-closed behavior: any aggregate expression that doesn't resolve to a known combiner still refuses the whole derivation (no silent partial fold). This is maintenance-plan derivation code — the **maintenance-plan purity** invariant applies (pure derivation in `smelt-logical`; statement emission stays in the existing pure emitters, extended for the multi-combiner shape, not re-derived downstream).
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-db/src/queries/maintenance.rs` — `derive_fold_spec`.
+- `crates/smelt-logical/src/maintenance/derive.rs` — `FoldSpec`, `derive_new_data`'s `Grain::Key` branch, the four combiner-consumer sites.
+- Statement-emission code the combiner sites feed (same purity boundary — no new authoring site).
+
+**Docs touched.**
+- `docs/specs/incremental_models.md` — the multi-aggregate fold caveat (if documented near the W0 nullability caveat) narrows or is removed.
+- `docs/specs/model_maintenance.md` (or wherever `FoldSpec`/fold derivation is described) — the per-column combiner shape stated, timeless.
+
+**Review checklist** (material findings only):
+- [ ] All four combiner-consumer sites in `derive.rs` audited and updated — no site still assumes a single shared combiner.
+- [ ] Fail-closed preserved: an unrecognized aggregate among a multi-column set refuses the whole cell, not a partial fold.
+- [ ] `statement_parity` green — the new multi-combiner statement shape has real executed-vs-emitted coverage, not just unit-level `FoldSpec` assertions.
+- [ ] Single-aggregate behavior unchanged (regression check against the existing `derive_fold_spec` tests).
+- [ ] The W1 six-column repro passes diagnostics; W1's second Blocked entry's candidate option (a) is thereby discharged.
+
+**Commit.** `feat(maintenance): per-column combiner in FoldSpec — multi-column extremal folds on the source-driven NewData path`
+
+---
+
 ### Phase W1: Composed-shape model in `examples/web_analytics`
 
 **Goal.** Land the flagship composed model in the real web-analytics workspace: `silver/events_deduped.sql` — event-grain dedupe keyed by `event_id`, time-partitioned by `first_seen_date`, over the raw events source's declared `key_recurrence` (the datagen `redelivery:` block already produces the duplicate storms it absorbs). Rewire `events_parsed`'s QUALIFY-dedup consumers to read the composed model, retiring the safety-override workaround where the narrative wants it. This is the tracer: if this model doesn't fall out naturally, Group A got the shape wrong.
 
-**Pre-conditions.** W0 (extremal-aggregate nullability — the flagship model's `partition_column` is an extremal fold); A2–A5 (routes + clocked-source publication; A4 for `key_recurrence`).
+**Pre-conditions.** W0 (extremal-aggregate nullability — the flagship model's `partition_column` is an extremal fold); W0b (multi-column extremal fold — the flagship model's six-column payload); A2–A5 (routes + clocked-source publication; A4 for `key_recurrence`).
 
 **TDD tests to write first.**
 - `crates/smelt-cli/tests/example_diagnostics.rs` — `examples/web_analytics` stays diagnostic-clean with the new model.
