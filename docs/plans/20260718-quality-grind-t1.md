@@ -84,7 +84,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 9     | done    | fix(logical): sub-day INTERVAL units in extract_interval_days_from_combined | 2026-07-19 |
 | 10    | blocked |        |      |
 | 11    | done    | feat(types): register to_seconds (Interval) and md5 (Text) in BuiltinRegistry | 2026-07-19 |
-| 12    | pending |        |      |
+| 12    | done    | docs: drop stale smelt-test selector TODO (BUG-022/031/062/071 already closed) | 2026-07-19 |
 
 ---
 
