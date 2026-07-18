@@ -17,5 +17,6 @@ pub mod generators;
 pub mod known_unknowns;
 pub mod monotonicity_gen;
 pub mod null_data;
+pub mod oracle_check;
 pub mod spark_oracle;
 pub mod type_comparison;

@@ -664,6 +664,93 @@ fn test_ifnull_nullability() {
     );
 }
 
+// Regression: a dedicated numeric-function property test caught IFNULL,
+// COALESCE, GREATEST, LEAST, and MOD returning the first argument's type
+// verbatim instead of promoting across mixed numeric argument types — a real
+// divergence from DuckDB itself (not a cross-engine difference), found in
+// 175 (function, type-pair) combinations.
+#[test]
+fn test_ifnull_promotes_mixed_numeric_types() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::SmallInt));
+    ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::Integer));
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT IFNULL(a, b) FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::Integer,
+        "IFNULL(SmallInt, Integer) should promote to Integer, matching DuckDB"
+    );
+}
+
+#[test]
+fn test_coalesce_promotes_mixed_numeric_types() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+    ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::BigInt));
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT COALESCE(a, b) FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::BigInt,
+        "COALESCE(Integer, BigInt) should promote to BigInt, matching DuckDB"
+    );
+}
+
+#[test]
+fn test_greatest_least_promote_mixed_numeric_types() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::Integer));
+    ctx.add_cte_column(
+        "t",
+        "b",
+        TypedColumn::nullable(DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        }),
+    );
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT GREATEST(a, b), LEAST(a, b) FROM t",
+        &ctx,
+    );
+    // promote_types widens Integer+Decimal to Decimal(38,10) (the same
+    // overflow-avoidance rule CASE/UNION use, Bug #7) rather than DuckDB's
+    // narrower DECIMAL(12,2) — an already-tolerated raw-SQL precision/scale
+    // gap (decimal_arithmetic_model in divergences.rs). What matters here is
+    // the *family*: Decimal, not Integer, matching DuckDB's GREATEST/LEAST
+    // widening across mixed numeric types.
+    assert!(
+        matches!(types[0].data_type, DataType::Decimal { .. }),
+        "GREATEST(Integer, Decimal) should promote to the Decimal family, matching DuckDB: got {:?}",
+        types[0].data_type
+    );
+    assert!(
+        matches!(types[1].data_type, DataType::Decimal { .. }),
+        "LEAST(Integer, Decimal) should promote to the Decimal family, matching DuckDB: got {:?}",
+        types[1].data_type
+    );
+}
+
+#[test]
+fn test_mod_promotes_mixed_numeric_types() {
+    let mut ctx = TypeContext::new();
+    ctx.add_cte_column("t", "a", TypedColumn::nullable(DataType::SmallInt));
+    ctx.add_cte_column("t", "b", TypedColumn::nullable(DataType::BigInt));
+    let types = infer_sql_with_ctx(
+        "WITH t AS (SELECT 1 AS a, 2 AS b) SELECT MOD(a, b) FROM t",
+        &ctx,
+    );
+    assert_eq!(
+        types[0].data_type,
+        DataType::BigInt,
+        "MOD(SmallInt, BigInt) should promote to BigInt, matching DuckDB"
+    );
+}
+
 #[test]
 fn test_temporal_arithmetic_date_interval() {
     // DATE + INTERVAL → Timestamp

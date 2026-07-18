@@ -259,6 +259,17 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
+            id: "float_promotes_to_double_spark",
+            description: "FLOAT combined with another numeric type in COALESCE/IFNULL/GREATEST/ \
+                LEAST/MOD — smelt keeps FLOAT (matches DuckDB's promotion, which also keeps \
+                FLOAT). Spark instead widens to DOUBLE whenever FLOAT is promoted against any \
+                other numeric type in these functions.",
+            smelt_type: DataType::Float,
+            duckdb_type: None,
+            spark_type: Some(DataType::Double),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
             id: "row_number_rank_family",
             description: "ROW_NUMBER/RANK/DENSE_RANK — smelt infers BigInt (matches DuckDB \
                 BIGINT), Spark returns INT (Integer) for these ranking window functions.",
@@ -424,6 +435,18 @@ mod tests {
         );
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "date_plus_interval");
+    }
+
+    #[test]
+    fn finds_float_promotes_to_double_divergence_spark() {
+        // Regression: the dedicated numeric-function property test caught
+        // COALESCE/IFNULL/GREATEST/LEAST(SMALLINT, FLOAT) diverging against
+        // Spark after promote_types-based promotion was fixed to correctly
+        // keep FLOAT (matching DuckDB) — Spark widens to DOUBLE instead.
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::Float, &DataType::Double, "spark", &divs);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "float_promotes_to_double_spark");
     }
 
     #[test]
