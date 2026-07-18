@@ -34,7 +34,9 @@ pub mod locality;
 pub mod propagate;
 pub mod skeleton;
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
+
+use crate::analysis::walk::{ColumnComparability, Comparability};
 
 /// How a source's rows change after they first appear.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -316,5 +318,98 @@ pub fn locality_refused_plan(message: String) -> MaintenancePlan {
         cells: Vec::new(),
         refusals: vec![Refusal::LocalityNotEstablished { message }],
         key_locality: None,
+    }
+}
+
+/// Fold a model's declared per-column equivalence contract
+/// (`columns.<c>.contract:`, `smelt_core::metadata::Contract`) over the
+/// walk's derived change-comparability verdict
+/// (`analysis::walk::PropertyVector::comparability`,
+/// `model_properties.md` §"Change comparability"): a `contract: plausible`
+/// column is `Incomparable` regardless of what the walk proved — the walk
+/// only sees the query's own SQL and cannot know that a payload column's
+/// non-determinism has been accepted by the modeller as an equivalence
+/// contract, so the override is applied here, where the derived vector meets
+/// the model's declared metadata, not inside the walk itself. Widen-never:
+/// a column the walk already proved `Comparable` and that carries no
+/// `plausible` declaration passes through unchanged.
+///
+/// This is plain plumbing — carrying the verdict on a plan-facing type — no
+/// admission or emitter reads the result yet.
+pub fn column_comparability_with_contract(
+    walk_comparability: &[ColumnComparability],
+    plausible_columns: &BTreeMap<String, smelt_core::metadata::Contract>,
+) -> Vec<ColumnComparability> {
+    walk_comparability
+        .iter()
+        .map(|c| {
+            let is_plausible = plausible_columns
+                .get(&c.output.to_ascii_lowercase())
+                .is_some_and(|contract| *contract == smelt_core::metadata::Contract::Plausible);
+            let comparability = if is_plausible {
+                Comparability::Incomparable
+            } else {
+                c.comparability
+            };
+            ColumnComparability {
+                output: c.output.clone(),
+                comparability,
+            }
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod comparability_contract_tests {
+    use super::*;
+
+    #[test]
+    fn plausible_contract_forces_incomparable_regardless_of_walk_verdict() {
+        let walk_comparability = vec![
+            ColumnComparability {
+                output: "amount".to_string(),
+                comparability: Comparability::Comparable,
+            },
+            ColumnComparability {
+                output: "notes".to_string(),
+                comparability: Comparability::Comparable,
+            },
+        ];
+        let mut contracts = BTreeMap::new();
+        contracts.insert(
+            "notes".to_string(),
+            smelt_core::metadata::Contract::Plausible,
+        );
+
+        let out = column_comparability_with_contract(&walk_comparability, &contracts);
+
+        assert_eq!(
+            out.iter()
+                .find(|c| c.output == "notes")
+                .map(|c| c.comparability),
+            Some(Comparability::Incomparable),
+            "a plausible-contract column must be forced Incomparable regardless of \
+             the walk's own (Comparable) verdict; got {out:?}"
+        );
+        assert_eq!(
+            out.iter()
+                .find(|c| c.output == "amount")
+                .map(|c| c.comparability),
+            Some(Comparability::Comparable),
+            "a column with no plausible declaration must pass through unchanged; got {out:?}"
+        );
+    }
+
+    #[test]
+    fn no_contract_passes_the_walk_verdict_through_unchanged() {
+        let walk_comparability = vec![ColumnComparability {
+            output: "ts".to_string(),
+            comparability: Comparability::Incomparable,
+        }];
+        let out = column_comparability_with_contract(&walk_comparability, &BTreeMap::new());
+        assert_eq!(
+            out, walk_comparability,
+            "no declared contracts must leave the walk's verdict untouched"
+        );
     }
 }

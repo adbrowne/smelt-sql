@@ -1561,6 +1561,39 @@ pub struct ColumnDeterminism {
     pub level: Determinism,
 }
 
+/// Change-comparability of a projected column — is its value a pure
+/// function of the *processed* inputs, and therefore comparable across
+/// separate runs (not merely stable within one run) for future
+/// write-suppression purposes (`model_properties.md` §"Change
+/// comparability"). A two-point lattice, `Comparable ⊑ Incomparable`; a
+/// columnar union takes the per-position lub, same shape as
+/// [`Determinism`]'s. `Incomparable` is the fail-closed default — an
+/// unrecognised construct never defaults to `Comparable`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Comparability {
+    /// A pure function of processed inputs — safe to diff against a prior
+    /// run's stored value.
+    Comparable,
+    /// Not provably stable across runs (a run-/row-nondeterministic value,
+    /// or an unrecognised construct the classifier has no rule for).
+    Incomparable,
+}
+
+impl Default for Comparability {
+    /// Fail-closed: absence of a proof is `Incomparable`, never an
+    /// optimistic `Comparable`.
+    fn default() -> Self {
+        Comparability::Incomparable
+    }
+}
+
+/// Per-column change-comparability fact.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ColumnComparability {
+    pub output: String,
+    pub comparability: Comparability,
+}
+
 /// Per-column algebraic discriminants of an aggregate output column (the
 /// combiner classifier applied at the aggregate's defining scope).
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1584,6 +1617,10 @@ pub struct PropertyVector {
     pub fds: Vec<DerivedFd>,
     /// Per-column determinism.
     pub determinism: Vec<ColumnDeterminism>,
+    /// Per-column change-comparability (P3, `model_properties.md` §"Change
+    /// comparability") — is the column's value a pure function of the
+    /// processed inputs, comparable across separate runs.
+    pub comparability: Vec<ColumnComparability>,
     /// Per-column aggregate discriminants (aggregate outputs only).
     pub discriminants: Vec<ColumnDiscriminant>,
     /// Output columns that are constant literals here, name → literal text.
@@ -1705,6 +1742,53 @@ impl PropertyTransfer<'_> {
                 }
             }
             out.push(ColumnDeterminism { output, level });
+        }
+        out
+    }
+
+    /// Per-column change-comparability of one SELECT scope, reducing plain
+    /// column refs through CTE/derived inputs where the input's own
+    /// comparability is known (`model_properties.md` §"Change
+    /// comparability").
+    fn scope_comparability(
+        &self,
+        sn: &SelectNode,
+        cx: &NodeCx,
+        input_props: &BTreeMap<String, &PropertyVector>,
+    ) -> Vec<ColumnComparability> {
+        let Some(select_list) = sn.select.select_list() else {
+            return Vec::new();
+        };
+        let mut out = Vec::new();
+        for item in select_list.items() {
+            if item.is_wildcard() {
+                continue;
+            }
+            let Some(expr) = item.expression() else {
+                continue;
+            };
+            let output = item
+                .column_name()
+                .unwrap_or_else(|| expr.text().trim().to_string());
+            let mut comparability = expr_comparability(&expr);
+            // Reduce a plain column reference through a CTE/derived input.
+            if let Some(col_ref) = smelt_parser::ColumnRef::from_expr(&expr) {
+                if let Some(source) = resolve_alias_source(cx, col_ref.qualifier()) {
+                    if let Some(inner) = input_props.get(&source) {
+                        if let Some(c) = inner
+                            .comparability
+                            .iter()
+                            .find(|c| c.output.eq_ignore_ascii_case(col_ref.name()))
+                        {
+                            comparability = comparability.max(c.comparability);
+                        }
+                    }
+                }
+            }
+            out.push(ColumnComparability {
+                output,
+                comparability,
+            });
         }
         out
     }
@@ -1836,6 +1920,7 @@ impl Transfer for PropertyTransfer<'_> {
                 };
 
                 let determinism = self.scope_determinism(sn, cx, &input_props);
+                let comparability = self.scope_comparability(sn, cx, &input_props);
                 let discriminants = self.scope_discriminants(sn);
 
                 let mut vector = PropertyVector {
@@ -1843,6 +1928,7 @@ impl Transfer for PropertyTransfer<'_> {
                     grain,
                     fds: Vec::new(),
                     determinism,
+                    comparability,
                     discriminants,
                     literal_columns,
                     has_set_op_barrier: input_barrier,
@@ -1864,6 +1950,11 @@ impl Transfer for PropertyTransfer<'_> {
                 // Determinism: per output position, the lub across arms.
                 let determinism = union_determinism(branches);
 
+                // Comparability: per output position, the lub across arms —
+                // a column comparable in one arm and incomparable in another
+                // folds Incomparable.
+                let comparability = union_comparability(branches);
+
                 // Grain survival: only the discriminated-union case keeps a
                 // key. A literal-discriminator column (a distinct constant per
                 // arm) added to a key shared by every arm makes the arms
@@ -1879,6 +1970,7 @@ impl Transfer for PropertyTransfer<'_> {
                     grain,
                     fds: Vec::new(),
                     determinism,
+                    comparability,
                     discriminants: Vec::new(),
                     literal_columns: Vec::new(),
                     // A set operation is always an FD barrier for any key it
@@ -1923,6 +2015,29 @@ fn union_determinism(branches: &[PropertyVector]) -> Vec<ColumnDeterminism> {
         out.push(ColumnDeterminism {
             output: col.output.clone(),
             level,
+        });
+    }
+    out
+}
+
+/// The per-position change-comparability lub across set-operation arms — a
+/// column `Comparable` in every arm stays `Comparable`; any arm that folds
+/// `Incomparable` dominates (same shape as [`union_determinism`]).
+fn union_comparability(branches: &[PropertyVector]) -> Vec<ColumnComparability> {
+    let Some(first) = branches.first() else {
+        return Vec::new();
+    };
+    let mut out = Vec::with_capacity(first.comparability.len());
+    for (i, col) in first.comparability.iter().enumerate() {
+        let mut comparability = col.comparability;
+        for other in &branches[1..] {
+            if let Some(o) = other.comparability.get(i) {
+                comparability = comparability.max(o.comparability);
+            }
+        }
+        out.push(ColumnComparability {
+            output: col.output.clone(),
+            comparability,
         });
     }
     out
@@ -2030,6 +2145,44 @@ fn expr_determinism(expr: &smelt_parser::Expr) -> Determinism {
         level = level.max(contrib);
     }
     level
+}
+
+/// The change-comparability of an expression (`model_properties.md`
+/// §"Change comparability") — fail-closed leaf classifier over every
+/// function call it contains. A known run-/row-nondeterministic function
+/// (`NOW`/`RANDOM`/…) is `Incomparable` (comparable only *within* one run,
+/// per the determinism predicate). A recognised function outside that set
+/// (registry-backed, `smelt_types::SqlFunction`) is treated as a pure
+/// function of its arguments and does not itself taint the result.
+/// A function call the registry does not recognise (a UDF, an opaque body)
+/// is the fail-closed case: `Incomparable`, never a default `Comparable`,
+/// since smelt cannot prove it is a pure function of processed inputs. A
+/// bare column reference or literal (no function calls) is `Comparable`.
+fn expr_comparability(expr: &smelt_parser::Expr) -> Comparability {
+    let mut result = Comparability::Comparable;
+    for node in expr.syntax().descendants() {
+        if node.kind() != smelt_parser::SyntaxKind::FUNCTION_CALL {
+            continue;
+        }
+        let Some(func) = smelt_parser::FunctionCall::cast(node) else {
+            continue;
+        };
+        let Some(name) = func.name() else { continue };
+        let contrib = match classify_function_determinism(&name) {
+            FunctionDeterminism::RowNondeterministic | FunctionDeterminism::RunDeterministic => {
+                Comparability::Incomparable
+            }
+            FunctionDeterminism::Neither => {
+                if smelt_types::SqlFunction::from_name(&name.to_ascii_uppercase()).is_some() {
+                    Comparability::Comparable
+                } else {
+                    Comparability::Incomparable
+                }
+            }
+        };
+        result = result.max(contrib);
+    }
+    result
 }
 
 /// Whether `expr` is a constant literal — a string/number literal with no
@@ -2657,6 +2810,100 @@ mod tests {
             Some(Determinism::Run),
             "now() must classify Run; got {:?}",
             run.determinism
+        );
+    }
+
+    // ===== Change-comparability lattice fold (P3) =====
+
+    fn comparability_of<'a>(v: &'a PropertyVector, output: &str) -> Option<&'a Comparability> {
+        v.comparability
+            .iter()
+            .find(|c| c.output == output)
+            .map(|c| &c.comparability)
+    }
+
+    #[test]
+    fn comparability_leaf_classification() {
+        // A plain aggregate column is a pure function of processed inputs —
+        // comparable across runs.
+        let agg =
+            vector_of("SELECT customer_id, SUM(amount) AS total FROM orders GROUP BY customer_id");
+        assert_eq!(
+            comparability_of(&agg, "total"),
+            Some(&Comparability::Comparable),
+            "a plain SUM aggregate must be Comparable; got {:?}",
+            agg.comparability
+        );
+
+        // A run-pinned clock is comparable *within* a run but not *across*
+        // runs — Incomparable.
+        let run = vector_of("SELECT now() AS t FROM src");
+        assert_eq!(
+            comparability_of(&run, "t"),
+            Some(&Comparability::Incomparable),
+            "now() must be Incomparable across runs; got {:?}",
+            run.comparability
+        );
+
+        // A row-nondeterministic value is unpinnable — Incomparable.
+        let row = vector_of("SELECT random() AS r FROM t");
+        assert_eq!(
+            comparability_of(&row, "r"),
+            Some(&Comparability::Incomparable),
+            "random() must be Incomparable; got {:?}",
+            row.comparability
+        );
+
+        // An unrecognised (opaque) function call is not known to be a pure
+        // deterministic function of its inputs — fail-closed to Incomparable,
+        // never a default Comparable.
+        let opaque = vector_of("SELECT my_opaque_udf(amount) AS y FROM orders");
+        assert_eq!(
+            comparability_of(&opaque, "y"),
+            Some(&Comparability::Incomparable),
+            "an unrecognised function call must fail-closed to Incomparable; got {:?}",
+            opaque.comparability
+        );
+    }
+
+    #[test]
+    fn comparability_folds_through_cte() {
+        // A NOW()-tainted CTE column, read plainly by the outer scope, must
+        // still be Incomparable — comparability composes through the walk's
+        // CTE reduction, not re-derived from the outer scope's own text.
+        let v = vector_of(
+            "WITH staged AS (SELECT now() AS t, customer_id FROM src) \
+             SELECT t, customer_id FROM staged",
+        );
+        assert_eq!(
+            comparability_of(&v, "t"),
+            Some(&Comparability::Incomparable),
+            "a NOW()-tainted CTE column must stay Incomparable through the outer read; got {:?}",
+            v.comparability
+        );
+        assert_eq!(
+            comparability_of(&v, "customer_id"),
+            Some(&Comparability::Comparable),
+            "a plain passthrough CTE column must stay Comparable; got {:?}",
+            v.comparability
+        );
+    }
+
+    #[test]
+    fn comparability_union_lub() {
+        // A column comparable in one arm and incomparable in the other folds
+        // Incomparable (the union operator rule = lub, same shape as
+        // determinism's per-position max).
+        let v = vector_of(
+            "SELECT customer_id AS id FROM crm_a \
+             UNION ALL \
+             SELECT now() AS id FROM crm_b",
+        );
+        assert_eq!(
+            comparability_of(&v, "id"),
+            Some(&Comparability::Incomparable),
+            "one Incomparable arm must dominate the union; got {:?}",
+            v.comparability
         );
     }
 }
