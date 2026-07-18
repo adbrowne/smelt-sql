@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784368495003,
+  "lastUpdate": 1784417318815,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -751,6 +751,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.957885,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ab6fc03773cae1e42109230a1d1cad57f8891bfa",
+          "message": "fix(autonomy-loop): classify 429/session-limit before the rc!=0 infra-failure check\n\nclaude --print exits nonzero on a 429, so the existing rc!=0 guard fired\nfirst and misclassified session-limit hits as generic infra failures,\nwhich count toward the forever-wrapper's fast-fail crash-loop guard.\nThree consecutive 429s (2026-07-18 22:37-22:58, waiting out the midnight\nMelbourne reset) tripped MAX_FAST_FAILS and halted the loop instead of\nretrying through the reset window as intended.\n\nMove the .result/api_error_status extraction and session-limit\nclassification ahead of the rc!=0 check so a rate-limit hit is always\nrouted to exit 4 (always retry, never a fast-fail) regardless of the\nprocess's own exit code.",
+          "timestamp": "2026-07-19T06:25:04+10:00",
+          "tree_id": "89136d369ef44e14def66ca8e9d6ee45af1087c7",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ab6fc03773cae1e42109230a1d1cad57f8891bfa"
+        },
+        "date": 1784417316556,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 61.126631,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 58.590908,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.230562,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.644556,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.337,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 951.330335,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.903522,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.6639630000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.3565180000000003,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.781221,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 779.895275,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 8.21296,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 35.58186,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 14.224548,
             "unit": "ms"
           }
         ]
