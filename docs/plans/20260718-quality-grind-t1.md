@@ -80,7 +80,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 5     | blocked |        |      |
 | 6     | done    | fix(parser): trailing ORDER BY/LIMIT after parenthesized set-op operand | 2026-07-19 |
 | 7     | done    | fix(parser): alias-first TABLESAMPLE/PIVOT/UNPIVOT ordering to match DuckDB | 2026-07-19 |
-| 8     | pending |        |      |
+| 8     | done    | fix(types): VALUES-body CTE alias arity check (AliasColumnArityMismatch parity) | 2026-07-19 |
 | 9     | pending |        |      |
 | 10    | pending |        |      |
 | 11    | pending |        |      |
@@ -538,6 +538,23 @@ Timeless-oracle wording throughout.
     flagged as now-passing — a side effect of the combined Phase 1/2/4
     fixes (NOT-prefixed operators, `==`, and RANGE) unblocking a statement
     that happened to use all three.
+
+- **2026-07-19, Phase 8.** Re-observed the pre-existing `sessions_chained`
+  self-referential fixpoint flake documented in Phase 5's blocked entry —
+  full `cargo test --quiet` runs failed on a different
+  `per_partition_equivalence`/`example_web_analytics` test each attempt
+  (`web_analytics_dedup_matches_full_rebuild`, `test_local_columns_equivalent`,
+  `test_daily_active_users_by_method_monotonicity`,
+  `web_analytics_events_enriched_matches_full_rebuild` across 4 runs), same
+  root cause each time. Confirmed unrelated to this phase: targeted
+  `cargo test -p smelt-cli --test e2e per_partition_equivalence` passes
+  clean in isolation (8/8), and this phase's own tests
+  (`values_body_cte_arity_mismatch`, `values_body_cte_arity_match_clean`)
+  are unaffected. Per the precedent already set by Phases 6 and 7 landing
+  despite this same flake, not treated as a phase-8 blocker — fmt, clippy,
+  and `example_diagnostics` are all green, and the phase's own red→green
+  TDD cycle is verified in isolation. The flake itself remains open for
+  human triage per Phase 5's candidate options (unchanged).
 
 ## Verification
 
