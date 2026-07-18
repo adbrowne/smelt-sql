@@ -39,6 +39,9 @@ owners: [andrew]
   | `supports_create_or_replace_table` | ✓ | ✗ | ✗ |
   | `supports_create_or_replace_view` | ✓ | ✓ | ✓ |
   | `supports_merge` | ✓ | ✓ | ✗ |
+  | `supports_column_scoped_merge` | ✓ | ✓ | ✗ |
+  | `supports_merge_not_matched_by_source` | ✗ | ✓ | ✗ |
+  | `supports_staged_relation_group` (temp-relation-backed statement group, for the merge-less conditional write) | ✓ | ✓ | ✓ |
   | `supports_pivot` | ✓ | ✓ | ✓ |
   | `supports_date_literal` | ✓ | ✗ | ✗ |
   | `supports_concat_operator` (`\|\|`) | ✓ | ✓ | ✓ |
@@ -118,6 +121,37 @@ Two flags describe a backend's participation in maintaining a keyed refresh mode
 
 - **`supports_native_ivm`** — the backend can maintain a declared query as a **native incremental view** (Databricks Enzyme, Snowflake Dynamic Tables). It gates the `refresh: materialized_view` mode: `true` → smelt emits the native maintained object and the engine owns freshness; `false` → the hard error above. It is *not* consulted for the smelt-driven keyed modes (`keyed`, `versioned`), which maintain their own state with `merge_into` + views on any backend.
 - **`supports_retraction`** — whether the backend's native IVM can **invert** a contribution (delete / reprocess a prior input). Meaningful only alongside `supports_native_ivm`; native IVM sets it `true` generally. It does **not** describe smelt-driven retraction: whether a `keyed` model can retract is a *per-model* property of its column families' algebra (the group rung, `incremental_models.md` §"The maintenance boundary"), derived from the SQL, not a blanket backend flag.
+
+### Column-scoped merge and conditional-write capabilities
+
+Four flags describe a backend's participation in the targeted-write and conditional-write
+transforms (`model_transforms.md` §"Generic column-scoped merge", §"Change-suppressed MERGE and
+the staged-candidate conditional DELETE+INSERT"). Like every capability flag, admission consults
+the struct directly — a plan cell whose chosen technique needs a flag the target backend does not
+set is never offered that technique, at plan time, not surfaced as a runtime error.
+
+- **`supports_column_scoped_merge`** — the backend can execute a `MERGE`/`UPDATE ... FROM`
+  restricted to one mutation-sensitivity column-group's columns against a source projection that
+  carries the full target row (recomputing only the group's columns, passing every other column
+  through unchanged from existing state). Gates the generic column-scoped merge transform and, by
+  extension, the dimension-driven horizon-bounded MERGE and the keyed column-scoped-`MERGE` half
+  of definition-change field-backfill.
+- **`supports_merge_not_matched_by_source`** — the backend's `MERGE` dialect exposes a `WHEN NOT
+  MATCHED BY SOURCE` clause, so a region-scoped change-suppressed MERGE can delete departed rows
+  in the same statement. `false` does not refuse the change-suppressed MERGE transform; it
+  changes its lowering — the departed-row delete is emitted as a separate scoped `DELETE`
+  statement inside the same statement group instead of a `MERGE` clause (the dialect split the
+  transform's licence names).
+- **`supports_staged_relation_group`** — the backend can execute a statement group built around a
+  named temporary relation (`CREATE` the staged relation, populate it, run dependent statements
+  against it, `DROP` it), transactional as a unit. Gates the staged-candidate conditional
+  DELETE+INSERT — the merge-less realisation of change-suppressed writes, and the only conditional
+  write path available to a backend with `supports_merge = false` (Spark-over-Parquet).
+
+These flags live in `BackendCapabilities` itself, queried by admission exactly like every other
+capability flag above — never re-derived by a consumer. `supports_column_scoped_merge` names the
+struct field this spec targets; it is not yet where the capability actually lives in code (see
+§Known Divergences).
 
 ### Session initialization
 Before any model executes, a backend's session must be usable against a target schema that may
@@ -209,6 +243,19 @@ resolves nested widening to a table rewrite.
 
 ## Known Divergences / Open Questions
 
+- **`supports_column_scoped_merge` lives on the `Backend` trait, not in `BackendCapabilities`.**
+  §"Column-scoped merge and conditional-write capabilities" specifies its target home as a
+  capability-struct field, matrixed above alongside every other flag; today it is a
+  `Backend::supports_column_scoped_merge(&self) -> bool` trait method
+  (`crates/smelt-backend/src/lib.rs:324`, default `false`, overridden to `true` only by
+  `crates/smelt-backend-duckdb`), absent from `BackendCapabilities`
+  (`crates/smelt-dialect/src/dialect.rs:29`) entirely — so it is not yet asserted by the
+  capability-conformance test the way every struct field is, and Spark's constructors carry no
+  explicit value for it at all (they inherit the trait default). Migrating it into the struct,
+  and adding real `supports_merge_not_matched_by_source` / `supports_staged_relation_group`
+  fields and their conformance assertions, is later work; the matrix above records the intended
+  end state so admission has one place to specify against. Tracked in
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Parity is verified by a gated CI job.** The full dual-target matrix (DuckDB + Spark),
   conformance suite, and the W1–W7 parity initiative are complete. The `spark-parity` CI job in
   `.github/workflows/compat.yml` provisions a Delta-enabled Spark Connect server, runs
@@ -247,7 +294,8 @@ resolves nested widening to a table rewrite.
   `crates/smelt-db/tests/type_property_tests.rs` (Spark oracle).
 - **User docs**: `docs-site/docs/` backend / targets pages.
 - **Plans (history)**: `docs/plans/20260328-multi-engine-example.md`,
-  `docs/plans/20260628-spark-parity.md`.
+  `docs/plans/20260628-spark-parity.md`,
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Related specs**: `architecture.md` (§"Backend trait surface"), `smelt_yml.md`
   (§"Target shape"), `incremental_models.md`, `schema_evolution.md`, `testing.md`,
   `types.md`.

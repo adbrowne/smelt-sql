@@ -46,6 +46,8 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
+| Change-suppressed MERGE (keyed `merge_into` / column-scoped merge variant) | region row identity + change comparability on every compared column | matched-arm gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the cell's comparable mutation-sensitive columns, so a row whose applied effect is the identity is never written; the unmatched side is dialect-keyed (`WHEN NOT MATCHED BY SOURCE` where the dialect has it, else a separate scoped `DELETE` in the same statement group) | unbuilt |
+| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | unbuilt |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
 | Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
@@ -176,6 +178,48 @@ horizon MERGE additionally needs target-as-replica plus a monotone join
 contribution plus a **derived** bounded horizon `H`, merging a dimension batch
 directly into the target slice `[conv_ts − H, conv_ts]` without re-reading the
 fact.
+
+**Change-suppressed MERGE and the staged-candidate conditional DELETE+INSERT** are *variants* of
+the write transforms above — a licensing property admits each variant into a cell's plan space,
+it never chooses between a variant and its unconditional sibling (§Design "A property licenses;
+it never chooses"). Both realise the same no-op write elimination
+(`incremental_models.md` §"Windowed maintenance and the horizon" category 2): a maintenance write
+is skipped exactly where the row's applied effect is proven, per row by evaluation, to be the
+identity. Two obligations license either variant, both discharged fail-closed:
+
+- **Region row identity** — the rows the compare joins stored state to candidate rows on: a
+  declared `unique_key`, else a proven grain key, else whole-row multiset identity (`EXCEPT ALL`
+  both ways) where no key is available. A cell whose identity cannot be established this way is
+  never conditionally written.
+- **Change comparability on every compared column** — each column in the predicate must be a pure
+  function of the processed inputs, so re-evaluating it at a fixed processed-input set reproduces
+  the same bits. A column that legitimately varies run to run (a declared `contract: plausible`,
+  or a run-pinned `NOW()`) is incomparable; a cell whose compared column-group contains even one
+  incomparable column refuses the conditional variant entirely and keeps the unconditional one —
+  comparing only the mutation-sensitive group is sound because the other groups are proven
+  insensitive to the trigger.
+
+Both variants carry the same **fixed-`S` bit-equality obligation**: at a fixed processed-input set
+`S`, the conditional variant and its unconditional sibling must produce identical stored state —
+this is what makes them *interchangeable* techniques for a cell (§"The plan matrix"
+"Interchangeability and choice") rather than a separate mode. Choosing between them is therefore a
+cost-model/`prefer`/`technique` matter, never a correctness one; the variant only changes *whether*
+an unchanged row is physically rewritten, never which bits a rewrite would produce.
+
+**Change-suppressed MERGE** is the matched-arm suppression: the existing `merge_into`/generic
+column-scoped merge emitter gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the compared
+column group on its matched arm, so an unmatched-effect row is skipped rather than rewritten. The
+unmatched-by-source side (a row present in stored state but absent from the candidate set, for a
+region-scoped variant) is dialect-keyed: `WHEN NOT MATCHED BY SOURCE` where the dialect exposes
+it, else a separately emitted scoped `DELETE` inside the same statement group.
+
+**The staged-candidate conditional DELETE+INSERT** is the merge-less realisation of the same
+licence — the keyed-shaped conditional write for a backend that cannot run `MERGE` at all (a
+documented gap: Spark-over-Parquet). One transaction: stage the candidate region into a temp
+relation; derive the changed/new/departed row sets against stored state by diff joins (keyed
+identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-or-departed rows;
+`INSERT` the changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`,
+with the write physically restricted to the rows whose effect is not the identity.
 
 **Definition-change field-backfill** is the pair of techniques a model gaining
 output fields backfills with (`incremental_models.md` §"The definition-change
@@ -410,6 +454,11 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
+- **Unbuilt: change-suppressed MERGE and the staged-candidate conditional DELETE+INSERT.**
+  Neither variant's predicate machinery exists yet — every `merge_into`/column-scoped-merge/
+  DELETE+INSERT emitter today writes unconditionally. Both variants' licensing proofs (region row
+  identity, per-column change comparability) and their admission are being built incrementally;
+  tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
   bounded-domain multiset, compile-time pinning; the reconciliation-ledger
   fold/recompute-reset pair (no `(output-region × column-group)` ledger
@@ -457,5 +506,6 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Code**: `crates/smelt-backend/src/lib.rs` (`merge_into`, `delete_partitions`, `insert_into_from_query`, `insert_overwrite`, `create_materialized_view_as` trait methods); impls in `crates/smelt-backend-duckdb`, `crates/smelt-backend-spark`; `crates/smelt-runtime/src/transformer.rs` (`inject_source_filters`, `inject_time_filter`, `is_transparent_single_source`); `crates/smelt-runtime/src/compile.rs`.
 - **Tests**: the batched per-partition full-refresh-equivalence harness; the cumulative end-state-equivalence harness; the pushdown/clamp unit tests in `smelt-runtime/src/transformer.rs`; the generative soundness oracle.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
-- **Plans (history)**: `docs/plans/20260704-model-updates.md`.
+- **Plans (history)**: `docs/plans/20260704-model-updates.md`,
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **Related specs**: `incremental_models.md`, `model_properties.md`, `models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.

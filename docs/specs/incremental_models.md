@@ -579,6 +579,11 @@ categories of narrowing, with sharp boundaries:
    technique (fail-closed). At a fixed processed-input set `S` the suppressed and unconditional
    variants produce identical state — interchangeable in the strongest sense of §"Per-cell
    admission", so choosing between them is squarely a cost-model/`prefer`/`technique` matter.
+   `model_transforms.md` catalogues the two physical realisations this category licenses:
+   change-suppressed MERGE (a matched-arm `IS DISTINCT FROM` predicate on the keyed `merge_into`
+   or column-scoped merge, dialect-split on the unmatched-by-source side) and the staged-candidate
+   conditional DELETE+INSERT (the merge-less realisation, for a backend without `MERGE`) — both
+   licensed by region row identity plus per-column change comparability on the compared group.
 3. **Write-eligibility clamps** — forbidden on the key grain, derived-only on the partition
    grain (the horizon above).
 
