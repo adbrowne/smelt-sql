@@ -1617,9 +1617,9 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   reframes the declared facts is `models.md` §"The Relation Contract".
 - **Observed-delta recording is built for the change-suppressed column-scoped MERGE family
   (§"The graph layer" — "Observed deltas on model edges"); its key→partition projection into
-  forward propagation is built for a composed model edge; backward resolution, the `smelt explain`
-  surface, and the keyed-fold/staged-candidate write families' own recording are not.** A
-  change-suppressed column-scoped MERGE records its changed-row set — the same `IS DISTINCT FROM`
+  forward propagation is built for a composed model edge, and both are surfaced by `smelt
+  explain`; backward resolution and the keyed-fold/staged-candidate write families' own recording
+  are not.** A change-suppressed column-scoped MERGE records its changed-row set — the same `IS DISTINCT FROM`
   comparison predicate that guards the write's matched arm, restricted to comparable columns only —
   into a warehouse-resident table alongside the reconciliation ledger, in the same backend
   transaction as the write itself: a failed write leaves no delta row, and a fully-suppressed run
@@ -1636,16 +1636,32 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   licensing that movement was proven or declared. An empty recorded delta projects to nothing (the graph half of the no-op
   cascade — a fully-suppressed run's downstream has nothing to do); an absent record (no
   conditional write has ever run for that window) still falls back to the full written window, the
-  always-correct widen-never-narrow default. What remains unbuilt: this projection is exercised by
-  directly supplying an already-fetched observed-delta lookup to the propagation assembly — reading
-  the real warehouse-resident table live during `smelt run --since-upstream` itself is not yet
-  wired into the CLI path; backward resolution does not yet consume a recorded delta at all (every
-  ancestor requirement is still the full clamp-derived slice); the keyed-fold and staged-candidate
-  write families do not yet record; `smelt explain` does not yet surface a cell's recording/
-  projection status; and the settle-bound × observed-delta composition named in §"What the
-  composed shape uniquely enables" has no `smelt explain`-visible leg to compose with yet. Tracked
-  by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (the `smelt explain` surface;
-  and, for external sources, the M3-input fingerprint-sidecar variant in §Future Extensions).
+  always-correct widen-never-narrow default. `smelt explain <model>` surfaces both halves as
+  static facts about the derived plan: a `ColumnScopedMerge` cell's block prints an
+  `observed-delta recording:` line reading `yes` only when that cell's own row identity is
+  proven (`region key: Key(...)`, never `WholeRow`) and every compared column is proven
+  comparable across runs — the same two fail-closed proofs write suppression itself requires
+  (`model_properties.md` §"Change comparability"; a `WholeRow`-identity cell or an incomparable compared column always
+  falls back to an unconditional matched-arm rewrite and has nothing to record, so its line reads
+  `no` instead) — and a composed model's `Key temporal
+  locality:` block prints an `observed-delta projection:` line — `exact (key-embedded)` /
+  `exact (key-determined)` for routes 1–2, widened by `r` plus margins for route 3 — alongside its
+  route and settle bound (a bare keyed model, with no established locality, prints no projection
+  line). This is a plan-level report only: `explain` never opens a backend connection, so it
+  reports what a cell's technique *would* record and how its route *would* project, never a
+  specific past run's actual recorded delta (that is `smelt run --since-upstream`'s own read
+  path, not `explain`'s) — so the settle-bound × observed-delta composition named in §"What the
+  composed shape uniquely enables" is `smelt explain`-visible on its static shape (route, settle
+  bound, projection form) but has no live "is this slice's recorded delta actually empty right
+  now" leg to compose with yet. What remains unbuilt: this projection is exercised by directly supplying
+  an already-fetched observed-delta lookup to the propagation assembly — reading the real
+  warehouse-resident table live during `smelt run --since-upstream` itself is not yet wired into
+  the CLI path; backward resolution does not yet consume a recorded delta at all (every ancestor
+  requirement is still the full clamp-derived slice); the keyed-fold and staged-candidate write
+  families do not yet record, so their cells print no recording line at all. Tracked by
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md` (wiring `--since-upstream`'s live
+  read path; and, for external sources, the M3-input fingerprint-sidecar variant in §Future
+  Extensions).
 - **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
   is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
   graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a

@@ -927,6 +927,24 @@ the model's own **Relation Contract** (its clock, identity, and derived `grain` 
 contract block per **inbound edge**. This only applies to incremental models (`refresh:
 incremental` with a `grain:` declared) — other models print a one-line notice instead.
 
+A `ColumnScopedMerge` cell's block additionally prints an `observed-delta recording:` line —
+the only technique family recording is wired for today (`KeyedFold` and the staged-candidate
+write family do not record yet, so their cells print no such line at all). The line still says
+`yes` or `no`: recording only actually fires when the cell's matched arm can suppress the write
+for unchanged rows, which needs a proven per-row identity (`region key:` must be `Key(...)`,
+never `WholeRow`) over columns all proven comparable across runs — a cell that fails either
+check falls back to an unconditional rewrite at runtime and has nothing to record, so its line
+reads `no`. For a composed (key + time)
+model, the `Key temporal locality:` block prints an `observed-delta projection:` line alongside
+its route and settle bound: `exact (key-embedded)` / `exact (key-determined)` for locality
+routes 1–2, `` widened by `r` + margins `` for route 3, since a key's stored partition can move
+under that route. A bare keyed model (no established locality) prints no `Key temporal
+locality:` block and no projection line — see [Observed deltas and no-op
+cascades](../guide/incremental-models.md#observed-deltas-and-no-op-cascades). Both lines are
+static facts about the derived plan, not about a specific past run: `smelt explain` never opens
+a backend connection, so it reports what a cell's technique *would* record and how its route
+*would* project.
+
 An inbound edge is either a declared source (`sources.*`) or an upstream maintained model —
 both render through the identical `clock:` / `identity:` / `derived grain:` rows, labelled
 `(source)` or `(model)` so it's clear which provider filled them. A row prints `(none)` when

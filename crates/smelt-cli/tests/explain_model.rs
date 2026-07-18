@@ -3,6 +3,7 @@
 //! to another maintained model derives a creation-trigger cell clocked by the
 //! upstream's own `timeseries:` declaration.
 
+use std::fs;
 use std::path::Path;
 
 use smelt_cli::argument_resolution::{compute_scope, resolve_argument};
@@ -824,4 +825,233 @@ SELECT d, amount FROM smelt.sources.payments
             "expected an unconditional 'write pin: (none)' row absent any cells[] entry: {report}"
         );
     }
+}
+
+// ---------------------------------------------------------------------------
+// Observed-delta recording + projection surface
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D4;
+// `docs/specs/incremental_models.md` §"The graph layer" — "Observed deltas
+// on model edges", §"What the composed shape uniquely enables" — "Exact
+// key→partition dirt projection").
+//
+// `examples/timeseries/models/daily_events_enriched.sql` is the real fixture
+// already exercising a `Technique::ColumnScopedMerge` cell (a single-input
+// mutable dimension enrichment) — the only technique family D2 wired
+// observed-delta recording for. No fixture today combines that technique
+// with the composed (key + time) shape in one model (`docs/specs/
+// incremental_models.md` §Known Divergences: keyed-fold/staged-candidate
+// recording is still unbuilt, and `daily_events_enriched` itself has no
+// identity axis), so the recording-status assertion and the
+// projection-form assertion are exercised over their own real fixtures
+// rather than a single model — recording status off the `ColumnScopedMerge`
+// cell here, projection form off the composed `user_daily_spend` (route 1)
+// and `silver.events_deduped` (route 3) fixtures below.
+///
+/// `daily_events_enriched` declares `batched.unique_key: [event_id]`, not a
+/// top-level `unique_key:` — and `derive::ModelInputs::declared_unique_key`
+/// only ever reads the top-level field for a `Grain::Partition` model
+/// (`crates/smelt-logical/src/maintenance/derive.rs`), so the `batched:`
+/// block's key never reaches P2 row-identity derivation here. With no
+/// provable FD key either (the fact+dimension join is not fan-out-free
+/// enough for `derive::row_identity`'s SQL-side proof), this cell's own
+/// `region key:` is genuinely `WholeRow` — the report already said as much
+/// ("no identity axis") before this test was corrected, but the
+/// recording-status line still printed "yes" unconditionally for every
+/// `ColumnScopedMerge` cell regardless of identity. It now correctly prints
+/// "no": a `WholeRow` cell's matched arm always falls back to unconditional
+/// rewrite at runtime (`choice::resolve_write_suppression`), so nothing is
+/// ever recorded for it.
+#[test]
+fn explain_prints_observed_delta_recording_status_for_a_conditional_cell() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report = build_report_for(&project_dir, "daily_events_enriched")
+        .expect("daily_events_enriched has a maintenance plan");
+
+    assert_eq!(
+        report
+            .matches("observed-delta recording: yes (change-suppressed column-scoped MERGE)")
+            .count(),
+        0,
+        "daily_events_enriched's ColumnScopedMerge cell has WholeRow row identity — it must \
+         never claim recording: yes: {report}"
+    );
+    assert_eq!(
+        report.matches("observed-delta recording: no").count(),
+        1,
+        "expected the negative recording row exactly once, on the model's one \
+         ColumnScopedMerge cell, and never on its DeleteInsert cells (which print no recording \
+         row at all): {report}"
+    );
+}
+
+/// A `ColumnScopedMerge` cell whose P2 row identity resolves `WholeRow`
+/// (no `batched.unique_key:` declared, and the join is not fan-out-free
+/// enough for `derive::row_identity`'s own FD proof to establish one either)
+/// must print "no" for observed-delta recording, never "yes" — a
+/// `WholeRow` cell has no per-row join identity to compare on, so
+/// `choice::resolve_write_suppression` always fail-closes to
+/// `Unconditional` for it (`crates/smelt-logical/src/maintenance/
+/// choice.rs`'s `whole_row_identity_refuses_regardless_of_comparability`
+/// unit test covers the same fail-closed rule at the derivation layer; this
+/// covers the `smelt explain` reporting surface, which regressed to
+/// printing "yes" unconditionally for the whole `ColumnScopedMerge`
+/// technique family before this fix).
+#[test]
+fn explain_prints_no_recording_for_a_whole_row_identity_conditional_cell() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let root = tmp.path();
+    let smelt_yml = r#"
+name: whole_row_recording_fixture
+version: 1
+
+paths:
+  - models
+
+targets:
+  dev:
+    type: duckdb
+    database: target/dev.duckdb
+    schema: main
+
+default_materialization: view
+"#;
+    // Mirrors `examples/timeseries/models/daily_events_enriched.sql`'s
+    // fact+dimension shape (a mutable, unclocked dimension whose column
+    // group derives an `UpstreamMutation` `ColumnScopedMerge` cell) but
+    // deliberately omits `batched.unique_key:` — with no declared key and
+    // no FD proof available from this join shape, P2 row identity resolves
+    // `WholeRow`.
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  partition_column: event_date
+  event_time_column: event_timestamp
+  granularity: day
+maintenance:
+  scan_bounds:
+    per_source:
+      users:
+        allow_full_scan: true
+---
+SELECT
+    date_trunc('day', e.event_timestamp) AS event_date,
+    e.event_timestamp,
+    e.event_type,
+    u.user_name
+FROM smelt.sources.events e
+JOIN smelt.sources.users u ON e.user_id = u.user_id
+"#;
+    let events_source = r#"
+columns:
+  - { name: event_timestamp, type: TIMESTAMP, nullable: false }
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: event_type, type: VARCHAR, nullable: false }
+mutation_profile:
+  kind: append_only
+"#;
+    let users_source = r#"
+columns:
+  - { name: user_id, type: INTEGER, nullable: false }
+  - { name: user_name, type: VARCHAR, nullable: false }
+mutation_profile:
+  kind: mutable_snapshot
+"#;
+    fs::write(root.join("smelt.yml"), smelt_yml).unwrap();
+    fs::create_dir_all(root.join("models")).unwrap();
+    fs::create_dir_all(root.join("models/sources")).unwrap();
+    fs::write(root.join("models/events_enriched.sql"), model).unwrap();
+    fs::write(root.join("models/sources/events.yml"), events_source).unwrap();
+    fs::write(root.join("models/sources/users.yml"), users_source).unwrap();
+
+    let report = build_report_for(root, "events_enriched").expect("model has a maintenance plan");
+
+    assert!(
+        report.contains("region key: WholeRow"),
+        "fixture must actually exercise the WholeRow identity case: {report}"
+    );
+    // Each cell's block starts at its own "  - group ..." header line; split
+    // on that marker to isolate the ColumnScopedMerge cell's own lines from
+    // any sibling cell (e.g. the model's other DeleteInsert/backfill cells).
+    let cell_block = report
+        .split("  - group ")
+        .find(|block| block.contains("technique: ColumnScopedMerge"))
+        .expect("expected an admitted ColumnScopedMerge cell for the mutable-dimension trigger");
+    assert!(
+        cell_block.contains("observed-delta recording: no"),
+        "a WholeRow-identity ColumnScopedMerge cell must never claim recording: yes: {cell_block}\n\nfull report:\n{report}"
+    );
+    assert!(
+        !cell_block.contains("observed-delta recording: yes"),
+        "a WholeRow-identity ColumnScopedMerge cell must never claim recording: yes: {cell_block}"
+    );
+}
+
+/// A composed model under locality route 1 (key-embedded) reports an
+/// *exact* observed-delta projection — no widening, since a stored row's
+/// partition value is a per-key constant under this route.
+#[test]
+fn explain_prints_exact_projection_for_a_route_one_composed_model() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let report =
+        build_report_for(&project_dir, "user_daily_spend").expect("model has a maintenance plan");
+
+    assert!(
+        report.contains("observed-delta projection: exact (key-embedded)"),
+        "expected an exact projection line for route 1: {report}"
+    );
+}
+
+/// A composed model under locality route 3 (recurrence-bounded) reports a
+/// *widened* observed-delta projection — a key's partition value may move
+/// under this route, so the projected dirt widens backward by `r` plus the
+/// route's own margins (`silver.events_deduped`, the flagship composed
+/// dedupe fixture).
+#[test]
+fn explain_prints_widened_projection_for_a_route_three_composed_model() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let report = build_report_for(&project_dir, "silver.events_deduped")
+        .expect("model has a maintenance plan");
+
+    assert!(
+        report.contains("observed-delta projection: widened by `r` + margins"),
+        "expected a widened projection line for route 3: {report}"
+    );
+}
+
+/// A bare keyed model (identity, no established key temporal locality) has
+/// no partition axis to project observed deltas onto at all — the report
+/// must show no projection row, distinct from a composed model's exact or
+/// widened form.
+#[test]
+fn explain_shows_no_projection_row_for_a_bare_keyed_model() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let report = build_report_for(&project_dir, "silver.device_user_edges")
+        .expect("model has a maintenance plan");
+
+    assert!(
+        !report.contains("Key temporal locality:"),
+        "silver.device_user_edges is bare keyed — no locality section expected: {report}"
+    );
+    assert!(
+        !report.contains("observed-delta projection:"),
+        "a bare keyed model must print no projection row at all: {report}"
+    );
 }

@@ -449,6 +449,45 @@ pub fn build_maintenance_plan_report(
                     let _ = writeln!(out, "      write pin: (none)");
                 }
             }
+            // Observed-delta recording (`incremental_models.md` §"The graph
+            // layer" — "Observed deltas on model edges"; §Known
+            // Divergences): recording is wired for exactly the
+            // change-suppressed column-scoped MERGE family
+            // (`Technique::ColumnScopedMerge`) — the keyed-fold and
+            // staged-candidate write families do not record yet, and every
+            // other technique (region rewrite, in-place update) has no
+            // conditional write to suppress in the first place. This reads
+            // the cell's own derived `technique` only — no re-derivation of
+            // whether a write is actually conditional at runtime.
+            //
+            // A `ColumnScopedMerge` cell only actually records at runtime
+            // when `choice::resolve_write_suppression` resolves `Suppressed`
+            // rather than fail-closed `Unconditional`
+            // (`smelt-runtime::maintenance_driver::
+            // execute_column_scoped_write_with_observed_delta`) — and P2 row
+            // identity (`RowIdentity::WholeRow` never proves a per-row join
+            // identity to compare on) is one of that resolution's two
+            // independent fail-closed gates, alongside P3 per-column
+            // comparability. `facts.has_identity` above already carries the
+            // P2 half of that verdict (consulted, not re-derived); the P3
+            // comparability half is not independently re-checked here — this
+            // reporting path has no `sql`/`JoinContext` threaded to redo the
+            // property-composition walk, so a `Key`-identity cell with an
+            // incomparable compared column can still print "yes" even though
+            // it resolves `Unconditional` at runtime (the authoritative
+            // check remains `choice::resolve_write_suppression`).
+            if cell.technique == Technique::ColumnScopedMerge && facts.has_identity {
+                let _ = writeln!(
+                    out,
+                    "      observed-delta recording: yes (change-suppressed column-scoped MERGE)"
+                );
+            } else if cell.technique == Technique::ColumnScopedMerge {
+                let _ = writeln!(
+                    out,
+                    "      observed-delta recording: no (no proven row identity — matched arm \
+                     falls back to unconditional rewrite, nothing to record)"
+                );
+            }
         }
     }
     let _ = writeln!(out);
@@ -476,10 +515,33 @@ pub fn build_maintenance_plan_report(
                 "route 3 (recurrence-bounded, declared key_recurrence)"
             }
         };
+        // Observed-delta key→partition projection form
+        // (`incremental_models.md` §"What the composed shape uniquely
+        // enables" — "Exact key→partition dirt projection"; §Known
+        // Divergences): routes 1–2 project a recorded observed delta to
+        // *exact* touched partitions (a stored row's partition value is a
+        // per-key constant); route 3 widens the projection backward by the
+        // recurrence bound `r` plus the route's own margins, since a key's
+        // partition value may move under that route. This mirrors
+        // `smelt_logical::maintenance::propagate::project_observed_delta`'s
+        // own route dispatch — read here, never re-derived.
+        let projection = match &locality.slice {
+            LocalitySlice::Window {
+                recurrence_bounded: false,
+                ..
+            } => "exact (key-embedded)",
+            LocalitySlice::DeltaValues { .. } => "exact (key-determined)",
+            LocalitySlice::Window {
+                recurrence_bounded: true,
+                ..
+            }
+            | LocalitySlice::RecurrenceBounded { .. } => "widened by `r` + margins",
+        };
         let _ = writeln!(out, "Key temporal locality:");
         let _ = writeln!(out, "  route: {route}");
         let _ = writeln!(out, "  slice: {:?}", locality.slice);
         let _ = writeln!(out, "  settle bound: {:?}", locality.settle_bound);
+        let _ = writeln!(out, "  observed-delta projection: {projection}");
         let _ = writeln!(out);
     }
 

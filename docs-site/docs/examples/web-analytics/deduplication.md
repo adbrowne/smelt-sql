@@ -172,6 +172,7 @@ Key temporal locality:
   route: route 3 (recurrence-bounded, declared key_recurrence)
   slice: RecurrenceBounded { partition_column: "first_seen_date", margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }
   settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
+  observed-delta projection: widened by `r` + margins
 
 Refusals: (none)
 
