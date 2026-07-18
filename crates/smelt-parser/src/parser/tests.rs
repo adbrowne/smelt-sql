@@ -10033,3 +10033,77 @@ fn null_literal_supports_cast_and_subscript_postfix() {
         );
     }
 }
+
+#[test]
+fn quoted_table_name_in_from() {
+    // A double-quoted table name in FROM position (`FROM "flights"`) is
+    // lexed as a STRING token (smelt's lexer doesn't distinguish `"` from
+    // `'` at the token-kind level), but `parse_table_ref`'s primary path
+    // only accepted IDENT. External corpus ledger category
+    // `quoted_table_name_in_from`: `SELECT "dest" FROM "flights"` previously
+    // failed to parse. Printer must re-emit the quotes on round-trip.
+    let sql = r#"SELECT "dest" FROM "flights""#;
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    assert!(
+        printed.contains(r#"FROM "flights""#),
+        "printed SQL should preserve the quoted table name: got {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn quoted_schema_qualified_table() {
+    // Same fix, schema-qualified: `FROM "schema"."table"`.
+    let sql = r#"SELECT * FROM "myschema"."mytable""#;
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    assert!(
+        printed.contains(r#"FROM "myschema"."mytable""#),
+        "printed SQL should preserve both quoted segments: got {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn single_quoted_glob_path_literal_in_from_unchanged() {
+    // Negative/regression guard: a single-quoted string in FROM position is
+    // a file-glob/path literal (`FROM 'x.parquet'`), a distinct token
+    // classification from the double-quoted-identifier fix above
+    // (`at_quoted_ident_alias` checks the leading quote character
+    // precisely). This is not yet accepted as a table reference at all —
+    // pin that it still produces a parse error, so the quoted-identifier
+    // fix is not accidentally widened to swallow single-quoted literals
+    // too (ledger category `file_glob_or_path_literal_from` stays separate
+    // from `quoted_table_name_in_from`).
+    let sql = "SELECT * FROM 'x.parquet'";
+    let parse = crate::parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "{sql:?} (single-quoted glob/path literal) should remain unparsed as a table ref; \
+         if this now parses cleanly, the quoted-identifier fix has incorrectly widened to \
+         accept single-quoted STRING tokens too"
+    );
+}

@@ -35,10 +35,6 @@ note = "An ORDER BY clause inside an aggregate/window function call's argument l
 category = "aggregate_call_order_by_clause"
 note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
-["c37e044f4cdbca2b"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
-
 ["430fadb76ce45e99"]
 category = "aggregate_call_order_by_clause"
 note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
@@ -454,10 +450,6 @@ note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed;
 ["a2a0218136085c71"]
 category = "exists_with_cte_subquery"
 note = "EXISTS(...) whose body is a CTE-scoped subquery (WITH ... SELECT) is not parsed; parse_exists_expr expects a bare SELECT"
-
-["c1307297692b3fcc"]
-category = "quoted_table_name_in_from"
-note = "A double-quoted table name in FROM position (e.g. FROM 'flights' (double-quoted in the source)) is not parsed; parse_table_ref only accepts IDENT, not the STRING token smelt's lexer produces for double-quoted text"
 
 ["909102b28165f9f6"]
 category = "implicit_cross_join_comma_syntax"

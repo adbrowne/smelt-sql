@@ -1745,8 +1745,45 @@ impl TableRef {
         self.0
             .children_with_tokens()
             .filter_map(|e| e.into_token())
-            .find(|t| t.kind() == IDENT)
-            .map(|t| t.text().to_string())
+            .find(|t| t.kind() == IDENT || (t.kind() == STRING && t.text().starts_with('"')))
+            .map(|t| strip_ident_quotes(t.text()).to_string())
+    }
+
+    /// Raw text of the primary table/schema-name path when it begins with a
+    /// double-quoted identifier lexed as STRING (`"flights"`,
+    /// `"schema"."table"`), quotes intact. DuckDB requires re-quoting names
+    /// that need it, so the printer must not go through `identifier()` here
+    /// — that method strips quotes (for resolution callers that want the
+    /// bare name) and only returns the first segment. Walks contiguous
+    /// `(IDENT|STRING) (DOT (IDENT|STRING))*` segments starting at the
+    /// first non-trivia, non-`LATERAL` token. Returns `None` when that
+    /// first token is not a double-quoted STRING — plain unquoted names
+    /// keep using the existing `identifier()` printer path unchanged.
+    pub fn quoted_identifier_path_text(&self) -> Option<String> {
+        let tokens: Vec<_> = self
+            .0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .filter(|t| !t.kind().is_trivia() && t.kind() != LATERAL_KW)
+            .collect();
+        let first = tokens.first()?;
+        if !(first.kind() == STRING && first.text().starts_with('"')) {
+            return None;
+        }
+        let mut out = first.text().to_string();
+        let mut i = 1;
+        while i + 1 < tokens.len() && tokens[i].kind() == DOT {
+            let seg = &tokens[i + 1];
+            let seg_is_ident_like =
+                seg.kind() == IDENT || (seg.kind() == STRING && seg.text().starts_with('"'));
+            if !seg_is_ident_like {
+                break;
+            }
+            out.push('.');
+            out.push_str(seg.text());
+            i += 2;
+        }
+        Some(out)
     }
 
     /// Get the alias if present (explicit AS alias or implicit alias after table ref)

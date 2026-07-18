@@ -496,10 +496,15 @@ impl<'a> super::Parser<'a> {
             self.start_node_at(checkpoint, FUNCTION_CALL);
             self.parse_arg_list();
             self.finish_node(); // Close FUNCTION_CALL
-        } else if self.at(IDENT) {
-            // Use builder checkpoint for proper lookahead
+        } else if self.at(IDENT) || self.at_quoted_ident_alias() {
+            // Use builder checkpoint for proper lookahead. `at_quoted_ident_alias()`
+            // accepts a double-quoted identifier lexed as STRING (`FROM "flights"`) —
+            // see the comment on that helper in parser/mod.rs. A single-quoted STRING
+            // (`FROM 'x.parquet'`, a file-glob/path literal) is deliberately excluded:
+            // that helper checks the leading quote character precisely so the two
+            // token shapes stay distinguished.
             let checkpoint = self.builder.checkpoint();
-            self.advance(); // Consume IDENT
+            self.advance(); // Consume IDENT or double-quoted identifier
             self.skip_trivia();
 
             if self.at(LPAREN) {
@@ -510,11 +515,16 @@ impl<'a> super::Parser<'a> {
             } else if self.at(DOT) {
                 // Could be schema.table, db.schema.table (arbitrary-depth
                 // qualification), or namespace.func(). Consume DOT + IDENT
-                // pairs in a loop so any qualification depth is accepted.
+                // (or double-quoted identifier) pairs in a loop so any
+                // qualification depth is accepted, quoted or not.
                 while self.at(DOT) {
                     self.advance(); // Consume DOT
                     self.skip_trivia();
-                    self.expect(IDENT); // Consume next segment IDENT
+                    if self.at_quoted_ident_alias() {
+                        self.advance(); // Consume next segment (double-quoted identifier)
+                    } else {
+                        self.expect(IDENT); // Consume next segment IDENT
+                    }
                     self.skip_trivia();
                     if self.at(LPAREN) || !self.at(DOT) {
                         break;

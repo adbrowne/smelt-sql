@@ -41,3 +41,4 @@ SELECT struct_pack(x => a, y => b) AS s FROM t
 SELECT UNNEST([[1, 2, 3]], recursive := true) AS u
 SELECT 2 NOT IN (2, 3) AS x
 SELECT a == 1 AS x FROM t
+SELECT a FROM "t"

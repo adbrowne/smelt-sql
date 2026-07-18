@@ -75,7 +75,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 |-------|---------|--------|------|
 | 1     | done    | fix(parser): NOT-prefixed binary operators | 2026-07-18 |
 | 2     | done    | fix(lexer): accept == as equality operator alias | 2026-07-18 |
-| 3     | pending |        |      |
+| 3     | done    | fix(parser): double-quoted table/schema names in FROM | 2026-07-18 |
 | 4     | pending |        |      |
 | 5     | pending |        |      |
 | 6     | pending |        |      |

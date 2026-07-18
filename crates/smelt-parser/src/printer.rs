@@ -264,6 +264,10 @@ impl Display for TableRef {
             // rest of this printer's approach of falling back to source text
             // for constructs without a dedicated Display impl.
             write!(f, "{}", subquery.syntax().text())?;
+        } else if let Some(quoted) = self.quoted_identifier_path_text() {
+            // Double-quoted table/schema name(s) — re-emit with quotes
+            // intact (`identifier()` strips them for resolution callers).
+            write!(f, "{}", quoted)?;
         } else if let Some(ident) = self.identifier() {
             write!(f, "{}", ident)?;
         } else if let Some(inner) = self.syntax().children().find_map(TableRef::cast) {
