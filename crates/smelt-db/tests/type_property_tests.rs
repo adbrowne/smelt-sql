@@ -232,6 +232,206 @@ fn smoke_count_aggregate() {
 }
 
 #[test]
+fn smoke_listagg_function() {
+    // LISTAGG is DuckDB's SQL-standard alias for STRING_AGG: a plain call,
+    // `LISTAGG(col, sep)` → Text, no WITHIN GROUP needed (that clause is
+    // rejected by DuckDB for both STRING_AGG and LISTAGG — see
+    // `smoke_string_agg_within_group_rejected_by_duckdb` below).
+    let oracle = DuckDbOracle::new();
+    let sql =
+        "WITH data AS (SELECT CAST('hello' AS STRING) AS x) SELECT LISTAGG(x, ',') AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+    assert_eq!(actual[0].1, DataType::Varchar { max_length: None });
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Varchar { max_length: None },
+        cast_sql: "CAST('hello' AS STRING)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+    assert_eq!(inferred[0].1, DataType::Text);
+}
+
+#[test]
+fn smoke_string_agg_within_group_rejected_by_duckdb() {
+    // Pins the oracle probe backing the decision NOT to generate
+    // `STRING_AGG`/`LISTAGG ... WITHIN GROUP (ORDER BY ...)`: the parser
+    // accepts the generic WITHIN GROUP call-modifier clause for any function
+    // name, but DuckDB's binder rejects it specifically for these two
+    // ordered-set-aggregate names (it only recognises a fixed set —
+    // percentile_cont/percentile_disc/mode/etc — as "ordered aggregates").
+    // If this ever starts succeeding (a DuckDB version change), the note in
+    // `core_functions` documenting the deferral is stale and STRING_AGG/LISTAGG
+    // WITHIN GROUP generation should be reconsidered.
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST('hello' AS STRING) AS x) \
+               SELECT STRING_AGG(x, ',') WITHIN GROUP (ORDER BY x) AS expr_0 FROM data";
+    assert!(
+        oracle.query_types(sql).is_err(),
+        "expected DuckDB to reject STRING_AGG ... WITHIN GROUP; syntax accepted now?"
+    );
+}
+
+#[test]
+fn smoke_percentile_cont_integer_widens_to_double() {
+    // Oracle probe: percentile_cont interpolates like MEDIAN — integer-family
+    // sort columns widen to DOUBLE. Here smelt agrees with DuckDB (both say
+    // Double), so this is a plain match, not a registered divergence.
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST(1 AS INTEGER) AS x) \
+               SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+    assert_eq!(actual[0].1, DataType::Double);
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Integer,
+        cast_sql: "CAST(1 AS INTEGER)".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+    assert_eq!(inferred[0].1, DataType::Double);
+}
+
+#[test]
+fn smoke_percentile_cont_decimal_diverges_from_smelt() {
+    // Oracle probe + regression pin for the `percentile_ordered_set_decimal`
+    // divergence: DuckDB preserves the sort column's Decimal type for
+    // percentile_cont, but smelt's registry-fixed signature always says
+    // Double (it can't see the WITHIN GROUP ORDER BY expression's type).
+    let oracle = DuckDbOracle::new();
+    let sql = "WITH data AS (SELECT CAST(99.99 AS DECIMAL(10,2)) AS x) \
+               SELECT percentile_cont(0.5) WITHIN GROUP (ORDER BY x) AS expr_0 FROM data";
+    let actual = oracle.query_types(sql).unwrap();
+    assert_eq!(
+        actual[0].1,
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+    );
+
+    let columns = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        },
+        cast_sql: "CAST(99.99 AS DECIMAL(10,2))".into(),
+    }];
+    let inferred = run_smelt_inference(sql, &columns);
+    assert_eq!(
+        inferred[0].1,
+        DataType::Double,
+        "smelt's PERCENTILE_CONT signature is registry-fixed Double (known bug, \
+         see percentile_ordered_set_decimal in divergences.rs)"
+    );
+
+    // The registered divergence must actually suppress this mismatch in the
+    // property-test harness.
+    let divergences = known_divergences();
+    check_types_against_oracle(
+        &oracle,
+        "duckdb",
+        sql,
+        &columns,
+        &[],
+        &divergences,
+        &known_unknowns(),
+    )
+    .unwrap();
+}
+
+#[test]
+fn smoke_percentile_disc_preserves_input_type() {
+    // Oracle probe + regression pin for `percentile_disc_integer` /
+    // `percentile_disc_bigint`: percentile_disc never interpolates — it always
+    // returns an actual input value, so its type is the sort column's type
+    // unchanged (Integer/BigInt included, unlike percentile_cont). smelt's
+    // registry-fixed signature always says Double.
+    let oracle = DuckDbOracle::new();
+    let divergences = known_divergences();
+    let unknowns = known_unknowns();
+
+    let sql_int = "WITH data AS (SELECT CAST(1 AS INTEGER) AS x) \
+                   SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY x) AS expr_0 FROM data";
+    assert_eq!(oracle.query_types(sql_int).unwrap()[0].1, DataType::Integer);
+    let cols_int = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Integer,
+        cast_sql: "CAST(1 AS INTEGER)".into(),
+    }];
+    assert_eq!(
+        run_smelt_inference(sql_int, &cols_int)[0].1,
+        DataType::Double
+    );
+    check_types_against_oracle(
+        &oracle,
+        "duckdb",
+        sql_int,
+        &cols_int,
+        &[],
+        &divergences,
+        &unknowns,
+    )
+    .unwrap();
+
+    let sql_big = "WITH data AS (SELECT CAST(1 AS BIGINT) AS x) \
+                   SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY x) AS expr_0 FROM data";
+    assert_eq!(oracle.query_types(sql_big).unwrap()[0].1, DataType::BigInt);
+    let cols_big = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::BigInt,
+        cast_sql: "CAST(1 AS BIGINT)".into(),
+    }];
+    assert_eq!(
+        run_smelt_inference(sql_big, &cols_big)[0].1,
+        DataType::Double
+    );
+    check_types_against_oracle(
+        &oracle,
+        "duckdb",
+        sql_big,
+        &cols_big,
+        &[],
+        &divergences,
+        &unknowns,
+    )
+    .unwrap();
+
+    let sql_dec = "WITH data AS (SELECT CAST(99.99 AS DECIMAL(10,2)) AS x) \
+                   SELECT percentile_disc(0.5) WITHIN GROUP (ORDER BY x) AS expr_0 FROM data";
+    assert_eq!(
+        oracle.query_types(sql_dec).unwrap()[0].1,
+        DataType::Decimal {
+            precision: 10,
+            scale: 2
+        }
+    );
+    let cols_dec = vec![generators::TypedSource {
+        name: "x".into(),
+        data_type: DataType::Decimal {
+            precision: 10,
+            scale: 2,
+        },
+        cast_sql: "CAST(99.99 AS DECIMAL(10,2))".into(),
+    }];
+    assert_eq!(
+        run_smelt_inference(sql_dec, &cols_dec)[0].1,
+        DataType::Double
+    );
+    check_types_against_oracle(
+        &oracle,
+        "duckdb",
+        sql_dec,
+        &cols_dec,
+        &[],
+        &divergences,
+        &unknowns,
+    )
+    .unwrap();
+}
+
+#[test]
 fn smoke_binary_add() {
     let oracle = DuckDbOracle::new();
     let sql = "WITH data AS (SELECT CAST(1 AS INTEGER) AS x) SELECT x + x AS expr_0 FROM data";
@@ -1122,9 +1322,9 @@ mod reachability {
         }
 
         // The extended, DuckDB-executable functions added to the generator.
-        // (INITCAP/TO_CHAR aren't DuckDB scalars, and POSITION(x IN y) /
-        // PERCENTILE_CONT WITHIN GROUP are deferred parser grammar, so those are
-        // not generated — see the note in `core_functions`.)
+        // (INITCAP/TO_CHAR aren't DuckDB scalars, and POSITION(x IN y) is
+        // deferred parser grammar; STRING_AGG/LISTAGG WITHIN GROUP is DuckDB's
+        // binder rejecting it outright — see the note in `core_functions`.)
         let new_functions = [
             "MEDIAN",
             "ARRAY_AGG",
@@ -1136,6 +1336,9 @@ mod reachability {
             "COVAR_POP",
             "COVAR_SAMP",
             "MODE",
+            "LISTAGG",
+            "PERCENTILE_CONT",
+            "PERCENTILE_DISC",
         ];
         let missing: Vec<&str> = new_functions
             .iter()
@@ -1158,6 +1361,25 @@ mod reachability {
         assert!(
             corpus.iter().any(|sql| sql.contains(") FILTER (WHERE ")),
             "generators never produced an aggregate FILTER clause over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_percentile_within_group() {
+        // PERCENTILE_CONT/PERCENTILE_DISC are only valid in DuckDB via the
+        // `WITHIN GROUP (ORDER BY ...)` ordered-set-aggregate form (probed
+        // directly — there is no direct-arg scalar-function form). Guards
+        // against the generator silently dropping the WITHIN GROUP wrapper.
+        // (Per-function reachability for PERCENTILE_CONT/PERCENTILE_DISC
+        // specifically is covered exhaustively by `reaches_extended_functions`
+        // above — this statistical 500-case sample isn't guaranteed to draw
+        // both of two adjacent list entries.)
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus
+                .iter()
+                .any(|sql| sql.contains("WITHIN GROUP (ORDER BY")),
+            "generators never produced a WITHIN GROUP ordered-set aggregate over {N} cases"
         );
     }
 }

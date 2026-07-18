@@ -741,6 +741,15 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::Text,
         },
+        // LISTAGG is DuckDB's SQL-standard alias for STRING_AGG (same plain-call
+        // shape: `LISTAGG(col, sep)` → Text; registered in BuiltinRegistry).
+        FuncDesc {
+            name: "LISTAGG",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral(",")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
         // Any-type aggregates
         FuncDesc {
             name: "ANY_VALUE",
@@ -837,10 +846,41 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::unknown_dynamic(), // arg-dependent
         },
+        // Ordered-set aggregates: `PERCENTILE_CONT(f) WITHIN GROUP (ORDER BY col)`.
+        // The parser now accepts the generic `WITHIN GROUP` call-modifier clause
+        // (any function name), and DuckDB itself binds it specifically for
+        // percentile_cont/percentile_disc (probed directly against DuckDB —
+        // `percentile_cont`/`percentile_disc` have no direct-arg scalar-function
+        // form; WITHIN GROUP is the only accepted shape). The `sql` for these two
+        // is built specially in `generate_expr` (the fraction argument plus a
+        // WITHIN GROUP ORDER BY over the compatible column), not via the generic
+        // arg-join path below.
+        FuncDesc {
+            name: "PERCENTILE_CONT",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "PERCENTILE_DISC",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
         // NOTE: INITCAP and TO_CHAR are not DuckDB scalar functions, and the
-        // SQL-standard `POSITION(x IN y)` / `PERCENTILE_CONT(f) WITHIN GROUP`
-        // forms are deferred parser grammar. They are intentionally not
-        // generated here — the differential-parsing gaps track them instead.
+        // SQL-standard `POSITION(x IN y)` form is deferred parser grammar (see
+        // gaps.rs). `STRING_AGG`/`LISTAGG` are also intentionally NOT generated
+        // with `WITHIN GROUP` here: unlike PERCENTILE_CONT/PERCENTILE_DISC,
+        // DuckDB's binder rejects it for these two names — probed directly:
+        // `string_agg(x, ',') WITHIN GROUP (ORDER BY y)` fails with `Parser
+        // Error: Unknown ordered aggregate "string_agg"` (same for `listagg`).
+        // DuckDB's real ordered form for these is `string_agg(x, sep ORDER BY
+        // y)` (ORDER BY inside the call's argument list), which is the
+        // still-open `aggregate_call_order_by_clause` parser gap (see
+        // docs/TODO.md), not the WITHIN GROUP clause. They are intentionally
+        // not generated here — the differential-parsing gaps track them instead.
     ]
 }
 
@@ -891,6 +931,17 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             DataType::SmallInt | DataType::Integer | DataType::BigInt => DataType::Double,
             other => other.clone(),
         },
+        // PERCENTILE_CONT/PERCENTILE_DISC: this mirrors smelt's *actual* current
+        // inference (BuiltinRegistry's fixed `Double` signature), not DuckDB's
+        // real behavior. DuckDB's WITHIN GROUP form is arg-dependent — probed
+        // directly: percentile_cont interpolates like MEDIAN (integer → Double,
+        // Decimal/Double preserved) and percentile_disc always preserves the
+        // exact input type (Integer/BigInt/Decimal/Double unchanged) — but
+        // smelt's type inference doesn't yet see the WITHIN GROUP ORDER BY
+        // expression's type at all (no AST accessor for it), so it can't
+        // compute the real answer. The resulting divergences are registered in
+        // divergences.rs (`percentile_ordered_set_decimal`, `percentile_disc_integer`,
+        // `percentile_disc_bigint`) rather than fixed here.
         "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP" | "COVAR_SAMP" => {
             DataType::Double
         }
@@ -921,7 +972,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
         | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "TRANSLATE" | "TO_CHAR" | "SUBSTRING"
-        | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" | "STRING_AGG" => DataType::Text,
+        | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" | "STRING_AGG" | "LISTAGG" => DataType::Text,
         // JSON functions
         "TO_JSON"
         | "JSON_OBJECT"
@@ -1113,20 +1164,33 @@ pub fn generate_expr(
 
             let return_type = function_return_type(func.name, &compatible_col.data_type);
 
-            // Build argument list
-            let mut args = Vec::new();
-            if let Some(lit) = func.prepend_literal {
-                args.push(format!("'{lit}'"));
-            }
-            args.push(compatible_col.name.clone());
-            for extra in func.extra_args {
-                match extra {
-                    ExtraArg::SameAsFirst => args.push(compatible_col.name.clone()),
-                    ExtraArg::IntLiteral(v) => args.push(v.to_string()),
-                    ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
+            // Ordered-set aggregates: `PERCENTILE_CONT`/`PERCENTILE_DISC` take
+            // their sort key from a `WITHIN GROUP (ORDER BY ...)` clause, not
+            // from the argument list — the compatible column goes there, and
+            // the call itself takes only the fraction literal. See the
+            // `FuncDesc` entries above for why this can't go through the
+            // generic arg-join path below.
+            let mut sql = if matches!(func.name, "PERCENTILE_CONT" | "PERCENTILE_DISC") {
+                format!(
+                    "{}(0.5) WITHIN GROUP (ORDER BY {})",
+                    func.name, compatible_col.name
+                )
+            } else {
+                // Build argument list
+                let mut args = Vec::new();
+                if let Some(lit) = func.prepend_literal {
+                    args.push(format!("'{lit}'"));
                 }
-            }
-            let mut sql = format!("{}({})", func.name, args.join(", "));
+                args.push(compatible_col.name.clone());
+                for extra in func.extra_args {
+                    match extra {
+                        ExtraArg::SameAsFirst => args.push(compatible_col.name.clone()),
+                        ExtraArg::IntLiteral(v) => args.push(v.to_string()),
+                        ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
+                    }
+                }
+                format!("{}({})", func.name, args.join(", "))
+            };
 
             // Aggregates: sometimes wrap in FILTER (WHERE ...) to exercise the
             // possibly-empty-group path (DuckDB already accepts this on every
