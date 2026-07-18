@@ -77,7 +77,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 2     | done    | fix(lexer): accept == as equality operator alias | 2026-07-18 |
 | 3     | done    | fix(parser): double-quoted table/schema names in FROM | 2026-07-18 |
 | 4     | done    | fix(parser): RANGE as function name/identifier outside frame specs | 2026-07-18 |
-| 5     | pending |        |      |
+| 5     | blocked |        |      |
 | 6     | pending |        |      |
 | 7     | pending |        |      |
 | 8     | pending |        |      |
@@ -470,6 +470,52 @@ Timeless-oracle wording throughout.
 ## Blocked phases
 
 (Append dated entries here; never stop-the-line.)
+
+- **2026-07-18, Phase 5.** The parser bug this phase describes (`NULL::VARCHAR`
+  and casts in named-arg value positions failing to parse) no longer
+  reproduces — confirmed by direct repro (`smelt_parser::parse` on both
+  forms returns zero errors) and by an existing test
+  (`null_literal_supports_cast_and_subscript_postfix`) already covering
+  `SELECT NULL::INTEGER`. The `external_ledger.toml` has zero entries in
+  category `smelt_fails_unclassified`, so there is nothing left to close —
+  the fix landed as an incidental side effect of Phases 1/2/4 (same pattern
+  as Phase 4's own "Deferred during implementation" note). Added two
+  regression tests locking the behaviour in
+  (`null_double_colon_cast`, `named_arg_value_with_cast` in
+  `crates/smelt-parser/src/parser/tests.rs`) — this part is not blocked and
+  the diff is safe to keep.
+  Blocking issue is unrelated to the phase's own work:
+  `bash .claude/scripts/verify-phase.sh`'s `cargo test (workspace)` leg is
+  red on a **pre-existing, flaky** e2e failure in
+  `smelt-cli::tests::e2e::per_partition_equivalence` — different test fails
+  each run (`events_enriched_dual_ids_replay_matches_rebuild`,
+  `web_analytics_events_enriched_narrow_update`,
+  `test_global_columns_documented_divergence` observed across 3 runs), same
+  root cause each time: `WARN self-referential model 'sessions_chained':
+  output-schema fixpoint did not converge within 5 rounds` →
+  `Error: model 'silver.sessions_chained' is self-referential and its
+  output-schema fixpoint did not converge`. Reproduced with `git stash`
+  (i.e. on the clean pre-phase-5 tree, no parser test diff applied) running
+  `cargo test -p smelt-cli --test e2e per_partition_equivalence` alone —
+  same failure, confirming it is unrelated to this phase and pre-existing
+  on `worktree-roadmap_todo` at commit `497ced8e`. Passes when run in total
+  isolation (`cargo test -p smelt-cli --test e2e
+  per_partition_equivalence::events_enriched_dual_ids_replay_matches_rebuild`
+  alone → ok), so this looks like nondeterminism in the self-referential
+  schema fixpoint calculation (or a resource-contention race) that only
+  manifests when the full e2e suite runs together. Candidate options for a
+  human: (a) investigate `sessions_chained`'s fixpoint convergence for
+  actual nondeterminism (e.g. HashMap iteration order feeding the
+  schema-merge loop) — a real correctness bug if so; (b) if it's
+  resource/timing contention under parallel `cargo test`, mark the affected
+  `per_partition_equivalence` tests `#[serial]` or reduce workspace test
+  parallelism; (c) if neither is quickly actionable, file a tracking issue
+  and allow-list this specific flake in the verify gate so it doesn't block
+  every future phase's pre-flight, not just this one. This is a
+  workspace-wide gate reliability issue, not scoped to Phase 5 — worth
+  master-plan visibility since it will re-block whichever phase runs next
+  if unaddressed. Tree restored to clean-except-Phase-5-diff state before
+  commit (no other phase's work touched).
 
 ## Deferred during implementation
 

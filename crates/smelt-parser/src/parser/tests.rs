@@ -10073,6 +10073,52 @@ fn null_literal_supports_cast_and_subscript_postfix() {
 }
 
 #[test]
+fn null_double_colon_cast() {
+    // `SELECT NULL::VARCHAR` — regression coverage for the postfix-`::`
+    // cast on a NULL literal primary. Ledger category
+    // `smelt_fails_unclassified` previously flagged this as a gap, but by
+    // the time this test was written the fix had already landed as a side
+    // effect of other parser work; this test locks the behaviour in.
+    let sql = "SELECT NULL::VARCHAR";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn named_arg_value_with_cast() {
+    // `f(x => 1::BIGINT)` — a `::` cast in a named-argument value position
+    // must be reachable through the standard expression entry point, not a
+    // restricted sub-parser that stops before the postfix-cast loop.
+    let sql = "SELECT my_func(my_param => 1::BIGINT) FROM t";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
 fn quoted_table_name_in_from() {
     // A double-quoted table name in FROM position (`FROM "flights"`) is
     // lexed as a STRING token (smelt's lexer doesn't distinguish `"` from
