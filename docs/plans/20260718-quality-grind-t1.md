@@ -82,7 +82,7 @@ pre-triaged one-file fixes from the ROADMAP deferred backlog.
 | 7     | done    | fix(parser): alias-first TABLESAMPLE/PIVOT/UNPIVOT ordering to match DuckDB | 2026-07-19 |
 | 8     | done    | fix(types): VALUES-body CTE alias arity check (AliasColumnArityMismatch parity) | 2026-07-19 |
 | 9     | done    | fix(logical): sub-day INTERVAL units in extract_interval_days_from_combined | 2026-07-19 |
-| 10    | pending |        |      |
+| 10    | blocked |        |      |
 | 11    | pending |        |      |
 | 12    | pending |        |      |
 
@@ -516,6 +516,36 @@ Timeless-oracle wording throughout.
   master-plan visibility since it will re-block whichever phase runs next
   if unaddressed. Tree restored to clean-except-Phase-5-diff state before
   commit (no other phase's work touched).
+
+- **2026-07-19, Phase 10.** Both parts of this phase's premise are already
+  resolved by prior commits that predate this plan — there is nothing left
+  to implement. (a) `body_position_to_byte` (the codepoint-counting helper
+  the phase describes) no longer exists anywhere in `crates/`; it was
+  deleted in commit `c44f21c6` ("refactor(db): carry TextRange through
+  diagnostics and collapse body-offset helpers", 2026-05-30), which
+  collapsed the `shifted_range`/`shifted_body_text_range`/
+  `remap_body_range`/`body_position_to_byte`/`shift_diagnostic_ranges`
+  helper family into integer arithmetic on `rowan::TextRange` — diagnostics
+  now carry byte-offset `TextRange` end-to-end from the emission-body
+  translation sites. (b) `smelt-ui`'s `DiagnosticInfo` already uses
+  `line_index::LineIndex`, not a legacy `offset_to_position` — see
+  `crates/smelt-ui/src/build.rs:217-223`, which constructs a `LineIndex`
+  once per file and calls `line_index.line_col(d.range.start())`. The
+  legacy `offset_to_position`/`text_range_to_range` functions were deleted
+  from `smelt-parser` in commit `bc3eb11f` ("chore(arch): land Diagnostic
+  range encoding rule and close divergence", 2026-05-30), which also
+  migrated `smelt-ui::build` to `LineIndex`. `rg -n
+  "offset_to_position|body_position_to_byte" crates/` returns zero live
+  hits (only a stale comment referencing the former name in
+  `crates/smelt-lsp/src/diagnostics_boundary.rs`). Both fixing commits
+  predate this plan's creation (`699e0bc1`), so the phase's author was
+  working from a stale backlog snapshot — `docs/ROADMAP.md:817` still lists
+  this as open, pointing at `docs/plans/20260529-emission-body-diagnostics.md`,
+  which is itself now stale and should be reconciled by a human. Candidate
+  options: (a) mark Phase 10 done-elsewhere and delete/rewrite it, updating
+  the stale ROADMAP line; (b) if a human believes a residual gap exists
+  that this investigation missed, re-scope the phase with a concrete
+  current repro. No code changed; tree left clean.
 
 ## Deferred during implementation
 
