@@ -486,6 +486,63 @@ pub fn generate_observed_delta_upsert_sql(
     )
 }
 
+/// Read-side counterpart to [`generate_observed_delta_upsert_sql`]: the SQL
+/// to fetch one `(model, window)`'s recorded row back
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D3
+/// — "Key→partition projection of observed deltas"). Pure string generation
+/// only, matching this module's own convention — the backend executes it
+/// and decodes the two `VARCHAR[]` columns into an [`ObservedDelta`]; a
+/// caller finding **no row** for the `(model, window)` key is the "never
+/// recorded" case (`incremental_models.md` §"The graph layer": "Empty and
+/// absent are distinct" — widen-never-narrow falls back to the written
+/// window), which this SQL alone cannot distinguish from a genuine
+/// zero-row query result — the caller's row-count check is what tells them
+/// apart, exactly as the DDL/DML tests above already exercise via
+/// `execute_sql(...).num_rows()`.
+pub fn generate_observed_delta_select_sql(
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> String {
+    format!(
+        "SELECT changed_keys, partitions FROM {schema}.{table} \
+         WHERE model_name = '{model}' AND window_start = '{window_start}' AND window_end = '{window_end}'",
+        schema = quote_identifier(schema),
+        table = OBSERVED_DELTA_TABLE_NAME,
+        model = escape_sql_literal(model),
+        window_start = escape_sql_literal(window_start),
+        window_end = escape_sql_literal(window_end),
+    )
+}
+
+/// One `(model, window)` row read back from the observed-delta table — the
+/// backend's decoded counterpart of the two `VARCHAR[]` columns
+/// [`generate_observed_delta_select_sql`] projects. `Option<ObservedDelta>`
+/// at the call site (not this type) carries the empty-vs-absent distinction:
+/// `None` means no row was found for that `(model, window)` (never
+/// recorded); `Some` with both vectors empty means the row exists and
+/// records a fully-suppressed run (present-and-empty). This type itself
+/// only ever represents a **found** row, so its own `is_empty` reports
+/// whether that found row's delta was empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservedDelta {
+    /// The model's `unique_key` values that changed in this window.
+    pub changed_keys: Vec<String>,
+    /// The touched partition values (the model's `timeseries.partition_column`
+    /// projection), empty when the model has no partition axis.
+    pub partitions: Vec<String>,
+}
+
+impl ObservedDelta {
+    /// Whether this **found** row recorded a fully-suppressed run (nothing
+    /// changed) — distinct from "no row was found at all"
+    /// (`Option<ObservedDelta>::None` at the call site).
+    pub fn is_empty(&self) -> bool {
+        self.changed_keys.is_empty() && self.partitions.is_empty()
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1048,5 +1105,43 @@ mod tests {
             "SELECT id AS delta_key, NULL AS delta_partition FROM changed",
         );
         assert!(sql.contains("'model''s_name'"));
+    }
+
+    // ── observed-delta read API (D3) ────────────────────────────────────
+
+    #[test]
+    fn observed_delta_select_sql_filters_on_every_key_field() {
+        let sql = generate_observed_delta_select_sql(
+            "main",
+            "silver.events_deduped",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        assert!(sql.contains("SELECT changed_keys, partitions FROM main._smelt_observed_delta"));
+        assert!(sql.contains("model_name = 'silver.events_deduped'"));
+        assert!(sql.contains("window_start = '2026-01-01'"));
+        assert!(sql.contains("window_end = '2026-01-02'"));
+    }
+
+    #[test]
+    fn observed_delta_select_sql_escapes_single_quotes_in_model_name() {
+        let sql =
+            generate_observed_delta_select_sql("main", "model's_name", "2026-01-01", "2026-01-02");
+        assert!(sql.contains("model_name = 'model''s_name'"));
+    }
+
+    #[test]
+    fn observed_delta_is_empty_distinguishes_found_empty_from_nonempty() {
+        assert!(ObservedDelta::default().is_empty());
+        assert!(ObservedDelta {
+            changed_keys: vec![],
+            partitions: vec![],
+        }
+        .is_empty());
+        assert!(!ObservedDelta {
+            changed_keys: vec!["k1".to_string()],
+            partitions: vec!["2026-01-01".to_string()],
+        }
+        .is_empty());
     }
 }

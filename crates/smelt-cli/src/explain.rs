@@ -463,9 +463,14 @@ pub fn build_maintenance_plan_report(
     if let Some(locality) = &result.plan.key_locality {
         use smelt_logical::maintenance::locality::LocalitySlice;
         let route = match &locality.slice {
-            LocalitySlice::Window { .. } => {
-                "route 1 (key-embedded) or route 3 (recurrence-bounded, statically derived)"
-            }
+            LocalitySlice::Window {
+                recurrence_bounded: false,
+                ..
+            } => "route 1 (key-embedded)",
+            LocalitySlice::Window {
+                recurrence_bounded: true,
+                ..
+            } => "route 3 (recurrence-bounded, statically derived)",
             LocalitySlice::DeltaValues { .. } => "route 2 (key-determined)",
             LocalitySlice::RecurrenceBounded { .. } => {
                 "route 3 (recurrence-bounded, declared key_recurrence)"

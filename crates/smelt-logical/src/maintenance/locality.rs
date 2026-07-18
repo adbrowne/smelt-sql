@@ -152,6 +152,24 @@ pub struct LocalityInputs<'a> {
 pub enum LocalitySlice {
     /// Route 1 (key-embedded), or route 3 with a **statically-derived**
     /// `r` (proof-backed, never checked): a step-relative window.
+    ///
+    /// The two sub-cases share this same shape for the **read**-side scan
+    /// clamp (`locality_margin_days`) — both need the driving source's own
+    /// derived margin to size the merge's target scan — but differ for
+    /// **write**-side observed-delta propagation
+    /// (`propagate::project_observed_delta`): route 1's `partition_column`
+    /// is itself a `unique_key` column, so a key's row can never land in a
+    /// another partition — the observed partition projects exactly, zero
+    /// widening. Route 3 static instead proves a key-recurrence bound `r`
+    /// folded into this very `margin_before`/`margin_after` — a key's row
+    /// can still land up to `r` away from where it was last observed, so
+    /// downstream propagation must widen by that same margin.
+    /// `recurrence_bounded` is the discriminant a consumer reads to tell
+    /// the two apart: `false` for route 1, `true` for route 3 static —
+    /// added because `margin_before`/`margin_after` alone cannot
+    /// distinguish them (route 1 can itself carry a non-zero derived read
+    /// margin, e.g. a `WHERE` lookback filter, that means nothing for row
+    /// movement).
     Window {
         /// The output's partition column the slice predicate ranges over.
         partition_column: String,
@@ -161,6 +179,13 @@ pub enum LocalitySlice {
         /// How far forward of a step's own partition value the slice must
         /// widen.
         margin_after: Seconds,
+        /// `true` when this `Window` is route 3's statically-derived
+        /// sub-route (the margin includes a proven key-recurrence bound
+        /// `r`, so a key's row can move within it — observed-delta
+        /// propagation must widen). `false` for route 1 (key-embedded —
+        /// the partition is exact for a given key, so propagation never
+        /// widens regardless of any read-side margin carried above).
+        recurrence_bounded: bool,
     },
     /// Route 2: the exact partition values the step's own delta carries.
     DeltaValues {
@@ -532,6 +557,7 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
             partition_column: inputs.partition_column.clone(),
             margin_before,
             margin_after,
+            recurrence_bounded: false,
         });
     }
 
@@ -672,6 +698,7 @@ pub fn establish_locality(inputs: &LocalityInputs) -> Result<LocalitySlice, Loca
                     partition_column: inputs.partition_column.clone(),
                     margin_before: *before,
                     margin_after: *after,
+                    recurrence_bounded: true,
                 });
             }
         }
@@ -873,10 +900,15 @@ mod tests {
             LocalitySlice::Window {
                 margin_before,
                 margin_after,
+                recurrence_bounded,
                 ..
             } => {
                 assert_eq!(margin_before, Seconds::ZERO);
                 assert_eq!(margin_after, Seconds::ZERO);
+                assert!(
+                    !recurrence_bounded,
+                    "route 1 (key-embedded) must set recurrence_bounded: false"
+                );
             }
             other => panic!("route 1 must derive a Window slice, got {other:?}"),
         }
@@ -1149,8 +1181,18 @@ mod tests {
         let inputs = route3_inputs(sql);
         let slice = establish_locality(&inputs).expect("route 3 must admit via static derivation");
         match slice {
-            LocalitySlice::Window { margin_before, .. } => {
+            LocalitySlice::Window {
+                margin_before,
+                recurrence_bounded,
+                ..
+            } => {
                 assert_eq!(margin_before, Seconds::days(3));
+                assert!(
+                    recurrence_bounded,
+                    "a statically-derived route-3 Window must set recurrence_bounded: true — \
+                     downstream observed-delta propagation (propagate::project_observed_delta) \
+                     relies on this to widen, not project exactly"
+                );
             }
             other => panic!(
                 "a statically-derived route-3 bound must render as an unchecked Window, got \

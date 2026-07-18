@@ -92,6 +92,7 @@ fn derived_slice() -> LocalitySlice {
         partition_column: "last_seen_date".to_string(),
         margin_before: smelt_logical::analysis::source_bounds::Seconds::days(3),
         margin_after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+        recurrence_bounded: true,
     }
 }
 

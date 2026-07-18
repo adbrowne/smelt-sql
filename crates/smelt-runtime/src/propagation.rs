@@ -219,6 +219,7 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
     let ClampAndLocality {
         clamp_days,
         locality_admitted,
+        ..
     } = derive_clamp_and_locality(models, source_infos)?;
 
     let mut edges = Vec::with_capacity(clamp_days.len());
@@ -261,6 +262,17 @@ pub fn build_forward_graph(models: &[ModelFile], source_infos: &[SourceInfo]) ->
 struct ClampAndLocality {
     clamp_days: BTreeMap<(String, String), (i64, i64)>,
     locality_admitted: BTreeMap<String, bool>,
+    /// The established [`smelt_logical::maintenance::locality::LocalitySlice`]
+    /// route for every `grain: key` model this workspace admits key temporal
+    /// locality for (Phase D3,
+    /// `docs/plans/20260715-composed-axes-conditional-maintenance.md` —
+    /// "Key→partition projection of observed deltas"). Consulted by
+    /// [`plan_since_upstream_with_observed_deltas`] to project a recorded
+    /// observed delta to exact partition dirt via
+    /// `smelt_logical::maintenance::propagate::project_observed_delta` —
+    /// never re-derived; the SAME verdict `locality_admitted` above folds
+    /// `Some(_).is_some()` from.
+    key_locality_slice: BTreeMap<String, smelt_logical::maintenance::locality::LocalitySlice>,
 }
 
 fn derive_clamp_and_locality(
@@ -281,6 +293,10 @@ fn derive_clamp_and_locality(
     // below as every model is visited, then consulted by `model_grain`
     // once the full edge list is assembled.
     let mut locality_admitted: BTreeMap<String, bool> = BTreeMap::new();
+    let mut key_locality_slice: BTreeMap<
+        String,
+        smelt_logical::maintenance::locality::LocalitySlice,
+    > = BTreeMap::new();
 
     for model in models {
         let Some(metadata) = model.metadata.as_deref() else {
@@ -444,6 +460,9 @@ fn derive_clamp_and_locality(
         // every model in the workspace has been visited.
         if metadata.grain == Some(ConfigGrain::Key) {
             locality_admitted.insert(table.clone(), result.plan.key_locality.is_some());
+            if let Some(key_locality) = result.plan.key_locality.as_ref() {
+                key_locality_slice.insert(table.clone(), key_locality.slice.clone());
+            }
         }
 
         for cell in &result.plan.cells {
@@ -520,6 +539,7 @@ fn derive_clamp_and_locality(
     Ok(ClampAndLocality {
         clamp_days,
         locality_admitted,
+        key_locality_slice,
     })
 }
 
@@ -619,21 +639,119 @@ fn render_interval(iv: &DayInterval) -> String {
 /// topological execution order — models absent from `order` are ignored,
 /// mirroring how `propagate` only ever dirties nodes reachable from the
 /// declared edges).
+///
+/// A thin wrapper over [`plan_since_upstream_with_observed_deltas`] with an
+/// empty observed-delta lookup — every model-edge origin falls back to its
+/// declared `--landed` window unwidened-and-unprojected (the D1
+/// widen-never-narrow rule's "absent" case, since an empty lookup can never
+/// contain a recorded row). Live wiring of the real `_smelt_observed_delta`
+/// warehouse table into this call is CLI/backend-read work outside this
+/// phase's critical files (`crates/smelt-state/src/`,
+/// `crates/smelt-runtime/src/propagation.rs`,
+/// `crates/smelt-logical/src/maintenance/{locality,propagate}.rs`) —
+/// tracked in `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+/// Phase D3's "Decisions taken" note.
 pub fn plan_since_upstream(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
     order: &[String],
     deltas: &[SourceDelta],
 ) -> Result<SinceUpstreamPlan> {
+    plan_since_upstream_with_observed_deltas(models, source_infos, order, deltas, &BTreeMap::new())
+}
+
+/// One `(model, window_start, window_end)` key into the observed-delta
+/// lookup [`plan_since_upstream_with_observed_deltas`] consults — the SAME
+/// three-part key `smelt_state::ddl_duckdb`'s `_smelt_observed_delta` table
+/// uses as its own `PRIMARY KEY`. `window_start`/`window_end` are ISO date
+/// strings, matching [`ordinal_to_iso`]'s own rendering of a
+/// [`SourceDelta::landed`] window.
+pub type ObservedDeltaKey = (String, String, String);
+
+/// The read-side lookup for `--since-upstream`'s observed-delta
+/// consultation: `None` for a `(model, window)` key means "never recorded"
+/// (`docs/specs/incremental_models.md` §"The graph layer" — "Empty and
+/// absent are distinct"; the widen-never-narrow fallback to the declared
+/// `--landed` window applies), while `Some` — even with both vectors empty
+/// — means a conditional write ran and recorded its (possibly empty)
+/// changed-row set for that exact window.
+pub type ObservedDeltaLookup = BTreeMap<ObservedDeltaKey, smelt_state::ddl_duckdb::ObservedDelta>;
+
+/// [`plan_since_upstream`]'s full form: consults `observed` for every
+/// delta origin that names a locality-admitted composed model
+/// (`docs/specs/incremental_models.md` §"What the composed shape uniquely
+/// enables" — exact `--landed` for model edges, Phase D3). For such an
+/// origin:
+/// - **absent** from `observed` (no entry for `(model, window_start,
+///   window_end)`): falls back to the declared `--landed` window unchanged
+///   (D1's widen-never-narrow rule — a consumer must not assume a narrower
+///   form exists just because this machinery is live).
+/// - **present and empty** (`ObservedDelta::is_empty()`): the origin
+///   contributes **no** dirt at all — the graph half of the no-op cascade
+///   (a fully-suppressed run's downstream has nothing to do).
+/// - **present and non-empty**: the recorded `partitions` are projected to
+///   exact partition-day intervals via
+///   `smelt_logical::maintenance::propagate::project_observed_delta`,
+///   using the SAME established [`smelt_logical::maintenance::locality::
+///   LocalitySlice`] route `smelt explain`'s own `key_locality` reads
+///   (never re-derived) — replacing the whole declared window with the
+///   observed, possibly-narrower (or, under route 3, differently-widened)
+///   partition set.
+///
+/// A delta origin that is a raw `sources.*` address, or a maintained model
+/// without an admitted key-temporal-locality route (a bare `grain:
+/// partition` model, say), is never looked up in `observed` at all — its
+/// delta is always the declared `--landed` window, exactly as before this
+/// phase.
+pub fn plan_since_upstream_with_observed_deltas(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    order: &[String],
+    deltas: &[SourceDelta],
+    observed: &ObservedDeltaLookup,
+) -> Result<SinceUpstreamPlan> {
     refuse_bare_keyed_origins(models, source_infos, deltas)?;
     let edges = build_forward_graph(models, source_infos)?;
+    let ClampAndLocality {
+        key_locality_slice, ..
+    } = derive_clamp_and_locality(models, source_infos)?;
 
     let mut source_deltas: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
     for d in deltas {
+        let projected: Vec<DayInterval> = match key_locality_slice.get(&d.source) {
+            Some(slice) => {
+                let key = (
+                    d.source.clone(),
+                    ordinal_to_iso(d.landed.start),
+                    ordinal_to_iso(d.landed.end),
+                );
+                match observed.get(&key) {
+                    // Present and empty: a fully-suppressed run recorded
+                    // nothing to propagate — the graph half of the no-op
+                    // cascade.
+                    Some(od) if od.is_empty() => Vec::new(),
+                    // Present and non-empty: project the recorded
+                    // partitions to exact dirt via the model's own
+                    // established locality route.
+                    Some(od) => smelt_logical::maintenance::propagate::project_observed_delta(
+                        slice,
+                        &od.partitions,
+                    ),
+                    // Absent: never recorded (e.g. a run that predates
+                    // conditional-write recording) — widen-never-narrow
+                    // fallback to the declared window.
+                    None => vec![d.landed],
+                }
+            }
+            // Not a locality-admitted composed-model origin at all (a raw
+            // source, or a model with no admitted key-temporal-locality
+            // route) — always the declared window, unchanged.
+            None => vec![d.landed],
+        };
         source_deltas
             .entry(d.source.clone())
             .or_default()
-            .push(d.landed);
+            .extend(projected);
     }
 
     let prop = propagate(&edges, &source_deltas)

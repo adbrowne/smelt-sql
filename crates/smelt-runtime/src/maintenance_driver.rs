@@ -270,6 +270,7 @@ pub async fn run_windowed_keyed_maintenance(
                 partition_column,
                 margin_before,
                 margin_after,
+                ..
             }
             | LocalitySlice::RecurrenceBounded {
                 partition_column,

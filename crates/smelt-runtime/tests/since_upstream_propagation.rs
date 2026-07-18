@@ -10,10 +10,13 @@
 
 use std::path::Path;
 
+use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
 use smelt_runtime::propagation::{
-    build_forward_graph, plan_since_upstream, resolve_build_plan, SourceDelta,
+    build_forward_graph, plan_since_upstream, plan_since_upstream_with_observed_deltas,
+    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
 };
+use smelt_state::ddl_duckdb::ObservedDelta;
 
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
@@ -577,6 +580,227 @@ fn composed_model_as_source() {
     );
 }
 
+/// Phase D3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// a composed model edge's recorded observed delta narrows forward
+/// propagation to exactly the touched partitions (widened only by the
+/// downstream edge's own real derived margin — `user_spend_rollup`'s
+/// 3-day pushdown lookback, unrelated to D3's own projection) instead of
+/// the whole declared `--landed` window. `examples/timeseries`'s
+/// `user_daily_spend` (route 1, key-embedded — `LocalitySlice::Window`
+/// with zero widening) is reused, matching `composed_model_as_source`'s
+/// own fixture and substitution rationale.
+#[test]
+fn observed_delta_narrows_composed_edge_to_recorded_partitions() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    // A wide declared window (20 days) — the pre-D3 behaviour would dirty
+    // `user_spend_rollup` over this entire window (mod the edge's own
+    // margin). The recorded observed delta only touched 3 far-apart
+    // partitions within it.
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 40);
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+
+    let mut observed: ObservedDeltaLookup = ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "user_daily_spend".to_string(),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.start),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.end),
+        ),
+        ObservedDelta {
+            changed_keys: vec!["u1".to_string(), "u2".to_string(), "u3".to_string()],
+            partitions: vec![
+                smelt_logical::maintenance::propagate::ordinal_to_iso(21),
+                smelt_logical::maintenance::propagate::ordinal_to_iso(30),
+                smelt_logical::maintenance::propagate::ordinal_to_iso(39),
+            ],
+        },
+    );
+
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("an observed delta on a composed origin must project and propagate");
+
+    // `user_spend_rollup`'s own inbound edge derives a real 3-day backward
+    // pushdown margin (its WHERE clause's `INTERVAL '3 days'` lookback) —
+    // each of the 3 exact observed partitions widens by that margin. The
+    // three widened regions ([18,22), [27,31), [36,40)) stay disjoint
+    // (spaced far enough apart) and are collectively much narrower than
+    // the declared 20-day window.
+    let rollup_runs: Vec<_> = plan
+        .runs
+        .iter()
+        .filter(|r| r.model == "user_spend_rollup")
+        .collect();
+    assert!(
+        !rollup_runs.is_empty(),
+        "the observed delta must still propagate: {:?}",
+        plan.runs
+    );
+    let total_days: i64 = rollup_runs
+        .iter()
+        .map(|r| {
+            let start = r.start.as_deref().expect("bounded run");
+            let end = r.end.as_deref().expect("bounded run");
+            let s = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap();
+            let e = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d").unwrap();
+            (e - s).num_days()
+        })
+        .sum();
+    assert!(
+        total_days < 20,
+        "observed-delta projection must be narrower than the full 20-day declared window: \
+         got {total_days} total dirtied days across {rollup_runs:?}"
+    );
+    // Every one of the 3 observed partitions must still be covered
+    // (widen-never-narrow) — spot-check the middle one.
+    let day_30_iso = smelt_logical::maintenance::propagate::ordinal_to_iso(30);
+    assert!(
+        rollup_runs
+            .iter()
+            .any(|r| r.start.as_deref().unwrap() <= day_30_iso.as_str()
+                && day_30_iso.as_str() < r.end.as_deref().unwrap()),
+        "the observed partition {day_30_iso} must be covered by some dirtied run: {rollup_runs:?}"
+    );
+}
+
+/// D3: a **present-and-empty** recorded observed delta (a fully-suppressed
+/// conditional write — nothing changed) propagates **nothing** downstream —
+/// the graph half of the no-op cascade.
+#[test]
+fn empty_observed_delta_schedules_zero_downstream_regions() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+
+    let mut observed: ObservedDeltaLookup = ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "user_daily_spend".to_string(),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.start),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.end),
+        ),
+        ObservedDelta {
+            changed_keys: vec![],
+            partitions: vec![],
+        },
+    );
+
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        plan.runs.is_empty(),
+        "an empty recorded delta must schedule zero downstream regions: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan
+            .dirty_set_report
+            .contains("user_spend_rollup <- user_daily_spend"),
+        "an empty recorded delta must not appear as dirt in the report: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// D3: an **absent** observed-delta record (e.g. a run that predates
+/// conditional-write recording) falls back to the declared `--landed`
+/// window unchanged — the D1 widen-never-narrow rule. Same fixture and
+/// deltas as `composed_model_as_source`, but driven through
+/// `plan_since_upstream_with_observed_deltas` with an empty lookup, proving
+/// the fallback path is identical to `plan_since_upstream`'s own behaviour.
+#[test]
+fn absent_observed_delta_falls_back_to_the_written_window() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+
+    let no_observed = ObservedDeltaLookup::new();
+    let with_lookup = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &no_observed,
+    )
+    .expect("absent record must fall back, not error");
+    let baseline = plan_since_upstream(&models, &source_infos, &order, &deltas)
+        .expect("baseline plan_since_upstream");
+
+    assert_eq!(
+        with_lookup.runs, baseline.runs,
+        "an absent observed-delta record must propagate identically to the no-observed-delta \
+         baseline"
+    );
+    assert!(
+        with_lookup
+            .runs
+            .iter()
+            .any(|r| r.model == "user_spend_rollup"),
+        "the declared window must still propagate downstream: {:?}",
+        with_lookup.runs
+    );
+}
+
 /// Phase B3: `resolve_build_plan` (the `smelt build --include-upstreams`
 /// backward-resolution assembly) walks *through* a locality-admitted
 /// composed ancestor exactly like any other clocked model — the composed
@@ -630,4 +854,197 @@ fn resolve_build_plan_walks_through_a_composed_ancestor() {
         "the report must show the composed ancestor as a build step: {}",
         resolved.report
     );
+}
+
+// ---------------------------------------------------------------------------
+// Phase D3 real-fixture e2e: `examples/web_analytics`'s flagship composed
+// model, `silver.events_deduped` (route 3, declared recurrence bound) ->
+// `silver.sessions`. Proves the D2 write-side (`smelt_state::ddl_duckdb`'s
+// real DDL/DML, executed against a real DuckDB backend — the SAME warehouse
+// round trip `crates/smelt-runtime/tests/observed_delta.rs` and
+// `crates/smelt-backend-duckdb/src/lib.rs`'s own tests already prove for the
+// write side) and this phase's read+project+propagate side compose
+// end to end over the actual flagship fixture: a fully-suppressed
+// `events_deduped` run (an empty recorded delta, exactly what a
+// change-suppressed conditional write records when nothing differs —
+// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D2)
+// schedules zero downstream `silver.sessions` regions under
+// `--since-upstream`.
+#[tokio::test]
+async fn web_analytics_events_deduped_fully_suppressed_schedules_no_downstream_sessions() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    // `silver.sessions_chained` is a deliberately self-referential rolling-
+    // window demo model elsewhere in this same workspace
+    // (`incremental_models.md`'s own "table-graph cycle" refusal —
+    // unrelated to `events_deduped`/`sessions`); `build_forward_graph`
+    // refuses the WHOLE graph fail-loud on any self-referential node it
+    // discovers, not just ones reachable from this test's target edge, so
+    // it must be excluded here to exercise the events_deduped -> sessions
+    // edge in isolation.
+    let models: Vec<_> = discovery
+        .discover_models()
+        .expect("discover models")
+        .into_iter()
+        .filter(|m| m.canonical_path() != "silver.sessions_chained")
+        .collect();
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    // `events_deduped` (route 3, declared recurrence bound via
+    // `sources.raw.events`'s `key_recurrence`) must be a real, locality-
+    // admitted graph node whose outbound edge reaches `silver.sessions` —
+    // the same real per-workspace derivation `smelt explain` uses.
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the real web_analytics graph must build: events_deduped is locality-admitted \
+         (route 3, declared)",
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.upstream == "silver.events_deduped" && e.downstream == "silver.sessions"),
+        "expected a real outbound edge silver.events_deduped -> silver.sessions: {edges:?}"
+    );
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "silver.events_deduped" || a == "silver.sessions")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(100, 101);
+    let window_start = smelt_logical::maintenance::propagate::ordinal_to_iso(window.start);
+    let window_end = smelt_logical::maintenance::propagate::ordinal_to_iso(window.end);
+
+    // The real D2 write-side round trip: a real DuckDB backend, the real
+    // `_smelt_observed_delta` DDL, and a real upsert recording a
+    // fully-suppressed run (a change-suppressed conditional write whose
+    // `IS DISTINCT FROM` guard matched zero rows — nothing to record but the
+    // schema itself, `docs/specs/incremental_models.md` §"The graph layer":
+    // "a fully-suppressed run's changed-keys query returns zero rows ...
+    // still inserts a row — present-and-empty, not absent").
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend.execute_sql(&ddl).await.expect("create delta table");
+    let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "silver.events_deduped",
+        &window_start,
+        &window_end,
+        "SELECT NULL::VARCHAR AS delta_key, NULL::VARCHAR AS delta_partition WHERE FALSE",
+    );
+    backend
+        .execute_sql(&upsert)
+        .await
+        .expect("record the fully-suppressed run's empty delta");
+
+    // The real D3 read side: `generate_observed_delta_select_sql` against
+    // the SAME real backend, decoded into an `ObservedDelta`.
+    let select = smelt_state::ddl_duckdb::generate_observed_delta_select_sql(
+        "main",
+        "silver.events_deduped",
+        &window_start,
+        &window_end,
+    );
+    let batches = backend.execute_sql(&select).await.expect("read delta row");
+    assert_eq!(
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        1,
+        "the fully-suppressed run's row must be present (empty, not absent)"
+    );
+    let observed_delta = decode_observed_delta_row(&batches);
+    assert!(
+        observed_delta.is_empty(),
+        "a fully-suppressed run's recorded delta must be present-and-empty: {observed_delta:?}"
+    );
+
+    let mut observed: ObservedDeltaLookup = ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "silver.events_deduped".to_string(),
+            window_start,
+            window_end,
+        ),
+        observed_delta,
+    );
+
+    let deltas = vec![SourceDelta {
+        source: "silver.events_deduped".to_string(),
+        landed: window,
+    }];
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "silver.sessions"),
+        "a fully-suppressed events_deduped run must schedule zero downstream silver.sessions \
+         regions: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan
+            .dirty_set_report
+            .contains("silver.sessions <- silver.events_deduped"),
+        "the dirty set must show no dirt on the events_deduped -> sessions edge: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// Decode the single `(changed_keys, partitions)` row
+/// `generate_observed_delta_select_sql` projects — the two `VARCHAR[]`
+/// columns — into an [`ObservedDelta`]. Mirrors
+/// `crates/smelt-runtime/tests/observed_delta.rs`'s own
+/// `batches_to_string_lists` decode helper (this phase's read side is the
+/// consumer of that exact same D2-written table).
+fn decode_observed_delta_row(batches: &[arrow::array::RecordBatch]) -> ObservedDelta {
+    use arrow::array::{Array, ListArray, StringArray};
+    for batch in batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let changed = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("changed_keys is a LIST column");
+        let partitions = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("partitions is a LIST column");
+        let changed_keys: Vec<String> = changed
+            .value(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("changed_keys elements are VARCHAR")
+            .iter()
+            .map(|v| v.unwrap_or_default().to_string())
+            .collect();
+        let parts: Vec<String> = partitions
+            .value(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("partitions elements are VARCHAR")
+            .iter()
+            .map(|v| v.unwrap_or_default().to_string())
+            .collect();
+        return ObservedDelta {
+            changed_keys,
+            partitions: parts,
+        };
+    }
+    panic!("expected exactly one row in the observed-delta batches");
 }
