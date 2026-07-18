@@ -81,7 +81,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | W0 | Extremal-aggregate nullability: `MIN`/`MAX` over a NOT NULL argument infers NOT NULL in grouped context (unblocks W1) | done (2026-07-18) |
 | W0b | Multi-column extremal fold: `derive_fold_spec`/`FoldSpec` support a per-column combiner list for the source-driven `NewData` path (unblocks W1's six-column flagship) | done (2026-07-18) |
 | W1 | Web-analytics tracer: composed `events_deduped` model, redelivery demo, project tests | done (2026-07-18) |
-| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | pending (transitively gated on W1) |
+| W2 | Web-analytics tutorial chapter + docs-site guide for the composed shape | done (2026-07-18) |
 | S1 | Facts-as-surface: top-level `unique_key:`, `refresh: incremental` admitted on facts alone, grain derived + check-only assertion | done (2026-07-18) |
 | S2 | Relation Contract read-side: derived grain for sources; `smelt explain` prints both providers' contract | done (2026-07-18) |
 | B1 | Graph admissibility for locality-admitted composed nodes (edge construction at declared granularity) | done (2026-07-18) |

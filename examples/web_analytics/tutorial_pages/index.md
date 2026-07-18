@@ -83,14 +83,17 @@ so you can run every command yourself.
 2. **[Duplicates and late data](late-data.md)** — a deduplication that
    smelt refuses until you justify it, and a lateness rule smelt turns
    into derived read windows.
-3. **[Sessions and the cross-midnight backfill](sessions.md)** — why any
+3. **[Deduplication without the workaround](deduplication.md)** — the
+   composed shape (identity *and* clock, declared together) that replaces
+   the override with a checked runtime guarantee.
+4. **[Sessions and the cross-midnight backfill](sessions.md)** — why any
    incrementally-maintained sessionizer must cut somewhere, and how a run
    for today correctly rewrites yesterday's partition. (An optional
    [deep dive](ordered-sessions.md) covers the session table that has to
    read its own history.)
-4. **[Backfills, new columns, and late updates](changing-things.md)** —
+5. **[Backfills, new columns, and late updates](changing-things.md)** —
    the three ways a live pipeline changes, and what smelt does for each.
-5. **[Taking stock](taking-stock.md)** — what you wrote versus what smelt
+6. **[Taking stock](taking-stock.md)** — what you wrote versus what smelt
    derived, and an honest comparison with the alternatives.
 
 ## Run it locally

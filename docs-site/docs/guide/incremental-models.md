@@ -14,7 +14,7 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-`refresh: incremental` is admitted by the **shape-defining facts** you declare, not by a separate mode selector: a `timeseries:` block (the **clock**) and/or a top-level `unique_key:` (the **identity**). Declaring the clock alone gives you the partition-addressed shape this guide covers — one row per `(partition_column, …)`; declaring the identity instead gives you the key-grain shape (see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md)). `refresh: incremental` with neither fact declared is a hard error naming what's missing.
+`refresh: incremental` is admitted by the **shape-defining facts** you declare, not by a separate mode selector: a `timeseries:` block (the **clock**) and/or a top-level `unique_key:` (the **identity**). Declaring the clock alone gives you the partition-addressed shape this guide covers — one row per `(partition_column, …)`; declaring the identity instead gives you the key-grain shape (see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md)). Declaring **both** together is a shape of its own — a key-addressed table that is also time-partitioned — covered under [The composed shape](#the-composed-shape-key-time) below. `refresh: incremental` with neither fact declared is a hard error naming what's missing.
 
 - **`refresh: incremental`** opts the model into the derived maintenance plan. It implies a stored `table` — you do not also declare `materialization: table`.
 - **`timeseries:`** declares the clock — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
@@ -753,6 +753,41 @@ The ledger is backend-resident: it lives alongside the target table for the tran
 
 See the [materializations guide](materializations.md#grain-partition-vs-grain-key) for a side-by-side comparison.
 
+## The composed shape (key + time)
+
+"Partitioned" and "keyed" aren't alternatives you pick between — they're independent facts, and a model may declare both. A `grain: key` model may add a `timeseries:` block to time-partition its output: still one row per key, but that row now lives in a fixed time partition too.
+
+```sql
+---
+materialization: table
+refresh: incremental
+unique_key: [event_id]
+grain: key
+timeseries:
+  event_time_column: first_seen_date
+  partition_column: first_seen_date
+  granularity: day
+---
+SELECT
+    event_id,
+    MIN(payload) AS payload,
+    MIN(event_date) AS first_seen_date
+FROM smelt.sources.raw.events
+GROUP BY event_id
+```
+
+Adding the clock isn't free — it requires **key temporal locality**: a guarantee that every duplicate delivery of one key stays within a bounded window of itself on the event axis. smelt establishes this one of three ways, in order:
+
+1. **Key-embedded** — the partition column is itself a key column.
+2. **Key-determined** — the partition value is a per-key constant, provable from the SQL.
+3. **Recurrence-bounded** — a `key_recurrence` window declared on the driving source (`sources.md` §"Source YAML shape"), checked transactionally at merge time rather than trusted.
+
+When none of the three applies, the `timeseries:` block is refused (`KeyedForbidsTimeseries`), naming the missing route.
+
+Establishing locality is worth it: a bare keyed table is a dead end for the rest of the pipeline — nothing downstream can window over it. A composed table is a clocked source in its own right, so a keyed stage can sit inside a propagation chain instead of terminating it, and a key-level change projects downstream instead of an unbounded lookup scan — **exactly**, to the keys' own partitions, under routes 1–2; under route 3 (recurrence-bounded) the projection widens backward by the recurrence bound plus any derived margins, per widen-never-narrow. `smelt explain` reports the established route, the pruned merge target slice, and the derived **settle bound** — how long a written slice can still change.
+
+The [deduplication tutorial page](../examples/web-analytics/deduplication.md) walks this shape end to end: a redelivery-prone event feed deduplicated by a keyed `MIN` fold instead of a `QUALIFY` window, with the recurrence bound doing the work a `safety_overrides` comment would otherwise have to.
+
 ## Schema evolution
 
 When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See [Schema Evolution](schema-evolution.md) for full details on:
@@ -766,5 +801,6 @@ When an incremental model's output schema changes (columns added, types widened,
 
 - [Materializations](materializations.md) for an overview of all materialization types
 - [grain: key](../reference/cumulative-aggregate.md) for key-grain running state (one row per key)
+- [Deduplication without the workaround](../examples/web-analytics/deduplication.md) for the composed key + time shape, worked end to end
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs
