@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784353957568,
+  "lastUpdate": 1784357866647,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -375,6 +375,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.638866,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "9dec8f69845856f4cae43aa0a1ecab4a25ccd9f5",
+          "message": "fix(test): register date_plus_interval Spark divergence, fix interval oracle parsing\n\nLocal soak run (PROPTEST_CASES beyond CI's 256) surfaced two more issues in\nthe type_property_tests dual-target oracle:\n\n- DATE + INTERVAL infers Timestamp in smelt (matches DuckDB), but Spark\n  returns DATE for a day/year-month-granularity interval. Register as\n  date_plus_interval.\n- spark_type_to_smelt only exact-matched the string \"interval\", but Spark's\n  typeof() always qualifies granularity (e.g. \"interval day to second\"),\n  so TIMESTAMP - TIMESTAMP misreported as Unknown(Dynamic) instead of\n  Interval. Fixed to prefix-match \"interval*\".\n\nEach fix includes a regression test.",
+          "timestamp": "2026-07-18T16:53:36+10:00",
+          "tree_id": "43713079368705677f0ab94beebb4a71923bc58d",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/9dec8f69845856f4cae43aa0a1ecab4a25ccd9f5"
+        },
+        "date": 1784357864589,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 58.47537,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 56.394572,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.848664,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.62312,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.31426099999999996,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 918.241821,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.167801,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.124981,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.127927,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.64426,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 753.038507,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.85227,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 34.035830000000004,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.864434,
             "unit": "ms"
           }
         ]
