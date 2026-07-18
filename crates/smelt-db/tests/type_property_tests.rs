@@ -14,21 +14,20 @@
 #[allow(dead_code)]
 mod prop_helpers;
 
-use prop_helpers::divergences::{find_divergence, known_divergences, TypeDivergence};
+use prop_helpers::divergences::{find_divergence, known_divergences};
 use prop_helpers::duckdb_oracle::{DuckDbOracle, TypeOracle};
 use prop_helpers::generators::{
     self, assemble_cte_query, generate_expr, join_scenario_strategy, multi_model_scenario_strategy,
     test_scenario_strategy, three_model_scenario_strategy, wrap_in_outer_cte, TypedExpr,
 };
-use prop_helpers::known_unknowns::{find_known_unknown, known_unknowns, KnownUnknown};
+use prop_helpers::known_unknowns::{find_known_unknown, known_unknowns};
+use prop_helpers::oracle_check::{
+    check_types_against_oracle, expr_sql_by_alias, run_smelt_inference,
+};
 use prop_helpers::spark_oracle::SparkOracle;
 use prop_helpers::type_comparison::{compare_types, TypeMatch};
 
-use std::collections::HashMap;
-
-use smelt_db::type_inference::{infer_select_column_types, TypeContext};
-use smelt_parser::ast::File;
-use smelt_types::{DataType, TypedColumn};
+use smelt_types::DataType;
 
 use std::path::{Path, PathBuf};
 
@@ -42,114 +41,6 @@ static SPARK: LazyLock<Option<SparkOracle>> = LazyLock::new(|| {
         .ok()
         .map(|id| SparkOracle::new(&id))
 });
-
-/// Parse SQL with smelt and run type inference on each select column.
-fn run_smelt_inference(sql: &str, columns: &[generators::TypedSource]) -> Vec<(String, DataType)> {
-    let parse = smelt_parser::parse(sql);
-    let root = parse.syntax();
-    let file = File::cast(root).expect("failed to cast to File");
-    let select_stmt = file.select_stmt().expect("no SelectStmt in parsed SQL");
-
-    // Build TypeContext with CTE columns
-    let mut ctx = TypeContext::new();
-    for col in columns {
-        ctx.add_cte_column(
-            "data",
-            &col.name,
-            TypedColumn::nullable(col.data_type.clone()),
-        );
-    }
-
-    let column_types = infer_select_column_types(&select_stmt, &ctx);
-
-    // Extract aliases from select list
-    let select_list = select_stmt.select_list().expect("no select list");
-    let items: Vec<_> = select_list.items().collect();
-
-    items
-        .iter()
-        .zip(column_types.iter())
-        .map(|(item, typed_col)| {
-            let alias = item.alias().unwrap_or_else(|| "?".to_string());
-            (alias, typed_col.data_type.clone())
-        })
-        .collect()
-}
-
-/// Build an alias → generating-SQL lookup so an inferred `Unknown` column can be
-/// matched against the known-unknowns registry by its generating expression.
-fn expr_sql_by_alias(exprs: &[TypedExpr]) -> HashMap<String, String> {
-    exprs
-        .iter()
-        .map(|e| (e.alias.clone(), e.sql.clone()))
-        .collect()
-}
-
-/// Compare smelt inference against one oracle backend, returning an error message on mismatch.
-#[allow(clippy::too_many_arguments)]
-fn check_types_against_oracle(
-    oracle: &dyn TypeOracle,
-    backend: &str,
-    sql: &str,
-    columns: &[generators::TypedSource],
-    exprs: &[TypedExpr],
-    divergences: &[TypeDivergence],
-    unknowns: &[KnownUnknown],
-) -> Result<(), String> {
-    let actual_types = match oracle.query_types(sql) {
-        Ok(types) => types,
-        Err(_) => return Ok(()), // Skip invalid SQL for this backend
-    };
-
-    let inferred_types = run_smelt_inference(sql, columns);
-    let by_alias = expr_sql_by_alias(exprs);
-
-    for (i, actual) in actual_types.iter().enumerate() {
-        let inferred = if i < inferred_types.len() {
-            &inferred_types[i]
-        } else {
-            continue;
-        };
-
-        let smelt_type = &inferred.1;
-        let actual_type = &actual.1;
-
-        if smelt_type.is_unknown() {
-            // A column smelt cannot type is a coverage hole, not a free pass:
-            // it is only tolerated when its generating expression matches a
-            // registered known-unknown shape.
-            let expr_sql = by_alias.get(&inferred.0).map(String::as_str).unwrap_or(sql);
-            if find_known_unknown(expr_sql, unknowns).is_some() {
-                continue;
-            }
-            return Err(format!(
-                "Unregistered Unknown inference for column {} ({}) against {backend}:\n  \
-                 smelt inferred: {smelt_type:?}\n  \
-                 {backend} actual:  {actual_type:?}\n  \
-                 generating expr: {expr_sql}\n  \
-                 SQL: {sql}\n  \
-                 (add a prop_helpers/known_unknowns.rs entry or fix inference)",
-                i, actual.0
-            ));
-        }
-
-        match compare_types(smelt_type, actual_type) {
-            TypeMatch::Exact | TypeMatch::Compatible { .. } => {}
-            TypeMatch::Mismatch => {
-                if find_divergence(smelt_type, actual_type, backend, divergences).is_none() {
-                    return Err(format!(
-                        "Type mismatch for column {} ({}) against {backend}:\n  \
-                         smelt inferred: {smelt_type:?}\n  \
-                         {backend} actual:  {actual_type:?}\n  \
-                         SQL: {sql}",
-                        i, actual.0
-                    ));
-                }
-            }
-        }
-    }
-    Ok(())
-}
 
 // ---- Property tests ----
 

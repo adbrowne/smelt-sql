@@ -80,6 +80,18 @@ pub fn known_unknowns() -> Vec<KnownUnknown> {
             markers: &[" * "],
             status: UnknownStatus::ByDesign,
         },
+        KnownUnknown {
+            id: "decimal_add_overflow",
+            description: "decimal + decimal whose growth precision (p'=max(p1-s1,p2-s2)+ \
+                max(s1,s2)+1, spec §15) exceeds 38 — smelt returns Unknown and emits a \
+                Decimal-precision-overflow diagnostic. Reached in cross-model chains where an \
+                already-widened decimal (e.g. DECIMAL(38,10) from a prior SUM) is added to \
+                itself (p'=39>38). Keyed on the spaced plus token under the is_unknown() guard \
+                (non-overflowing addition is a typed Decimal, integer addition is a typed \
+                Integer).",
+            markers: &[" + "],
+            status: UnknownStatus::ByDesign,
+        },
     ]
 }
 
@@ -132,6 +144,17 @@ mod tests {
         );
         // COUNT(*) must NOT match the multiply-overflow entry.
         assert!(find_known_unknown("COUNT(*)", &entries).is_none());
+    }
+
+    #[test]
+    fn add_token_matches_overflow() {
+        // Regression: a 10k-case soak run caught `up_0 + up_0` (up_0 =
+        // DECIMAL(38,10) from a prior SUM) returning Unknown, unregistered.
+        let entries = known_unknowns();
+        assert_eq!(
+            find_known_unknown("up_0 + up_0", &entries).unwrap().id,
+            "decimal_add_overflow"
+        );
     }
 
     #[test]

@@ -259,6 +259,17 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
+            id: "float_promotes_to_double_spark",
+            description: "FLOAT combined with another numeric type in COALESCE/IFNULL/GREATEST/ \
+                LEAST/MOD — smelt keeps FLOAT (matches DuckDB's promotion, which also keeps \
+                FLOAT). Spark instead widens to DOUBLE whenever FLOAT is promoted against any \
+                other numeric type in these functions.",
+            smelt_type: DataType::Float,
+            duckdb_type: None,
+            spark_type: Some(DataType::Double),
+            status: DivergenceStatus::BackendSpecific,
+        },
+        TypeDivergence {
             id: "row_number_rank_family",
             description: "ROW_NUMBER/RANK/DENSE_RANK — smelt infers BigInt (matches DuckDB \
                 BIGINT), Spark returns INT (Integer) for these ranking window functions.",
@@ -278,6 +289,12 @@ pub fn find_divergence<'a>(
     backend: &str,
     divergences: &'a [TypeDivergence],
 ) -> Option<&'a TypeDivergence> {
+    // Unwrap one level of Array (e.g. ARRAY_AGG(expr) results) so element-level
+    // divergences (like decimal growth) are still recognized under wrapping —
+    // the registry has no separate Array-of-Decimal entries to maintain.
+    if let (DataType::Array(smelt_elem), DataType::Array(actual_elem)) = (smelt, actual) {
+        return find_divergence(smelt_elem, actual_elem, backend, divergences);
+    }
     divergences.iter().find(|d| {
         types_match(&d.smelt_type, smelt) && {
             let expected = match backend {
@@ -360,6 +377,29 @@ mod tests {
     }
 
     #[test]
+    fn finds_decimal_arithmetic_model_divergence_under_array_wrapping_duckdb() {
+        // Regression: a soak run caught `ARRAY_AGG(dec_col * dec_col)` diverging
+        // against DuckDB — the existing decimal_arithmetic_model wildcard covers
+        // bare Decimal-vs-Decimal, but ARRAY_AGG wraps the result in Array, and
+        // the matcher didn't unwrap it before comparing.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Array(Box::new(DataType::Decimal {
+                precision: 21,
+                scale: 4,
+            })),
+            &DataType::Array(Box::new(DataType::Decimal {
+                precision: 18,
+                scale: 4,
+            })),
+            "duckdb",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "decimal_arithmetic_model");
+    }
+
+    #[test]
     fn finds_median_decimal_divergence_spark() {
         // Regression: a soak run at 10000 cases caught `MEDIAN(DECIMAL(10,2))`
         // diverging against Spark — smelt/DuckDB preserve the Decimal type,
@@ -395,6 +435,18 @@ mod tests {
         );
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "date_plus_interval");
+    }
+
+    #[test]
+    fn finds_float_promotes_to_double_divergence_spark() {
+        // Regression: the dedicated numeric-function property test caught
+        // COALESCE/IFNULL/GREATEST/LEAST(SMALLINT, FLOAT) diverging against
+        // Spark after promote_types-based promotion was fixed to correctly
+        // keep FLOAT (matching DuckDB) — Spark widens to DOUBLE instead.
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::Float, &DataType::Double, "spark", &divs);
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "float_promotes_to_double_spark");
     }
 
     #[test]

@@ -696,6 +696,25 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         })
     }
 
+    /// Fold every argument's type through `promote_types` (the same widening
+    /// `CASE`/`UNION` use) in argument order. `promote_types` already treats
+    /// `Unknown`/`Null` as dominated by any known type, so an Unknown-typed
+    /// leading argument doesn't poison the fold — used by COALESCE, IFNULL,
+    /// GREATEST, LEAST, and MOD so mixed numeric argument types widen to their
+    /// common type instead of returning the first argument's type verbatim.
+    fn promote_arg_types(func: &FunctionCall, ctx: &TypeContext) -> Option<DataType> {
+        let mut result: Option<TypedColumn> = None;
+        for arg in func.arguments() {
+            if let Some(arg_type) = infer_expression_type(&arg, ctx) {
+                result = Some(match result {
+                    None => arg_type,
+                    Some(acc) => promote_types(&acc, &arg_type),
+                });
+            }
+        }
+        result.map(|tc| tc.data_type)
+    }
+
     match sql_func {
         SqlFunction::Count => Some(TypedColumn {
             data_type: DataType::BigInt,
@@ -750,25 +769,23 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         }
 
         SqlFunction::Coalesce => {
-            // Try all arguments, return first concrete (non-Unknown, non-Null) type.
+            // Fold all argument types via promote_types (the same widening used
+            // by CASE/UNION) rather than taking the first concrete type verbatim
+            // — DuckDB and Spark both widen COALESCE across mixed argument types
+            // (e.g. COALESCE(SMALLINT, INTEGER) -> INTEGER), and taking only the
+            // first concrete type disagreed with DuckDB itself, not just Spark.
             // COALESCE is non-nullable when at least one argument is non-nullable
             // or is a non-null literal, because the result will always have a value.
-            let mut result_type = None;
             let mut has_non_nullable_arg = false;
             for arg in func.arguments() {
                 if let Some(arg_type) = infer_expression_type(&arg, ctx) {
                     if !arg_type.nullable {
                         has_non_nullable_arg = true;
                     }
-                    if result_type.is_none()
-                        && !matches!(arg_type.data_type, DataType::Unknown(_) | DataType::Null)
-                    {
-                        result_type = Some(arg_type.data_type.clone());
-                    }
                 }
             }
-            let data_type =
-                result_type.unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+            let data_type = promote_arg_types(func, ctx)
+                .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
             Some(TypedColumn {
                 data_type,
                 nullable: !has_non_nullable_arg,
@@ -778,16 +795,13 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         SqlFunction::Nullif => first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true),
 
         SqlFunction::Ifnull => {
-            // IFNULL(a, b) is equivalent to COALESCE(a, b).
+            // IFNULL(a, b) is equivalent to COALESCE(a, b) — same promotion
+            // rationale as the Coalesce arm above.
             // Non-nullable when either argument is non-nullable.
             let args = func.arguments();
             let first_type = args.first().and_then(|a| infer_expression_type(a, ctx));
             let second_type = args.get(1).and_then(|a| infer_expression_type(a, ctx));
-            let data_type = first_type
-                .as_ref()
-                .filter(|t| !matches!(t.data_type, DataType::Unknown(_) | DataType::Null))
-                .or(second_type.as_ref())
-                .map(|t| t.data_type.clone())
+            let data_type = promote_arg_types(func, ctx)
                 .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
             let has_non_nullable = first_type.as_ref().is_some_and(|t| !t.nullable)
                 || second_type.as_ref().is_some_and(|t| !t.nullable);
@@ -953,7 +967,17 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
             nullable: true,
         }),
 
-        SqlFunction::Mod => first_arg_type_or(func, ctx, DataType::Integer, true),
+        SqlFunction::Mod => {
+            // Fold both operand types via promote_types rather than taking the
+            // first argument's type verbatim — see the Coalesce arm above for
+            // the same rationale (DuckDB widens MOD across mixed numeric types,
+            // e.g. MOD(SMALLINT, BIGINT) -> BIGINT).
+            let data_type = promote_arg_types(func, ctx).unwrap_or(DataType::Integer);
+            Some(TypedColumn {
+                data_type,
+                nullable: true,
+            })
+        }
 
         SqlFunction::Sin
         | SqlFunction::Cos
@@ -1043,18 +1067,16 @@ pub fn infer_function_type(func: &FunctionCall, ctx: &TypeContext) -> Option<Typ
         }),
 
         SqlFunction::Greatest | SqlFunction::Least => {
-            // Try all arguments, return first concrete type
-            for arg in func.arguments() {
-                if let Some(arg_type) = infer_expression_type(&arg, ctx) {
-                    if !matches!(arg_type.data_type, DataType::Unknown(_) | DataType::Null) {
-                        return Some(TypedColumn {
-                            data_type: arg_type.data_type,
-                            nullable: true,
-                        });
-                    }
-                }
-            }
-            first_arg_type_or(func, ctx, DataType::unknown_dynamic(), true)
+            // Fold all argument types via promote_types rather than taking the
+            // first concrete type verbatim — see the Coalesce arm above for the
+            // same rationale (DuckDB itself widens GREATEST/LEAST across mixed
+            // numeric argument types).
+            let data_type = promote_arg_types(func, ctx)
+                .unwrap_or(DataType::Unknown(smelt_types::UnknownReason::Dynamic));
+            Some(TypedColumn {
+                data_type,
+                nullable: true,
+            })
         }
 
         SqlFunction::ArrayAgg => {
