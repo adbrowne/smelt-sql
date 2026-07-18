@@ -176,21 +176,29 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         // a return to the removed blanket `is_decimal_compat` rule — because the
         // *exact* decimal correctness of smelt's inference is verified separately
         // and strictly by `tests/proptests/type_conformance_tests.rs`, which
-        // cast-wraps smelt's inferred types and asserts DuckDB reproduces them
-        // with zero divergence. A smelt-vs-DuckDB decimal difference on raw SQL is
-        // expected; a cast-wrapped difference is a bug the conformance test fails
-        // on. Verified DuckDB behaviours: `CAST(99.99 AS DECIMAL(10,2)) *
-        // CAST(99.99 AS DECIMAL(10,2))` → DECIMAL(18,4) (smelt DECIMAL(21,4));
-        // `ROUND(CAST(99.99 AS DECIMAL(10,2)))` → DECIMAL(10,0) (smelt (10,2));
-        // `IFNULL(CAST(99.99 AS DECIMAL(10,2)), 0)` → DECIMAL(12,2) (smelt (10,2)).
+        // cast-wraps smelt's inferred types and asserts DuckDB AND Spark reproduce
+        // them with zero divergence. A smelt-vs-backend decimal difference on raw
+        // SQL is expected; a cast-wrapped difference is a bug the conformance test
+        // fails on. Verified behaviours (confirmed independently against each
+        // engine): `CAST(99.99 AS DECIMAL(10,2)) * CAST(99.99 AS DECIMAL(10,2))` →
+        // DuckDB DECIMAL(18,4) (smelt (21,4), diverges), Spark DECIMAL(21,4)
+        // (matches smelt — multiplication genuinely is Spark-aligned);
+        // `ROUND(CAST(99.99 AS DECIMAL(10,2)))` → DuckDB DECIMAL(10,0), Spark
+        // DECIMAL(9,0) (smelt (10,2) — smelt's ROUND keeps input scale, neither
+        // backend does, and the two backends don't even agree with each other);
+        // `IFNULL(CAST(99.99 AS DECIMAL(10,2)), 0)` → DuckDB DECIMAL(12,2), Spark
+        // DECIMAL(12,2) (smelt (10,2) — both backends widen precision to hold the
+        // integer literal, contrary to the "Spark-aligned" assumption this entry
+        // used to make about Spark).
         TypeDivergence {
             id: "decimal_arithmetic_model",
-            description: "smelt uses Spark-aligned decimal growth (spec §15); DuckDB uses \
-                physically-clamped native decimal arithmetic. On raw SQL the two disagree on \
-                Decimal precision/scale across multiplication, ROUND, IFNULL, and nested \
-                arithmetic. Exact decimal correctness is verified by the cast-wrap conformance \
-                oracle (type_conformance_tests.rs); this entry tolerates the raw-SQL \
-                Decimal-vs-Decimal difference only.",
+            description: "smelt uses Spark-aligned decimal growth (spec §15) for multiplication, \
+                but neither DuckDB nor Spark match smelt's raw-SQL precision/scale for ROUND or \
+                IFNULL/COALESCE decimal widening. On raw SQL the three disagree on Decimal \
+                precision/scale across ROUND, IFNULL, and nested arithmetic. Exact decimal \
+                correctness is verified by the cast-wrap conformance oracle \
+                (type_conformance_tests.rs); this entry tolerates the raw-SQL Decimal-vs-Decimal \
+                difference only, against either backend.",
             // Wildcard: matches any smelt Decimal.
             smelt_type: DataType::Decimal {
                 precision: 0,
@@ -201,9 +209,13 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
                 precision: 0,
                 scale: 0,
             }),
-            // Spark uses the same Spark-aligned formulas as smelt, so no divergence
-            // there; a Spark Decimal difference should still surface.
-            spark_type: None,
+            // Wildcard: matches any Spark Decimal. Previously `None` on the
+            // (disproven) assumption that Spark's decimal growth always matches
+            // smelt's; ROUND and IFNULL both diverge on raw SQL against Spark too.
+            spark_type: Some(DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            }),
             status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
@@ -217,6 +229,20 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: Some(DataType::Integer),
             spark_type: None,
             status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "date_plus_interval",
+            description: "DATE + INTERVAL / DATE - INTERVAL — smelt infers Timestamp (matches \
+                DuckDB, which always promotes to TIMESTAMP). Spark keeps the result as DATE when \
+                the interval is day/year-month granularity (only promotes to TIMESTAMP once the \
+                interval carries a time-of-day component). smelt's Interval type doesn't \
+                distinguish granularity, so it can't conditionally match Spark here.",
+            smelt_type: DataType::Timestamp {
+                with_timezone: false,
+            },
+            duckdb_type: None,
+            spark_type: Some(DataType::Date),
+            status: DivergenceStatus::BackendSpecific,
         },
         TypeDivergence {
             id: "row_number_rank_family",
@@ -294,6 +320,48 @@ mod tests {
         let found = find_divergence(&DataType::Double, &DataType::BigInt, "spark", &divs);
         assert!(found.is_some());
         assert_eq!(found.unwrap().id, "ceil_floor_double");
+    }
+
+    #[test]
+    fn finds_decimal_arithmetic_model_divergence_spark() {
+        // Regression: a local soak run (PROPTEST_CASES beyond CI's 256) caught
+        // `IFNULL(DECIMAL(10,2), 0)` diverging against Spark (widens to
+        // DECIMAL(12,2), same as DuckDB) even though decimal_arithmetic_model
+        // previously assumed Spark always matches smelt's raw-SQL decimal type.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            &DataType::Decimal {
+                precision: 12,
+                scale: 2,
+            },
+            "spark",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "decimal_arithmetic_model");
+    }
+
+    #[test]
+    fn finds_date_plus_interval_divergence_spark() {
+        // Regression: a soak run at 3000 cases (CI runs 256) caught
+        // `CAST('2024-01-01' AS DATE) + CAST('1 day' AS INTERVAL)` diverging
+        // against Spark — smelt/DuckDB return Timestamp, Spark returns Date for
+        // a day-granularity interval.
+        let divs = known_divergences();
+        let found = find_divergence(
+            &DataType::Timestamp {
+                with_timezone: false,
+            },
+            &DataType::Date,
+            "spark",
+            &divs,
+        );
+        assert!(found.is_some());
+        assert_eq!(found.unwrap().id, "date_plus_interval");
     }
 
     #[test]
