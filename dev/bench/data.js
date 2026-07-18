@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784357869670,
+  "lastUpdate": 1784366717181,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -469,6 +469,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.864434,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "61b4673dc6323a6baaf8a08c9ca683ff9559b919",
+          "message": "fix(test): register median_decimal Spark type divergence\n\n10k-case local soak run caught MEDIAN(DECIMAL) diverging against Spark:\nsmelt/DuckDB preserve the input Decimal type, but Spark's MEDIAN is\nimplemented via percentile_cont and always returns DOUBLE.",
+          "timestamp": "2026-07-18T19:20:52+10:00",
+          "tree_id": "ecc81a026d48dfd3b944e2b28ff2eed2710a1c03",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/61b4673dc6323a6baaf8a08c9ca683ff9559b919"
+        },
+        "date": 1784366715887,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 58.62426,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 56.49168,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.857765,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.634907,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.350606,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 923.298117,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.062917,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.568486,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.431549,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.712272,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 759.281246,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 6.888190000000001,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 34.38162,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 14.371056,
             "unit": "ms"
           }
         ]
