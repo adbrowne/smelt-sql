@@ -1912,22 +1912,27 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   violation count and sample keys) without ever writing to the target; a derived `r` never runs
   the probe. Both the probe and the merge are single-owner-emitted
   (`smelt_logical::maintenance::emit::{emit_recurrence_bound_probe, emit_keyed_fold}`) and covered
-  by the `statement_parity` gate. Route 3's own real-fixture coverage is likewise driver-level:
-  its flagship shape is also an extremal-fold (`MIN`/`MAX`) partition column — now NOT NULL under
-  the grouped-extremal rule above — but its real-DuckDB coverage still drives the
-  windowed-keyed-maintenance driver directly (a manually-built classification) rather than
-  through the full `execute_project` pipeline; this exercises the actual emitted SQL against a
-  real database. Landing an `execute_project`-driven route-3 fixture (the web-analytics tracer's
-  composed `events_deduped` model) is tracked by
-  `docs/plans/20260715-composed-axes-conditional-maintenance.md`. The declared-vs-derived
+  by the `statement_parity` gate. Route 3's routine unit- and driver-level coverage manually
+  builds the classification and drives the windowed-keyed-maintenance driver directly rather than
+  through the full `execute_project` pipeline (its flagship shape is also an extremal-fold
+  (`MIN`/`MAX`) partition column — now NOT NULL under the grouped-extremal rule above). An
+  `execute_project`-driven route-3 fixture also exists: the web-analytics tracer's composed
+  `events_deduped` model, driven through the real run pipeline with a redelivery-storm re-run
+  proving both the doubly-predicated `MERGE` text (the recurrence-bounded slice on the target
+  read, the write-suppression arm on the matched clause — see below) and a zero-row write.
+  The declared-vs-derived
   precedence order (derived tried first) and the
   order-independent key-set comparison for the declared fallback are implementation choices this
   plan made where the spec text underdetermines them.
 
   The slice-pruned merge is the
-  prerequisite every bullet of §"What the composed shape uniquely enables" builds on. The two
-  graph-layer bullets (propagation admissibility, key→partition dirt projection) are realized;
-  slice-bounded write suppression and the settle-bound × observed-delta composition remain
+  prerequisite every bullet of §"What the composed shape uniquely enables" builds on. All three
+  bullets are realized: the two graph-layer ones (propagation admissibility, key→partition dirt
+  projection), and slice-bounded write suppression — a composed (key + time) output's
+  suppressed `MERGE` carries the locality slice on the target read and the `IS DISTINCT FROM`
+  suppression arm together, keeping compare cost proportional to the slice rather than the full
+  key space; a bare keyed model's suppressed `MERGE` carries the suppression arm alone, never an
+  invented slice. The settle-bound × observed-delta composition remains
   unbuilt, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
 - **`grain: key_per_partition` derives no plan yet.** The value parses and passes declaration
   validation, but maintenance-plan derivation has no trajectory/backfill machinery to back the
@@ -1953,13 +1958,16 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   `INSERT` only the rows whose effect is not the identity, `DROP` the staged relation) —
   `maintenance::choice::resolve_keyed_write_mechanism` chooses between the keyed `MERGE` and this
   mechanism purely from a backend-capability flag, never a silent substitution on a
-  `MERGE`-capable backend. Still unbuilt: the region `DELETE`+`INSERT` family has no conditional
+  `MERGE`-capable backend. That choice is wired into the live `refresh: keyed` per-partition
+  execution loop (`smelt-runtime::cumulative`): the loop resolves each cell's `WriteSuppression`
+  once per run, from the same P2 row-identity and P3 change-comparability facts the column-scoped
+  path uses, and dispatches the keyed-fold `MERGE` to its suppressed or unconditional matched arm
+  accordingly — composing with a locality-admitted model's target-scan slice unchanged (both
+  predicates land on the same `MERGE`, never one displacing the other). Still unbuilt: the region
+  `DELETE`+`INSERT` family has no conditional
   variant yet (every region overwrite still rewrites unchanged rows), the whole-row (keyless,
   `EXCEPT ALL`-both-ways) staged-candidate realisation does not exist, a `write:` pin over the
-  keyed `MERGE`/staged-candidate choice does not exist, wiring that choice into the live
-  `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) has not happened —
-  the emitters and the choice-layer admission are built and tested directly, but the per-run
-  dispatch still always emits the unconditional keyed-fold `MERGE` — and no observed output delta
+  keyed `MERGE`/staged-candidate choice does not exist, and no observed output delta
   is recorded anywhere. Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.

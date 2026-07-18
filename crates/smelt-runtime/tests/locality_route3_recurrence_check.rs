@@ -30,11 +30,20 @@ use std::path::Path;
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Granularity, TimeseriesConfig};
+use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
     AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
 use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
+
+/// This file exercises route-3 checked-merge behaviour, not suppression —
+/// every call site below passes the plain unconditional matched arm.
+fn unconditional() -> WriteSuppression {
+    WriteSuppression::Unconditional {
+        why: "test exercises route-3 checked-merge behaviour, not suppression".to_string(),
+    }
+}
 
 fn timeseries() -> TimeseriesConfig {
     TimeseriesConfig {
@@ -167,6 +176,7 @@ async fn checked_route3_in_bound_redelivery_merges_cleanly() {
         &steps,
         &classification,
         Some(&slice),
+        &unconditional(),
         compile_step,
     )
     .await
@@ -201,6 +211,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &create_steps,
         &classification(),
         Some(&checked_slice()),
+        &unconditional(),
         compile_step,
     )
     .await
@@ -225,6 +236,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         &violating_steps,
         &classification(),
         Some(&checked_slice()),
+        &unconditional(),
         compile_step,
     )
     .await
@@ -402,6 +414,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &create_steps,
         &classification(),
         Some(&derived_slice()),
+        &unconditional(),
         compile_step,
     )
     .await
@@ -423,6 +436,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         &steps,
         &classification(),
         Some(&derived_slice()),
+        &unconditional(),
         compile_step,
     )
     .await

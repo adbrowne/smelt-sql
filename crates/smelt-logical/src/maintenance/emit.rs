@@ -899,6 +899,85 @@ mod keyed_fold_suppressed_tests {
 }
 
 #[cfg(test)]
+mod composed_slice_bounded_suppression_tests {
+    //! `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+    //! C6: composing suppression (C4/C5) with locality (A2) — a composed
+    //! (key + time) output's suppressed `MERGE` carries **both** predicates
+    //! (the slice on the target read, `IS DISTINCT FROM` on the matched
+    //! arm); a bare keyed model with no established locality slice carries
+    //! only the suppression arm, never an invented slice. This module makes
+    //! that composition explicit at the emitter level (mirroring the
+    //! `events_deduped`-shaped fixture: `event_id` key, `first_seen_date`
+    //! slice) — `keyed_fold_suppressed_tests::
+    //! suppressed_variant_composes_with_slice_predicate`/`suppressed_
+    //! variant_carries_is_distinct_from_over_compared_fold_columns` (C5)
+    //! already exercise the same emitter branches; these tests are this
+    //! phase's own explicit, named proof of the same claim.
+
+    use super::*;
+
+    fn key() -> Vec<String> {
+        vec!["event_id".to_string()]
+    }
+
+    fn folds() -> Vec<(String, String)> {
+        vec![(
+            "device_id".to_string(),
+            "MIN(target.device_id, delta.device_id)".to_string(),
+        )]
+    }
+
+    #[test]
+    fn composed_model_suppressed_merge_carries_both_predicates() {
+        let slice = TargetSlicePredicate::Range {
+            partition_column: "first_seen_date".to_string(),
+            lower: "2026-04-01".to_string(),
+            upper: "2026-04-01".to_string(),
+        };
+        let group = emit_keyed_fold_suppressed(
+            "main.events_deduped",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            Some(&slice),
+            &["device_id".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let sql = &group.statements[0].sql;
+        assert!(
+            sql.contains("target.first_seen_date BETWEEN '2026-04-01' AND '2026-04-01'"),
+            "composed model's suppressed merge must carry the slice predicate: {sql}"
+        );
+        assert!(
+            sql.contains("IS DISTINCT FROM"),
+            "composed model's suppressed merge must ALSO carry the suppression arm: {sql}"
+        );
+    }
+
+    #[test]
+    fn bare_keyed_model_suppressed_merge_carries_only_the_suppression_arm() {
+        let group = emit_keyed_fold_suppressed(
+            "main.events_deduped",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &["device_id".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let sql = &group.statements[0].sql;
+        assert!(
+            sql.contains("IS DISTINCT FROM"),
+            "bare keyed model's suppressed merge must carry the suppression arm: {sql}"
+        );
+        assert!(
+            !sql.contains("BETWEEN") && !sql.contains(" IN ("),
+            "bare keyed model's suppressed merge must never invent a slice: {sql}"
+        );
+    }
+}
+
+#[cfg(test)]
 mod staged_candidate_conditional_tests {
     use super::*;
 

@@ -114,12 +114,26 @@ pub trait WindowedKeyedRule: Send + Sync {
     /// the driver (`run_windowed_keyed_maintenance`) from the caller's
     /// established `LocalitySlice` — `None` for a keyed model with no
     /// admitted (or no declared) key temporal locality.
+    ///
+    /// `suppression` is the cell's already-resolved [`WriteSuppression`]
+    /// verdict (T1, `docs/plans/20260715-composed-axes-conditional-
+    /// maintenance.md` Phase C6): the caller resolves it once, outside the
+    /// step loop, from the model's own P2 row identity and P3 change-
+    /// comparability over the fold's own output columns — this trait method
+    /// does not re-derive admission, only chooses which matched-arm shape to
+    /// emit. `slice` and `suppression` compose independently: a composed
+    /// (key + time) model's suppressed merge carries both predicates; a bare
+    /// keyed model's carries only the suppression arm (never an invented
+    /// slice) — the composition itself lives in the single-owner emitter
+    /// (`smelt_logical::maintenance::emit::emit_keyed_fold_suppressed`),
+    /// this method only threads the two already-resolved values to it.
     fn merge_sql(
         &self,
         schema: &str,
         table: &str,
         delta_sql: &str,
         slice: Option<&TargetSlicePredicate>,
+        suppression: &WriteSuppression,
     ) -> String;
 
     /// The reconciliation ledger's storage grading for this rule's cell
@@ -195,6 +209,7 @@ pub async fn run_windowed_keyed_maintenance(
     steps: &[MaintenanceStep],
     rule: &dyn WindowedKeyedRule,
     locality: Option<&LocalitySlice>,
+    suppression: &WriteSuppression,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
 ) -> Result<ExecutionResult> {
     if let Some(reason) = rule.refuse() {
@@ -271,7 +286,13 @@ pub async fn run_windowed_keyed_maintenance(
         });
         let action_sql = match &create_group {
             Some(group) => group.statements[0].sql.clone(),
-            None => rule.merge_sql(schema, table, &delta_sql, slice_predicate.as_ref()),
+            None => rule.merge_sql(
+                schema,
+                table,
+                &delta_sql,
+                slice_predicate.as_ref(),
+                suppression,
+            ),
         };
 
         // Route 3's declared sub-route (`LocalitySlice::RecurrenceBounded`)
@@ -1030,6 +1051,14 @@ mod tests {
         assert!(driving_steps("2024-01-05", "2024-01-01", &Granularity::Day).is_err());
     }
 
+    /// The plain unconditional matched arm — the pre-Phase-C6 default for
+    /// tests below that don't exercise suppression itself.
+    fn unconditional_suppression() -> WriteSuppression {
+        WriteSuppression::Unconditional {
+            why: "test rule does not exercise write suppression".to_string(),
+        }
+    }
+
     /// A rule whose combiner set is never monoid-safe — the driver must
     /// refuse the whole run rather than merge approximately.
     struct AlwaysRefuses;
@@ -1044,6 +1073,7 @@ mod tests {
             _table: &str,
             _delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
+            _suppression: &WriteSuppression,
         ) -> String {
             unreachable!("merge_sql must not be called once refuse() fires")
         }
@@ -1205,6 +1235,7 @@ mod tests {
             table: &str,
             delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
+            _suppression: &WriteSuppression,
         ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
@@ -1225,6 +1256,7 @@ mod tests {
             table: &str,
             delta_sql: &str,
             _slice: Option<&TargetSlicePredicate>,
+            _suppression: &WriteSuppression,
         ) -> String {
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
         }
@@ -1248,6 +1280,7 @@ mod tests {
             &steps,
             &AlwaysRefuses,
             None,
+            &unconditional_suppression(),
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -1276,6 +1309,7 @@ mod tests {
             &steps,
             &SumRule,
             None,
+            &unconditional_suppression(),
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -1321,6 +1355,7 @@ mod tests {
             &steps,
             &SumRuleAdditive,
             None,
+            &unconditional_suppression(),
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -1367,6 +1402,7 @@ mod tests {
             &steps,
             &SumRuleAdditive,
             None,
+            &unconditional_suppression(),
             |step| {
                 Ok(format!(
                     "SELECT * FROM src WHERE d = '{}'",
@@ -1410,6 +1446,7 @@ mod tests {
             table: &str,
             delta_sql: &str,
             slice: Option<&TargetSlicePredicate>,
+            _suppression: &WriteSuppression,
         ) -> String {
             self.captured.lock().unwrap().push(slice.cloned());
             format!("MERGE INTO {}.{} USING ({})", schema, table, delta_sql)
@@ -1437,6 +1474,7 @@ mod tests {
             &steps,
             &rule,
             Some(&locality),
+            &unconditional_suppression(),
             |step| {
                 Ok(format!(
                     "SELECT id, first_seen_at FROM src WHERE d = '{}'",

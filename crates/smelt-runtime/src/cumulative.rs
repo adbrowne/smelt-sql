@@ -19,8 +19,13 @@ use crate::transformer::{inject_source_filters, SourceBound, TimeRange};
 use anyhow::{Context, Result};
 use smelt_backend::{Backend, ExecutionResult};
 use smelt_core::ModelFile;
+use smelt_logical::analysis::join_shape::JoinContext;
+use smelt_logical::analysis::walk::model_property_vector;
+use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppression};
+use smelt_logical::maintenance::derive::row_identity;
 use smelt_logical::maintenance::emit::{
-    emit_keyed_fold, emit_recurrence_bound_probe, MaintenanceDialect, TargetSlicePredicate,
+    emit_keyed_fold, emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect,
+    TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::{
     establish_locality, partition_column_provably_not_null, LocalityInputs, LocalitySlice,
@@ -58,8 +63,9 @@ impl WindowedKeyedRule for CumulativeClassification {
         table: &str,
         delta_sql: &str,
         slice: Option<&TargetSlicePredicate>,
+        suppression: &WriteSuppression,
     ) -> String {
-        build_cumulative_merge_sql(schema, table, delta_sql, self, slice)
+        build_cumulative_merge_sql(schema, table, delta_sql, self, slice, suppression)
     }
 
     /// `Grade::Additive` iff any aggregator column's cross-partition
@@ -246,6 +252,12 @@ pub async fn execute_cumulative_aggregate(
         );
     }
 
+    // Resolved once, up front (like `locality_slice` above), from the
+    // model's own P2 row identity and P3 change-comparability over the
+    // fold's own output columns (`docs/plans/20260715-composed-axes-
+    // conditional-maintenance.md` Phase C6) — never re-derived per step.
+    let suppression = resolve_cumulative_write_suppression(&classification, &clean_sql);
+
     run_windowed_keyed_maintenance(
         backend,
         model_name,
@@ -254,6 +266,7 @@ pub async fn execute_cumulative_aggregate(
         &steps,
         &classification,
         locality_slice.as_ref(),
+        &suppression,
         |step| {
             // 4. Per-partition pushdown: inject the driving source's
             //    `[step.start, step.end)` filter, then compile (resolves
@@ -302,7 +315,7 @@ pub async fn execute_cumulative_aggregate(
 /// the rendered `(column, expression)` pairs to the emitter, which owns the
 /// `MERGE` shape.
 ///
-/// Shape:
+/// Shape (unconditional):
 /// ```sql
 /// MERGE INTO schema.table AS target
 /// USING (<delta_sql>) AS delta
@@ -312,12 +325,28 @@ pub async fn execute_cumulative_aggregate(
 ///     ...
 /// WHEN NOT MATCHED THEN INSERT *
 /// ```
+///
+/// `suppression` is the cell's already-resolved [`WriteSuppression`] verdict
+/// (T1, `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+/// Phase C6 — extending Phase C5's keyed-fold suppression emitter into the
+/// live `refresh: keyed` maintenance loop): `WriteSuppression::Suppressed`
+/// dispatches to [`emit_keyed_fold_suppressed`] (the matched arm gains an
+/// `IS DISTINCT FROM` guard over the compared fold columns, composing with
+/// `slice` unchanged — both predicates land on the same `ON` clause when
+/// both are present, and a bare keyed model with no locality slice carries
+/// only the suppression arm); `WriteSuppression::Unconditional` keeps this
+/// function's pre-Phase-C6 [`emit_keyed_fold`] dispatch, byte-identical.
+/// This function does no admission of its own — the caller (`execute_
+/// cumulative_aggregate`) resolves `suppression` once, from the model's own
+/// P2 row identity and P3 change-comparability over the fold's own output
+/// columns.
 pub fn build_cumulative_merge_sql(
     schema: &str,
     table: &str,
     delta_sql: &str,
     classification: &CumulativeClassification,
     slice: Option<&TargetSlicePredicate>,
+    suppression: &WriteSuppression,
 ) -> String {
     let folds: Vec<(String, String)> = classification
         .aggregator_columns
@@ -331,15 +360,54 @@ pub fn build_cumulative_merge_sql(
         .collect();
 
     let schema_table = format!("{schema}.{table}");
-    let group = emit_keyed_fold(
-        &schema_table,
-        &classification.unique_key,
-        &folds,
-        delta_sql,
-        slice,
-        MaintenanceDialect::DuckDb,
-    );
+    let group = match suppression {
+        WriteSuppression::Suppressed { compared_columns } => emit_keyed_fold_suppressed(
+            &schema_table,
+            &classification.unique_key,
+            &folds,
+            delta_sql,
+            slice,
+            compared_columns,
+            MaintenanceDialect::DuckDb,
+        ),
+        WriteSuppression::Unconditional { .. } => emit_keyed_fold(
+            &schema_table,
+            &classification.unique_key,
+            &folds,
+            delta_sql,
+            slice,
+            MaintenanceDialect::DuckDb,
+        ),
+    };
     group.statements[0].sql.clone()
+}
+
+/// Resolve this classification's [`WriteSuppression`] verdict
+/// (`smelt_logical::maintenance::choice::resolve_write_suppression`): P2 row
+/// identity comes from the classifier's own already-proven `unique_key`
+/// (the classifier only reaches `Grain::Key` admission over a proven
+/// `GROUP BY` key, so treating it as the declared key for [`row_identity`]
+/// is not a second, independent proof — it is the same key `derive.rs`'s
+/// own `Technique::KeyedFold` cell carries as `PlanCell::row_identity`, read
+/// off the classifier directly rather than re-deriving a `MaintenancePlan`);
+/// P3 change-comparability comes from the shared composition walk
+/// (`model_property_vector`) over the model's own SQL. `compared_columns`
+/// is exactly the fold's own output columns — there is nothing else a
+/// keyed-fold cell's matched arm could write.
+fn resolve_cumulative_write_suppression(
+    classification: &CumulativeClassification,
+    sql: &str,
+) -> WriteSuppression {
+    let group_columns: Vec<String> = classification
+        .aggregator_columns
+        .iter()
+        .map(|col| col.output_name.clone())
+        .collect();
+    let identity = row_identity(&classification.unique_key, sql);
+    let comparability = model_property_vector(sql, &JoinContext::new())
+        .map(|v| v.comparability)
+        .unwrap_or_default();
+    resolve_write_suppression(&group_columns, &comparability, &identity)
 }
 
 /// Collect `smelt.<path>` references from raw SQL by scanning for the prefix.
@@ -404,6 +472,15 @@ mod tests {
         }
     }
 
+    /// The plain unconditional matched arm — the pre-Phase-C6 default the
+    /// existing byte-identity tests below still exercise, so the
+    /// `emit_keyed_fold` dispatch path stays unchanged.
+    fn unconditional() -> WriteSuppression {
+        WriteSuppression::Unconditional {
+            why: "test exercises the unconditional dispatch path directly".to_string(),
+        }
+    }
+
     /// `build_cumulative_merge_sql` is a thin wrapper over the single-owner
     /// `emit_keyed_fold` emitter (`docs/specs/incremental_models.md`
     /// §"Statement emission (single owner)"): this test asserts its output
@@ -444,6 +521,7 @@ mod tests {
             delta_sql,
             &classification,
             None,
+            &unconditional(),
         );
         assert!(sql.contains("MERGE INTO main.device_user_edges"));
         assert!(sql.contains("target.device_id = delta.device_id"));
@@ -506,14 +584,21 @@ mod tests {
             lower: "2026-01-02".to_string(),
             upper: "2026-01-02".to_string(),
         };
-        let without_slice =
-            build_cumulative_merge_sql("main", "device_daily", delta_sql, &classification, None);
+        let without_slice = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            None,
+            &unconditional(),
+        );
         let with_slice = build_cumulative_merge_sql(
             "main",
             "device_daily",
             delta_sql,
             &classification,
             Some(&slice),
+            &unconditional(),
         );
         assert!(
             with_slice.contains("AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02'"),
@@ -561,6 +646,7 @@ mod tests {
             delta_sql,
             &classification,
             Some(&slice),
+            &unconditional(),
         );
         assert!(
             with_slice.contains(
@@ -573,6 +659,186 @@ mod tests {
         assert!(
             !with_slice.contains("BETWEEN"),
             "route 2's slice must never render as a margin-based range: {with_slice}"
+        );
+    }
+
+    /// `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase C6: a `WriteSuppression::Suppressed` verdict dispatches to
+    /// `emit_keyed_fold_suppressed` instead of the unconditional
+    /// `emit_keyed_fold` — the matched arm gains an `IS DISTINCT FROM`
+    /// guard over exactly the compared fold columns, byte-identical to a
+    /// direct emitter call.
+    #[test]
+    fn build_cumulative_merge_sql_dispatches_suppressed_variant() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "event_count".to_string(),
+                per_partition_agg: "COUNT".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Sum,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        let delta_sql = "SELECT device_id, COUNT(*) AS event_count FROM events GROUP BY device_id";
+        let suppression = WriteSuppression::Suppressed {
+            compared_columns: vec!["event_count".to_string()],
+        };
+        let sql = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            None,
+            &suppression,
+        );
+
+        let expected = emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &classification.unique_key,
+            &[(
+                "event_count".to_string(),
+                "target.event_count + delta.event_count".to_string(),
+            )],
+            delta_sql,
+            None,
+            &["event_count".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            sql, expected.statements[0].sql,
+            "build_cumulative_merge_sql must dispatch Suppressed to emit_keyed_fold_suppressed, \
+             byte-identical to a direct emitter call"
+        );
+        assert!(sql.contains("IS DISTINCT FROM"));
+    }
+
+    /// Phase C6's own claim: a composed (key + time) model's suppressed
+    /// `MERGE` carries **both** predicates (the locality slice on the
+    /// target read, `IS DISTINCT FROM` on the matched arm); a bare keyed
+    /// model with no established locality slice carries only the
+    /// suppression arm — never an invented slice. Both shapes dispatch
+    /// through the SAME `build_cumulative_merge_sql` call, `slice` being
+    /// the only thing that differs.
+    #[test]
+    fn build_cumulative_merge_sql_composed_suppression_carries_both_predicates_bare_carries_only_one(
+    ) {
+        let classification = CumulativeClassification {
+            unique_key: vec!["device_id".to_string(), "event_date".to_string()],
+            aggregator_columns: vec![AggregatorColumn {
+                output_name: "max_amount".to_string(),
+                per_partition_agg: "MAX".to_string(),
+                cross_partition_combiner: CrossPartitionCombiner::Max,
+            }],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        let delta_sql = "SELECT device_id, event_date, MAX(amount) AS max_amount FROM events \
+                          WHERE event_date = '2026-01-02' GROUP BY 1, 2";
+        let suppression = WriteSuppression::Suppressed {
+            compared_columns: vec!["max_amount".to_string()],
+        };
+
+        // Bare keyed (no established locality slice): suppression arm only,
+        // no invented slice.
+        let bare = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            None,
+            &suppression,
+        );
+        assert!(
+            bare.contains("IS DISTINCT FROM"),
+            "bare keyed suppressed merge must carry the suppression arm: {bare}"
+        );
+        assert!(
+            !bare.contains("BETWEEN") && !bare.contains(" IN ("),
+            "bare keyed suppressed merge must never invent a slice: {bare}"
+        );
+
+        // Composed (key + time): both predicates, on the same ON clause.
+        let slice = TargetSlicePredicate::Range {
+            partition_column: "event_date".to_string(),
+            lower: "2026-01-02".to_string(),
+            upper: "2026-01-02".to_string(),
+        };
+        let composed = build_cumulative_merge_sql(
+            "main",
+            "device_daily",
+            delta_sql,
+            &classification,
+            Some(&slice),
+            &suppression,
+        );
+        assert!(
+            composed.contains("AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02'"),
+            "composed suppressed merge must carry the slice predicate: {composed}"
+        );
+        assert!(
+            composed.contains("IS DISTINCT FROM"),
+            "composed suppressed merge must ALSO carry the suppression arm: {composed}"
+        );
+
+        let expected = emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &classification.unique_key,
+            &[(
+                "max_amount".to_string(),
+                "GREATEST(target.max_amount, delta.max_amount)".to_string(),
+            )],
+            delta_sql,
+            Some(&slice),
+            &["max_amount".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(
+            composed, expected.statements[0].sql,
+            "composed suppression+slice dispatch must be byte-identical to a direct emitter call"
+        );
+    }
+
+    /// Phase C6: `execute_cumulative_aggregate`'s own suppression resolver —
+    /// a fully comparable fold over the classifier's own proven `unique_key`
+    /// resolves `Suppressed`, naming exactly the fold's own output columns
+    /// (mirrors `events_deduped.sql`'s `MIN`-folded shape).
+    #[test]
+    fn resolve_cumulative_write_suppression_admits_comparable_min_fold() {
+        let classification = CumulativeClassification {
+            unique_key: vec!["event_id".to_string()],
+            aggregator_columns: vec![
+                AggregatorColumn {
+                    output_name: "device_id".to_string(),
+                    per_partition_agg: "MIN".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Min,
+                },
+                AggregatorColumn {
+                    output_name: "first_seen_date".to_string(),
+                    per_partition_agg: "MIN".to_string(),
+                    cross_partition_combiner: CrossPartitionCombiner::Min,
+                },
+            ],
+            driving_source: DrivingSource {
+                name: "smelt.sources.raw.events".to_string(),
+                timeseries: dummy_ts(),
+            },
+        };
+        let sql = "SELECT event_id, MIN(device_id) AS device_id, \
+                    MIN(CAST(event_date AS DATE)) AS first_seen_date \
+                    FROM smelt.sources.raw.events GROUP BY event_id";
+        let suppression = resolve_cumulative_write_suppression(&classification, sql);
+        assert_eq!(
+            suppression,
+            WriteSuppression::Suppressed {
+                compared_columns: vec!["device_id".to_string(), "first_seen_date".to_string()]
+            },
+            "a MIN-folded group over a proven key must admit suppression, not refuse: \
+             {suppression:?}"
         );
     }
 

@@ -43,7 +43,8 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    emit_recurrence_bound_probe, MaintenanceDialect, Region, TargetSlicePredicate,
+    emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect, Region,
+    TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_planner::{
@@ -909,20 +910,28 @@ async fn keyed_fold_statements_come_from_the_emitter() {
         "executed CREATE group must be byte-identical to a direct emitter call"
     );
 
-    // Step 2: combiner-aware MERGE.
+    // Step 2: combiner-aware MERGE. `first_seen`/`last_seen` are both
+    // Comparable (MIN/MAX are registry-backed deterministic functions) over
+    // a proven `device_id` key, so a real run now resolves `Suppressed`
+    // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // Phase C6 — `resolve_cumulative_write_suppression`, wired into
+    // `execute_cumulative_aggregate`) — the matched arm carries an `IS
+    // DISTINCT FROM` guard over both fold columns.
     let merge_sql = &groups[1].statements[0].sql;
     assert_eq!(groups[1].statements.len(), 1);
     let prefix = "MERGE INTO main.device_user_edges AS target USING (";
     let suffix = ") AS delta ON target.device_id = delta.device_id \
-                  WHEN MATCHED THEN UPDATE SET first_seen = LEAST(target.first_seen, delta.first_seen), \
-                  last_seen = GREATEST(target.last_seen, delta.last_seen) \
-                  WHEN NOT MATCHED THEN INSERT *";
+                  WHEN MATCHED AND (target.first_seen IS DISTINCT FROM (LEAST(target.first_seen, \
+                  delta.first_seen)) OR target.last_seen IS DISTINCT FROM (GREATEST(target.\
+                  last_seen, delta.last_seen))) THEN UPDATE SET first_seen = LEAST(target.\
+                  first_seen, delta.first_seen), last_seen = GREATEST(target.last_seen, \
+                  delta.last_seen) WHEN NOT MATCHED THEN INSERT *";
     assert!(
         merge_sql.starts_with(prefix) && merge_sql.ends_with(suffix),
         "unexpected merge statement: {merge_sql}"
     );
     let delta_select = &merge_sql[prefix.len()..merge_sql.len() - suffix.len()];
-    let expected_merge = emit_keyed_fold(
+    let expected_merge = emit_keyed_fold_suppressed(
         "main.device_user_edges",
         &["device_id".to_string()],
         &[
@@ -937,6 +946,7 @@ async fn keyed_fold_statements_come_from_the_emitter() {
         ],
         delta_select,
         None,
+        &["first_seen".to_string(), "last_seen".to_string()],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -981,6 +991,17 @@ async fn keyed_fold_statements_come_from_the_emitter() {
 /// `RecordingBackend` records — rather than the ledger-interleaved additive
 /// path, matching `keyed_fold_statements_come_from_the_emitter`'s own choice
 /// of combiner.
+///
+/// This is also the doubly-predicated statement-parity leg
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// C6): `max_amount` is Comparable (a registry-backed deterministic
+/// aggregate) over the proven `{device_id, event_date}` key, so a real run
+/// now resolves `WriteSuppression::Suppressed`
+/// (`resolve_cumulative_write_suppression`, wired into `execute_cumulative_
+/// aggregate`) — the executed `MERGE` carries **both** the slice predicate
+/// on the `ON` clause's target read AND the `IS DISTINCT FROM` suppression
+/// arm on the matched clause, byte-identical to a direct `emit_keyed_fold_
+/// suppressed` call with the same slice.
 #[tokio::test]
 async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
     let tmp = tempfile::tempdir().expect("tempdir");
@@ -1127,21 +1148,28 @@ async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
     let suffix = ") AS delta ON target.device_id = delta.device_id AND \
                   target.event_date = delta.event_date AND \
                   target.event_date BETWEEN '2024-01-02' AND '2024-01-02' \
-                  WHEN MATCHED THEN UPDATE SET \
+                  WHEN MATCHED AND (target.max_amount IS DISTINCT FROM (GREATEST(target.\
+                  max_amount, delta.max_amount))) THEN UPDATE SET \
                   max_amount = GREATEST(target.max_amount, delta.max_amount) \
                   WHEN NOT MATCHED THEN INSERT *";
     assert!(
         merge_sql.starts_with(prefix) && merge_sql.ends_with(suffix),
         "unexpected slice-predicated merge statement: {merge_sql}"
     );
+    assert!(
+        merge_sql.contains("BETWEEN") && merge_sql.contains("IS DISTINCT FROM"),
+        "the composed model's suppressed merge must carry BOTH the slice predicate and the \
+         suppression arm: {merge_sql}"
+    );
     let delta_select = &merge_sql[prefix.len()..merge_sql.len() - suffix.len()];
 
-    let expected = emit_keyed_fold(
+    let expected = emit_keyed_fold_suppressed(
         "main.device_daily",
         &key,
         &folds,
         delta_select,
         Some(&slice),
+        &["max_amount".to_string()],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -1254,6 +1282,9 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         &create_steps,
         &classification,
         Some(&slice),
+        &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
+            why: "test asserts the unconditional checked-merge shape".to_string(),
+        },
         compile_step,
     )
     .await
@@ -1282,6 +1313,9 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         &steps,
         &classification,
         Some(&slice),
+        &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
+            why: "test asserts the unconditional checked-merge shape".to_string(),
+        },
         compile_step,
     )
     .await
@@ -1711,7 +1745,7 @@ async fn suppressed_keyed_fold_statements_come_from_the_emitter() {
     let key = vec!["device_id".to_string()];
     let compared_columns = vec!["event_count".to_string()];
 
-    let group = smelt_logical::maintenance::emit::emit_keyed_fold_suppressed(
+    let group = emit_keyed_fold_suppressed(
         "main.device_daily",
         &key,
         &folds,
@@ -1728,7 +1762,7 @@ async fn suppressed_keyed_fold_statements_come_from_the_emitter() {
     let recorded = backend.recorded_groups();
     assert_eq!(recorded.len(), 1);
     assert_eq!(&recorded[0], &group);
-    let expected = smelt_logical::maintenance::emit::emit_keyed_fold_suppressed(
+    let expected = emit_keyed_fold_suppressed(
         "main.device_daily",
         &key,
         &folds,
@@ -1990,6 +2024,200 @@ async fn staged_candidate_interrupted_run_leaves_no_temp_relation_behind() {
         )
         .await,
         "the target table must be completely untouched by a rolled-back staged-candidate group"
+    );
+}
+
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase C6's
+/// own real-fixture requirement: `examples/web_analytics`'s
+/// `silver.events_deduped` (the flagship composed shape — key-addressed via
+/// `event_id`, time-partitioned via `first_seen_date`, admitted through
+/// route 3's declared `key_recurrence`) driven through the SAME real model
+/// text `smelt run` executes for that example, via `execute_project` and a
+/// `RecordingBackend` so the executed SQL can be inspected directly — the
+/// real-fixture counterpart to `keyed_fold_slice_predicated_merge_
+/// statements_come_from_the_emitter`'s synthetic composed fixture above.
+///
+/// Only the two files this model actually needs
+/// (`models/sources/raw/events.yml`, `models/silver/events_deduped.sql`)
+/// are copied byte-for-byte off disk — not the whole example (which also
+/// needs `smelt-datagen`-generated Parquet + the `functions/` dir neither
+/// model here calls) — into a fresh scratch project, seeded directly via
+/// `raw.events` INSERTs rather than a full datagen run.
+///
+/// Day 1 seeds `event_id` 1; day 2 redelivers the SAME `event_id` 1 with
+/// byte-identical payload fields (only `arrival_time`, a column this model
+/// never selects, would differ in a real redelivery — irrelevant here) —
+/// exactly `datagen.yaml`'s `redelivery:` storm, collapsed to one pair —
+/// alongside a genuinely new `event_id` 2. Day 2's `MERGE` step must carry
+/// **both** predicates (the route-3 `RecurrenceBounded` slice on the target
+/// read, `IS DISTINCT FROM` suppression on the matched arm) and must write
+/// zero rows for the redelivered key while still inserting the new one.
+#[tokio::test]
+async fn events_deduped_composed_suppression_storm_rerun_writes_zero_rows() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources/raw")).unwrap();
+    std::fs::create_dir_all(project_dir.join("models/silver")).unwrap();
+
+    let fixture_root = repo_root().join("examples/web_analytics");
+    let events_yml = std::fs::read_to_string(fixture_root.join("models/sources/raw/events.yml"))
+        .expect("read examples/web_analytics/models/sources/raw/events.yml");
+    let events_deduped_sql =
+        std::fs::read_to_string(fixture_root.join("models/silver/events_deduped.sql"))
+            .expect("read examples/web_analytics/models/silver/events_deduped.sql");
+    std::fs::write(
+        project_dir.join("models/sources/raw/events.yml"),
+        &events_yml,
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/silver/events_deduped.sql"),
+        &events_deduped_sql,
+    )
+    .unwrap();
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: events_deduped_storm_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS raw;\n\
+             CREATE TABLE raw.events (\n\
+               event_id BIGINT, device_id INTEGER, user_id INTEGER, seconds_in_day INTEGER,\n\
+               event_time VARCHAR, arrival_time VARCHAR, utm_campaign VARCHAR, payload VARCHAR,\n\
+               event_date VARCHAR\n\
+             );\n\
+             -- Day 1: event_id 1 first seen.\n\
+             INSERT INTO raw.events VALUES (\n\
+               1, 10, NULL, 100, '2026-04-01T00:01:40', '2026-04-01T00:01:41', NULL,\n\
+               '{\"event_name\": \"page_view\", \"platform\": \"web\", \"url\": \"/home\"}',\n\
+               '2026-04-01'\n\
+             );\n\
+             -- Day 2: event_id 1 redelivered (byte-identical payload fields — only\n\
+             -- arrival_time, never selected by this model, differs), plus a\n\
+             -- genuinely new event_id 2.\n\
+             INSERT INTO raw.events VALUES (\n\
+               1, 10, NULL, 100, '2026-04-01T00:01:40', '2026-04-02T00:01:41', NULL,\n\
+               '{\"event_name\": \"page_view\", \"platform\": \"web\", \"url\": \"/home\"}',\n\
+               '2026-04-01'\n\
+             );\n\
+             INSERT INTO raw.events VALUES (\n\
+               2, 11, NULL, 200, '2026-04-02T00:03:20', '2026-04-02T00:03:21', NULL,\n\
+               '{\"event_name\": \"page_view\", \"platform\": \"web\", \"url\": \"/pricing\"}',\n\
+               '2026-04-02'\n\
+             );",
+        )
+        .expect("seed raw.events");
+    }
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    // Window 1: day 1 alone — first-run CREATE, no MERGE yet.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "events-deduped-storm-run-1".to_string(),
+            make_request("dev", "2026-04-01", "2026-04-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("day 1 (create) must run");
+    }
+
+    // Window 2: day 2 — the redelivery-storm step, a single MERGE.
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    execute_project(
+        "events-deduped-storm-run-2".to_string(),
+        make_request("dev", "2026-04-02", "2026-04-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("day 2 (redelivery-storm merge) must run");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let merge_group = groups
+        .iter()
+        .find(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .expect("day 2 must execute exactly one MERGE group");
+    let merge_sql = &merge_group.statements[0].sql;
+
+    assert!(
+        merge_sql.contains("BETWEEN"),
+        "the composed model's merge must carry the route-3 recurrence-bounded slice on the \
+         target read: {merge_sql}"
+    );
+    assert!(
+        merge_sql.contains("IS DISTINCT FROM"),
+        "the composed model's merge must carry the suppression arm: {merge_sql}"
+    );
+
+    // Zero-write proof: reissue the exact statement text the run recorded
+    // — DuckDB's own `MERGE` returns the count of rows it actually
+    // modified (`crates/smelt-runtime/tests/technique_lowering.rs::
+    // merge_affected_row_count`'s own technique). The run already brought
+    // the target to its converged state, so replaying the identical
+    // statement now must match every row (`event_id` 1's redelivered
+    // duplicate, `event_id` 2 already inserted) but write none of them.
+    let replay = backend
+        .execute_sql(merge_sql)
+        .await
+        .expect("replaying the recorded merge must succeed");
+    let batch = replay.first().expect("MERGE returns one Count row");
+    let affected = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("Count column is Int64")
+        .value(0);
+    assert_eq!(
+        affected, 0,
+        "replaying day 2's already-converged merge must write zero rows — the redelivery \
+         storm's unchanged payload must be fully suppressed"
+    );
+
+    // Result-equivalence: the maintained state must still equal a full
+    // refresh of the model's own MIN-fold dedup over every seeded row.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT event_id, device_id, user_id, first_seen_date FROM main.silver_events_deduped",
+            "SELECT event_id, MIN(device_id) AS device_id, MIN(user_id) AS user_id, \
+             MIN(CAST(event_date AS DATE)) AS first_seen_date FROM raw.events GROUP BY event_id"
+        )
+        .await,
+        "the composed suppressed-merge run must still reproduce a full refresh"
     );
 }
 

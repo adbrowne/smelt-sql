@@ -8,6 +8,7 @@ use proptest::test_runner::TestRunner;
 
 use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
+use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{Technique, Trigger};
 use smelt_maintenance_testkit::feed::{self, FeedSourcePosture};
@@ -2205,6 +2206,28 @@ async fn insert_composed_rows_via_backend(
     Ok(())
 }
 
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase C6
+/// TDD item 4: the composed pool runs with suppression enabled and must
+/// stay equivalent under redelivery schedules — `total`/`last_seen` are
+/// both registry-backed deterministic aggregates (`SUM`/`MAX`), Comparable
+/// under the P3 change-comparability walk, over the recipe's own proven
+/// `id` key, so a hand-built `Suppressed` verdict here mirrors exactly what
+/// `resolve_write_suppression` would resolve for these fixed classifications
+/// (`crate::cumulative::resolve_cumulative_write_suppression`'s own
+/// production wiring), without re-deriving the walk over generated SQL this
+/// testkit's classifications are never actually parsed from.
+fn composed_route2_suppression() -> WriteSuppression {
+    WriteSuppression::Suppressed {
+        compared_columns: vec!["total".to_string()],
+    }
+}
+
+fn composed_route3_suppression() -> WriteSuppression {
+    WriteSuppression::Suppressed {
+        compared_columns: vec!["last_seen".to_string()],
+    }
+}
+
 async fn drive_composed_route2_and_assert(
     backend: &DuckDbBackend,
     recipe: &ComposedKeyedRecipe,
@@ -2258,6 +2281,7 @@ async fn drive_composed_route2_and_assert(
             &steps,
             &classification,
             slice,
+            &composed_route2_suppression(),
             compile_step,
         )
         .await
@@ -2301,6 +2325,7 @@ async fn drive_composed_route3_and_assert(
             &steps,
             &classification,
             Some(&slice),
+            &composed_route3_suppression(),
             compile_step,
         )
         .await
