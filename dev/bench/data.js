@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784417318815,
+  "lastUpdate": 1784417321808,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -1079,6 +1079,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.697581331269028,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "ab6fc03773cae1e42109230a1d1cad57f8891bfa",
+          "message": "fix(autonomy-loop): classify 429/session-limit before the rc!=0 infra-failure check\n\nclaude --print exits nonzero on a 429, so the existing rc!=0 guard fired\nfirst and misclassified session-limit hits as generic infra failures,\nwhich count toward the forever-wrapper's fast-fail crash-loop guard.\nThree consecutive 429s (2026-07-18 22:37-22:58, waiting out the midnight\nMelbourne reset) tripped MAX_FAST_FAILS and halted the loop instead of\nretrying through the reset window as intended.\n\nMove the .result/api_error_status extraction and session-limit\nclassification ahead of the rc!=0 check so a rate-limit hit is always\nrouted to exit 4 (always retry, never a fast-fail) regardless of the\nprocess's own exit code.",
+          "timestamp": "2026-07-19T06:25:04+10:00",
+          "tree_id": "89136d369ef44e14def66ca8e9d6ee45af1087c7",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/ab6fc03773cae1e42109230a1d1cad57f8891bfa"
+        },
+        "date": 1784417320739,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.23458376322397,
             "unit": "MB/s"
           }
         ]
