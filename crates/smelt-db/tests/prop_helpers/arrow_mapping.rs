@@ -112,6 +112,77 @@ mod tests {
         );
     }
 
+    /// `LIST` → `Array<T>` for each base element type the property-test
+    /// generators can now produce (ARRAY literals / ARRAY_AGG / subscript /
+    /// slice) — guards the recursive `arrow_to_smelt` call in the List branch
+    /// against silently regressing to a blanket `Unknown` for any of them.
+    #[test]
+    fn list_mapping_all_base_element_types() {
+        let cases: &[(ArrowType, DataType)] = &[
+            (ArrowType::Boolean, DataType::Boolean),
+            (ArrowType::Int32, DataType::Integer),
+            (ArrowType::Int64, DataType::BigInt),
+            (ArrowType::Float64, DataType::Double),
+            (ArrowType::Utf8, DataType::Varchar { max_length: None }),
+            (ArrowType::Date32, DataType::Date),
+            (
+                ArrowType::Timestamp(TimeUnit::Microsecond, None),
+                DataType::Timestamp {
+                    with_timezone: false,
+                },
+            ),
+            (
+                ArrowType::Timestamp(TimeUnit::Microsecond, Some("UTC".into())),
+                DataType::Timestamp {
+                    with_timezone: true,
+                },
+            ),
+            (
+                ArrowType::Decimal128(10, 2),
+                DataType::Decimal {
+                    precision: 10,
+                    scale: 2,
+                },
+            ),
+            (ArrowType::Time64(TimeUnit::Microsecond), DataType::Time),
+            (
+                ArrowType::Interval(arrow::datatypes::IntervalUnit::MonthDayNano),
+                DataType::Interval,
+            ),
+        ];
+
+        for (elem_arrow, elem_smelt) in cases {
+            let list_type = ArrowType::List(Arc::new(Field::new("item", elem_arrow.clone(), true)));
+            assert_eq!(
+                arrow_to_smelt(&list_type),
+                DataType::Array(Box::new(elem_smelt.clone())),
+                "LIST<{elem_arrow:?}> should map to Array<{elem_smelt:?}>"
+            );
+        }
+    }
+
+    /// `LargeList` uses the same recursive element mapping as `List`.
+    #[test]
+    fn large_list_mapping() {
+        let list_type = ArrowType::LargeList(Arc::new(Field::new("item", ArrowType::Utf8, true)));
+        assert_eq!(
+            arrow_to_smelt(&list_type),
+            DataType::Array(Box::new(DataType::Varchar { max_length: None }))
+        );
+    }
+
+    /// Nested `List<List<T>>` — element-type-aware recursion should reach two
+    /// levels deep (e.g. `ARRAY_AGG(ARRAY_AGG(x))`-shaped results).
+    #[test]
+    fn nested_list_mapping() {
+        let inner = ArrowType::List(Arc::new(Field::new("item", ArrowType::Int32, true)));
+        let outer = ArrowType::List(Arc::new(Field::new("item", inner, true)));
+        assert_eq!(
+            arrow_to_smelt(&outer),
+            DataType::Array(Box::new(DataType::Array(Box::new(DataType::Integer))))
+        );
+    }
+
     #[test]
     fn null_mapping() {
         assert_eq!(arrow_to_smelt(&ArrowType::Null), DataType::Null);

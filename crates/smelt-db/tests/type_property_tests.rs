@@ -1247,18 +1247,26 @@ mod reachability {
 
     #[test]
     fn reaches_decimal_arithmetic() {
-        let corpus = sample_generated_sql(N);
+        // `expr_kind_strategy`'s weighted `prop_oneof!` spreads probability
+        // over every `ExprKind` arm; each new arm dilutes `BinaryOp`'s share,
+        // so a fixed-N deterministic sample can stop reliably drawing a
+        // specific binary-op/column-type pairing whenever the arm list grows
+        // (same sensitivity `reaches_percentile_within_group` documents for
+        // `core_functions()`). Use a larger sample than the shared `N` to
+        // stay robust to that growth instead of tuning weights forever.
+        const LARGER_N: usize = 5 * N;
+        let corpus = sample_generated_sql(LARGER_N);
         assert!(
             has_binop(&corpus, "dec_col", &["+"], "dec_col"),
-            "generators never produced decimal + decimal over {N} cases"
+            "generators never produced decimal + decimal over {LARGER_N} cases"
         );
         assert!(
             has_binop(&corpus, "dec_col", &["*"], "dec_col"),
-            "generators never produced decimal * decimal over {N} cases"
+            "generators never produced decimal * decimal over {LARGER_N} cases"
         );
         assert!(
             has_binop(&corpus, "dec_col", &["/"], "dec_col"),
-            "generators never produced decimal / decimal over {N} cases"
+            "generators never produced decimal / decimal over {LARGER_N} cases"
         );
     }
 
@@ -1432,6 +1440,78 @@ mod reachability {
                 .iter()
                 .any(|sql| sql.contains("WITHIN GROUP (ORDER BY")),
             "generators never produced a WITHIN GROUP ordered-set aggregate over {LARGER_N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_array_agg() {
+        // ARRAY_AGG(col) → Array(col_type); was already registered in
+        // `core_functions()` but never had a dedicated reachability guard.
+        // Like `reaches_extended_functions`, this sweeps the generator's own
+        // Function path directly rather than sampling the full scenario
+        // strategy — `core_functions()` is far longer than any small sample
+        // would reliably surface any one specific entry from (same sparsity
+        // reasoning as `reaches_extended_functions` above).
+        use super::generators::{BaseType, ExprKind, TypedSource};
+        let pool: Vec<TypedSource> = BaseType::all()
+            .iter()
+            .enumerate()
+            .map(|(i, bt)| TypedSource {
+                name: format!("{}_{}", bt.col_prefix(), i),
+                data_type: bt.to_smelt_type(),
+                cast_sql: bt.cast_sql().to_string(),
+            })
+            .collect();
+        let n_funcs = super::generators::core_functions().len();
+        let hit = (0..n_funcs).any(|expr_idx| {
+            (0..(n_funcs * 3)).any(|func_idx| {
+                generate_expr(&pool, ExprKind::Function, expr_idx, func_idx)
+                    .is_some_and(|e| e.sql.contains("ARRAY_AGG("))
+            })
+        });
+        assert!(hit, "ARRAY_AGG not reachable from the generator");
+    }
+
+    #[test]
+    fn reaches_array_literal() {
+        // `[<lit>, <lit>, <lit>]` bare array literals (ExprKind::ArrayLiteral,
+        // as opposed to a subscripted/sliced literal). Each generated corpus
+        // entry is a *full assembled query*, so the literal shows up
+        // mid-string as `...)] AS expr_N` — the `)] ` sequence (a literal's
+        // last element's closing CAST paren directly followed by the
+        // literal's closing bracket) only occurs for a bare literal;
+        // `[...][idx] AS expr_N`/`[...][a:b] AS expr_N` insert the
+        // subscript/slice brackets between the two, so they never produce a
+        // `)] ` run.
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|sql| sql.contains(")] AS ")),
+            "generators never produced a bare array literal over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_array_subscript() {
+        // `[...][idx]` subscript (ExprKind::ArraySubscript), both in-bounds
+        // and deliberately out-of-bounds indices.
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|sql| sql.contains("][1]")),
+            "generators never produced an in-bounds array subscript over {N} cases"
+        );
+        assert!(
+            corpus.iter().any(|sql| sql.contains("][99]")),
+            "generators never produced an out-of-bounds array subscript over {N} cases"
+        );
+    }
+
+    #[test]
+    fn reaches_array_slice() {
+        // `[...][1:2]` slice (ExprKind::ArraySlice).
+        let corpus = sample_generated_sql(N);
+        assert!(
+            corpus.iter().any(|sql| sql.contains("][1:2]")),
+            "generators never produced an array slice over {N} cases"
         );
     }
 }

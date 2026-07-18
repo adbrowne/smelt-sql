@@ -1314,6 +1314,40 @@ fn test_array_slice_from_column() {
 }
 
 #[test]
+fn test_array_subscript_on_inline_literal() {
+    // Regression: `[1, 2, 3][1]` — the outer EXPRESSION node's direct
+    // children are ARRAY_LITERAL and ARRAY_SUBSCRIPT as *siblings* (the
+    // literal is not nested inside the subscript node), so the outer expr
+    // satisfies `as_array_literal()` too. Dispatch previously checked
+    // `as_array_literal()` before `as_array_subscript()`, so it always
+    // resolved to the literal's own `Array<T>` type and silently discarded
+    // the subscript — `[1, 2, 3][1]` inferred `Array(Integer)` instead of
+    // `Integer`.
+    let types = infer_sql("SELECT [1, 2, 3][1]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::SmallInt,
+        "subscripting an inline array literal must return the element type, not Array<T>"
+    );
+    assert!(
+        types[0].nullable,
+        "array element access should be nullable (out-of-bounds is NULL)"
+    );
+}
+
+#[test]
+fn test_array_slice_on_inline_literal() {
+    // Same sibling-precedence bug as `test_array_subscript_on_inline_literal`,
+    // for the slice form.
+    let types = infer_sql("SELECT [1, 2, 3][1:2]");
+    assert_eq!(
+        types[0].data_type,
+        DataType::Array(Box::new(DataType::SmallInt)),
+        "slicing an inline array literal must stay Array<T>"
+    );
+}
+
+#[test]
 fn test_row_constructor_type() {
     // ROW(1, 'hello', TRUE) → Struct with positional fields
     let types = infer_sql("SELECT ROW(1, 'hello', TRUE)");

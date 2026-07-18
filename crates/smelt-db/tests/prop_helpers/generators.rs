@@ -182,6 +182,12 @@ pub enum ExprKind {
     Like,
     /// Regex operators (~, ~*) → Boolean.
     Regex,
+    /// Array literal, e.g. `[1, 2, 3]` → Array<T>.
+    ArrayLiteral,
+    /// Array subscript, e.g. `arr[1]` → T (nullable — out-of-bounds is NULL).
+    ArraySubscript,
+    /// Array slice, e.g. `arr[1:2]` → Array<T>.
+    ArraySlice,
 }
 
 // ---- Function descriptors ----
@@ -1062,6 +1068,9 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::Regex),
         1 => Just(ExprKind::Extract),
         1 => Just(ExprKind::MakeTemporal),
+        1 => Just(ExprKind::ArrayLiteral),
+        1 => Just(ExprKind::ArraySubscript),
+        1 => Just(ExprKind::ArraySlice),
     ]
 }
 
@@ -1460,6 +1469,56 @@ pub fn generate_expr(
                     },
                 })
             }
+        }
+
+        ExprKind::ArrayLiteral => {
+            // [<lit>, <lit>, <lit>] — three copies of the same base-type literal
+            // so DuckDB and smelt agree on a single, unambiguous element type
+            // (no cross-element promotion to reason about).
+            let bases = BaseType::all();
+            let base = bases[func_idx % bases.len()];
+            let elem_sql = base.cast_sql();
+            Some(TypedExpr {
+                sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}]"),
+                alias,
+                expected_smelt_type: DataType::Array(Box::new(base.to_smelt_type())),
+            })
+        }
+
+        ExprKind::ArraySubscript => {
+            // [<lit>, <lit>, <lit>][idx] — subscript an inline array literal
+            // (the column pool has no Array-typed columns). Alternates between
+            // an in-bounds index (1-based) and a deliberately out-of-bounds one
+            // to exercise DuckDB's out-of-bounds-is-NULL behavior; either way
+            // the inferred type is `nullable: true` (see
+            // `infer_array_subscript_type`), so the expected type is the same
+            // in both cases.
+            let bases = BaseType::all();
+            let base = bases[func_idx % bases.len()];
+            let elem_sql = base.cast_sql();
+            let idx = if (expr_idx + func_idx).is_multiple_of(2) {
+                1
+            } else {
+                99
+            };
+            Some(TypedExpr {
+                sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}][{idx}]"),
+                alias,
+                expected_smelt_type: base.to_smelt_type(),
+            })
+        }
+
+        ExprKind::ArraySlice => {
+            // [<lit>, <lit>, <lit>][1:2] — slice of an inline array literal,
+            // same element-type-agreement reasoning as ArrayLiteral above.
+            let bases = BaseType::all();
+            let base = bases[func_idx % bases.len()];
+            let elem_sql = base.cast_sql();
+            Some(TypedExpr {
+                sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}][1:2]"),
+                alias,
+                expected_smelt_type: DataType::Array(Box::new(base.to_smelt_type())),
+            })
         }
     }
 }

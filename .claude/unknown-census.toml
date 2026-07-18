@@ -217,37 +217,37 @@ discriminant = "unresolved"
 
 # ── smelt-db / type_inference/dispatch ────────────────────────────────────────
 
-["crates/smelt-db/src/type_inference/dispatch.rs:539"]
+["crates/smelt-db/src/type_inference/dispatch.rs:552"]
 classification = "legitimate"
 reason = "SELECT item expression type inference fallback — infer_expression_type returns None; conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:544"]
+["crates/smelt-db/src/type_inference/dispatch.rs:557"]
 classification = "legitimate"
 reason = "SELECT item has no expression (star-expand or syntax error) — Unknown placeholder for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:774"]
+["crates/smelt-db/src/type_inference/dispatch.rs:787"]
 classification = "legitimate"
 reason = "type promotion wildcard — incompatible temporal sub-types produce Unknown; conservative conservatism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:778"]
+["crates/smelt-db/src/type_inference/dispatch.rs:791"]
 classification = "legitimate"
 reason = "type promotion wildcard — top-level incompatible families; Unknown is deliberate conservatism"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:799"]
+["crates/smelt-db/src/type_inference/dispatch.rs:812"]
 classification = "legitimate"
 reason = "UNION branch SELECT item fallback — expression type unknown; conservative Unknown for column"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:804"]
+["crates/smelt-db/src/type_inference/dispatch.rs:817"]
 classification = "legitimate"
 reason = "UNION branch SELECT item (no expression) fallback — Unknown placeholder"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/dispatch.rs:827"]
+["crates/smelt-db/src/type_inference/dispatch.rs:840"]
 classification = "legitimate"
 reason = "UNION/EXCEPT/INTERSECT ... BY NAME (DuckDB): column unification is by name and widens to the union of names across operands, not smelt's positional promotion — that algorithm isn't implemented, so every column is marked Unknown(Unresolved) rather than reusing positional promotion, which would be silently wrong whenever branches don't already align 1:1 by position. cannot_infer_type_for_schema surfaces ColumnTypeUnresolved to the user."
 discriminant = "unresolved"
