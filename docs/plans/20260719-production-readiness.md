@@ -40,10 +40,11 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
   `spark-integration`) still runs nightly and on the `run-docker-tests` label.
 - **Secrets.** `connect_url` supports `${ENV_VAR}` interpolation (fail-loud on unset), closing
   the plaintext-token gap.
-- **Divergence ledger.** All 24 `spark_type` entries in `divergences.rs` re-verified against a
-  live Spark Connect server; stale entries corrected (e.g. `SIGN` is always `Double` on Spark,
-  not argument-typed); confirmed by a 1000-case property soak with zero new unregistered
-  divergences.
+- **Divergence ledger.** All 22 `spark_type` entries in `divergences.rs` re-verified against a
+  live Spark Connect server (20 annotated `verified: 2026-07-20` with the verifying SQL; the 2
+  by-design leniency entries left as special-cased); stale entries corrected (e.g. `SIGN` is
+  always `Double` on Spark, not argument-typed); confirmed by a 1000-case property soak with
+  zero new unregistered divergences.
 - **Dual-target parity sweep.** Full-refresh/view/ephemeral models and the
   `batched`/`keyed`/`versioned` maintenance legs green on both backends, zero skipped
   assertions.

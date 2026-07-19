@@ -67,6 +67,7 @@ The v0.5 release review positions Spark as beta unless promoted (decision D1). T
 | 4     | done    | (this commit) | 2026-07-20 |
 | 5     | done    | (this commit) | 2026-07-20 |
 | 6     | done    | (this commit) | 2026-07-20 |
+| 7     | done    | (this commit) | 2026-07-20 |
 
 ## Phase detail
 
@@ -234,6 +235,47 @@ The v0.5 release review positions Spark as beta unless promoted (decision D1). T
 - [ ] Evidence brief states facts + the open decision, not a recommendation disguised as fact
 
 **Commit.** `docs(spark): backend page for secured surface + supported-vs-beta evidence brief`
+
+### Phase 7: Post-completion remediation — CI-gate hardening, evidence corrections, empirical verification
+
+**Goal.** Close the four findings from the 2026-07-20 post-completion review of this plan:
+
+1. **Phase 3's empirical trigger checks were never run** — the phase commit substituted
+   static inspection of the rendered `if:` expressions for the required scratch-commit
+   red-green via `gh pr checks`, and no tracking PR from `worktree-production` existed to
+   fire a `pull_request` event at all (master pre-flight step 5 unfulfilled).
+2. **Nightly skip hole in the new CI wiring** — `spark-parity` and `type-property-spark`
+   carry `needs: changes` with an `if:` containing no status-check function; per GitHub
+   Actions semantics a failure of the `changes` job (plausible on non-PR events: the
+   `base:` fallback resolves to the literal `HEAD~1` on `schedule`) silently skips both
+   jobs even on nightly — the exact skip-green failure mode this plan exists to close.
+3. **Evidence-brief count wrong** — the D1 brief in the master plan says "all 24
+   `spark_type` entries"; the ledger has 22 (20 annotated `verified: 2026-07-20` + the 2
+   by-design leniency entries; Phase 4's own commit message says 22; this plan's original
+   "21" was a stale pre-work estimate, left as written per plans-are-historical).
+4. **Phase 5's sweep evidence unrecorded** — the phase commit is docs-only with an empty
+   body; the checklist's "sweep output recorded" and zero-skip grep evidence exist nowhere,
+   so the brief's "zero skipped assertions" claim was unevidenced.
+
+**Remediation shape.**
+- `.github/workflows/compat.yml`: wrap both gated `if:` expressions as
+  `${{ !cancelled() && (schedule || label || needs.changes.outputs.spark == 'true') }}`
+  so a `changes`-job failure can never silently skip the nightly legs (finding 2).
+- `docs/plans/20260719-production-readiness.md`: correct the brief's ledger count 24 → 22
+  with the 20+2 breakdown (finding 3).
+- Re-run the Phase 5 sweep against the live worktree-bound Spark server and record the
+  tails + zero-skip grep below (finding 4).
+- Open the tracking PR from `worktree-production` → `main` and record whether the
+  `changes` job fires `spark-parity` + `type-property-spark` on it via `gh pr checks`
+  (finding 1; the W4 commits touch Spark-relevant paths, so the gate must fire).
+
+**Critical files.** `.github/workflows/compat.yml`, `docs/plans/20260719-production-readiness.md`, this file.
+
+**Commit.** `fix(spark): harden per-PR CI gate against changes-job failure; correct + evidence the D1 brief (W4 review remediation)`
+
+#### Phase 7 evidence
+
+(recorded at execution time)
 
 ## Deferred during implementation
 

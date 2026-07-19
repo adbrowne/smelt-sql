@@ -247,7 +247,10 @@ jobs:
     # Run on schedule (nightly), when explicitly labeled, or when this PR/push
     # touches Spark-relevant paths (type-inference, signature registry, dialect
     # surface, backend crate)
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true'
+    # !cancelled() guards against a `changes`-job failure silently skipping this
+    # job on nightly/labeled runs (a needed job's failure skips dependents unless
+    # the if: carries a status-check function).
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true') }}
 
     env:
       DUCKDB_LIB_DIR: /usr/local/lib
@@ -299,7 +302,10 @@ jobs:
     # Run on schedule (nightly), when explicitly labeled, or when this PR/push
     # touches Spark-relevant paths (backend crate, parity tests, type
     # inference, signature registry, dialect surface)
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true'
+    # !cancelled() guards against a `changes`-job failure silently skipping this
+    # job on nightly/labeled runs (a needed job's failure skips dependents unless
+    # the if: carries a status-check function).
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true') }}
 
     env:
       DUCKDB_LIB_DIR: /usr/local/lib
