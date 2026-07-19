@@ -2243,9 +2243,18 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     enrichment join), and the `referential_integrity` world-fact (`sources.md`) the proof's
     row-preservation conjunct consumes for an inner-join enrichment are all built and reach a
     maintained-model edge's own driving-source recompute (see the maintained-model-edge paragraph
-    above); an external `mutable_snapshot` source's own delta now has an exact form available (M3's
-    fingerprint sidecar), but M2's compute-restriction licence is not yet extended to consume it —
-    that extension is separate follow-on work.
+    above). The compute-restriction licence now also extends to an `UpstreamMutation` cell driven
+    by an external `mutable_snapshot` source: the SAME skeleton-source-closure proof and the SAME
+    restriction gate (`smelt_logical::maintenance::choice::resolve_recompute_restriction`) admit
+    the cell when its enrichment join closes and the fingerprint sidecar's synthesized
+    changed-key set (M3) is non-empty for the touched region — a renamed dimension row's recompute
+    is then a point lookup on that row's key, not a scan of every fact row the dimension's
+    unclocked, accepted-full-scan reach would otherwise touch. Wiring this into a live run's own
+    trigger/technique dispatch (`crates/smelt-runtime/src/execute.rs`'s regular incremental batch
+    loop) is separate follow-on work; today the mechanism — the closure derivation, the delta
+    threading, and the emitted delta-restricted statement — is proven against a real fixture and a
+    real backend directly, the same "build it, then wire live dispatch" split M3's own sidecar
+    build/consume halves went through.
   - **M3 — derived change feeds**: snapshot-diff made real on both boundaries — a fingerprint
     sidecar (lifecycle: `sources.md` §"The fingerprint sidecar") synthesizes a change feed for an
     external `mutable_snapshot` source, and the

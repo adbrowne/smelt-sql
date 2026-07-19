@@ -696,6 +696,43 @@ pub fn emit_recurrence_bound_probe(
     MaintenanceStatement::new(sql)
 }
 
+/// The referential-integrity count-preservation tripwire
+/// (`docs/specs/sources.md` §"Referential integrity"; `model_properties.md`
+/// §"Skeleton-source closure" P1, row-preservation conjunct 4): a read-only
+/// query the caller (`smelt-runtime`) executes and inspects *before*
+/// trusting an inner-join enrichment recompute a declared
+/// `referential_integrity` world-fact licensed, so a violation is caught
+/// without ever writing to the target — "the whole transaction rolls back"
+/// trivially, the same shape [`emit_recurrence_bound_probe`] uses for
+/// route 3's out-of-slice match probe.
+///
+/// Returns one row with two columns:
+/// - `driving_count` (`BIGINT`) — the row count of `driving_select` (the
+///   fact side alone, scoped to the touched region) — the count a
+///   row-preserving join must not fall short of.
+/// - `enriched_count` (`BIGINT`) — the row count of `enriched_select` (the
+///   SAME region's inner-join enrichment recompute). `enriched_count <
+///   driving_count` disproves the declared `referential_integrity` — some
+///   driving row's join key had no match in the dimension, so the inner
+///   join silently dropped it — and the caller fails the run loudly
+///   (`SourceCountPreservationViolated`) rather than trusting the
+///   declaration's licensed technique against a stale or simply wrong
+///   fact.
+///
+/// `driving_select`/`enriched_select` are the caller's own already-compiled
+/// `SELECT`s (scoped to the touched region); this emitter does no scoping
+/// of its own, matching every other function in this module.
+pub fn emit_count_preservation_probe(
+    driving_select: &str,
+    enriched_select: &str,
+) -> MaintenanceStatement {
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM ({driving_select}) AS __smelt_driving) AS driving_count, \
+         (SELECT COUNT(*) FROM ({enriched_select}) AS __smelt_enriched) AS enriched_count"
+    );
+    MaintenanceStatement::new(sql)
+}
+
 /// First-run `CREATE TABLE … AS` for a windowed-keyed-maintenance cell
 /// (`maintenance_driver::run_windowed_keyed_maintenance`'s create arm): the
 /// target table does not exist yet, so the first step's delta becomes the
@@ -1822,5 +1859,27 @@ mod delta_restricted_delete_insert_tests {
             MaintenanceDialect::DuckDb,
         );
         assert_eq!(restricted_fallback, direct);
+    }
+}
+
+#[cfg(test)]
+mod count_preservation_probe_tests {
+    use super::*;
+
+    #[test]
+    fn probe_compares_driving_and_enriched_row_counts() {
+        let probe = emit_count_preservation_probe(
+            "SELECT event_id FROM main.raw_events WHERE event_date >= '2026-07-01'",
+            "SELECT e.event_id FROM main.raw_events e JOIN main.raw_users u ON e.user_id = \
+             u.user_id WHERE e.event_date >= '2026-07-01'",
+        );
+        assert_eq!(
+            probe.sql,
+            "SELECT (SELECT COUNT(*) FROM (SELECT event_id FROM main.raw_events WHERE \
+             event_date >= '2026-07-01') AS __smelt_driving) AS driving_count, (SELECT \
+             COUNT(*) FROM (SELECT e.event_id FROM main.raw_events e JOIN main.raw_users u ON \
+             e.user_id = u.user_id WHERE e.event_date >= '2026-07-01') AS __smelt_enriched) AS \
+             enriched_count"
+        );
     }
 }

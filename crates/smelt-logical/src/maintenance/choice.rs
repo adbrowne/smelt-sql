@@ -481,13 +481,26 @@ pub fn resolve_keyed_write_mechanism(
     }
 }
 
-/// Whether a model-edge creation cell's region recompute (`Technique::
-/// DeleteInsert`, the `RecomputeRegion` corner) may restrict its scan to an
-/// exact upstream delta's changed-key set (T3, `docs/specs/model_transforms.md`
-/// §"Delta-restricted enrichment join"; `docs/plans/20260715-composed-axes-
-/// conditional-maintenance.md` Phase E3). Licensed only by the conjunction of
-/// two independent facts — either alone falls back to the ordinary widened
-/// scan, never a partial restriction:
+/// Whether a cell's recompute may restrict its scan to an exact upstream
+/// delta's changed-key set (T3, `docs/specs/model_transforms.md` §"Delta-
+/// restricted enrichment join"). Built for a model-edge creation cell's
+/// region recompute (`Technique::DeleteInsert`, the `RecomputeRegion`
+/// corner — `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+/// Phase E3) and reused unchanged for an `UpstreamMutation` cell's
+/// column-scoped-MERGE enrichment recompute driven by an external
+/// `mutation_profile: mutable_snapshot` source, whose exact delta is the
+/// fingerprint sidecar's synthesized changed-key set instead of a model
+/// edge's recorded observed delta (T3 over external sources, Phase F5) —
+/// this function's admission logic does not distinguish the two: it only
+/// ever consults a [`super::SkeletonSourceClosure`] verdict and an exact
+/// delta key set, both already provider-agnostic by construction, so no
+/// change was needed to extend the licence (the "licence union" the phase
+/// wires — `derive::mutation_enrichment_closure` is the analogous closure
+/// derivation for the external-source case, mirroring `derive::
+/// model_edge_enrichment_closure`'s already-landed one for model edges).
+/// Licensed only by the conjunction of two independent facts — either
+/// alone falls back to the ordinary widened scan, never a partial
+/// restriction:
 /// - **P1, skeleton-source closure** (`super::SkeletonSourceClosure`,
 ///   `crate::analysis::skeleton_closure`): every enrichment join in the
 ///   cell's model must be proven `Closed`, so the driving edge's changed
@@ -546,6 +559,51 @@ pub fn resolve_recompute_restriction(
                   is the fail-closed default (widen-never-narrow)"
                 .to_string(),
         },
+    }
+}
+
+/// The column a [`RecomputeRestriction::Restricted`] semi-join predicates
+/// on for an `UpstreamMutation` cell driven by an external source (T3 over
+/// external sources, `docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase F5) — as opposed to a model-edge creation cell,
+/// where the restriction column is the OUTPUT's own row-identity key
+/// (`maintenance_driver::DeltaRestrictionFacts::restrict_column`, since a
+/// model edge's delta flows straight through in the same key domain). An
+/// external source's fingerprint-sidecar-derived delta is keyed by the
+/// SOURCE's own row identity instead — the dimension's declared
+/// `unique_key` — which the enrichment join's equality condition equates
+/// against the driving (fact) side's own column of the SAME name (the
+/// common same-name foreign-key convention this v1 restriction assumes;
+/// `docs/specs/sources.md` §"Row identity"). `None` for a composite or
+/// undeclared unique key — this v1 restriction, like the model-edge one,
+/// is single-column only; the caller's safe default is the ordinary
+/// widened scan.
+pub fn enrichment_restrict_column(dimension_unique_key: &[String]) -> Option<&str> {
+    match dimension_unique_key {
+        [only] => Some(only.as_str()),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod enrichment_restrict_column_tests {
+    use super::*;
+
+    #[test]
+    fn single_column_key_resolves() {
+        let key = vec!["user_id".to_string()];
+        assert_eq!(enrichment_restrict_column(&key), Some("user_id"));
+    }
+
+    #[test]
+    fn composite_key_refuses() {
+        let key = vec!["a".to_string(), "b".to_string()];
+        assert_eq!(enrichment_restrict_column(&key), None);
+    }
+
+    #[test]
+    fn no_key_refuses() {
+        assert_eq!(enrichment_restrict_column(&[]), None);
     }
 }
 

@@ -344,6 +344,79 @@ fn model_edge_enrichment_closure(
     Some(verdict)
 }
 
+/// External-source `referential_integrity:` world-facts (`docs/specs/
+/// sources.md` §"Referential integrity"), keyed by source name (matching
+/// [`SourceFacts::name`]), consumed by [`mutation_enrichment_closure`] for
+/// P1's row-preservation conjunct (4) on an `UpstreamMutation` cell's own
+/// enrichment join (T3 over external sources, `docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` Phase F5). A source
+/// with no entry contributes no row-preservation fact — its enrichment
+/// join's closure proof is never attempted (`None`, not a disproven
+/// `Open`), matching [`derive_maintenance_plan`]'s own always-empty-map
+/// call, which is byte-identical to its pre-F5 behaviour.
+pub type SourceReferentialIntegrity = BTreeMap<String, Vec<String>>;
+
+/// Build the [`JoinContext`] [`mutation_enrichment_closure`]'s one-to-one
+/// conjunct (3) needs from every one of `sources` that is actually joined
+/// in `sql` (resolved via `analysis::skeleton_closure::enrichment_join_
+/// alias`, never guessed), keyed by each joined source's own declared
+/// `unique_key` (`SourceFacts::unique_key`). Mirrors [`model_edges_join_
+/// context`] exactly, generalized from upstream maintained-model edges to
+/// external sources — a source whose `unique_key` is undeclared, or whose
+/// alias this resolves to `None` for (not actually joined in this scope,
+/// e.g. it is the `FROM`-clause driving table), contributes no key fact,
+/// same fail-closed default as the model-edge case.
+fn source_facts_join_context(sql: &str, sources: &[SourceFacts]) -> JoinContext {
+    use crate::analysis::skeleton_closure::enrichment_join_alias;
+
+    let mut ctx = JoinContext::new();
+    for facts in sources {
+        let Some(alias) = enrichment_join_alias(sql, &facts.name) else {
+            continue;
+        };
+        if !facts.unique_key.is_empty() {
+            let cols: Vec<&str> = facts.unique_key.iter().map(String::as_str).collect();
+            ctx = ctx.with_composite_unique_key(&alias, &cols);
+        }
+    }
+    ctx
+}
+
+/// Derive the P1 skeleton-source-closure verdict for an `UpstreamMutation`
+/// cell's own enrichment join against `source` — the external-source
+/// analogue of [`model_edge_enrichment_closure`] (T3 over external sources,
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// F5): the SAME [`skeleton_source_closure`] proof, fed the source's
+/// declared `referential_integrity` world-fact instead of a model edge's
+/// always-`None` one (an external source has no upstream `unique_key`
+/// analogue to license row preservation on its own — only its own declared
+/// `referential_integrity` can).
+///
+/// `None` when `source_referential_integrity` carries no entry for
+/// `source` — the caller opted out of the closure proof entirely for this
+/// source, exactly matching every `UpstreamMutation` cell's behaviour
+/// before this map existed (`derive_maintenance_plan`'s own call always
+/// passes an empty map). When an entry *is* present, a declared
+/// `referential_integrity` alone does not guarantee `Closed`:
+/// [`skeleton_source_closure`] still independently checks every conjunct
+/// (including one-to-one join contribution via [`source_facts_join_
+/// context`]'s declared-`unique_key` facts, and the v1 aggregation-scope
+/// restriction), so a caller that declares `referential_integrity` without
+/// a matching `unique_key`, or over a fan-out join, still correctly sees
+/// `Open`.
+fn mutation_enrichment_closure(
+    sql: &str,
+    source: &str,
+    sources: &[SourceFacts],
+    source_referential_integrity: &SourceReferentialIntegrity,
+) -> Option<crate::analysis::skeleton_closure::SkeletonSourceClosure> {
+    use crate::analysis::skeleton_closure::skeleton_source_closure;
+
+    let ri = source_referential_integrity.get(source)?;
+    let join_ctx = source_facts_join_context(sql, sources);
+    Some(skeleton_source_closure(sql, source, Some(ri), &join_ctx))
+}
+
 /// Everything the v0 derivation reads. `column_groups` and
 /// `output.skeleton_columns` are hand-supplied (the deferred classifiers);
 /// the rest is derived from `sql` and the source declarations.
@@ -455,7 +528,46 @@ fn link_source(
 }
 
 /// Derive the plan cells (and refusals) for `triggers` against `inputs`.
+///
+/// Every `UpstreamMutation` cell's `skeleton_source_closure` is `None` —
+/// this entry point never attempts the P1 proof for an external source's
+/// enrichment join (byte-identical to this function's pre-Phase-F5
+/// behaviour). Use [`derive_maintenance_plan_with_referential_integrity`]
+/// to opt an external source's declared `referential_integrity` world-fact
+/// into the same proof [`append_model_edge_cells`] already runs for model
+/// edges.
 pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> MaintenancePlan {
+    derive_maintenance_plan_impl(inputs, triggers, &SourceReferentialIntegrity::new())
+}
+
+/// [`derive_maintenance_plan`], additionally threading `source_referential_
+/// integrity` world-facts (`docs/specs/sources.md` §"Referential
+/// integrity") into every `UpstreamMutation` cell's P1 skeleton-source-
+/// closure proof (T3 over external sources, `docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` Phase F5) — the
+/// licence union with [`append_model_edge_cells`]'s already-landed model-
+/// edge proof: the SAME [`crate::analysis::skeleton_closure::
+/// skeleton_source_closure`] function, the SAME [`super::choice::
+/// resolve_recompute_restriction`] gate downstream, no new mechanism.
+///
+/// A source absent from `source_referential_integrity` behaves exactly as
+/// under [`derive_maintenance_plan`] (`skeleton_source_closure: None`) —
+/// this function only *adds* closure attempts for the sources the caller
+/// names, never removes or alters anything else `derive_maintenance_plan`
+/// would have derived.
+pub fn derive_maintenance_plan_with_referential_integrity(
+    inputs: &ModelInputs,
+    triggers: &[Trigger],
+    source_referential_integrity: &SourceReferentialIntegrity,
+) -> MaintenancePlan {
+    derive_maintenance_plan_impl(inputs, triggers, source_referential_integrity)
+}
+
+fn derive_maintenance_plan_impl(
+    inputs: &ModelInputs,
+    triggers: &[Trigger],
+    source_referential_integrity: &SourceReferentialIntegrity,
+) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
     let identity = row_identity(inputs.declared_unique_key(), inputs.sql);
@@ -465,9 +577,14 @@ pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> Ma
             Trigger::NewData { source } => {
                 derive_new_data(inputs, &bounds, source, &identity, &mut plan)
             }
-            Trigger::UpstreamMutation { source } => {
-                derive_mutation(inputs, &bounds, source, &identity, &mut plan)
-            }
+            Trigger::UpstreamMutation { source } => derive_mutation(
+                inputs,
+                &bounds,
+                source,
+                &identity,
+                source_referential_integrity,
+                &mut plan,
+            ),
             Trigger::ColumnAdded { columns } => {
                 derive_column_added(inputs, &bounds, columns, &identity, &mut plan)
             }
@@ -678,11 +795,16 @@ fn derive_new_data(
 /// explicitly linked to the output axis (K8's ratified
 /// `require: partition_local` refuses the unlinked/unclocked case unless the
 /// full scan is declared).
+///
+/// `source_referential_integrity` is [`mutation_enrichment_closure`]'s own
+/// input, threaded straight through — see that function's doc comment for
+/// the `None`-vs-attempted-and-`Open` distinction this preserves.
 fn derive_mutation(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     source: &str,
     identity: &RowIdentityVerdict,
+    source_referential_integrity: &SourceReferentialIntegrity,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::UpstreamMutation {
@@ -695,6 +817,23 @@ fn derive_mutation(
         });
         return;
     };
+
+    // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
+    // closure"; T3 over external sources, `docs/plans/20260715-composed-
+    // axes-conditional-maintenance.md` Phase F5): a property of this cell's
+    // own enrichment join against `source`, derived once and shared by
+    // every column-group cell this source drives — mirroring
+    // `append_model_edge_cells`'s `model_edge_enrichment_closure`, the
+    // model-edge analogue this generalizes (the "licence union" the phase
+    // wires: the SAME `skeleton_source_closure` proof and the SAME
+    // `choice::resolve_recompute_restriction` gate now admit an external
+    // mutable-snapshot source's enrichment join, not only a model edge's).
+    let closure = mutation_enrichment_closure(
+        inputs.sql,
+        source,
+        &inputs.sources,
+        source_referential_integrity,
+    );
 
     for group in inputs
         .column_groups
@@ -740,7 +879,7 @@ fn derive_mutation(
             scans,
             ledger_catch_up: false,
             row_identity: identity.clone(),
-            skeleton_source_closure: None,
+            skeleton_source_closure: closure.clone(),
             fingerprint_projections: BTreeMap::new(),
         });
     }
