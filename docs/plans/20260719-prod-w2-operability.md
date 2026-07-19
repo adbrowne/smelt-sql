@@ -62,7 +62,7 @@ The production-release review found that smelt's correctness core is release-gra
 | 5     | done     | (this commit) | 2026-07-20 |
 | 6     | done     | (this commit) | 2026-07-20 |
 | 7     | done     | f82fe7ef | 2026-07-20 |
-| 8     | pending  |        |      |
+| 8     | blocked  |        |      |
 
 ## Phase detail
 
@@ -284,6 +284,20 @@ The production-release review found that smelt's correctness core is release-gra
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+## Blocked phases
+
+Append-only log of phases the loop recorded as `blocked` and continued past. Each entry: date, phase id, reason/decision, candidate options.
+
+- **2026-07-20, Phase 8.** Phase 8's TDD tests and the "multi-failure run prints one summary block naming each failed model" requirement assume per-model failure data (an error string and a retry count per model) that the current manifest schema and abort logic do not carry, and closing the gap needs files outside the phase's declared "critical files" list.
+  - `ModelRunRecord` (`crates/smelt-state/src/lib.rs`) has no `error` or `retry_count` field — `docs/specs/run_state.md` §"Run manifest" doesn't specify one either, only §"Run report" mentions "per-model error messages for any `failed` entry" without saying where that text is captured.
+  - `execute_project`'s wave-flush loop (`crates/smelt-runtime/src/execute.rs:2646-2726`) only ever records **one** failing model as `aborted`/`Failed`; every other model that errors in the same wave falls through the later `or_insert_with` catch-up loop and is recorded as `outcome: Skipped` with its real error silently discarded. So today a genuinely multi-model-failure run cannot produce a report naming "each failed model" — only one `failed` entry ever exists in the manifest, the rest read as `skipped`.
+  - `model_retrying`'s attempt count (`RunReporter::model_retrying`, `crates/smelt-runtime/src/reporter.rs`) is a transient per-call callback; nothing persists a final per-model retry count anywhere a report-writer could read it back from after the run completes.
+  - The phase's declared critical files (`crates/smelt-cli/src/reporter.rs`, `crates/smelt-cli/src/main.rs`, `crates/smelt-runtime/src/reporter.rs`) do not include `crates/smelt-state/src/lib.rs` or `crates/smelt-runtime/src/execute.rs`, so implementing this as literally scoped either silently expands the phase's touched-file set or ships a report that can't satisfy its own TDD tests.
+  - **Candidate options for the human to pick between:**
+    1. **Scope the report down to today's model.** Report a single `first_error: {model, message}` plus outcome counts (success/skipped/failed, where `failed` is always ≤ 1 entry) and drop retry counts and "each failed model" from the TDD tests; update Phase 8's test bullets and `run_state.md` §"Run report" to match. No `execute.rs`/`smelt-state` changes needed — stays inside the declared critical files.
+    2. **Extend the schema.** Add `error: Option<String>` and `retry_count: u32` to `ModelRunRecord`, change the wave-flush `Err(e)` arm to record every failing model as `Failed` (not just the first) with its own error text instead of falling through to the `skipped` catch-up loop, and thread a per-model retry counter from `model_retrying` into the manifest entry. This is real scope growth — touches `smelt-state`, `execute.rs`, and `run_state.md` §"Run manifest" (schema change, spec-first) — and changes the abort model from "stop at first failure" to "let a wave finish, then abort with every failure recorded," which is itself a semantics decision beyond what W2 phases 5-7 established.
+  Row set to `blocked`; tree restored to clean, no code changes made this iteration.
 
 ## Verification
 
