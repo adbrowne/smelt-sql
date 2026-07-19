@@ -2782,34 +2782,35 @@ happens to see. There's nothing left to order.</p>
 <a id="__codelineno-3-10" name="__codelineno-3-10" href="#__codelineno-3-10"></a>      scan clamps: (none)
 <a id="__codelineno-3-11" name="__codelineno-3-11" href="#__codelineno-3-11"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
 <a id="__codelineno-3-12" name="__codelineno-3-12" href="#__codelineno-3-12"></a>      write pin: (none)
-<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>  - group {*} on trigger Backfill
-<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>      corner:    RecomputeRegion
-<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>      technique: DeleteInsert
-<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>      ledger_catch_up: false
-<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>      region key: Key([&quot;event_id&quot;])
-<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>      locality:  partition_local
-<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>      scan clamps: (none)
-<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
-<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>      write pin: (none)
-<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>
-<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>Key temporal locality:
-<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>  route: route 3 (recurrence-bounded, declared key_recurrence)
-<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>  slice: RecurrenceBounded { partition_column: &quot;first_seen_date&quot;, margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }
-<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>  settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
-<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>  observed-delta projection: widened by `r` + margins
-<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>
-<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>Refusals: (none)
-<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>
-<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>Relation contract:
-<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>  clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day
-<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>  identity: event_id
-<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>  derived grain: key
-<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>
-<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>Inbound edges: sources.raw.events
-<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>  - sources.raw.events (source)
-<a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
-<a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a>      identity: (none)
-<a id="__codelineno-3-40" name="__codelineno-3-40" href="#__codelineno-3-40"></a>      derived grain: partition
+<a id="__codelineno-3-13" name="__codelineno-3-13" href="#__codelineno-3-13"></a>      write variant: suppressed (preference — steady-state trigger over prior state)
+<a id="__codelineno-3-14" name="__codelineno-3-14" href="#__codelineno-3-14"></a>  - group {*} on trigger Backfill
+<a id="__codelineno-3-15" name="__codelineno-3-15" href="#__codelineno-3-15"></a>      corner:    RecomputeRegion
+<a id="__codelineno-3-16" name="__codelineno-3-16" href="#__codelineno-3-16"></a>      technique: DeleteInsert
+<a id="__codelineno-3-17" name="__codelineno-3-17" href="#__codelineno-3-17"></a>      ledger_catch_up: false
+<a id="__codelineno-3-18" name="__codelineno-3-18" href="#__codelineno-3-18"></a>      region key: Key([&quot;event_id&quot;])
+<a id="__codelineno-3-19" name="__codelineno-3-19" href="#__codelineno-3-19"></a>      locality:  partition_local
+<a id="__codelineno-3-20" name="__codelineno-3-20" href="#__codelineno-3-20"></a>      scan clamps: (none)
+<a id="__codelineno-3-21" name="__codelineno-3-21" href="#__codelineno-3-21"></a>      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+<a id="__codelineno-3-22" name="__codelineno-3-22" href="#__codelineno-3-22"></a>      write pin: (none)
+<a id="__codelineno-3-23" name="__codelineno-3-23" href="#__codelineno-3-23"></a>
+<a id="__codelineno-3-24" name="__codelineno-3-24" href="#__codelineno-3-24"></a>Key temporal locality:
+<a id="__codelineno-3-25" name="__codelineno-3-25" href="#__codelineno-3-25"></a>  route: route 3 (recurrence-bounded, declared key_recurrence)
+<a id="__codelineno-3-26" name="__codelineno-3-26" href="#__codelineno-3-26"></a>  slice: RecurrenceBounded { partition_column: &quot;first_seen_date&quot;, margin_before: Seconds(259200), margin_after: Seconds(0), r: Seconds(259200) }
+<a id="__codelineno-3-27" name="__codelineno-3-27" href="#__codelineno-3-27"></a>  settle bound: AfterRecurrenceBound { r: Seconds(259200), margin: Seconds(0) }
+<a id="__codelineno-3-28" name="__codelineno-3-28" href="#__codelineno-3-28"></a>  observed-delta projection: widened by `r` + margins
+<a id="__codelineno-3-29" name="__codelineno-3-29" href="#__codelineno-3-29"></a>
+<a id="__codelineno-3-30" name="__codelineno-3-30" href="#__codelineno-3-30"></a>Refusals: (none)
+<a id="__codelineno-3-31" name="__codelineno-3-31" href="#__codelineno-3-31"></a>
+<a id="__codelineno-3-32" name="__codelineno-3-32" href="#__codelineno-3-32"></a>Relation contract:
+<a id="__codelineno-3-33" name="__codelineno-3-33" href="#__codelineno-3-33"></a>  clock:    event_time_column=first_seen_date partition_column=first_seen_date granularity=Day
+<a id="__codelineno-3-34" name="__codelineno-3-34" href="#__codelineno-3-34"></a>  identity: event_id
+<a id="__codelineno-3-35" name="__codelineno-3-35" href="#__codelineno-3-35"></a>  derived grain: key
+<a id="__codelineno-3-36" name="__codelineno-3-36" href="#__codelineno-3-36"></a>
+<a id="__codelineno-3-37" name="__codelineno-3-37" href="#__codelineno-3-37"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-3-38" name="__codelineno-3-38" href="#__codelineno-3-38"></a>  - sources.raw.events (source)
+<a id="__codelineno-3-39" name="__codelineno-3-39" href="#__codelineno-3-39"></a>      clock:    event_time_column=event_date partition_column=event_date granularity=Day
+<a id="__codelineno-3-40" name="__codelineno-3-40" href="#__codelineno-3-40"></a>      identity: (none)
+<a id="__codelineno-3-41" name="__codelineno-3-41" href="#__codelineno-3-41"></a>      derived grain: partition
 </code></pre></div>
 <p>Two things the previous page's refusal didn't have:</p>
 <ul>
