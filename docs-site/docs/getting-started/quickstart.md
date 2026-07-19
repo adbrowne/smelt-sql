@@ -87,6 +87,7 @@ materialization: table
 SELECT
   o.order_id,
   o.order_date,
+  o.customer_id,
   o.amount,
   c.name AS customer_name,
   c.country
@@ -136,4 +137,6 @@ Install the [smelt VSCode extension](../guide/editor-setup.md) for syntax highli
 
 - [How smelt Works](../concepts/how-it-works.md) -- understand the logical/physical separation
 - [Incremental Models](../guide/incremental-models.md) -- process only new data
+- [Deployment](../guide/deployment.md) -- run smelt outside your laptop (CI, containers, scheduled jobs)
+- [Orchestration](../guide/orchestration.md) -- run smelt under cron, Airflow, or another scheduler
 - [CLI Reference](../reference/cli.md) -- full command documentation
