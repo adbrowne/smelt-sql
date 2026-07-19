@@ -77,6 +77,24 @@ reject the model — the dialect printer **lowers** the logical construct to an 
 physical form the backend accepts. A capability flag set to `false` is an instruction to the
 printer to lower, never a reason to emit invalid SQL or to surface a user-facing error.
 
+**Supported-surface statement.** Dual-target parity covers: full-refresh table and view
+materializations, ephemeral (CTE-inlined) models, and the `batched`/`keyed`/`versioned`
+incremental maintenance legs — each exercised on both DuckDB and Spark by the same parametrized
+CLI integration tests, plus the DuckDB-anchored `maintenance_conformance` suite (`smelt-cli`
+crate) for the maintenance legs specifically. `refresh: materialized_view` is excluded: no
+backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
+mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
+beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
+
+**CI tiering.** Two tiers enforce the supported surface. A **per-PR tier** — gated on the PR's
+changed paths touching Spark-relevant code (the Spark backend crate, Spark/parity integration
+tests, the function-signature registry, type inference, the parser's dialect surface, or the
+Python adapter) — runs `spark-parity` and `type-property-spark`. A **nightly tier** runs the
+full Spark job set (including the corpus-driven `spark-integration` parser-compat job)
+unconditionally, and is also reachable on demand via the `run-docker-tests` PR label. A Spark
+regression outside the per-PR path filter still surfaces within one nightly cycle rather than
+sitting unnoticed on `main` indefinitely.
+
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
 model's **output columns** are reconciled to the inferred type: the compiled SQL is wrapped in an
@@ -163,6 +181,26 @@ the first statement a fresh session issues — on backends whose `setCurrentData
 fails for a missing schema (Spark Connect raises `[SCHEMA_NOT_FOUND]`), that ordering bug blocks
 every model on first run. The flag is `true` for every backend today; the conformance suite
 asserts each constructor sets it and that a first-run model against a fresh schema succeeds.
+
+### Connection security
+A backend target's connection string may need secrets (an auth token) or TLS parameters that
+must not live in the checked-in `smelt.yml`. These are carried as `${ENV_VAR}` references inside
+the `connect_url` string, resolved by the config-load interpolation pass (`smelt_yml.md`
+§"Environment interpolation") — this spec adds no second interpolation mechanism. Token and TLS
+settings are passed as Spark Connect URL parameters, never as new YAML keys:
+
+```yaml
+targets:
+  databricks:
+    type: spark
+    connect_url: "sc://host:443/;token=${DATABRICKS_TOKEN};use_ssl=true"
+```
+
+The interpolated URL — token and all — passes to the Spark Connect Python client
+(`builder.remote(connect_url)`) unmodified; smelt never parses out or stores the token
+separately, and never logs the resolved URL. A `connect_url` holding a literal (non-`${VAR}`)
+token is a lint-worthy smell: the secret sits in the committed YAML in plaintext, exactly what
+the interpolation mechanism exists to prevent.
 
 ### Loading data into a backend
 Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the
@@ -277,6 +315,14 @@ resolves nested widening to a table rewrite.
   performance gap, not a correctness one. Deferred.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
+- **Per-PR Spark CI gating and a re-verified divergence ledger are not yet in place.** Today
+  `spark-parity` and `type-property-spark` run only on `schedule` or the `run-docker-tests`
+  label — nightly-gated, not per-PR — so a Spark regression can merge to `main` and sit until
+  the next nightly run surfaces it. The `spark_type` divergence ledger in
+  `crates/smelt-db/tests/prop_helpers/divergences.rs` (21 entries) was written during earlier
+  soaks that later proved some entries stale, and has not been re-verified end to end against a
+  live Spark Connect server since. Both the per-PR gate and the ledger re-verification are
+  tracked in `docs/plans/20260719-prod-w4-spark.md`.
 
 ## References
 
