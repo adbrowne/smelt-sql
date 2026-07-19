@@ -5,8 +5,71 @@ use crate::schema_tracking::DeployedSchema;
 use crate::snapshot_store::SnapshotStore;
 use crate::RunManifest;
 use anyhow::{Context, Result};
+use serde::{Deserialize, Serialize};
+use std::fs::{File, OpenOptions};
+use std::io::{Seek, SeekFrom, Write as _};
 use std::path::{Path, PathBuf};
 use tracing::warn;
+
+/// The on-disk `.smelt/` layout version this binary writes and the highest
+/// version it can read (`docs/specs/run_state.md` §"`meta.json` and layout
+/// versioning"). Bump this — and add an explicit migration rule, never a
+/// generic version-diff engine — the next time the layout changes.
+pub const CURRENT_STATE_VERSION: u32 = 1;
+
+/// `.smelt/meta.json` — the layout-version marker. A missing file denotes
+/// the legacy pre-versioning root-level layout; a version greater than
+/// [`CURRENT_STATE_VERSION`] is a hard error (never a silent best-effort
+/// read).
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct StateMeta {
+    state_version: u32,
+}
+
+/// Write `value` to `path` atomically: serialize, write to a `.tmp` sibling
+/// in the same directory, `fsync`, then rename into place. A process killed
+/// mid-write leaves either the old file intact or the new one — never a
+/// truncated or partially-written file (`docs/specs/run_state.md`
+/// §"Atomic writes").
+fn write_json_atomic<T: Serialize>(path: &Path, value: &T) -> Result<()> {
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {:?}", parent))?;
+    }
+    let json = serde_json::to_string_pretty(value)
+        .with_context(|| format!("Failed to serialize state for {:?}", path))?;
+
+    let mut tmp_name = path.as_os_str().to_os_string();
+    tmp_name.push(".tmp");
+    let tmp_path = PathBuf::from(tmp_name);
+
+    let mut file = File::create(&tmp_path)
+        .with_context(|| format!("Failed to create temp file: {:?}", tmp_path))?;
+    file.write_all(json.as_bytes())
+        .with_context(|| format!("Failed to write temp file: {:?}", tmp_path))?;
+    file.sync_all()
+        .with_context(|| format!("Failed to fsync temp file: {:?}", tmp_path))?;
+    drop(file);
+
+    std::fs::rename(&tmp_path, path)
+        .with_context(|| format!("Failed to rename {:?} to {:?}", tmp_path, path))?;
+    Ok(())
+}
+
+/// RAII guard for the exclusive advisory lock on `.smelt/lock`
+/// (`docs/specs/run_state.md` §"Locking"). Held for a run's duration;
+/// dropping the guard (on success or on any error path, since it is an
+/// ordinary local binding) releases the lock.
+#[derive(Debug)]
+pub struct StateLock {
+    file: File,
+}
+
+impl Drop for StateLock {
+    fn drop(&mut self) {
+        let _ = fs4::FileExt::unlock(&self.file);
+    }
+}
 
 /// JSON file-backed state store.
 ///
@@ -27,6 +90,7 @@ impl FileStore {
 
     /// Ensure the state directories exist.
     pub fn init(&self) -> Result<()> {
+        self.check_version()?;
         std::fs::create_dir_all(self.runs_dir())
             .with_context(|| format!("Failed to create runs directory: {:?}", self.runs_dir()))?;
         Ok(())
@@ -56,17 +120,120 @@ impl FileStore {
         self.state_dir.join("schemas")
     }
 
+    fn lock_path(&self) -> PathBuf {
+        self.state_dir.join("lock")
+    }
+
+    fn meta_path(&self) -> PathBuf {
+        self.state_dir.join("meta.json")
+    }
+
+    /// Hard-error if `.smelt/meta.json` records a layout version newer than
+    /// this binary understands. A missing `meta.json` is the legacy
+    /// pre-versioning layout and is not an error here — only [`lock`]
+    /// performs the one-time upgrade write, so a version check outside the
+    /// lock never itself mutates `.smelt/`.
+    ///
+    /// Called by every read/write entry point (`init`, and each `load_*`
+    /// method) so an unrecognised future version is refused loudly no
+    /// matter which operation is attempted first
+    /// (`docs/specs/run_state.md` §"Layout version is checked before any
+    /// read or write").
+    fn check_version(&self) -> Result<()> {
+        let path = self.meta_path();
+        if !path.exists() {
+            return Ok(());
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read state layout marker: {:?}", path))?;
+        let meta: StateMeta = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse state layout marker: {:?}", path))?;
+        if meta.state_version > CURRENT_STATE_VERSION {
+            anyhow::bail!(
+                "'.smelt/' was written with state_version {} but this smelt binary only understands up to version {}. Refusing to read or write .smelt/ — upgrade smelt, or remove .smelt/ to start fresh.",
+                meta.state_version,
+                CURRENT_STATE_VERSION
+            );
+        }
+        Ok(())
+    }
+
+    /// Validate the on-disk layout version, upgrading a missing
+    /// `meta.json` (the legacy pre-versioning layout) by stamping the
+    /// current version. Must run only while holding the exclusive lock
+    /// (`lock()` calls this) so a concurrent second process never observes
+    /// a half-migrated layout (`docs/specs/run_state.md` §"Locking").
+    fn check_and_upgrade_meta_locked(&self) -> Result<()> {
+        let path = self.meta_path();
+        if !path.exists() {
+            return write_json_atomic(
+                &path,
+                &StateMeta {
+                    state_version: CURRENT_STATE_VERSION,
+                },
+            );
+        }
+        self.check_version()
+    }
+
+    /// Acquire the exclusive advisory lock on `.smelt/lock` for the
+    /// duration of a run. A second process contending for the lock fails
+    /// loudly, naming the holder's PID, rather than interleaving writes
+    /// (`docs/specs/run_state.md` §"Locking"). Also performs the one-time
+    /// legacy-layout `meta.json` upgrade / future-version hard-error check
+    /// under the lock.
+    pub fn lock(&self) -> Result<StateLock> {
+        std::fs::create_dir_all(&self.state_dir)
+            .with_context(|| format!("Failed to create state directory: {:?}", self.state_dir))?;
+        let lock_path = self.lock_path();
+        let mut file = OpenOptions::new()
+            .create(true)
+            .truncate(false)
+            .read(true)
+            .write(true)
+            .open(&lock_path)
+            .with_context(|| format!("Failed to open lock file: {:?}", lock_path))?;
+
+        if let Err(err) = fs4::FileExt::try_lock(&file) {
+            return match err {
+                fs4::TryLockError::WouldBlock => {
+                    let holder = std::fs::read_to_string(&lock_path).unwrap_or_default();
+                    let holder = holder.trim();
+                    anyhow::bail!("state locked by PID {}", holder)
+                }
+                fs4::TryLockError::Error(io_err) => {
+                    Err(io_err).with_context(|| format!("Failed to lock {:?}", lock_path))
+                }
+            };
+        }
+
+        // We now hold the exclusive lock: record our own PID so a
+        // contending process can name us in its error, then validate/
+        // upgrade the layout version marker under the lock.
+        file.set_len(0)
+            .with_context(|| format!("Failed to truncate lock file: {:?}", lock_path))?;
+        file.seek(SeekFrom::Start(0))
+            .with_context(|| format!("Failed to seek lock file: {:?}", lock_path))?;
+        write!(file, "{}", std::process::id())
+            .with_context(|| format!("Failed to write PID to lock file: {:?}", lock_path))?;
+        file.sync_all().ok();
+
+        if let Err(err) = self.check_and_upgrade_meta_locked() {
+            let _ = fs4::FileExt::unlock(&file);
+            return Err(err);
+        }
+
+        Ok(StateLock { file })
+    }
+
     // --- Run Manifests ---
 
     /// Save a run manifest to disk.
     pub fn save_run(&self, manifest: &RunManifest) -> Result<()> {
         self.init()?;
         let path = self.runs_dir().join(format!("{}.json", manifest.run_id));
-        let json = serde_json::to_string_pretty(manifest)
-            .with_context(|| "Failed to serialize run manifest")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("Failed to write run manifest: {:?}", path))?;
-        Ok(())
+        write_json_atomic(&path, manifest)
+            .with_context(|| format!("Failed to write run manifest: {:?}", path))
     }
 
     /// Load run manifests, sorted by run_id (newest first).
@@ -75,6 +242,7 @@ impl FileStore {
     /// Files are sorted by name (descending) before loading, so with a limit
     /// only the newest files are read from disk.
     pub fn load_runs(&self, limit: Option<usize>) -> Result<Vec<RunManifest>> {
+        self.check_version()?;
         let runs_dir = self.runs_dir();
         if !runs_dir.exists() {
             return Ok(Vec::new());
@@ -116,6 +284,7 @@ impl FileStore {
 
     /// Load a specific run manifest by ID.
     pub fn load_run(&self, run_id: &str) -> Result<Option<RunManifest>> {
+        self.check_version()?;
         let path = self.runs_dir().join(format!("{}.json", run_id));
         if !path.exists() {
             return Ok(None);
@@ -131,6 +300,7 @@ impl FileStore {
 
     /// Load the interval store from disk. Returns default if file doesn't exist.
     pub fn load_intervals(&self) -> Result<IntervalStore> {
+        self.check_version()?;
         let path = self.intervals_path();
         if !path.exists() {
             return Ok(IntervalStore::default());
@@ -146,11 +316,8 @@ impl FileStore {
     pub fn save_intervals(&self, store: &IntervalStore) -> Result<()> {
         self.init()?;
         let path = self.intervals_path();
-        let json = serde_json::to_string_pretty(store)
-            .with_context(|| "Failed to serialize interval store")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("Failed to write intervals: {:?}", path))?;
-        Ok(())
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write intervals: {:?}", path))
     }
 
     // --- Reconciliation Ledger ---
@@ -159,6 +326,7 @@ impl FileStore {
     /// model). Returns default if the file doesn't exist — a model with no
     /// ledger has never had a plan-managed fold/recompute recorded.
     pub fn load_reconciliation_store(&self) -> Result<ReconciliationStore> {
+        self.check_version()?;
         let path = self.reconciliation_path();
         if !path.exists() {
             return Ok(ReconciliationStore::default());
@@ -174,11 +342,8 @@ impl FileStore {
     pub fn save_reconciliation_store(&self, store: &ReconciliationStore) -> Result<()> {
         self.init()?;
         let path = self.reconciliation_path();
-        let json = serde_json::to_string_pretty(store)
-            .with_context(|| "Failed to serialize reconciliation ledger")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("Failed to write reconciliation ledger: {:?}", path))?;
-        Ok(())
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write reconciliation ledger: {:?}", path))
     }
 
     // --- Landed-delta store ---
@@ -188,6 +353,7 @@ impl FileStore {
     /// doesn't exist — a source with no entry has never had a landing
     /// recorded.
     pub fn load_landed_deltas(&self) -> Result<LandedDeltaStore> {
+        self.check_version()?;
         let path = self.landed_deltas_path();
         if !path.exists() {
             return Ok(LandedDeltaStore::default());
@@ -203,17 +369,15 @@ impl FileStore {
     pub fn save_landed_deltas(&self, store: &LandedDeltaStore) -> Result<()> {
         self.init()?;
         let path = self.landed_deltas_path();
-        let json = serde_json::to_string_pretty(store)
-            .with_context(|| "Failed to serialize landed-delta store")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("Failed to write landed-delta store: {:?}", path))?;
-        Ok(())
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write landed-delta store: {:?}", path))
     }
 
     // --- Snapshot / Environment Store ---
 
     /// Load the snapshot store from disk. Returns an empty store if the file doesn't exist.
     pub fn load_snapshot_store(&self) -> Result<SnapshotStore> {
+        self.check_version()?;
         let path = self.snapshots_path();
         if !path.exists() {
             return Ok(SnapshotStore::default());
@@ -229,30 +393,26 @@ impl FileStore {
     pub fn save_snapshot_store(&self, store: &SnapshotStore) -> Result<()> {
         self.init()?;
         let path = self.snapshots_path();
-        let json = serde_json::to_string_pretty(store)
-            .with_context(|| "Failed to serialize snapshot store")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("Failed to write snapshot store: {:?}", path))?;
-        Ok(())
+        write_json_atomic(&path, store)
+            .with_context(|| format!("Failed to write snapshot store: {:?}", path))
     }
 
     // --- Schema Tracking ---
 
     /// Save a deployed schema for a model.
     pub fn save_schema(&self, schema: &DeployedSchema) -> Result<()> {
+        self.check_version()?;
         let dir = self.schemas_dir();
         std::fs::create_dir_all(&dir)
             .with_context(|| format!("Failed to create schemas directory: {:?}", dir))?;
         let path = dir.join(format!("{}.json", schema.model));
-        let json = serde_json::to_string_pretty(schema)
-            .with_context(|| "Failed to serialize deployed schema")?;
-        std::fs::write(&path, json)
-            .with_context(|| format!("Failed to write schema: {:?}", path))?;
-        Ok(())
+        write_json_atomic(&path, schema)
+            .with_context(|| format!("Failed to write schema: {:?}", path))
     }
 
     /// Load the deployed schema for a model. Returns None if not found.
     pub fn load_schema(&self, model_name: &str) -> Result<Option<DeployedSchema>> {
+        self.check_version()?;
         let path = self.schemas_dir().join(format!("{}.json", model_name));
         if !path.exists() {
             return Ok(None);
@@ -560,5 +720,118 @@ mod tests {
 
         let loaded = file_store.load_snapshot_store().unwrap();
         assert!(loaded.is_empty());
+    }
+
+    // --- Phase 3: state store hardening ---
+
+    #[test]
+    fn atomic_write_leaves_no_temp_files() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        let mut intervals = IntervalStore::default();
+        intervals
+            .get_or_create("daily_revenue", "sha256:abc")
+            .record_interval("2026-01-01", "2026-01-02");
+        store.save_intervals(&intervals).unwrap();
+
+        let entries: Vec<String> = std::fs::read_dir(dir.path().join(".smelt"))
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .map(|e| e.file_name().to_string_lossy().into_owned())
+            .collect();
+        assert!(
+            !entries.iter().any(|name| name.ends_with(".tmp")),
+            "expected no leftover .tmp files, got {entries:?}"
+        );
+        assert!(
+            entries.contains(&"intervals.json".to_string()),
+            "expected intervals.json to exist, got {entries:?}"
+        );
+
+        // Content round-trips.
+        let loaded = store.load_intervals().unwrap();
+        assert!(loaded.get("daily_revenue").is_some());
+        assert_eq!(
+            loaded.get("daily_revenue").unwrap().covered_intervals.len(),
+            1
+        );
+    }
+
+    #[test]
+    fn second_lock_holder_gets_fail_loud_error() {
+        let dir = TempDir::new().unwrap();
+        let store1 = FileStore::new(dir.path());
+        let store2 = FileStore::new(dir.path());
+
+        let _guard1 = store1.lock().unwrap();
+        let err = store2
+            .lock()
+            .expect_err("second lock acquisition must fail");
+        let msg = err.to_string();
+        assert!(
+            msg.contains("state locked by PID"),
+            "unexpected error message: {msg}"
+        );
+        assert!(
+            msg.contains(&std::process::id().to_string()),
+            "expected the holder's PID in the error message: {msg}"
+        );
+    }
+
+    #[test]
+    fn future_state_version_is_hard_error() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+        store.init().unwrap();
+        std::fs::write(
+            dir.path().join(".smelt").join("meta.json"),
+            r#"{"state_version": 99}"#,
+        )
+        .unwrap();
+
+        let err = store
+            .load_intervals()
+            .expect_err("a future state_version must hard-error on load");
+        assert!(
+            err.to_string().contains("99"),
+            "error should name the on-disk version: {err}"
+        );
+
+        let err2 = store
+            .lock()
+            .expect_err("a future state_version must hard-error on lock");
+        assert!(
+            err2.to_string().contains("99"),
+            "error should name the on-disk version: {err2}"
+        );
+    }
+
+    #[test]
+    fn missing_meta_json_is_legacy_and_upgraded() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path());
+
+        // Simulate a pre-versioning (legacy) layout: state exists, no meta.json.
+        let mut intervals = IntervalStore::default();
+        intervals
+            .get_or_create("daily_revenue", "sha256:abc")
+            .record_interval("2026-01-01", "2026-01-02");
+        store.save_intervals(&intervals).unwrap();
+        let meta_path = dir.path().join(".smelt").join("meta.json");
+        assert!(!meta_path.exists());
+
+        // First locked open upgrades the layout by stamping the current version.
+        let _guard = store.lock().unwrap();
+        assert!(meta_path.exists());
+        let content = std::fs::read_to_string(&meta_path).unwrap();
+        assert!(
+            content.contains(&CURRENT_STATE_VERSION.to_string()),
+            "expected meta.json to record the current state_version, got: {content}"
+        );
+
+        // Pre-existing state is still readable after the upgrade.
+        let loaded = store.load_intervals().unwrap();
+        assert!(loaded.get("daily_revenue").is_some());
     }
 }

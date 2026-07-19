@@ -40,6 +40,22 @@ Every `smelt` subcommand follows the same exit-code contract, so orchestrators (
 
 ---
 
+## State lock errors
+
+Any command that mutates run state (`smelt run`, `smelt build`, `smelt backbuild`) takes an exclusive lock on `.smelt/lock` for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:
+
+```
+Error: state locked by PID <n>
+```
+
+rather than silently interleaving writes with the in-flight run. This is expected when two runs are launched concurrently against the same project (e.g. an overlapping cron schedule, or a manual run started while a CI job is still going) — it is not a corruption signal. Wait for the process named by `<n>` to finish, then re-run.
+
+The lock is an OS-level advisory file lock (`flock`), not a hand-rolled PID file: if the holder process is killed or its container crashes, the operating system releases the lock automatically when the process's file descriptors close, so a stuck lock left behind by a dead process is not expected. If a `state locked by PID <n>` error persists after confirming `<n>` is no longer running, that indicates the lock file lives on a filesystem that doesn't honor advisory locks (e.g. certain network mounts) rather than a normal stale-lock condition.
+
+See `docs/specs/run_state.md` §"Locking" for the full semantics.
+
+---
+
 ## Argument resolution and `--scope`
 
 Every command that takes an entity identifier — a model name in `--select`, a positional model argument to `smelt type`, `smelt table`, `smelt status`, etc. — resolves it using a three-shape input rule.

@@ -736,6 +736,15 @@ pub async fn execute_project(
     );
 
     let file_store = FileStore::new(project_dir);
+    // Hold the exclusive advisory lock on `.smelt/lock` for the remainder of
+    // this run — every state write below (manifest, intervals,
+    // reconciliation ledger, landed deltas, schema snapshots) happens while
+    // `_state_lock` is alive. Dropping it (on success or any error/early
+    // return from this point on, since it is an ordinary local binding)
+    // releases the lock (`docs/specs/run_state.md` §"Locking").
+    let _state_lock = file_store
+        .lock()
+        .context("failed to acquire the .smelt/ state lock")?;
     let mut manifest = RunManifest {
         run_id: run_id.clone(),
         started_at: run_start,
