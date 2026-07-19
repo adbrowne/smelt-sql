@@ -985,6 +985,115 @@ pub fn parse_active_backends(text: &str) -> Option<Vec<String>> {
     Some(backends)
 }
 
+/// Resolve `${VAR}` environment-variable references in raw `smelt.yml` text,
+/// before it is parsed into a typed `Config` (`smelt_yml.md` §Semantics item
+/// 8 — interpolation runs exactly once, in the config-load pass, before any
+/// other parse-time or semantic validation observes the value).
+///
+/// Walks the generic YAML value tree (not the raw text) so each reference
+/// can be reported against its YAML key path (e.g. `targets.prod.connect_url`).
+/// `$$` is unescaped to a literal `$` in the same pass. Every unresolved
+/// `${VAR}` in the file is collected and reported together — a config with
+/// two missing variables names both, never just the first. `env_lookup` is
+/// injectable so tests don't have to mutate process env.
+///
+/// If `text` does not parse as YAML at all, interpolation is skipped and the
+/// text is returned unchanged — the downstream `Config` parse produces the
+/// real syntax error instead of a confusing interpolation-stage one.
+pub fn interpolate_env_vars(
+    text: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<String> {
+    let value: serde_yaml::Value = match serde_yaml::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return Ok(text.to_string()),
+    };
+    let mut missing: Vec<(String, String)> = Vec::new();
+    let interpolated = interpolate_value(value, String::new(), env_lookup, &mut missing);
+    if !missing.is_empty() {
+        let mut detail = String::new();
+        for (var, key_path) in &missing {
+            detail.push_str(&format!(
+                "  ${{{var}}} at `{key_path}` — environment variable `{var}` is not set\n"
+            ));
+        }
+        anyhow::bail!(
+            "smelt.yml: unresolved environment variable reference(s):\n{}",
+            detail.trim_end()
+        );
+    }
+    serde_yaml::to_string(&interpolated)
+        .map_err(|e| anyhow::anyhow!("failed to re-serialize smelt.yml after interpolation: {e}"))
+}
+
+fn interpolate_value(
+    value: serde_yaml::Value,
+    key_path: String,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    missing: &mut Vec<(String, String)>,
+) -> serde_yaml::Value {
+    match value {
+        serde_yaml::Value::String(s) => {
+            serde_yaml::Value::String(interpolate_string(&s, &key_path, env_lookup, missing))
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut new_map = serde_yaml::Mapping::new();
+            for (k, v) in map {
+                let child_path = match (k.as_str(), key_path.is_empty()) {
+                    (Some(name), true) => name.to_string(),
+                    (Some(name), false) => format!("{key_path}.{name}"),
+                    (None, _) => key_path.clone(),
+                };
+                let new_v = interpolate_value(v, child_path, env_lookup, missing);
+                new_map.insert(k, new_v);
+            }
+            serde_yaml::Value::Mapping(new_map)
+        }
+        serde_yaml::Value::Sequence(seq) => serde_yaml::Value::Sequence(
+            seq.into_iter()
+                .enumerate()
+                .map(|(i, v)| interpolate_value(v, format!("{key_path}[{i}]"), env_lookup, missing))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Interpolate `${VAR}` / unescape `$$` within a single string leaf. Any
+/// unresolved reference is pushed to `missing` (keyed by variable name and
+/// the string's YAML key path) rather than resolved to an empty string.
+fn interpolate_string(
+    s: &str,
+    key_path: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    missing: &mut Vec<(String, String)>,
+) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$' {
+            out.push('$');
+            i += 2;
+            continue;
+        }
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            if let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == '}') {
+                let name: String = chars[i + 2..i + 2 + rel_end].iter().collect();
+                match env_lookup(&name) {
+                    Some(val) => out.push_str(&val),
+                    None => missing.push((name, key_path.to_string())),
+                }
+                i = i + 2 + rel_end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
 impl Config {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let config_path = project_dir.join("smelt.yml");
@@ -994,8 +1103,14 @@ impl Config {
                 source: e.into(),
             })?;
 
+        let interpolated = interpolate_env_vars(&content, &|name| std::env::var(name).ok())
+            .map_err(|e| ConfigError::LoadError {
+                path: config_path.clone(),
+                source: e,
+            })?;
+
         let (config, warnings) =
-            Self::parse_with_warnings(&content).map_err(|e| ConfigError::LoadError {
+            Self::parse_with_warnings(&interpolated).map_err(|e| ConfigError::LoadError {
                 path: config_path,
                 source: e.into(),
             })?;
@@ -1425,6 +1540,79 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `${VAR}` in a target field resolves against a set (injected) variable.
+    #[test]
+    fn env_interpolation_resolves_var() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://${SPARK_HOST}:15002
+"#;
+        let lookup = |name: &str| -> Option<String> {
+            if name == "SPARK_HOST" {
+                Some("spark-cluster.internal".to_string())
+            } else {
+                None
+            }
+        };
+        let resolved =
+            interpolate_env_vars(yaml, &lookup).expect("SPARK_HOST is set, must resolve");
+        let config: Config = serde_yaml::from_str(&resolved).expect("resolved YAML must parse");
+        assert_eq!(
+            config.targets["prod"].connect_url.as_deref(),
+            Some("sc://spark-cluster.internal:15002")
+        );
+    }
+
+    /// A missing variable is a hard error naming both the variable and the
+    /// YAML key path it appears under — never a silent empty string.
+    #[test]
+    fn env_interpolation_missing_var_is_error() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://${SPARK_HOST}:15002
+"#;
+        let lookup = |_: &str| -> Option<String> { None };
+        let err =
+            interpolate_env_vars(yaml, &lookup).expect_err("unset SPARK_HOST must be a hard error");
+        let message = err.to_string();
+        assert!(
+            message.contains("SPARK_HOST"),
+            "error must name the missing variable: {message}"
+        );
+        assert!(
+            message.contains("targets.prod.connect_url"),
+            "error must name the YAML key path: {message}"
+        );
+    }
+
+    /// `$$` unescapes to a literal `$` with no lookup attempted, even when
+    /// no environment variables are set at all.
+    #[test]
+    fn env_interpolation_double_dollar_escapes() {
+        let yaml = r#"
+name: test_project
+targets:
+  dev:
+    type: duckdb
+    database: "cost$$report.duckdb"
+    schema: main
+"#;
+        let lookup = |_: &str| -> Option<String> { None };
+        let resolved =
+            interpolate_env_vars(yaml, &lookup).expect("no ${VAR} reference, must not error");
+        let config: Config = serde_yaml::from_str(&resolved).expect("resolved YAML must parse");
+        assert_eq!(
+            config.targets["dev"].database.as_deref(),
+            Some("cost$report.duckdb")
+        );
+    }
 
     /// iter-4 issue #1: a smelt.yml without a `version` field must parse
     /// (defaulting to 1) so new users don't trip over a required field that

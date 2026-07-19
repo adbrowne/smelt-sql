@@ -93,6 +93,21 @@ targets:
     format: delta  # default; can also be "parquet"
 ```
 
+### Environment interpolation
+
+Any string value anywhere in `smelt.yml` may reference an environment variable with `${VAR_NAME}`. The reference is resolved once, at config load, before validation — this is how secrets (a Spark `connect_url`, a warehouse credential) stay out of the checked-in file. Write `$$` for a literal `$` that must not trigger a lookup.
+
+```yaml
+targets:
+  spark_prod:
+    type: spark
+    connect_url: ${SPARK_CONNECT_URL}   # e.g. sc://spark.internal:15002 from CI secrets
+    catalog: spark_catalog
+    schema: main
+```
+
+If `SPARK_CONNECT_URL` is unset, loading the config fails immediately with an error naming both the variable and the key path (`targets.spark_prod.connect_url`) — it never silently resolves to an empty string. When a config references more than one missing variable, every one of them is reported together, not just the first.
+
 ---
 
 ## Materialization Types
