@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784427388378,
+  "lastUpdate": 1784427390690,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 13.922442,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "f8acdd637c95f24eabea51c6a537705442d1b05a",
+          "message": "research: production-release review — state, blockers, v0.5 shape, blog series\n\nCo-Authored-By: Claude Fable 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-19T12:05:52+10:00",
+          "tree_id": "02e1fd505c7637ab8568c67c4daf79b74f942a47",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/f8acdd637c95f24eabea51c6a537705442d1b05a"
+        },
+        "date": 1784427390207,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.76045509832255,
+            "unit": "MB/s"
           }
         ]
       }
