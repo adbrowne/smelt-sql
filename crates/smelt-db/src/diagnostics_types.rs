@@ -675,6 +675,19 @@ pub enum DiagnosticCode {
     /// Message: "GrainAssertionMismatch: declared `grain: {asserted}` disagrees with the grain derived from the declared shape facts (`grain: {derived}`) — fix the `grain:` assertion or the facts it derives from"
     GrainAssertionMismatch,
 
+    // ── Declarative column test diagnostic codes (docs/specs/data_tests.md) ──
+    /// A `columns.<c>.tests` entry does not match `not_null`, `unique`,
+    /// `accepted_values`, or `relationships`. Anchored at the offending
+    /// entry (currently the top of the file — precise per-entry anchoring
+    /// is not yet wired).
+    /// Message: "UnknownColumnTestKind: column '{column}' has a `tests` entry '{entry}' which is not one of the recognized kinds (not_null, unique, accepted_values, relationships)"
+    UnknownColumnTestKind,
+    /// A `columns.<c>.tests` entry names a column absent from the model's
+    /// inferred output schema. Anchored at the column key (currently the
+    /// top of the file — precise per-entry anchoring is not yet wired).
+    /// Message: "ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema"
+    ColumnTestOnUnknownColumn,
+
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or
     /// `WITH cte(c₁, c₂, …) AS (SELECT …)` has a different length from the

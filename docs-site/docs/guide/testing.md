@@ -351,6 +351,79 @@ everything downstream of them).
 `smelt build` / `smelt check` concern, so use `smelt build` (or a `smelt run` followed by
 `smelt check`) when you want the data validated.
 
+## Declarative column tests
+
+For the common case of asserting a fact about a single column — non-null, unique,
+one of a fixed set of values, or a foreign-key-style reference to another model —
+declare it directly on the column instead of hand-writing a `smelt.check`. Add a
+`tests` key under the column's entry in a model's `columns:` frontmatter:
+
+```sql
+---
+name: orders
+columns:
+  order_id:
+    tests:
+      - not_null
+      - unique
+  status:
+    tests:
+      - accepted_values: ['pending', 'shipped', 'cancelled']
+  customer_id:
+    tests:
+      - relationships:
+          to: customers
+          field: id
+---
+SELECT order_id, status, customer_id FROM raw_orders
+```
+
+Four kinds are recognized:
+
+| Kind | Form | Checks |
+|------|------|--------|
+| `not_null` | bare string | the column is never `NULL` |
+| `unique` | bare string | the column (or column set) has no duplicate values |
+| `accepted_values` | `{accepted_values: [...]}` | every non-null value is one of the listed literals |
+| `relationships` | `{relationships: {to: <model>, field: <column>}}` | every non-null value matches a row in `to.field` |
+
+A misspelled kind, or a `tests` entry on a column that doesn't exist in the model's
+output, is a hard compile error — unlike other `columns:` keys (a stale `description`
+is silently dropped), a stale or misspelled test would otherwise look like it's
+running when it isn't.
+
+### Proven tests cost nothing at run time
+
+Before running anything, `smelt` checks whether the model's own SQL already proves the
+test true:
+
+- `not_null` is proven when the type checker has already inferred the column
+  non-nullable.
+- `unique` is proven when the tested column (or column set) is exactly the model's
+  declared `unique_key:`.
+
+A proven test is reported as `proven — no scan emitted` and costs no query — it's
+re-verified on every compile, so a change that breaks the guarantee re-opens the scan
+rather than leaving a stale green result. `accepted_values` and `relationships` have no
+proof path yet and always run as a scan (see below).
+
+```
+$ smelt check
+
+smelt check — declarative column tests
+
+  PROVEN  orders.order_id.not_null — no scan emitted
+  PROVEN  orders.order_id.unique — no scan emitted
+```
+
+A test that isn't proven is designed to lower to the same failing-rows scan machinery
+as a hand-written `smelt.check` — zero rows returned means the test passes. That scan
+is not wired up yet: today, an unproven test (including every `accepted_values` and
+`relationships` test, which have no proof path) is parsed and validated but does not
+run a scan or appear in the PASS/FAIL/WARN report. Only proven verdicts are reported
+currently. Declarative column tests are always `error`-severity; there is no
+`warn`-severity form today.
+
 ## Comparison behavior
 
 ### Set vs ordered comparison

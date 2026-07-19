@@ -18,9 +18,13 @@
 use anyhow::{Context, Result};
 use smelt_cli::{
     backend_registry::BackendRegistry, build_fn_body_map_from_model_files, find_project_root,
-    CompilerRegistry, Config, ModelDiscovery,
+    init_db, CompilerRegistry, Config, ModelDiscovery,
 };
-use smelt_core::{graph::DependencyGraph, metadata::CheckSeverity};
+use smelt_core::{
+    graph::DependencyGraph,
+    metadata::{CheckSeverity, ColumnTest},
+};
+use smelt_logical::{resolve_not_null_verdict, resolve_unique_verdict, TestVerdict};
 use smelt_runtime::{run_single_check, CheckStatus};
 use std::collections::{HashMap, HashSet};
 
@@ -79,6 +83,81 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
         .filter(|m| !m.is_assertion())
         .cloned()
         .collect();
+
+    // Declarative column tests (`columns.<c>.tests`, `docs/specs/data_tests.md`)
+    // — proven-verdict short-circuit. Runs unconditionally (independent of
+    // whether the project has any `smelt.check` declarations or a `--select`
+    // match), since a project may declare column tests without ever declaring
+    // a hand-authored check.
+    //
+    // Consult derived properties first (inferred nullability for `not_null`,
+    // the declared `unique_key:` for `unique`); a proven verdict is reported
+    // here with no scan. An unproven verdict falls through to a scan lowered
+    // through this same check machinery — wiring that scan into the run below
+    // is separate follow-on scope (`docs/plans/20260719-prod-w3-adoption.md`);
+    // this phase only lands the proof step and its no-scan reporting.
+    let mut proven_count = 0usize;
+    if regular_models
+        .iter()
+        .any(|m| model_has_column_tests(m.metadata.as_deref()))
+    {
+        let db = init_db(&project_dir, &all_models);
+        if let Some(ws) = smelt_db::Workspace::try_get(&db) {
+            println!("\nsmelt check — declarative column tests\n");
+            for model in &regular_models {
+                let Some(metadata) = model.metadata.as_deref() else {
+                    continue;
+                };
+                if !model_has_column_tests(Some(metadata)) {
+                    continue;
+                }
+                let Some(file) = db.source_file(&model.path) else {
+                    continue;
+                };
+                let typed_schema = smelt_db::typed_model_schema(&db, ws, file);
+                let known_key_sets: Vec<Vec<String>> = metadata
+                    .unique_key
+                    .as_ref()
+                    .map(|k| vec![k.clone()])
+                    .unwrap_or_default();
+
+                let mut columns: Vec<_> = metadata.columns.iter().collect();
+                columns.sort_by(|a, b| a.0.cmp(b.0));
+                for (column, col_meta) in columns {
+                    for test in &col_meta.tests {
+                        let (label, verdict) = match test {
+                            ColumnTest::Simple(kind) if kind == "not_null" => {
+                                let is_non_nullable = column_non_nullable(&typed_schema, column);
+                                ("not_null", resolve_not_null_verdict(is_non_nullable))
+                            }
+                            ColumnTest::Simple(kind) if kind == "unique" => (
+                                "unique",
+                                resolve_unique_verdict(
+                                    std::slice::from_ref(column),
+                                    &known_key_sets,
+                                ),
+                            ),
+                            // accepted_values/relationships have no proof
+                            // path today (`docs/specs/data_tests.md`
+                            // §"Known Divergences") — always needs a scan,
+                            // not yet wired here.
+                            _ => continue,
+                        };
+                        if verdict == TestVerdict::Proven {
+                            println!(
+                                "  PROVEN  {}.{}.{} — no scan emitted",
+                                model.name, column, label
+                            );
+                            proven_count += 1;
+                        }
+                    }
+                }
+            }
+            if proven_count > 0 {
+                println!();
+            }
+        }
+    }
 
     if check_models.is_empty() {
         println!("No checks found.");
@@ -253,4 +332,31 @@ fn extract_check_name_from_content(content: &str) -> Option<String> {
     let file = smelt_parser::ast::File::cast(parse.syntax())?;
     let check = file.checks().next()?;
     check.name()
+}
+
+/// True if any `columns:` entry declares a non-empty `tests` list
+/// (`docs/specs/data_tests.md` §Surface).
+fn model_has_column_tests(metadata: Option<&smelt_core::metadata::ModelMetadata>) -> bool {
+    metadata
+        .map(|m| m.columns.values().any(|c| !c.tests.is_empty()))
+        .unwrap_or(false)
+}
+
+/// Whether `column` is provably non-nullable from the model's own inferred
+/// schema (`docs/specs/data_tests.md` §Semantics "Resolution order" — the
+/// `not_null` proof step).
+///
+/// Only trusts `Computed` columns (the model directly determines the
+/// value) — pass-through (`FromModel`), wildcard-expanded, and
+/// unresolved-source columns are left `None` (undecidable), matching the
+/// same reliability filter `check_timeseries_nullability` applies
+/// (`crates/smelt-db/src/queries/check_types.rs`). `None` is fail-safe: the
+/// caller's [`resolve_not_null_verdict`] treats it as "needs a scan", never
+/// as a claimed proof.
+fn column_non_nullable(schema: &smelt_db::ModelSchema, column: &str) -> Option<bool> {
+    let col = schema.columns.iter().find(|c| c.name == column)?;
+    if !matches!(col.source, smelt_db::schema::ColumnSource::Computed) {
+        return None;
+    }
+    col.data_type.as_ref().map(|tc| !tc.nullable)
 }

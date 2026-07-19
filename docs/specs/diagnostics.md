@@ -186,6 +186,17 @@ Owned by `docs/specs/testing.md`.
 
 ---
 
+### Declarative column tests
+
+Owned by `docs/specs/data_tests.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `UnknownColumnTestKind` | Error | A `columns.<c>.tests` entry does not match `not_null`, `unique`, `accepted_values`, or `relationships`. Anchored at the offending entry. |
+| `ColumnTestOnUnknownColumn` | Error | A `columns.<c>.tests` entry names a column absent from the model's inferred output schema. Anchored at the column key. |
+
+---
+
 ### Types
 
 Owned by `docs/specs/types.md` and the VALUES/alias-column-list analysis.

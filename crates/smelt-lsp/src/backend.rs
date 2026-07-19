@@ -460,6 +460,8 @@ impl Backend {
                     "maintenance-write-pattern-unavailable"
                 }
                 DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
+                DbCode::UnknownColumnTestKind => "unknown-column-test-kind",
+                DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
             };
             NumberOrString::String(code_str.to_string())
         });

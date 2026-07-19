@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod data_tests;
 pub mod graph;
 pub mod logical;
 pub mod lowering;
@@ -17,6 +18,7 @@ pub use analysis::temporal::{
     EffectiveWindow, TemporalDependency, TemporalOffset, TemporalSource,
 };
 pub use analysis::{analyze_select, SelectAnalysis, SelectItemKind};
+pub use data_tests::{resolve_not_null_verdict, resolve_unique_verdict, TestVerdict};
 pub use graph::{ModelGraph, ModelInfo};
 pub use logical::{
     parse_function_properties, Cardinality, FnId, FunctionProperties, JoinSpec, LogicalNode, Plan,

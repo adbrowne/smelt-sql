@@ -130,6 +130,12 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // exactly like `KeyedForbidsTimeseries` above.
         MetadataError::MaintenanceWritePatternUnavailable { .. } => None,
         MetadataError::MaintenanceWriteAddressingRefused { .. } => None,
+        // Handled by a dedicated arm in check_file_diagnostics: `UnknownColumnTestKind`
+        // is raised by the pure `validate_column_tests` on the `Ok(Single)` path;
+        // `ColumnTestOnUnknownColumn` needs `typed_model_schema` (Salsa), which this
+        // pure mapper does not have.
+        MetadataError::UnknownColumnTestKind { .. } => None,
+        MetadataError::ColumnTestOnUnknownColumn { .. } => None,
     }
 }
 
@@ -1966,6 +1972,48 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 data: None,
             })
             .accumulate(db);
+        }
+
+        // Declarative column test validation (`docs/specs/data_tests.md`
+        // §"Fail-loud validation"). Two checks, run only when at least one
+        // column declares a non-empty `tests` list:
+        //   1. `UnknownColumnTestKind` — pure, from `validate_column_tests`.
+        //   2. `ColumnTestOnUnknownColumn` — needs the inferred output
+        //      schema, so it is made here (not in `smelt-core`) via
+        //      `typed_model_schema`.
+        if metadata.columns.values().any(|c| !c.tests.is_empty()) {
+            if let Err(kind_err) = smelt_core::metadata::validate_column_tests(metadata) {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: kind_err.to_string(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::UnknownColumnTestKind),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+
+            let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
+            let typed_schema = typed_model_schema(db, workspace, file);
+            let schema_columns: Vec<String> = typed_schema
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            if let Err(col_err) = smelt_core::metadata::validate_column_tests_against_schema(
+                metadata,
+                model_name,
+                &schema_columns,
+            ) {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: col_err.to_string(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::ColumnTestOnUnknownColumn),
+                    data: None,
+                })
+                .accumulate(db);
+            }
         }
 
         // Timeseries schema invariants (D-52 rules 7 and 8).

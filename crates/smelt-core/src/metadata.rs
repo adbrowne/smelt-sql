@@ -593,6 +593,28 @@ pub enum MetadataError {
         pattern: String,
         why: String,
     },
+
+    /// A `columns.<c>.tests` entry does not match one of the four recognized
+    /// kinds (`not_null`, `unique`, `accepted_values`, `relationships`) —
+    /// including a misspelled kind name or an unrecognized parameterized
+    /// form. Raised by [`validate_column_tests`], a pure frontmatter
+    /// validator (`docs/specs/data_tests.md` §"Fail-loud validation").
+    #[error("UnknownColumnTestKind: column '{column}' has a `tests` entry '{entry}' which is not one of the recognized kinds (not_null, unique, accepted_values, relationships)")]
+    UnknownColumnTestKind { column: String, entry: String },
+
+    /// A `columns.<c>.tests` entry names a column `<c>` absent from the
+    /// model's inferred output schema. Not raised by a pure frontmatter
+    /// validator — the column-presence check needs the model's inferred
+    /// schema, which this crate does not have, so it is made by
+    /// `smelt-db`'s `check_file_diagnostics` (which has `typed_model_schema`
+    /// in scope) and surfaced from there, the same pattern as
+    /// `KeyedForbidsTimeseries`/`MaintenanceWritePatternUnavailable` above.
+    /// The variant is kept here so `MetadataError` stays the shared
+    /// vocabulary every consumer's exhaustive match already handles
+    /// (`docs/specs/data_tests.md` §"Fail-loud validation" — the deliberate
+    /// contrast with the silent-drop rule for other `columns:` keys).
+    #[error("ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema")]
+    ColumnTestOnUnknownColumn { model: String, column: String },
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -969,6 +991,130 @@ pub fn validate_bounded_domains(
                 bd.column
             ),
         });
+    }
+    Ok(())
+}
+
+/// Validate `columns.<c>.tests` entries structurally: every entry must match
+/// one of the four recognized kinds (`not_null`, `unique`, `accepted_values`,
+/// `relationships`), and a parameterized entry must carry the recognized
+/// parameter shape.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata`.
+/// Deliberately does **not** check that a tested column exists in the
+/// model's inferred output schema — that check needs the inferred schema,
+/// which this crate does not have; it is made downstream by `smelt-db`
+/// (`MetadataError::ColumnTestOnUnknownColumn`). See
+/// `docs/specs/data_tests.md` §"Fail-loud validation".
+///
+/// Rules checked:
+/// - `not_null` / `unique` as a bare string list entry.
+/// - `{accepted_values: [<literal>, ...]}` — a non-empty list value.
+/// - `{relationships: {to: <model>, field: <column>}}` — a map value
+///   carrying both a `to` and a `field` string key.
+/// - Anything else (misspelled kind, unrecognized parameterized key, a
+///   multi-key parameterized entry, or a malformed `accepted_values`/
+///   `relationships` shape) → `UnknownColumnTestKind`.
+pub fn validate_column_tests(metadata: &ModelMetadata) -> Result<(), MetadataError> {
+    for (column, col_meta) in &metadata.columns {
+        for test in &col_meta.tests {
+            validate_one_column_test(column, test)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_one_column_test(column: &str, test: &ColumnTest) -> Result<(), MetadataError> {
+    match test {
+        ColumnTest::Simple(name) => match name.as_str() {
+            "not_null" | "unique" => Ok(()),
+            other => Err(MetadataError::UnknownColumnTestKind {
+                column: column.to_string(),
+                entry: other.to_string(),
+            }),
+        },
+        ColumnTest::Parameterized(params) => {
+            // A single-key entry is the only recognized parameterized shape;
+            // reject multi-key entries (e.g. accidentally merged
+            // `- {accepted_values: [...], relationships: {...}}`).
+            if params.len() != 1 {
+                return Err(MetadataError::UnknownColumnTestKind {
+                    column: column.to_string(),
+                    entry: format!("{:?}", params.keys().collect::<Vec<_>>()),
+                });
+            }
+            let Some((kind, value)) = params.iter().next() else {
+                // Unreachable in practice (params.len() == 1 checked just
+                // above), but avoids a production `.expect(` — fail loud
+                // with the same diagnostic rather than panicking.
+                return Err(MetadataError::UnknownColumnTestKind {
+                    column: column.to_string(),
+                    entry: "<empty parameterized test entry>".to_string(),
+                });
+            };
+            match kind.as_str() {
+                "accepted_values" => match value {
+                    serde_yaml::Value::Sequence(seq) if !seq.is_empty() => Ok(()),
+                    _ => Err(MetadataError::UnknownColumnTestKind {
+                        column: column.to_string(),
+                        entry: "accepted_values (must be a non-empty list)".to_string(),
+                    }),
+                },
+                "relationships" => {
+                    let has_field = |name: &str| {
+                        value
+                            .as_mapping()
+                            .and_then(|m| m.get(serde_yaml::Value::String(name.to_string())))
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.is_empty())
+                    };
+                    if has_field("to") && has_field("field") {
+                        Ok(())
+                    } else {
+                        Err(MetadataError::UnknownColumnTestKind {
+                            column: column.to_string(),
+                            entry: "relationships (must be a map with non-empty `to` and `field`)"
+                                .to_string(),
+                        })
+                    }
+                }
+                other => Err(MetadataError::UnknownColumnTestKind {
+                    column: column.to_string(),
+                    entry: other.to_string(),
+                }),
+            }
+        }
+    }
+}
+
+/// Validate that every `columns.<c>.tests`-bearing column name exists in the
+/// model's inferred output schema (`schema_columns`).
+///
+/// Pure function — takes the schema as plain data (a column-name slice)
+/// rather than any Salsa/schema type, so this crate stays free of a
+/// `smelt-db` dependency. The caller (`smelt-db`'s `check_file_diagnostics`)
+/// supplies `schema_columns` from `typed_model_schema`.
+///
+/// This is a deliberate **contrast** with the rest of the `columns:` map: a
+/// `description` (or other non-`tests` key) on a column absent from the
+/// inferred schema is silently dropped from catalog output, because a stale
+/// description is inert. A stale or misspelled *test* is not inert — see
+/// `docs/specs/data_tests.md` §"Fail-loud validation".
+pub fn validate_column_tests_against_schema(
+    metadata: &ModelMetadata,
+    model_name: &str,
+    schema_columns: &[String],
+) -> Result<(), MetadataError> {
+    for (column, col_meta) in &metadata.columns {
+        if col_meta.tests.is_empty() {
+            continue;
+        }
+        if !schema_columns.iter().any(|c| c == column) {
+            return Err(MetadataError::ColumnTestOnUnknownColumn {
+                model: model_name.to_string(),
+                column: column.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -1475,6 +1621,83 @@ fn parse_section_delimiter(line: &str, line_number: usize) -> Result<String, Met
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All four `columns.<c>.tests` kinds, including the parameterized
+    /// forms, parse into `ColumnTest` and pass `validate_column_tests`
+    /// (`docs/specs/data_tests.md` §Surface).
+    #[test]
+    fn parses_column_tests_list() {
+        let source = r#"---
+name: orders
+columns:
+  order_id:
+    tests:
+      - not_null
+      - unique
+  status:
+    tests:
+      - accepted_values: ['pending', 'shipped', 'cancelled']
+  customer_id:
+    tests:
+      - relationships:
+          to: customers
+          field: id
+---
+SELECT order_id, status, customer_id FROM raw_orders"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        let metadata = match result {
+            FileMetadata::Single { metadata, .. } => metadata,
+            other => panic!("Expected Single variant, got {:?}", other),
+        };
+
+        let order_id_tests = &metadata.columns.get("order_id").unwrap().tests;
+        assert_eq!(
+            order_id_tests,
+            &vec![
+                ColumnTest::Simple("not_null".to_string()),
+                ColumnTest::Simple("unique".to_string()),
+            ]
+        );
+
+        let status_tests = &metadata.columns.get("status").unwrap().tests;
+        assert_eq!(status_tests.len(), 1);
+        assert!(matches!(status_tests[0], ColumnTest::Parameterized(_)));
+
+        let customer_id_tests = &metadata.columns.get("customer_id").unwrap().tests;
+        assert_eq!(customer_id_tests.len(), 1);
+        assert!(matches!(customer_id_tests[0], ColumnTest::Parameterized(_)));
+
+        validate_column_tests(&metadata).expect("all four kinds should validate cleanly");
+    }
+
+    /// A misspelled/unrecognized `tests` entry is a hard `MetadataError`
+    /// (`docs/specs/data_tests.md` §"Fail-loud validation").
+    #[test]
+    fn unknown_test_kind_is_metadata_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_id".to_string(),
+            ColumnMetadata {
+                tests: vec![ColumnTest::Simple("nut_null".to_string())],
+                ..Default::default()
+            },
+        );
+        let metadata = ModelMetadata {
+            name: Some("orders".to_string()),
+            columns,
+            ..Default::default()
+        };
+
+        let err = validate_column_tests(&metadata)
+            .expect_err("misspelled test kind must be a hard error");
+        assert!(
+            matches!(err, MetadataError::UnknownColumnTestKind { .. }),
+            "Expected UnknownColumnTestKind, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("nut_null"));
+    }
 
     #[test]
     fn test_no_frontmatter() {
