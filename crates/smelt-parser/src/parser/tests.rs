@@ -86,6 +86,58 @@ fn test_multiple_joins() {
 }
 
 #[test]
+fn test_comma_join_two_tables() {
+    let input = "SELECT * FROM users, orders";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().expect("should have FROM");
+    assert_eq!(from.joins().count(), 1);
+    let join = from.joins().next().unwrap();
+    assert!(join.is_comma_join(), "should be a comma-join");
+    assert!(join.condition().is_none(), "comma-join has no condition");
+    let table_ref = join.table_ref().expect("should have table ref");
+    assert_eq!(table_ref.identifier().as_deref(), Some("orders"));
+}
+
+#[test]
+fn test_comma_join_three_tables() {
+    let input = "SELECT * FROM a, b, c";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    assert_eq!(from.joins().count(), 2);
+    assert!(from.joins().all(|j| j.is_comma_join()));
+}
+
+#[test]
+fn test_comma_join_mixed_with_explicit_join() {
+    let input = "SELECT * FROM a, b INNER JOIN c ON b.id = c.id";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    let joins: Vec<_> = from.joins().collect();
+    assert_eq!(joins.len(), 2);
+    assert!(joins[0].is_comma_join(), "first join should be comma-join");
+    assert!(
+        !joins[1].is_comma_join(),
+        "second join should be explicit JOIN"
+    );
+    assert_eq!(joins[1].join_type(), Some(JoinType::Inner));
+}
+
+#[test]
+fn test_comma_join_with_aliases() {
+    let input = "SELECT * FROM users AS u, orders o";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    let join = from.joins().next().unwrap();
+    assert!(join.is_comma_join());
+    let table_ref = join.table_ref().unwrap();
+    assert_eq!(table_ref.alias().as_deref(), Some("o"));
+}
+
+#[test]
 fn test_using_clause() {
     let input = "SELECT * FROM users JOIN orders USING (user_id)";
     let (_, select) = parse_select(input);
@@ -1196,23 +1248,20 @@ fn test_lateral_join() {
 }
 
 #[test]
-fn test_lateral_subquery_comma_form_is_a_registered_gap() {
-    // Comma-separated FROM lists (`FROM a, LATERAL (...)`) have never had a
-    // grammar production — `parse_from_clause` only recognises the first
-    // table ref plus JOIN-keyword chains (see `test_lateral_join` for the
-    // supported `LEFT JOIN LATERAL` form). Before fail-loud trailing-content
-    // detection, the leftover `, LATERAL (...) o` was silently absorbed at
-    // end-of-file, so this construct looked accepted; it now surfaces the
-    // parse error the grammar always implied. Comma-separated FROM lists are
-    // unimplemented grammar, not a fail-loud-parsing regression — tracked as
-    // follow-on grammar work.
+fn test_comma_join_with_lateral_subquery() {
+    // Comma-separated FROM lists (`FROM a, LATERAL (...)`) now parse via the
+    // ANSI-89 implicit comma-join grammar (quality-grind-t3 Phase 1) — the
+    // comma-join table ref goes through the same `parse_table_ref` as any
+    // other JOIN operand, so LATERAL is accepted there too (see
+    // `test_lateral_join` for the `LEFT JOIN LATERAL` form).
     let input = "SELECT * FROM users, LATERAL (SELECT * FROM orders WHERE user_id = users.id) o";
-    let parse = parse(input);
-    assert!(
-        !parse.errors.is_empty(),
-        "comma-separated FROM lists are not supported by the grammar; \
-         expected a parse error, got a clean parse"
-    );
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    let join = from.joins().next().expect("should have a join");
+    assert!(join.is_comma_join(), "should be a comma-join");
+    let table_ref = join.table_ref().expect("should have table ref");
+    assert!(table_ref.is_lateral(), "should be LATERAL");
 }
 
 #[test]

@@ -1641,6 +1641,19 @@ impl JoinClause {
             .find(|t| !t.kind().is_trivia())
             .is_some_and(|t| t.kind() == IDENT && t.text().eq_ignore_ascii_case("NATURAL"))
     }
+
+    /// Whether this join is the ANSI-89 implicit comma-separated form
+    /// (`FROM a, b`) rather than an explicit `JOIN` keyword. Ratified
+    /// 2026-07-18 (master `docs/plans/20260718-quality-grind.md` D-QG-2) as a
+    /// cross join; the comma token is always the first non-trivia token of
+    /// the `JOIN_CLAUSE`, mirroring how `is_natural` reads its marker.
+    pub fn is_comma_join(&self) -> bool {
+        self.0
+            .children_with_tokens()
+            .filter_map(|e| e.into_token())
+            .find(|t| !t.kind().is_trivia())
+            .is_some_and(|t| t.kind() == COMMA)
+    }
 }
 
 /// JOIN type enumeration

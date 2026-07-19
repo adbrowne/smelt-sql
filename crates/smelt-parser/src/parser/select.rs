@@ -404,11 +404,14 @@ impl<'a> super::Parser<'a> {
         // Parse first table reference (required)
         self.parse_table_ref();
 
-        // Parse zero or more JOIN clauses
+        // Parse zero or more JOIN clauses, including the ANSI-89 implicit
+        // comma-separated form (`FROM a, b`), which reuses the same
+        // JOIN_CLAUSE node kind — see `JoinClause::is_comma_join`.
         loop {
             self.skip_trivia();
             if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
                 || self.at_contextual_keyword("NATURAL")
+                || self.at(COMMA)
             {
                 self.parse_join_clause();
             } else {
@@ -515,6 +518,7 @@ impl<'a> super::Parser<'a> {
                     self.skip_trivia();
                     if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
                         || self.at_contextual_keyword("NATURAL")
+                        || self.at(COMMA)
                     {
                         self.parse_join_clause();
                     } else {
@@ -837,6 +841,22 @@ impl<'a> super::Parser<'a> {
     #[allow(clippy::if_same_then_else)]
     pub(super) fn parse_join_clause(&mut self) {
         self.start_node(JOIN_CLAUSE);
+
+        // ANSI-89 implicit comma-separated cross join: `FROM a, b`. Ratified
+        // (2026-07-18, master D-QG-2) as a cross join — `JoinClause::join_type`
+        // classifies it accordingly (Phase 2). No JOIN keyword, no condition.
+        if self.at(COMMA) {
+            self.advance();
+            self.skip_trivia();
+            if !self.at(IDENT) && !self.at(LATERAL_KW) && !self.at(LPAREN) {
+                self.error("Expected table reference after ','".to_string());
+                self.finish_node();
+                return;
+            }
+            self.parse_table_ref();
+            self.finish_node();
+            return;
+        }
 
         // Optional NATURAL modifier (contextual keyword): `NATURAL [INNER |
         // LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`. Join columns

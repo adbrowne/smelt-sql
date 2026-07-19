@@ -279,9 +279,15 @@ impl Display for FromClause {
             write!(f, "{}", first_table)?;
         }
 
-        // Get all JOINs
+        // Get all JOINs. A comma-join (`FROM a, b`) prints as `, b` rather
+        // than ` JOIN b` — fidelity requires preserving the comma form
+        // rather than rewriting it to `CROSS JOIN`.
         for join in self.joins() {
-            write!(f, " {}", join)?;
+            if join.is_comma_join() {
+                write!(f, ", {}", join)?;
+            } else {
+                write!(f, " {}", join)?;
+            }
         }
 
         Ok(())
@@ -319,7 +325,11 @@ impl Display for TableRef {
             // double-printed.
             write!(f, "({}", inner)?;
             for join in self.syntax().children().filter_map(JoinClause::cast) {
-                write!(f, " {}", join)?;
+                if join.is_comma_join() {
+                    write!(f, ", {}", join)?;
+                } else {
+                    write!(f, " {}", join)?;
+                }
             }
             write!(f, ")")?;
         } else {
@@ -366,6 +376,15 @@ impl Display for TableRef {
 
 impl Display for JoinClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_comma_join() {
+            // No `JOIN` keyword, no condition — the caller (`FromClause`/
+            // `TableRef` Display) prints the leading `, ` separator.
+            if let Some(table_ref) = self.table_ref() {
+                write!(f, "{}", table_ref)?;
+            }
+            return Ok(());
+        }
+
         if self.is_natural() {
             write!(f, "NATURAL ")?;
         }
@@ -912,6 +931,26 @@ mod tests {
     #[test]
     fn test_select_join() {
         assert_round_trip("SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id");
+    }
+
+    #[test]
+    fn test_comma_join_two_tables() {
+        assert_round_trip("SELECT * FROM users, orders");
+    }
+
+    #[test]
+    fn test_comma_join_three_tables() {
+        assert_round_trip("SELECT * FROM a, b, c");
+    }
+
+    #[test]
+    fn test_comma_join_mixed_with_explicit_join() {
+        assert_round_trip("SELECT * FROM a, b JOIN c ON b.id = c.id");
+    }
+
+    #[test]
+    fn test_comma_join_with_aliases() {
+        assert_round_trip("SELECT * FROM users AS u, orders AS o");
     }
 
     #[test]
