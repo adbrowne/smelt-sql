@@ -182,6 +182,7 @@ smelt run [OPTIONS]
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
 | `--dry-run` | | bool | `false` | Print the maintenance statements that would run — without executing (see below) |
+| `--show-plan` | | bool | `false` | Print the resolved execution plan (model names + strategies) and exit, without executing. Combine with `--dry-run` to see the plan without any execution side effects. |
 | `--event-time-start` | | string | | Start of event time range for incremental models (ISO 8601: YYYY-MM-DD). Requires `--event-time-end`. |
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--start` | | string | | Alias for `--event-time-start` |
@@ -193,6 +194,7 @@ smelt run [OPTIONS]
 | `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
+| `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 | `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
 | `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
@@ -366,6 +368,7 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 | `--dry-run` | | bool | `false` | Print the maintenance statements that would run, with per-chunk boundaries — without executing ([details](#dry-run-inspect-the-maintenance-statements-before-they-run)) |
 | `--batch-size` | | integer | | Override batch size in days for backfill chunking |
 | `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
+| `--allow-downgrade` | | bool | `false` | Allow incremental models that fail bound derivation to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 
 **Examples:**
 
@@ -416,6 +419,7 @@ The flags below have surprised users in practice; the table records what each on
 | `--exclude` / `-e` | repeatable | Same selector grammar and repetition rule as `--select`. |
 | `--dry-run` | **not on `smelt build`** | Use `smelt run --dry-run` for parse-and-validate-without-executing. There is no project-wide compile-only flag on `build` today. |
 | `--event-time-start` / `--event-time-end` | implemented | ISO-8601 (`2026-03-20` or `2026-03-20T00:00:00Z`). End is exclusive. Both required together for incremental execution. |
+| `--allow-downgrade` | implemented | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL. |
 
 **Usage:**
 
@@ -438,6 +442,7 @@ smelt build [OPTIONS]
 | `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
 | `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with---include-upstreams). |
 | `--include-upstreams` | | bool | `false` | Resolve and build the target model's required upstream slices for `--period` instead of the ordinary seed+run-everything build. Requires `--period`. |
+| `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 
 **Examples:**
 
@@ -532,10 +537,14 @@ smelt test [OPTIONS]
 | `--select` | `-s` | string[] | | Filter tests by name (repeatable, substring match) |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each test |
 | `--show-all` | | bool | `false` | Show passing tests in output (default: only failures shown) |
+| `--target` | | string | `dev` | Target environment from smelt.yml — only consulted by singular tests that query real data |
+| `--database` | | path | _(from smelt.yml)_ | DuckDB database file path (overrides smelt.yml) |
+| `--seed` | | integer | | Random seed for property-based tests, for reproducibility |
+| `--json` | | bool | `false` | Output results as JSON for editor integration. Always exits `0`, regardless of test status — a caller must inspect the JSON for pass/fail, not the exit code. |
 
 **Output:**
 
-Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails.
+Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails — except with `--json`, which always exits `0` so an editor or CI step can parse the JSON body regardless of pass/fail status.
 
 ```
 smelt test

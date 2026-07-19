@@ -123,6 +123,8 @@ nav:
     - Timeseries: reference/timeseries.md
     - Key-Grain Patterns: reference/cumulative-aggregate.md
     - State & Recovery: reference/state.md
+    - Diagnostics: reference/diagnostics.md
+    - smelt explain: reference/smelt-explain.md
     - Language Spec: reference/language.md
   - Developing smelt:
     - Architecture: developing/architecture.md
