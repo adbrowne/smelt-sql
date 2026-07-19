@@ -2820,6 +2820,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../smelt-explain/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    smelt explain
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../language/" class="md-nav__link">
         
   
@@ -3719,6 +3775,13 @@
 <td>Print the maintenance statements that would run — without executing (see below)</td>
 </tr>
 <tr>
+<td><code>--show-plan</code></td>
+<td></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Print the resolved execution plan (model names + strategies) and exit, without executing. Combine with <code>--dry-run</code> to see the plan without any execution side effects.</td>
+</tr>
+<tr>
 <td><code>--event-time-start</code></td>
 <td></td>
 <td>string</td>
@@ -3794,6 +3857,13 @@
 <td>bool</td>
 <td><code>false</code></td>
 <td>Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See <a href="../../guide/schema-evolution/">Schema Evolution</a>.</td>
+</tr>
+<tr>
+<td><code>--allow-downgrade</code></td>
+<td></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag.</td>
 </tr>
 <tr>
 <td><code>--since-upstream</code></td>
@@ -4031,6 +4101,13 @@
 <td><code>false</code></td>
 <td>Force per-partition execution (one query per granularity period)</td>
 </tr>
+<tr>
+<td><code>--allow-downgrade</code></td>
+<td></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Allow incremental models that fail bound derivation to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag.</td>
+</tr>
 </tbody>
 </table>
 <p><strong>Examples:</strong></p>
@@ -4101,6 +4178,11 @@
 <td><code>--event-time-start</code> / <code>--event-time-end</code></td>
 <td>implemented</td>
 <td>ISO-8601 (<code>2026-03-20</code> or <code>2026-03-20T00:00:00Z</code>). End is exclusive. Both required together for incremental execution.</td>
+</tr>
+<tr>
+<td><code>--allow-downgrade</code></td>
+<td>implemented</td>
+<td>Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL.</td>
 </tr>
 </tbody>
 </table>
@@ -4195,6 +4277,13 @@
 <td>bool</td>
 <td><code>false</code></td>
 <td>Resolve and build the target model's required upstream slices for <code>--period</code> instead of the ordinary seed+run-everything build. Requires <code>--period</code>.</td>
+</tr>
+<tr>
+<td><code>--allow-downgrade</code></td>
+<td></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag.</td>
 </tr>
 </tbody>
 </table>
@@ -4336,10 +4425,38 @@
 <td><code>false</code></td>
 <td>Show passing tests in output (default: only failures shown)</td>
 </tr>
+<tr>
+<td><code>--target</code></td>
+<td></td>
+<td>string</td>
+<td><code>dev</code></td>
+<td>Target environment from smelt.yml — only consulted by singular tests that query real data</td>
+</tr>
+<tr>
+<td><code>--database</code></td>
+<td></td>
+<td>path</td>
+<td><em>(from smelt.yml)</em></td>
+<td>DuckDB database file path (overrides smelt.yml)</td>
+</tr>
+<tr>
+<td><code>--seed</code></td>
+<td></td>
+<td>integer</td>
+<td></td>
+<td>Random seed for property-based tests, for reproducibility</td>
+</tr>
+<tr>
+<td><code>--json</code></td>
+<td></td>
+<td>bool</td>
+<td><code>false</code></td>
+<td>Output results as JSON for editor integration. Always exits <code>0</code>, regardless of test status — a caller must inspect the JSON for pass/fail, not the exit code.</td>
+</tr>
 </tbody>
 </table>
 <p><strong>Output:</strong></p>
-<p>Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails.</p>
+<p>Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails — except with <code>--json</code>, which always exits <code>0</code> so an editor or CI step can parse the JSON body regardless of pass/fail status.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a>smelt test
 <a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a>
 <a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>  PASS test_cohort_sizes (mart_cohort_retention::cohort_sizes)     0.02s
