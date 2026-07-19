@@ -1,7 +1,7 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-07-17
+last_reviewed: 2026-07-19
 owners: [andrew]
 ---
 
@@ -1661,7 +1661,8 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   families do not yet record, so their cells print no recording line at all. Tracked by
   `docs/plans/20260715-composed-axes-conditional-maintenance.md` (wiring `--since-upstream`'s live
   read path; and, for external sources, the M3-input fingerprint-sidecar variant in §Future
-  Extensions).
+  Extensions, whose lifecycle — naming, storage, transactionality, GC, invalidation — is now
+  normative in `sources.md` §"The fingerprint sidecar").
 - **No execution technique keys off a maintained-model creation cell.** §"Upstream model edges"
   is otherwise live: the per-model derivation `smelt explain` reports and the forward-propagation
   graph (`crates/smelt-runtime/src/propagation.rs::build_forward_graph`) both resolve a
@@ -2238,7 +2239,8 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     above); an external `mutable_snapshot` source's own delta (requiring M3's fingerprint sidecar
     first) is unbuilt.
   - **M3 — derived change feeds**: snapshot-diff made real on both boundaries — a fingerprint
-    sidecar synthesizes a change feed for an external `mutable_snapshot` source, and the
+    sidecar (lifecycle: `sources.md` §"The fingerprint sidecar") synthesizes a change feed for an
+    external `mutable_snapshot` source, and the
     conditional write's own changed-row set is recorded as the model's **observed output
     delta**, turning every maintained model into a change-feed-postured upstream for free. On a
     composed (key + time) output the observed delta projects to exact partition dirt
@@ -2248,7 +2250,8 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     (§Known Divergences "Observed-delta recording is built…"); the fingerprint-sidecar half, for
     an external `mutable_snapshot` source, remains unbuilt.
   Each mechanism needs its own spec diff before it is surface: P1–P4 proofs in
-  `model_properties.md` (P1 landed; P2–P4 remain), T1–T5 transform variants in
+  `model_properties.md` (P1–P3 landed; P4 — fingerprint projection, §"Fingerprint projection" —
+  is now defined but unbuilt), T1–T5 transform variants in
   `model_transforms.md` (T1/T2/T3 landed as catalogue rows; the observed-output-delta recording
   (T5) is specified in this spec's own graph-layer section above rather than as a catalogue row;
   T4 remains), the referential-integrity world-fact (landed) and landed-delta refinement (landed) in

@@ -1,7 +1,7 @@
 ---
 feature: sources
 status: experimental
-last_reviewed: 2026-07-17
+last_reviewed: 2026-07-19
 owners: [andrew]
 ---
 
@@ -140,7 +140,71 @@ This is a **narrowing** declaration under the trust rule (§Semantics "The trust
 
 ### Landed-delta (derived, recorded)
 
-For every source a maintenance run consumes, smelt records **what changed** since the source's delta was last consumed — the per-source delta. In its fullest form this is a **changed-row set with a partition projection** onto the source's own axis (which partition intervals contain at least one changed row); a delta the graph layer actually schedules against is always the *projected* form, never the raw row set. Where no row-level record exists for a source, the delta **widens** to the coarsest representation that source's shape supports — an append-only clocked source with no row-level tracking still resolves to the interval diff of processed partitions; a `change_feed` source's deltas come from the feed's offsets (already row-level); a `mutable_snapshot` source with no derived changed-row record resolves to "the whole table" (which propagates as whole-model dirt downstream). This is the input to cross-model forward propagation (`incremental_models.md` §"The graph layer": what landed decides which downstream partitions run), which applies the same rule to a **model** edge's delta (`incremental_models.md` §"The graph layer" — the observed output delta where recorded, else the run's written window). **Widen-never-narrow governs the whole hierarchy**: absent a recorded changed-row set, the coarser interval-or-whole-table form is always the correct fallback — a consumer may never assume a narrower delta exists than what was actually recorded. The recording is derived, never declared. Row-level recording via a fingerprint sidecar (for a `mutable_snapshot` source with no native change feed) is not yet built — tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (see `incremental_models.md` §Known Divergences). The record lives in smelt's run state (`run_state.md`), keyed by source address.
+For every source a maintenance run consumes, smelt records **what changed** since the source's delta was last consumed — the per-source delta. In its fullest form this is a **changed-row set with a partition projection** onto the source's own axis (which partition intervals contain at least one changed row); a delta the graph layer actually schedules against is always the *projected* form, never the raw row set. Where no row-level record exists for a source, the delta **widens** to the coarsest representation that source's shape supports — an append-only clocked source with no row-level tracking still resolves to the interval diff of processed partitions; a `change_feed` source's deltas come from the feed's offsets (already row-level); a `mutable_snapshot` source with no derived changed-row record resolves to "the whole table" (which propagates as whole-model dirt downstream). This is the input to cross-model forward propagation (`incremental_models.md` §"The graph layer": what landed decides which downstream partitions run), which applies the same rule to a **model** edge's delta (`incremental_models.md` §"The graph layer" — the observed output delta where recorded, else the run's written window). **Widen-never-narrow governs the whole hierarchy**: absent a recorded changed-row set, the coarser interval-or-whole-table form is always the correct fallback — a consumer may never assume a narrower delta exists than what was actually recorded. The recording is derived, never declared. Row-level recording for a `mutable_snapshot` source with no native change feed is synthesized by the **fingerprint sidecar** (§"The fingerprint sidecar", below); it is spec'd but not yet built — tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (see `incremental_models.md` §Known Divergences). The record lives in smelt's run state (`run_state.md`), keyed by source address.
+
+### The fingerprint sidecar
+
+For a `mutable_snapshot` source with no native change feed, smelt can synthesize one: a
+**row-content fingerprint sidecar** — a warehouse-resident table recording, per source row key, a
+content digest last observed for that key — that a consuming run diffs the source's *current*
+content against to derive an exact changed-key set, instead of treating every re-scan as a
+whole-table delta (`incremental_models.md` §Future Extensions "Conditional maintenance without a
+change feed", mechanism M3). This is a different **artifact class** from the semantic fingerprint
+in `output_fingerprint.md` — see that spec's own boundary paragraph for why the two coexist
+without contradiction.
+
+**Digest.** A SHA-256-class digest over the row's content, restricted to the **fingerprint
+projection** the consuming model actually reads (`model_properties.md` §"Fingerprint projection",
+P4) — an irrelevant-column edit elsewhere in the row never dirties the key. The digest is a
+*detection* mechanism only: the exact write-suppression compare a consuming write performs is
+still `IS DISTINCT FROM` over the processed columns (`model_properties.md` §"Change
+comparability"), never the digest itself. The **collision-soundness invariant** — two distinct row
+contents never collide to the same digest at any practically observable rate — is an assumed
+property of SHA-256, not something smelt proves; it is the oracle gate a synthesized-delta
+conformance leg (`incremental_models.md`) exercises (real content edits ⇒ exactly the edited keys
+detected; no false-negative "unchanged" verdict observed across the generated fixture space), not
+a formally established fact.
+
+**Naming and namespace.** The sidecar is a warehouse-resident table, `_smelt_fingerprint_sidecar`,
+alongside the reconciliation ledger and the observed-delta table (`incremental_models.md`
+§"The reconciliation ledger", §"Observed deltas on model edges") — the same excluded bookkeeping
+class under §"Statement emission (single owner)"'s third exclusion, owned per dialect by
+`smelt-state`, DuckDB-scoped today (matching the ledger's own posture; a non-DuckDB target fails
+loud rather than silently skipping the sidecar). A row is namespaced by `(source address,
+projection identity, source key)` — **projection identity**, not consumer identity: a canonical
+hash of the P4 projection's column set. Two consumers of the same source whose derived projections
+are byte-identical incidentally **share** one sidecar partition (a storage optimisation, never a
+correctness dependency); consumers with differing projections never share, and a fail-closed
+full-row digest (an unprojectable consumption, P4) is its own distinct projection identity — it is
+never silently widened onto, or narrowed from, another consumer's own projection.
+
+**Transactionality.** The sidecar upsert for a key runs in the **same backend transaction as the
+consuming write** that reads the derived changed-key set — mirroring the observed-delta record's
+own rule (`incremental_models.md` §"Observed deltas on model edges"): a failed write leaves no
+digest update, so a re-run recomputes the same delta rather than silently treating a
+half-committed key as already seen.
+
+**First run and `--full-refresh`.** A source key absent from the sidecar is, by construction, a
+changed key — the whole-table delta a first run against an unpopulated sidecar produces
+(consistent with the landed-delta widen-never-narrow default, above) also populates the sidecar as
+a byproduct. A `--full-refresh` run does not diff against the sidecar at all for the region it
+rebuilds — trusting nothing stored is the whole point of a full refresh — and unconditionally
+repopulates the sidecar for that region, so the next incremental run starts from a fresh baseline
+rather than an inherited, possibly-stale one.
+
+**GC.** A key's disappearance from the source is itself a change: a full re-scan diff observes a
+sidecar key with no matching source row, emits it as a deletion in the changed-key set, and drops
+its sidecar row. GC of a **projection-identity partition** whose owning consumer no longer exists
+(a deleted or redefined model) is not performed — an orphaned partition is inert cost (never read
+again, no soundness exposure), not a correctness hazard, and is left as an explicit Open Question
+below rather than a silent leak masquerading as handled.
+
+**Invalidation.** A definition change or schema evolution on the *consuming model* invalidates
+that model's own projection-identity partition — the partition is reset (every stored digest for
+it discarded), so the next run treats every key as changed, the same widen-never-narrow default
+every other invalidation in this spec follows. Invalidation is scoped to the changed consumer's
+own partition; a sibling consumer's differently-identified partition is unaffected unless its own
+projection also changed.
 
 ### Source with `timeseries:` declaration
 
@@ -262,6 +326,8 @@ Sources are discovered alongside every other project file by walking `paths:`. R
 - **Declared profiles license almost nothing yet.** `mutation_profile` reaches only the input-delta classifier (whose only wired consumer distinction is `change_feed`) — every partition-grain cell is served by unconditional recompute regardless of profile, and the fold/ledger techniques the licence table describes are the unbuilt machinery of `incremental_models.md` §Known Divergences. None of the verification tripwires (`SourceMutationProfileViolated`, `SourceWatermarkViolated`, `SourceUniqueKeyViolated`, `SourceRetentionExceeded`) exist; `smelt verify` does not exist.
 - **`referential_integrity` parses and validates; the count-preservation tripwire does not exist yet.** `crates/smelt-core/src/sources.rs` parses the bare-string and list forms and enforces the subset rule against a declared `unique_key` (`MalformedSource`), so a source can now declare the world-fact `model_properties.md` §"Skeleton-source closure" (P1) consumes for its row-preservation conjunct. What remains unbuilt: the count-preservation tripwire itself (`SourceCountPreservationViolated`) has no runtime check yet, so a declared `referential_integrity` is not yet re-verified against the touched region on a consuming run — only a `LEFT JOIN` is unconditionally trusted end-to-end today; an inner/equi-join licensed by the declaration is a narrowing admitted ahead of its verification mechanism landing. Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (E2).
 - **Landed-delta recording is v1 (append-only interval diff only); the changed-row-set form (§"Landed-delta (derived, recorded)") is spec'd but unbuilt for sources.** The per-source delta intervals the graph layer consumes are recorded per source address in the run state (`smelt_state::landed_deltas`), no longer model-only: an append-only clocked source's landing is interval-diffed against prior coverage; a `mutable_snapshot` or unclocked source always resolves to the whole-table delta. `change_feed` offset-based delta detection and the fingerprint-sidecar-derived changed-row set for a `mutable_snapshot` source are not yet built — every source still resolves through the append-only-or-whole-table path regardless of a declared `change_feed` profile. Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (M3-input, §Future Extensions of `incremental_models.md`).
+- **The fingerprint sidecar (§"The fingerprint sidecar") is spec'd but unbuilt.** No `_smelt_fingerprint_sidecar` table, digest computation, or diff query exists yet; the section above states the intended naming, storage, transactionality, GC, `--full-refresh`, and invalidation rules ahead of the implementation so the build has a ruling to follow rather than inventing one mid-phase. The P4 fingerprint-projection proof it depends on (`model_properties.md` §"Fingerprint projection") is likewise unbuilt. Tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md` (F2–F4).
+- **Two sidecar lifecycle questions are open, deliberately not ruled on above.** (1) GC of an orphaned projection-identity partition (a deleted or redefined consumer's stale digests) is not specified — the sidecar section leaves it unswept, reasoning that inert storage is not a soundness hazard, but a project running long enough could accumulate meaningful dead weight; a future sweep (e.g. keyed to model-address existence at plan time) is unruled-on future work. (2) A schema-versioning strategy for the persisted digest format itself (so a future digest-algorithm or projection-encoding change does not silently compare against a stale-format row) is unspecified; `output_fingerprint.md` §"Two fingerprint artifact classes" names this as this spec's problem to solve, not its own, and it remains unsolved here too. (3) Cross-project sharing of a sidecar for a source declared identically in two smelt projects against the same warehouse is out of scope — the namespace above is implicitly single-project (no project identifier in the key), which is fine under project isolation (`architecture.md` §"Project isolation rule") but is recorded here as a boundary, not an oversight.
 - **Aggregate `sources.yml` presence is not yet a migration error (Constraint 6).** Still parsed as a legacy type-information fallback when a project declares no per-entity sources. Tracked as BUG-078 in `docs/bug-hunt/2026-05-30-findings.md`.
 - **Backend-derived source facts are a Known Divergence by decision** (`09-spec-readiness.md` decision 10): a backend capability (Delta CDF presence, Iceberg snapshots) could *derive* `change_feed` + `delta_identity` instead of requiring declaration — a `multi_backend.md` capability-flag question, tracked separately.
 - **Probe cost governance is open**: which tripwires run per-run vs sampled vs on-demand — likely a project-level policy key, not per-source (`docs/research/20260705-refresh-as-maintenance-plan/05-source-properties.md` §Open questions).
@@ -288,7 +354,8 @@ Sources are discovered alongside every other project file by walking `paths:`. R
   - `smelt_yml.md` — `paths:` key the discovery layer consumes.
   - `timeseries.md` — the `timeseries:` block grammar this spec hosts on external sources.
   - `incremental_models.md` — the per-cell admission and graph layer these world-facts license and feed; consumer of `timeseries:` on sources via source-filter pushdown, and of `mutation_profile`/`key_recurrence` (key temporal locality).
-  - `model_properties.md` — §"Skeleton-source closure" (P1), the proof `referential_integrity` licenses the row-preservation conjunct of.
+  - `model_properties.md` — §"Skeleton-source closure" (P1), the proof `referential_integrity` licenses the row-preservation conjunct of; §"Fingerprint projection" (P4), the proof the fingerprint sidecar digests against.
+  - `output_fingerprint.md` — the semantic model-SQL fingerprint; §"Two fingerprint artifact classes" draws the boundary against the row-content sidecar.
   - `models.md` — the input-consumption axis these declarations decide, and §"The Relation Contract" (the shared vocabulary this source YAML is the declared-provider fill of).
   - `run_state.md` — where landed-delta intervals and probe records live.
   - `types.md` — `DataType` vocabulary used by `columns[].type`.
