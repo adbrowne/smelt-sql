@@ -65,7 +65,7 @@ The production-release review found no onboarding path (`smelt init` is hinted a
 |-------|----------|--------|------|
 | 1     | done     | 3d5f9af7 | 2026-07-20 |
 | 2     | done     | 8d7935dc | 2026-07-20 |
-| 3     | done     | (this commit) | 2026-07-20 |
+| 3     | done     | e1c9a694 | 2026-07-20 |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
