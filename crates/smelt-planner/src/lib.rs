@@ -1,10 +1,10 @@
 pub use smelt_logical::analysis;
+pub use smelt_logical::graph;
 pub use smelt_logical::logical;
+pub use smelt_logical::lowering;
 pub use smelt_logical::types;
 
-pub mod graph;
 pub mod logical_plan_rules;
-pub mod lowering;
 pub mod plan_printer;
 #[cfg(feature = "python")]
 pub mod python_bridge;

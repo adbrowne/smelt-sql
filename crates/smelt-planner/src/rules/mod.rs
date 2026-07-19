@@ -1,7 +1,5 @@
 pub mod cube_split;
-pub mod cumulative;
-pub mod incremental;
-pub mod rule_diagnostics;
+pub use smelt_logical::rules::{cumulative, incremental, rule_diagnostics};
 
 use crate::graph::ModelGraph;
 use crate::types::Transformation;

@@ -63,7 +63,7 @@ since 2026-07-09.
 | 4     | done    | test(props): generate ARRAY literals, ARRAY_AGG, subscript and slice | 2026-07-19 |
 | 5     | done    | test(props): generate ROW/STRUCT constructors with field-exact comparison | 2026-07-19 |
 | 6     | done    | refactor(planner): consume smelt-logical analysis modules, delete duplicated copies (part 1) | 2026-07-19 |
-| 7     | pending |        |      |
+| 7     | done    | refactor(planner): consume smelt-logical rules/graph/lowering, delete duplicated copies (part 2) | 2026-07-19 |
 | 8     | pending |        |      |
 | 9     | pending |        |      |
 
