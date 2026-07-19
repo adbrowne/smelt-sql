@@ -56,6 +56,18 @@ See `docs/specs/run_state.md` §"Locking" for the full semantics.
 
 ---
 
+## State isolation per target
+
+Run state lives under `.smelt/targets/<target>/`, keyed by the `--target` a command ran against (default `dev`). A run against `dev` and a run against `prod` never share interval coverage, reconciliation ledgers, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. This means:
+
+- `smelt run --target prod` and `smelt run --target dev` can each be resumed, inspected, and reasoned about independently; a `dev` backfill can never mask a coverage gap in `prod`.
+- `smelt status`, `smelt history`, and `smelt diff` accept `--target` (default `dev`) and report on that target's state only — pass the target you actually care about, especially in CI where the default `dev` is rarely the one that matters.
+- `.smelt/meta.json` (the layout-version marker) and `.smelt/lock` (the advisory single-writer lock) are the only files shared across every target — see `docs/specs/run_state.md` §"`.smelt/` directory layout".
+
+See `docs/specs/run_state.md` §"`.smelt/` directory layout" for the full on-disk shape.
+
+---
+
 ## Argument resolution and `--scope`
 
 Every command that takes an entity identifier — a model name in `--select`, a positional model argument to `smelt type`, `smelt table`, `smelt status`, etc. — resolves it using a three-shape input rule.
@@ -541,6 +553,7 @@ smelt diff [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
+| `--target` | | string | `dev` | Target environment from `smelt.yml`. Deployed schemas are recorded per target (see "State isolation per target" below), so `diff` compares against this target's recorded state. |
 | `--select` | `-s` | string[] | | Select models to diff (repeatable). Same selector syntax as `smelt run`. |
 | `--exclude` | `-e` | string[] | | Exclude models from diff (repeatable). Same syntax as `--select`. |
 | `--json` | | bool | `false` | Output as JSON for machine consumption |
@@ -862,6 +875,7 @@ smelt status [OPTIONS] [MODEL_NAME]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | Target environment from `smelt.yml`. State is partitioned per target (see "State isolation per target" below), so `status` reports coverage for this target's state only. |
 | `--since` | string | | Start of query range for gap detection (ISO 8601: YYYY-MM-DD) |
 | `--until` | string | | End of query range for gap detection (ISO 8601: YYYY-MM-DD, default: today) |
 
@@ -904,6 +918,7 @@ smelt history [OPTIONS] [MODEL_NAME]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
+| `--target` | | string | `dev` | Target environment from `smelt.yml`. Run manifests are recorded per target (see "State isolation per target" below), so `history` reports runs for this target only. |
 | `--limit` | `-l` | integer | `10` | Number of runs to show |
 
 **Examples:**

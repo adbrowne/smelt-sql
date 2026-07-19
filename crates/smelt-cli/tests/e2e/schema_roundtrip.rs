@@ -84,8 +84,12 @@ fn no_phantom_nullability_after_clean_build() {
     );
 
     // Schema files must exist
-    assert!(dir.join(".smelt/schemas/stg_orders.json").exists());
-    assert!(dir.join(".smelt/schemas/mart_summary.json").exists());
+    assert!(dir
+        .join(".smelt/targets/dev/schemas/stg_orders.json")
+        .exists());
+    assert!(dir
+        .join(".smelt/targets/dev/schemas/mart_summary.json")
+        .exists());
 
     // smelt diff must exit 0 (no changes detected)
     let diff = run_smelt(&["diff"], dir);
@@ -102,7 +106,7 @@ fn no_phantom_nullability_after_clean_build() {
 }
 
 /// Phase 2: after deleting a model file and rebuilding, the stale schema entry
-/// must be removed from `.smelt/schemas/`.
+/// must be removed from `.smelt/targets/dev/schemas/`.
 #[test]
 fn stale_schema_cleaned_after_model_deleted() {
     let tmp = TempDir::new().unwrap();
@@ -116,7 +120,9 @@ fn stale_schema_cleaned_after_model_deleted() {
         "first smelt build failed:\nstderr: {}",
         String::from_utf8_lossy(&build1.stderr),
     );
-    assert!(dir.join(".smelt/schemas/mart_summary.json").exists());
+    assert!(dir
+        .join(".smelt/targets/dev/schemas/mart_summary.json")
+        .exists());
 
     // Delete mart_summary.sql
     std::fs::remove_file(dir.join("models/mart_summary.sql")).unwrap();
@@ -131,7 +137,8 @@ fn stale_schema_cleaned_after_model_deleted() {
 
     // Stale schema file must be removed
     assert!(
-        !dir.join(".smelt/schemas/mart_summary.json").exists(),
+        !dir.join(".smelt/targets/dev/schemas/mart_summary.json")
+            .exists(),
         "stale schema file was not cleaned up after model deletion"
     );
 
@@ -201,10 +208,11 @@ targets:
 
     // The schema for the sub-dir model must survive the stale-schema cleanup.
     assert!(
-        dir.join(".smelt/schemas/staging_stg_orders.json").exists(),
+        dir.join(".smelt/targets/dev/schemas/staging_stg_orders.json")
+            .exists(),
         "sub-dir model schema was deleted by stale-schema cleanup; \
-         .smelt/schemas/ = {:?}",
-        std::fs::read_dir(dir.join(".smelt/schemas"))
+         .smelt/targets/dev/schemas/ = {:?}",
+        std::fs::read_dir(dir.join(".smelt/targets/dev/schemas"))
             .map(|rd| rd
                 .filter_map(|e| e.ok().map(|e| e.file_name()))
                 .collect::<Vec<_>>())

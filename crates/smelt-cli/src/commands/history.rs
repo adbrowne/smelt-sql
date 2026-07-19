@@ -12,7 +12,22 @@ pub async fn history(args: HistoryArgs, scope: Option<&str>) -> Result<()> {
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
-    let file_store = FileStore::new(&project_dir);
+    let config =
+        Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+    if !config.targets.contains_key(&args.target) {
+        return Err(anyhow::anyhow!(
+            "Target '{}' not found in smelt.yml. Available targets: {}",
+            args.target,
+            config
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
+
+    let file_store = FileStore::new(&project_dir, &args.target);
     let manifests = file_store
         .load_runs(Some(args.limit))
         .with_context(|| "Failed to load run history")?;
@@ -26,8 +41,6 @@ pub async fn history(args: HistoryArgs, scope: Option<&str>) -> Result<()> {
 
     // If a model name was given, resolve it via scope.
     let resolved_model_name: Option<String> = if let Some(ref name) = args.model_name {
-        let config =
-            Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
         let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
         let models = discovery
             .discover_models()

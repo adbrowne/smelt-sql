@@ -735,7 +735,7 @@ pub async fn execute_project(
         total_batches,
     );
 
-    let file_store = FileStore::new(project_dir);
+    let file_store = FileStore::new(project_dir, &request.target);
     // Hold the exclusive advisory lock on `.smelt/lock` for the remainder of
     // this run — every state write below (manifest, intervals,
     // reconciliation ledger, landed deltas, schema snapshots) happens while

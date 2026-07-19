@@ -30,6 +30,8 @@ targets:
 
 You can define multiple targets and select one at runtime with the `--target` CLI flag (default: `dev`).
 
+**State isolation per target.** Run state (interval coverage, reconciliation ledgers, deployed-schema snapshots, run history) is stored under `.smelt/targets/<target_name>/`, so each target has its own closed, disjoint state store — a `dev` run can never mask a coverage gap in `prod`, and vice versa. See `docs/reference/cli.md` §"State isolation per target" and `docs/specs/run_state.md` §"`.smelt/` directory layout" for the full on-disk shape.
+
 ### DuckDB Target
 
 | Field | Type | Required | Description |

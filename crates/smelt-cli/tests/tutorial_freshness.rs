@@ -369,8 +369,15 @@ impl WorkspaceCache {
         let dest = self.tmp_root.join(format!("ws_{}", self.counter));
         copy_dir_filtered(&src, &dest);
         if fixture_schemas {
-            let schemas_dir = dest.join(".smelt").join("schemas");
-            fs::create_dir_all(&schemas_dir).expect("mkdir .smelt/schemas");
+            // Fixtures land under the default `dev` target, matching the
+            // `--target` these test invocations never pass
+            // (`docs/specs/run_state.md` §"`.smelt/` directory layout").
+            let schemas_dir = dest
+                .join(".smelt")
+                .join("targets")
+                .join("dev")
+                .join("schemas");
+            fs::create_dir_all(&schemas_dir).expect("mkdir .smelt/targets/dev/schemas");
             let fixture_src = src.join("deployed_schema_fixture");
             if fixture_src.is_dir() {
                 let mut entries: Vec<PathBuf> = fs::read_dir(&fixture_src)

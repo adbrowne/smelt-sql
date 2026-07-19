@@ -167,7 +167,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
     let (auto_start, auto_end) = if args.auto && effective_start.is_none() {
-        compute_auto_time_range(&project_dir, &graph)
+        compute_auto_time_range(&project_dir, &args.target, &graph)
             .map_or((None, None), |(s, e)| (Some(s), Some(e)))
     } else {
         (None, None)

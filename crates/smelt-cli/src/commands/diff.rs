@@ -33,6 +33,18 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
 
     let config =
         Config::load(&project_dir).with_context(|| "Failed to load smelt.yml configuration")?;
+    if !config.targets.contains_key(&args.target) {
+        return Err(anyhow::anyhow!(
+            "Target '{}' not found in smelt.yml. Available targets: {}",
+            args.target,
+            config
+                .targets
+                .keys()
+                .cloned()
+                .collect::<Vec<_>>()
+                .join(", ")
+        ));
+    }
 
     let sources = SourcesConfig::load(&project_dir).ok();
 
@@ -124,7 +136,7 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
         .filter(|name| selected_names.contains(name.as_str()))
         .collect();
 
-    let file_store = FileStore::new(&project_dir);
+    let file_store = FileStore::new(&project_dir, &args.target);
 
     // Build model name → ModelFile lookup keyed by the canonical dot-path.
     let all_models: Vec<_> = graph.iter_models().map(|(_, m)| m.clone()).collect();

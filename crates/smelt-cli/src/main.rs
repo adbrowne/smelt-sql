@@ -368,6 +368,11 @@ struct StatusArgs {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
 
+    /// Target environment from smelt.yml — state is partitioned per target,
+    /// so status is reported for this target's state only.
+    #[arg(long, default_value = "dev")]
+    target: String,
+
     /// Specific model to show status for (omit for all)
     model_name: Option<String>,
 
@@ -385,6 +390,11 @@ struct HistoryArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — state is partitioned per target,
+    /// so history is reported for this target's runs only.
+    #[arg(long, default_value = "dev")]
+    target: String,
 
     /// Specific model to show history for (omit for all runs)
     model_name: Option<String>,
@@ -453,6 +463,11 @@ struct DiffArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — deployed schemas are recorded
+    /// per target, so the diff compares against this target's state.
+    #[arg(long, default_value = "dev")]
+    target: String,
 
     /// Select models to diff (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
     #[arg(long = "select", short = 's')]
