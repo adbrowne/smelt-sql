@@ -1784,16 +1784,17 @@ pub async fn execute_project(
                 // only asks which technique the plan admits for the trigger,
                 // exactly like `resolve_incremental_strategy` above does for
                 // the creation trigger.
-                let column_scoped_cell = plan.model_file.metadata.as_deref().and_then(|metadata| {
-                    crate::maintenance_driver::resolve_live_column_scoped_cell(
+                let column_scoped_cell = match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
                         &sql_for_bounds,
                         &plan.model_file.db_name_owned(),
                         metadata,
                         &maint_source_facts,
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
-                    )
-                });
+                    )?,
+                    None => None,
+                };
 
                 let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
                     source_timeseries

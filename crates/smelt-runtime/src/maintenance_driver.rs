@@ -27,8 +27,9 @@ use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{
-    effective_override, resolve_recompute_restriction, resolve_write_suppression,
-    resolve_write_variant, RecomputeRestriction, WriteSuppression,
+    effective_override, resolve_cell_choice, resolve_recompute_restriction,
+    resolve_write_suppression, resolve_write_variant, ChosenTechnique, RecomputeRestriction,
+    WriteSuppression,
 };
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
@@ -595,6 +596,18 @@ pub enum ResolvedTechnique {
     ColumnScopedMerge,
 }
 
+/// Legacy two-way (`RegionRecompute`/`ColumnScopedMerge`) resolver, retained
+/// **only** for `crates/smelt-runtime/tests/technique_lowering.rs`'s narrow
+/// unit coverage of that two-way choice in isolation. It has **zero
+/// production call sites**: the live execute path resolves entirely through
+/// `smelt_logical::maintenance::choice::resolve_cell_choice`, dispatched from
+/// [`resolve_live_column_scoped_cell`] below (Phase 2, `docs/plans/
+/// 20260719-prod-w7-bakeoff.md`). `pub` (not `pub(crate)`) only because
+/// `technique_lowering.rs` is a `tests/` integration test compiled as a
+/// separate crate and needs external visibility; do not add new production
+/// callers — extend `resolve_cell_choice` and thread the result through
+/// `resolve_live_column_scoped_cell` instead.
+///
 /// Resolve which technique executes for `trigger`, mirroring
 /// `incremental_models.md` §"Per-cell admission": a `technique:` pin bypasses
 /// the cost model, **never** admission — pinning `rederive_columns` for a
@@ -641,6 +654,9 @@ pub fn resolve_cell_technique(
 /// existing `pin`-only call sites (and this module's own unit tests) keep
 /// compiling unchanged; production write-pin consultation happens through
 /// this entry point once a caller has a resolved [`WritePattern`] in hand.
+/// Like [`resolve_cell_technique`], this has no production call site — it
+/// exists solely for `technique_lowering.rs`'s two-way unit coverage; the
+/// live path is `resolve_cell_choice` via [`resolve_live_column_scoped_cell`].
 pub fn resolve_cell_technique_with_write_pin(
     plan: &MaintenancePlan,
     trigger: &Trigger,
@@ -706,8 +722,9 @@ pub fn resolve_cell_technique_with_write_pin(
 
 /// Find the first `explicitly_mutable` source whose `Trigger::
 /// UpstreamMutation` cell resolves live to `Technique::ColumnScopedMerge`
-/// (via [`resolve_cell_technique`]) in the model's derived
-/// [`MaintenancePlan`] — the regular incremental execution loop's per-run
+/// (via `smelt_logical::maintenance::choice::resolve_cell_choice`, see below)
+/// in the model's derived [`MaintenancePlan`] — the regular incremental
+/// execution loop's per-run
 /// technique choice (MP11), as distinct from [`resolve_incremental_strategy`]
 /// above, which only maps the creation trigger. Per the "Maintenance-plan
 /// purity" invariant (root `CLAUDE.md`), this calls
@@ -736,6 +753,19 @@ pub fn resolve_cell_technique_with_write_pin(
 /// matched by `PlanCell::group`'s display name — the plan-purity invariant's
 /// "derived once, never re-derived" extends to this lookup, not a second
 /// column-grouping pass.
+///
+/// This is the ladder's single production dispatch site for the
+/// Fold/Recompute/RederiveColumns family dimension
+/// (`smelt_logical::maintenance::choice::resolve_cell_choice`) — a
+/// frontmatter `cells[].technique` hard pin or `cells[].prefer` soft
+/// preference on this trigger's cell is threaded in via
+/// [`effective_override`] and actually consulted, rather than the
+/// pin-less two-way resolver this call site used before (Phase 2,
+/// `docs/plans/20260719-prod-w7-bakeoff.md`). An inadmissible hard pin
+/// surfaces as [`smelt_logical::maintenance::choice::ChoiceRefusal`],
+/// mapped here to a real `Err` — the fail-loud discipline (root
+/// `CLAUDE.md`) forbids silently falling back to region recompute for a
+/// pin the derived plan does not admit.
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -743,8 +773,8 @@ pub fn resolve_live_column_scoped_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
-) -> Option<(String, PlanCell, WriteSuppression)> {
-    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
         table,
         metadata,
@@ -764,61 +794,49 @@ pub fn resolve_live_column_scoped_cell(
         // this resolver only inspects mutation-trigger cells, which key
         // temporal locality's routes do not gate.
         &[],
-    )?;
+    ) else {
+        return Ok(None);
+    };
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
         .maintenance
         .as_ref()
         .map(|m| m.cells.as_slice())
         .unwrap_or(&[]);
-    explicitly_mutable.iter().find_map(|source| {
+    for source in explicitly_mutable {
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };
-        // An already-validated `cells[].write` pin for this trigger's cell
-        // (`smelt-db`'s pre-execution diagnostic gate already ran
-        // `resolve_write_pin`'s registry/capability/equivalence checks — an
-        // invalid pin never reaches here, the run would already have been
-        // refused with `MaintenanceWritePatternUnavailable`/
-        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
-        // *name* to its registry entry so `resolve_cell_technique_with_write_pin`
-        // can consult which [`smelt_logical::maintenance::WriteSelection`]
-        // it maps to, never re-deriving admission itself.
-        let write_pin = result.plan.cell_for(&trigger).and_then(|plan_cell| {
-            let pin_name = smelt_db::queries::maintenance::matching_write_pin(
-                plan_cell,
-                &result.column_groups,
-                cells_cfg,
-            )?;
-            smelt_logical::maintenance::lookup_write_pattern(&pin_name)
-        });
-        let resolved = resolve_cell_technique_with_write_pin(
-            &result.plan,
-            &trigger,
-            None,
-            write_pin,
-            backend_supports_column_scoped_merge,
-        )
-        .ok()?;
-        if resolved != ResolvedTechnique::ColumnScopedMerge {
-            return None;
-        }
-        let cell = result.plan.cell_for(&trigger)?.clone();
+        let Some(cell) = result.plan.cell_for(&trigger).cloned() else {
+            continue;
+        };
         let group_columns = result
             .column_groups
             .iter()
             .find(|g| g.name() == cell.group)
             .map(|g| g.columns.clone())
             .unwrap_or_default();
-        let comparability = model_property_vector(sql, &JoinContext::new())
-            .map(|v| v.comparability)
-            .unwrap_or_default();
-        let raw_suppression =
-            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
-        // The override ladder's write-suppression dimension
-        // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
-        // Phase G1): `defaults.prefer`/`cells[].prefer`/`cells[].technique`
-        // narrowed to this cell's own trigger + column group, exactly the
-        // same ladder `resolve_cell_choice` narrows for family choice.
+        // An already-validated `cells[].write` pin for this trigger's cell
+        // (`smelt-db`'s pre-execution diagnostic gate already ran
+        // `resolve_write_pin`'s registry/capability/equivalence checks — an
+        // invalid pin never reaches here, the run would already have been
+        // refused with `MaintenanceWritePatternUnavailable`/
+        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
+        // *name* to its registry entry so `resolve_cell_choice` can consult
+        // which [`smelt_logical::maintenance::WriteSelection`] it maps to,
+        // never re-deriving admission itself.
+        let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+            &cell,
+            &result.column_groups,
+            cells_cfg,
+        )
+        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+        // The override ladder (`defaults.prefer` → `cells[].prefer` →
+        // `cells[].technique`, narrower scope winning) narrowed to this
+        // cell's own trigger + column group — the SAME `overrides` value
+        // feeds both the family choice below and the write-suppression
+        // variant resolution further down, so a `cells[].technique` entry
+        // naming e.g. `suppress`/`unconditional` for this cell is visible
+        // to both dimensions from one ladder evaluation.
         let overrides = effective_override(
             metadata
                 .maintenance
@@ -828,6 +846,22 @@ pub fn resolve_live_column_scoped_cell(
             source,
             &group_columns,
         );
+        let chosen = resolve_cell_choice(
+            &result.plan,
+            &trigger,
+            &overrides,
+            write_pin,
+            backend_supports_column_scoped_merge,
+        )
+        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+        if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
+            continue;
+        }
+        let comparability = model_property_vector(sql, &JoinContext::new())
+            .map(|v| v.comparability)
+            .unwrap_or_default();
+        let raw_suppression =
+            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
         // Fold the first-build/definition-change-backfill posture (or an
         // explicit `prefer`/`technique` override on this dimension) into
         // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
@@ -838,31 +872,32 @@ pub fn resolve_live_column_scoped_cell(
         // resolver's own rule, never a runtime special case here.
         //
         // A `technique: suppress` pin forcing suppression on over a genuine
-        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the
-        // `write_pin` dimension just above — where `smelt-db`'s
-        // pre-execution diagnostics (`MaintenanceWritePatternUnavailable`/
-        // `MaintenanceWriteAddressingRefused`) already validate `cells[].write`
-        // pins before a run ever reaches this code, making that `.ok()?`
-        // defensive/unreachable — there is currently NO pre-execution
-        // diagnostic gate for this write-*variant* pin dimension
-        // (`technique`/`prefer: suppress`/`unconditional`). So this `.ok()?`
-        // is a REAL silent fallback: an inadmissible variant pin is not
-        // refused here, it just falls through to the safe region-recompute
-        // batch loop below instead of failing the run loudly. This is a
-        // known gap, not by design; see `docs/specs/incremental_models.md`
-        // §"Known Divergences" and
+        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
+        // dimension just resolved above — where `resolve_cell_choice`'s
+        // refusal is now a real run error — there is currently NO
+        // pre-execution diagnostic gate for this write-*variant* pin
+        // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
+        // `continue` below on `Err` is a REAL silent fallback: an
+        // inadmissible variant pin is not refused here, it just falls
+        // through to the safe region-recompute batch loop instead of
+        // failing the run loudly. This is a known gap, not by design; see
+        // `docs/specs/incremental_models.md` §"Known Divergences" and
         // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
         // Phase G1 for the tracked follow-up to extend the diagnostic gate
-        // to this dimension.
-        let (suppression, _variant_reason) = resolve_write_variant(
+        // to this dimension — out of scope for Phase 2 of
+        // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
+        // family (Fold/Recompute/RederiveColumns) dimension.
+        let Ok((suppression, _variant_reason)) = resolve_write_variant(
             &raw_suppression,
             &cell.trigger,
             cell.ledger_catch_up,
             &overrides,
-        )
-        .ok()?;
-        Some((source.clone(), cell, suppression))
-    })
+        ) else {
+            continue;
+        };
+        return Ok(Some((source.clone(), cell, suppression)));
+    }
+    Ok(None)
 }
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an
