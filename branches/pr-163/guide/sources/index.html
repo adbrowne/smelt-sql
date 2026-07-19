@@ -1400,6 +1400,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#declaring-referential-integrity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Declaring referential integrity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#loading-source-data" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2626,6 +2637,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#declaring-referential-integrity" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Declaring referential integrity
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#loading-source-data" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2760,19 +2782,30 @@
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="w">  </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mutable_snapshot</span>
 </code></pre></div>
 <p>The structured form additionally accepts sub-facts scoped to a particular <code>kind:</code> — <code>lateness</code> and <code>redelivery</code> for <code>append_only</code>, <code>retractions</code>, <code>ordered</code>, and <code>delta_identity</code> for <code>change_feed</code>, and <code>key_recurrence</code> under any <code>kind</code>. See <a href="../incremental-models/#enrichment-joins-and-dimension-updates"><code>mutation_profile</code> in incremental models</a> for an example that uses the structured form to admit a column-scoped <code>MERGE</code> cell.</p>
+<h2 id="declaring-referential-integrity">Declaring referential integrity<a class="headerlink" href="#declaring-referential-integrity" title="Permanent link">&para;</a></h2>
+<p>A dimension source read through an ordinary (inner) <code>JOIN</code> — rather than a <code>LEFT JOIN</code> — only produces one output row per driving-side row if every foreign key the join reads is guaranteed to exist in the dimension. <code>referential_integrity:</code> states that guarantee explicitly:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># models/sources/raw/users.yml</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="nt">description</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">Raw user data</span>
+<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="nt">mutation_profile</span><span class="p">:</span>
+<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="w">  </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mutable_snapshot</span>
+<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="nt">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">user_id</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="nt">referential_integrity</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">user_id</span><span class="p p-Indicator">]</span>
+</code></pre></div>
+<p><code>referential_integrity:</code> names the column(s) a consuming model's equi-join reads that are guaranteed present — every value a fact table joins on this dimension by is guaranteed to have a matching row here. When declared (as a subset of <code>unique_key:</code>, which must also be declared), a model that enriches through a bare inner join on that column no longer needs to be rewritten as a <code>LEFT JOIN</code> to prove it preserves every driving row.</p>
+<p>This is a narrowing declaration, not a hint: every consuming run re-checks it over the region it touched (the row count out of the join must equal the row count into it), and a violation — a fact row whose key has no match in the dimension, disproving the declaration — fails the run loudly rather than silently trusting stale metadata. Declare it only when you can back the guarantee (e.g. the dimension is populated ahead of the fact table, or a foreign-key constraint enforces it upstream).</p>
 <h2 id="loading-source-data">Loading source data<a class="headerlink" href="#loading-source-data" title="Permanent link">&para;</a></h2>
 <p>smelt does not load source data. You are responsible for ensuring the source tables exist in your target database before running models that depend on them.</p>
 <h2 id="project-structure">Project structure<a class="headerlink" href="#project-structure" title="Permanent link">&para;</a></h2>
 <p>Source YAML files live alongside other models under your <code>paths:</code> directories. A typical layout:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>models/
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>  sources/
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>    raw/
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a>      users.yml
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a>      events.yml
-<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a>      transactions.yml
-<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a>  staging/
-<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a>    stg_users.sql
-<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a>    stg_events.sql
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>models/
+<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a>  sources/
+<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a>    raw/
+<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a>      users.yml
+<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a>      events.yml
+<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a>      transactions.yml
+<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a>  staging/
+<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a>    stg_users.sql
+<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a>    stg_events.sql
 </code></pre></div>
 <h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
 <ul>
