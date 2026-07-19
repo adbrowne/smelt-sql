@@ -169,6 +169,7 @@ pub async fn check_and_migrate(
     column_defaults: &HashMap<String, String>,
     backfill_exprs: &HashMap<String, String>,
     ddl_backend: Option<&DdlBackend>,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<SchemaEvolutionResult> {
     let model_hash = compute_model_hash(model_sql);
     let default_backend = DdlBackend::DuckDb;
@@ -241,7 +242,11 @@ pub async fn check_and_migrate(
                     .collect(),
                 transactional: use_transaction,
             };
-            if let Err(e) = backend.execute_statement_group(&group).await {
+            if let Err(e) = crate::execute::retry_backend_call(retry, || {
+                backend.execute_statement_group(&group)
+            })
+            .await
+            {
                 return Err(anyhow::anyhow!("Schema migration failed: {}", e));
             }
 

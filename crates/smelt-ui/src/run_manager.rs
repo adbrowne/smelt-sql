@@ -180,6 +180,8 @@ fn to_runtime_request(request: RunExecuteRequest) -> smelt_runtime::ExecuteReque
         run_checks: false,
         checks: vec![],
         jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
     }
 }
 

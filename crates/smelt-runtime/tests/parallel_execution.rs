@@ -80,6 +80,8 @@ fn base_request(target: &str, jobs: Option<usize>) -> ExecuteRequest {
         run_checks: false,
         checks: vec![],
         jobs,
+        retry_max: None,
+        retry_backoff_ms: None,
     }
 }
 

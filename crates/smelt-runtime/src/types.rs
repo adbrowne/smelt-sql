@@ -119,6 +119,28 @@ pub struct ExecuteRequest {
     /// strictly before its downstream's start regardless of `jobs`.
     #[serde(default)]
     pub jobs: Option<usize>,
+
+    /// Maximum retry attempts for a transient backend failure
+    /// (`BackendError::is_transient`) hit while executing one model's
+    /// statement group — the whole group (drop+create, or a batch's
+    /// DELETE+INSERT/MERGE) is re-run, never a partial slice of it, so a
+    /// retry can never leave a half-applied write behind
+    /// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). `None` (the
+    /// default) resolves to 3 attempts. `Some(0)` disables retry entirely —
+    /// the first transient failure fails the model immediately, matching
+    /// pre-Phase-6 behaviour. A deterministic (non-transient) error is never
+    /// retried regardless of this value.
+    #[serde(default)]
+    pub retry_max: Option<u32>,
+
+    /// Base backoff, in milliseconds, for the exponential-backoff delay
+    /// between retry attempts (`delay = retry_backoff_ms * 2^(attempt-1) +
+    /// jitter`; jitter is derived deterministically from a hash of
+    /// `(run_id, model_name, attempt)` — never `Instant::now`/`SystemTime`,
+    /// so retry delays are reproducible in tests). `None` (the default)
+    /// resolves to 200ms.
+    #[serde(default)]
+    pub retry_backoff_ms: Option<u64>,
 }
 
 fn default_true() -> bool {

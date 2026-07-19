@@ -56,6 +56,22 @@ use smelt_runtime::maintenance_driver::{
     ColumnMergeDispatch, ResolvedTechnique,
 };
 
+/// A retry policy that never retries — these tests exercise the
+/// column-scoped MERGE write directly against a real DuckDB backend,
+/// outside `execute_project`, so there is no `ExecuteRequest`/run reporter
+/// to derive one from (`docs/plans/20260719-prod-w2-operability.md` Phase
+/// 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "technique-lowering-test",
+        model_name: "technique-lowering-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 /// These two physical-mechanism tests below exercise `execute_column_scoped_
 /// merge` directly (not through the derived plan's own `WriteSuppression`
 /// resolution, `maintenance_driver::resolve_live_column_scoped_cell`'s job)
@@ -281,6 +297,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         dimension_batch_sql,
         &unconditional(),
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("column-scoped merge must succeed");
@@ -449,6 +466,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         dimension_batch_sql,
         &unconditional(),
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("horizon-clamped column-scoped merge must succeed");
@@ -558,6 +576,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         dimension_batch_sql,
         &suppression,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed");
@@ -589,6 +608,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         dimension_batch_sql,
         &suppression,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed after mutation");
@@ -810,6 +830,7 @@ async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_s
         dimension_batch_sql,
         &steady_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("steady-state suppressed merge must succeed");
@@ -822,6 +843,7 @@ async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_s
         dimension_batch_sql,
         &backfill_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("first-build unconditional merge must succeed");
@@ -956,6 +978,7 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
         dimension_batch_sql,
         &natural_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("natural suppressed merge must succeed");
@@ -968,6 +991,7 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
         dimension_batch_sql,
         &pinned_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("pinned unconditional merge must succeed");
@@ -1382,6 +1406,8 @@ mod column_scoped_merge_e2e {
             run_checks: false,
             checks: vec![],
             jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
         }
     }
 

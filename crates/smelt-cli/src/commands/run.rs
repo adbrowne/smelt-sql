@@ -213,6 +213,8 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         run_checks: false,
         checks: vec![],
         jobs: args.jobs,
+        retry_max: None,
+        retry_backoff_ms: None,
     };
 
     let run_id = generate_run_id();
@@ -402,6 +404,8 @@ async fn run_since_upstream(
             run_checks: false,
             checks: Vec::new(),
             jobs: args.jobs,
+            retry_max: None,
+            retry_backoff_ms: None,
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

@@ -178,6 +178,16 @@ Progress output, the per-run manifest, and every other run-report artifact are i
 
 Concurrency helps most when a project's DAG is wide (many independent models per layer) and when a meaningful share of a run's wall-clock time is spent on work other than the backend query itself (SQL compilation, schema-evolution checks, `smelt.check` execution) — a single-connection backend (e.g. DuckDB) still serializes concurrent query execution against that one connection, so `--jobs` primarily shortens a run by overlapping that surrounding work, and by overlapping models assigned to *different* targets.
 
+### Retrying transient backend failures
+
+`smelt run`, `smelt build`, and `smelt backbuild` automatically retry a model's write step when it fails with a **transient** backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.
+
+A retry always re-runs the model's *entire* write step for the attempt that failed — the full drop-and-recreate for a table, one incremental batch's complete DELETE+INSERT, a column-scoped MERGE, or a keyed model's create-or-merge partition write — never a partial slice of it, so a retried model never leaves a half-applied write behind. Coverage is uniform across every write technique a model can dispatch to, including the delta-restricted recompute a model-edge creation trigger can take. Retries use exponential backoff between attempts; the delay is derived deterministically from the run and model identity rather than real-clock jitter, so repeated runs behave predictably.
+
+Only transient failures are retried. A deterministic failure — invalid SQL, a type mismatch, a constraint violation, a missing table, an unsupported dialect feature — fails the model on the first attempt, since retrying cannot change the outcome.
+
+By default, up to 3 attempts are made per write step before the model is reported as failed. To disable retry entirely (fail immediately on the first transient error, matching pre-retry behavior), set `retry_max: 0` on the run request. There is currently no dedicated CLI flag for this; it is available to programmatic consumers of the run engine (e.g. the UI) via the `retry_max`/`retry_backoff_ms` fields on the run request.
+
 **Selector syntax:**
 
 The `--select` and `--exclude` flags support graph-aware selection:

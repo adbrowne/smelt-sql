@@ -221,6 +221,7 @@ pub async fn run_windowed_keyed_maintenance(
     locality: Option<&LocalitySlice>,
     suppression: &WriteSuppression,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     if let Some(reason) = rule.refuse() {
         bail!(
@@ -479,7 +480,11 @@ pub async fn run_windowed_keyed_maintenance(
                         transactional: false,
                     },
                 };
-                backend.execute_statement_group(&group).await.map_err(|e| {
+                crate::execute::retry_backend_call(retry, || {
+                    backend.execute_statement_group(&group)
+                })
+                .await
+                .map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
                         model_name,
@@ -889,6 +894,7 @@ pub fn resolve_live_column_scoped_cell(
 /// what a backend executes, matching every other technique in this module
 /// (`docs/specs/incremental_models.md` §"Statement emission (single
 /// owner)").
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_column_scoped_merge_full(
     backend: &dyn Backend,
     schema: &str,
@@ -897,6 +903,7 @@ pub async fn execute_column_scoped_merge_full(
     dimension_batch_sql: &str,
     suppression: &WriteSuppression,
     window: &PartitionRange,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -910,6 +917,7 @@ pub async fn execute_column_scoped_merge_full(
         suppression,
         dialect,
         window,
+        retry,
     )
     .await
     .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
@@ -1038,6 +1046,7 @@ async fn execute_column_scoped_write_with_observed_delta(
     suppression: &WriteSuppression,
     dialect: MaintenanceDialect,
     window: &PartitionRange,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> std::result::Result<(), BackendError> {
     let full_table = format!("{schema}.{table}");
     match suppression {
@@ -1075,17 +1084,19 @@ async fn execute_column_scoped_write_with_observed_delta(
                 &window.end,
                 &changed_keys_query,
             );
-            backend
-                .execute_conditional_write_and_record_observed_delta(
+            crate::execute::retry_backend_call(retry, || {
+                backend.execute_conditional_write_and_record_observed_delta(
                     &ensure_sql,
                     &group,
                     &record_sql,
                 )
-                .await
+            })
+            .await
         }
         WriteSuppression::Unconditional { .. } => {
             let group = emit_column_scoped_merge(&full_table, unique_key, source_select, dialect);
-            backend.execute_statement_group(&group).await
+            crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+                .await
         }
     }
 }
@@ -1486,6 +1497,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     window_start: &str,
     window_end: &str,
     dialect: MaintenanceDialect,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
@@ -1505,7 +1517,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
         delta.as_deref(),
         dialect,
     );
-    backend.execute_statement_group(&group).await?;
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group)).await?;
     Ok(group)
 }
 
@@ -1629,6 +1641,7 @@ pub async fn execute_column_scoped_merge(
     dimension_batch_sql: &str,
     suppression: &WriteSuppression,
     window: &PartitionRange,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -1652,6 +1665,7 @@ pub async fn execute_column_scoped_merge(
         suppression,
         dialect,
         window,
+        retry,
     )
     .await
     .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
@@ -1836,6 +1850,22 @@ mod tests {
     use smelt_dialect::{BackendCapabilities, SqlDialect};
     use smelt_logical::analysis::source_bounds::Seconds;
     use std::sync::Mutex;
+
+    /// A retry policy that never retries — these unit tests exercise the
+    /// driver against `RecordingBackend`, a synchronous test double, so
+    /// there is no `ExecuteRequest`/run reporter to derive a policy from
+    /// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). Retry
+    /// behaviour itself is covered end-to-end by `tests/retry.rs`.
+    const NO_OP_REPORTER: crate::reporter::NoOpReporter = crate::reporter::NoOpReporter;
+    fn no_retry_policy() -> crate::execute::RetryPolicy<'static> {
+        crate::execute::RetryPolicy {
+            retry_max: 0,
+            base_backoff_ms: 0,
+            run_id: "maintenance-driver-unit-test",
+            model_name: "maintenance-driver-unit-test",
+            reporter: &NO_OP_REPORTER,
+        }
+    }
 
     #[test]
     fn driving_steps_day_granularity_in_temporal_order() {
@@ -2101,6 +2131,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await;
         assert!(result.is_err());
@@ -2130,6 +2161,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap();
@@ -2176,6 +2208,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap();
@@ -2223,6 +2256,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap_err();
@@ -2295,6 +2329,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap();

@@ -37,6 +37,22 @@ use smelt_planner::{
 };
 use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
 
+/// A retry policy that never retries — these tests exercise the
+/// windowed-keyed-maintenance driver directly against a real DuckDB
+/// backend, outside `execute_project`, so there is no `ExecuteRequest`/run
+/// reporter to derive one from (`docs/plans/20260719-prod-w2-operability.md`
+/// Phase 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "locality-route3-recurrence-check-test",
+        model_name: "locality-route3-recurrence-check-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 /// This file exercises route-3 checked-merge behaviour, not suppression —
 /// every call site below passes the plain unconditional matched arm.
 fn unconditional() -> WriteSuppression {
@@ -179,6 +195,7 @@ async fn checked_route3_in_bound_redelivery_merges_cleanly() {
         Some(&slice),
         &unconditional(),
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect("in-bound redelivery must merge cleanly, not refuse");
@@ -214,6 +231,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         Some(&checked_slice()),
         &unconditional(),
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -239,6 +257,7 @@ async fn checked_route3_out_of_bound_redelivery_rolls_back_with_violation() {
         Some(&checked_slice()),
         &unconditional(),
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect_err("an out-of-bound redelivery must refuse the run");
@@ -417,6 +436,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         Some(&derived_slice()),
         &unconditional(),
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -439,6 +459,7 @@ async fn derived_route3_bound_never_emits_the_check() {
         Some(&derived_slice()),
         &unconditional(),
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect("a derived slice must merge cleanly");

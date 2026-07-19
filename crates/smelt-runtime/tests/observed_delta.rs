@@ -22,6 +22,22 @@ use smelt_logical::maintenance::choice::{resolve_write_suppression, WriteSuppres
 use smelt_logical::maintenance::{RowIdentity, RowIdentityVerdict};
 use smelt_runtime::maintenance_driver::execute_column_scoped_merge_full;
 
+/// A retry policy that never retries — these tests exercise the
+/// column-scoped MERGE write directly against a real DuckDB backend,
+/// outside `execute_project`, so there is no `ExecuteRequest`/run reporter
+/// to derive one from (`docs/plans/20260719-prod-w2-operability.md` Phase
+/// 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "observed-delta-test",
+        model_name: "observed-delta-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 fn key_suppression(compared: &[&str]) -> WriteSuppression {
     let row_identity = RowIdentityVerdict {
         identity: RowIdentity::Key(vec!["user_id".to_string()]),
@@ -176,6 +192,7 @@ async fn suppressed_merge_records_exactly_the_changed_keys() {
         dimension_batch_sql,
         &suppression,
         &w,
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed merge succeeds");
@@ -231,6 +248,7 @@ async fn fully_suppressed_run_records_present_and_empty_delta() {
         dimension_batch_sql,
         &suppression,
         &w,
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed merge succeeds");
@@ -298,6 +316,7 @@ async fn incomparable_column_change_alone_records_nothing() {
         dimension_batch_sql,
         &suppression,
         &w,
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed merge succeeds");
@@ -352,6 +371,7 @@ async fn rerunning_the_same_window_replaces_never_duplicates() {
         dimension_batch_sql,
         &suppression,
         &w,
+        &no_retry_policy(),
     )
     .await
     .unwrap();
@@ -369,6 +389,7 @@ async fn rerunning_the_same_window_replaces_never_duplicates() {
         dimension_batch_sql,
         &suppression,
         &w,
+        &no_retry_policy(),
     )
     .await
     .unwrap();
@@ -447,6 +468,7 @@ async fn partitioned_window_records_touched_partitions() {
         dimension_batch_sql,
         &suppression,
         &w,
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed merge succeeds");

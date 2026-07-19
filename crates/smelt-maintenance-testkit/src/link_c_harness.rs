@@ -213,5 +213,7 @@ pub fn base_request(target: &str) -> ExecuteRequest {
         run_checks: false,
         checks: vec![],
         jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
     }
 }

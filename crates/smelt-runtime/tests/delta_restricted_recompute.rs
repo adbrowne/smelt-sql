@@ -16,6 +16,22 @@ use smelt_logical::maintenance::SkeletonSourceClosure;
 use smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction;
 use tempfile::TempDir;
 
+/// A retry policy that never retries — these tests exercise the T3
+/// delta-restricted DeleteInsert dispatch directly against a real DuckDB
+/// backend, outside `execute_project`, so there is no `ExecuteRequest`/run
+/// reporter to derive one from (`docs/plans/20260719-prod-w2-operability.md`
+/// Phase 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "delta-restricted-recompute-test",
+        model_name: "delta-restricted-recompute-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 const UPSTREAM_MODEL: &str = "silver.fact";
 const WINDOW_START: &str = "2026-07-01";
 const WINDOW_END: &str = "2026-07-02";
@@ -145,6 +161,7 @@ async fn closed_with_exact_delta_touches_only_the_delta_keys() {
         WINDOW_START,
         WINDOW_END,
         MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("restricted recompute executes");
@@ -208,6 +225,7 @@ async fn open_closure_falls_back_to_the_widened_scan() {
         WINDOW_START,
         WINDOW_END,
         MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("unrestricted recompute executes");
@@ -242,6 +260,7 @@ async fn absent_observed_delta_runs_the_ordinary_widened_scan() {
         WINDOW_START,
         WINDOW_END,
         MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("unrestricted recompute executes");
@@ -276,6 +295,7 @@ async fn empty_observed_delta_falls_back_to_the_widened_scan() {
         WINDOW_START,
         WINDOW_END,
         MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("unrestricted recompute executes");

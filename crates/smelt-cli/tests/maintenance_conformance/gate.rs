@@ -38,6 +38,23 @@ use smelt_planner::{
 use smelt_runtime::check_runner::batches_to_rows;
 use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
 
+/// A retry policy that never retries — this conformance gate drives a real
+/// DuckDB backend directly rather than going through `execute_project`, so
+/// there is no `ExecuteRequest`/run reporter to derive one from
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). `retry_max: 0`
+/// keeps every call site's behaviour identical to before retry coverage was
+/// extended to these maintenance-driver entry points.
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "maintenance-conformance-gate",
+        model_name: "maintenance-conformance-gate",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 /// Default deterministic case count for
 /// `append_only_partition_pool_upholds_equivalence` — small enough to stay
 /// on par with `property_discovery`'s per-target budget (plan Phase 3
@@ -2284,6 +2301,7 @@ async fn drive_composed_route2_and_assert(
             slice,
             &composed_route2_suppression(),
             compile_step,
+            &no_retry_policy(),
         )
         .await
         .map_err(|e| anyhow::anyhow!("composed route-2 window {i} merge failed: {e}"))?;
@@ -2328,6 +2346,7 @@ async fn drive_composed_route3_and_assert(
             Some(&slice),
             &composed_route3_suppression(),
             compile_step,
+            &no_retry_policy(),
         )
         .await
         .map_err(|e| {
@@ -2908,6 +2927,7 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             "2026-07-01",
             "2026-07-02",
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+            &no_retry_policy(),
         )
         .await
         .unwrap_or_else(|e| panic!("case {i}: restricted recompute failed: {e}"));
@@ -2928,6 +2948,7 @@ async fn delta_restricted_equals_widened_scan_at_fixed_s() {
             "2026-07-01",
             "2026-07-02",
             smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+            &no_retry_policy(),
         )
         .await
         .unwrap_or_else(|e| panic!("case {i}: widened recompute failed: {e}"));
@@ -3093,6 +3114,7 @@ async fn empty_delta_cascade_is_a_no_op() {
         dimension_batch_sql,
         &suppression,
         &window,
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed merge over an unchanged redelivery must succeed");

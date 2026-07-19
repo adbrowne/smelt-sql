@@ -404,6 +404,8 @@ fn run_request(start: &str, end: &str) -> ExecuteRequest {
         run_checks: false,
         checks: vec![],
         jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
     }
 }
 

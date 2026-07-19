@@ -22,7 +22,9 @@ use futures::stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
+use smelt_backend::{
+    Backend, BackendError, Materialization, MaterializationStrategy, PartitionRange,
+};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
@@ -140,6 +142,11 @@ enum ReporterEvent {
         status: String,
         row_count: usize,
     },
+    ModelRetrying {
+        attempt: u32,
+        retry_max: u32,
+        error: String,
+    },
 }
 
 /// Records [`RunReporter`] callbacks made during one model's execution
@@ -154,6 +161,18 @@ struct EventSink {
 }
 
 impl EventSink {
+    /// Record one event. The single lock site every [`RunReporter`] method
+    /// below routes through, so `EventSink` needs exactly one poisoned-lock
+    /// `.expect` for all of them combined rather than one per method
+    /// (`.claude/hardening-baseline.txt` ratchet — see root `CLAUDE.md`
+    /// §"Fail-loud discipline").
+    fn push(&self, event: ReporterEvent) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(event);
+    }
+
     /// Replay every buffered event onto `reporter`, in the order recorded.
     fn replay(&self, reporter: &dyn RunReporter, run_id: &str, model: &str) {
         for event in self.events.lock().expect("EventSink mutex poisoned").iter() {
@@ -188,6 +207,11 @@ impl EventSink {
                     status,
                     row_count,
                 } => reporter.check_result(run_id, check, status, *row_count),
+                ReporterEvent::ModelRetrying {
+                    attempt,
+                    retry_max,
+                    error,
+                } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
             }
         }
     }
@@ -195,22 +219,16 @@ impl EventSink {
 
 impl RunReporter for EventSink {
     fn model_started(&self, _run_id: &str, _model: &str, model_index: usize, models_total: usize) {
-        self.events
-            .lock()
-            .expect("EventSink mutex poisoned")
-            .push(ReporterEvent::ModelStarted {
-                model_index,
-                models_total,
-            });
+        self.push(ReporterEvent::ModelStarted {
+            model_index,
+            models_total,
+        });
     }
 
     fn model_compiled(&self, _run_id: &str, _model: &str, sql: &str) {
-        self.events
-            .lock()
-            .expect("EventSink mutex poisoned")
-            .push(ReporterEvent::ModelCompiled {
-                sql: sql.to_string(),
-            });
+        self.push(ReporterEvent::ModelCompiled {
+            sql: sql.to_string(),
+        });
     }
 
     fn maintenance_statements(
@@ -220,12 +238,10 @@ impl RunReporter for EventSink {
         chunk: Option<&crate::reporter::ChunkInfo>,
         group: &smelt_logical::maintenance::emit::StatementGroup,
     ) {
-        self.events.lock().expect("EventSink mutex poisoned").push(
-            ReporterEvent::MaintenanceStatements {
-                chunk: chunk.cloned(),
-                group: group.clone(),
-            },
-        );
+        self.push(ReporterEvent::MaintenanceStatements {
+            chunk: chunk.cloned(),
+            group: group.clone(),
+        });
     }
 
     fn batch_completed(
@@ -237,15 +253,12 @@ impl RunReporter for EventSink {
         row_count: usize,
         duration: StdDuration,
     ) {
-        self.events
-            .lock()
-            .expect("EventSink mutex poisoned")
-            .push(ReporterEvent::BatchCompleted {
-                batch_index,
-                batches_total,
-                row_count,
-                duration,
-            });
+        self.push(ReporterEvent::BatchCompleted {
+            batch_index,
+            batches_total,
+            row_count,
+            duration,
+        });
     }
 
     fn model_completed(
@@ -255,25 +268,187 @@ impl RunReporter for EventSink {
         row_count: usize,
         duration: StdDuration,
     ) {
-        self.events
-            .lock()
-            .expect("EventSink mutex poisoned")
-            .push(ReporterEvent::ModelCompleted {
-                row_count,
-                duration,
-            });
+        self.push(ReporterEvent::ModelCompleted {
+            row_count,
+            duration,
+        });
     }
 
     fn check_result(&self, _run_id: &str, check: &str, status: &str, row_count: usize) {
-        self.events
-            .lock()
-            .expect("EventSink mutex poisoned")
-            .push(ReporterEvent::CheckResult {
-                check: check.to_string(),
-                status: status.to_string(),
-                row_count,
-            });
+        self.push(ReporterEvent::CheckResult {
+            check: check.to_string(),
+            status: status.to_string(),
+            row_count,
+        });
     }
+
+    fn model_retrying(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        attempt: u32,
+        retry_max: u32,
+        error: &str,
+    ) {
+        self.push(ReporterEvent::ModelRetrying {
+            attempt,
+            retry_max,
+            error: error.to_string(),
+        });
+    }
+}
+
+/// Default retry bound (`ExecuteRequest::retry_max`) and base backoff, in
+/// milliseconds (`ExecuteRequest::retry_backoff_ms`), used when a request
+/// leaves either field unset (`docs/plans/20260719-prod-w2-operability.md`
+/// Phase 6).
+const DEFAULT_RETRY_MAX: u32 = 3;
+const DEFAULT_RETRY_BACKOFF_MS: u64 = 200;
+
+/// Deterministic backoff delay for retry `attempt` (1-based) of
+/// `model_name` within run `run_id`: exponential backoff off
+/// `base_backoff_ms`, jittered by a stable hash of `(run_id, model_name,
+/// attempt)` — never real-clock entropy (`rand`, `Instant`, `SystemTime`),
+/// so retry timing is reproducible and tests never race a real delay
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6: "jitter from
+/// run_id hash — no `Date::now` coupling in tests").
+fn retry_backoff_delay(
+    base_backoff_ms: u64,
+    attempt: u32,
+    run_id: &str,
+    model_name: &str,
+) -> StdDuration {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Cap the shift so a pathologically high `retry_max` cannot overflow.
+    let shift = attempt.saturating_sub(1).min(16);
+    let exponential = base_backoff_ms.saturating_mul(1u64 << shift);
+    let mut hasher = DefaultHasher::new();
+    (run_id, model_name, attempt).hash(&mut hasher);
+    let jitter = if base_backoff_ms == 0 {
+        0
+    } else {
+        hasher.finish() % base_backoff_ms
+    };
+    StdDuration::from_millis(exponential.saturating_add(jitter))
+}
+
+/// Resolved retry policy for one model's maintenance write
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). Carries exactly
+/// the fields [`retry_backend_call`] needs so every statement-group-issuing
+/// call site — the incremental/full-refresh dispatch in this module AND the
+/// column-scoped-MERGE (MP11), T3 delta-restricted DeleteInsert, and
+/// windowed-keyed-maintenance (`refresh: keyed`) dispatch in
+/// `maintenance_driver.rs`/`cumulative.rs` — retries a transient backend
+/// error identically, rather than each layer growing its own copy of the
+/// backoff/jitter math. `retry_max: 0` (an operator's `retry_max: 0` request,
+/// or a test that does not exercise retry) makes every retry-guarded call a
+/// single, unretried attempt — behaviourally identical to no retry wrapper
+/// at all.
+pub struct RetryPolicy<'a> {
+    pub retry_max: u32,
+    pub base_backoff_ms: u64,
+    pub run_id: &'a str,
+    pub model_name: &'a str,
+    pub reporter: &'a dyn RunReporter,
+}
+
+impl<'a> RetryPolicy<'a> {
+    /// Resolve a request's `retry_max`/`retry_backoff_ms` (falling back to
+    /// [`DEFAULT_RETRY_MAX`]/[`DEFAULT_RETRY_BACKOFF_MS`]) into a policy for
+    /// `model_name` within `run_id`.
+    pub fn from_request(
+        request: &ExecuteRequest,
+        run_id: &'a str,
+        model_name: &'a str,
+        reporter: &'a dyn RunReporter,
+    ) -> Self {
+        Self {
+            retry_max: request.retry_max.unwrap_or(DEFAULT_RETRY_MAX),
+            base_backoff_ms: request.retry_backoff_ms.unwrap_or(DEFAULT_RETRY_BACKOFF_MS),
+            run_id,
+            model_name,
+            reporter,
+        }
+    }
+}
+
+/// Bounded retry with exponential backoff wrapping a single backend call
+/// whose whole effect is safe to re-issue on a transient failure — one
+/// model's *whole* statement group (drop+create for a full refresh, or one
+/// batch's DELETE+INSERT/MERGE/APPEND), or a maintenance helper that reads a
+/// fact then issues exactly one such statement group (T3 delta-restricted
+/// DeleteInsert, MP11 column-scoped MERGE, `refresh: keyed`'s
+/// create-or-merge write) — never a
+/// partial slice of it, and never an earlier, already-succeeded statement
+/// group belonging to the same model
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6, review checklist
+/// "no partial-write replay hazard"). Each of this function's call sites in
+/// `execute_one_model` passes a closure that re-invokes exactly one such
+/// backend call; the closure itself is idempotent-safe to re-run because it
+/// starts with `DROP ... IF EXISTS` (full refresh) or is a backend-native
+/// transactional DELETE+INSERT/MERGE (incremental) —
+/// `Backend::delete_and_insert_transactional`'s own contract
+/// (`crates/smelt-backend/src/lib.rs`) already guarantees a failed INSERT
+/// rolls back its DELETE, so retrying re-applies the same transaction
+/// rather than compounding a partial write.
+///
+/// Retries only `BackendError::is_transient` failures; a deterministic
+/// SQL/type/constraint error is returned to the caller on the first
+/// attempt, unretried.
+pub(crate) async fn retry_backend_call<T, F, Fut>(
+    policy: &RetryPolicy<'_>,
+    mut call: F,
+) -> Result<T, BackendError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BackendError>>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < policy.retry_max && err.is_transient() => {
+                attempt += 1;
+                policy.reporter.model_retrying(
+                    policy.run_id,
+                    policy.model_name,
+                    attempt,
+                    policy.retry_max,
+                    &err.to_string(),
+                );
+                let delay = retry_backoff_delay(
+                    policy.base_backoff_ms,
+                    attempt,
+                    policy.run_id,
+                    policy.model_name,
+                );
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Convenience wrapper over [`retry_backend_call`] for this module's own
+/// call sites, which already hold an [`ExecuteRequest`] rather than a
+/// pre-resolved [`RetryPolicy`].
+async fn retry_statement_group<T, F, Fut>(
+    request: &ExecuteRequest,
+    run_id: &str,
+    model_name: &str,
+    reporter: &dyn RunReporter,
+    call: F,
+) -> Result<T, BackendError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BackendError>>,
+{
+    let policy = RetryPolicy::from_request(request, run_id, model_name, reporter);
+    retry_backend_call(&policy, call).await
 }
 
 /// Run the project end-to-end.
@@ -1101,6 +1276,8 @@ pub async fn execute_project(
                         );
                         let ddl_backend =
                             ddl_backend_for_dialect(backend.dialect(), table_format, None);
+                        let schema_evolution_retry =
+                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                         match check_and_migrate(
                             backend,
                             file_store,
@@ -1114,6 +1291,7 @@ pub async fn execute_project(
                             &column_defaults,
                             &backfill_exprs,
                             Some(&ddl_backend),
+                            &schema_evolution_retry,
                         )
                         .await
                         {
@@ -1162,6 +1340,8 @@ pub async fn execute_project(
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
                     };
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                     crate::cumulative::execute_cumulative_aggregate(
                         backend,
                         &plan.model_file,
@@ -1174,6 +1354,7 @@ pub async fn execute_project(
                         source_timeseries,
                         source_key_recurrence,
                         false,
+                        &retry_policy,
                     )
                     .await
                 }
@@ -1594,6 +1775,7 @@ pub async fn execute_project(
                         .await?;
                     if !table_exists {
                         bootstrap_self_ref_empty_target(
+                            request,
                             backend,
                             schema,
                             &plan.model_file,
@@ -1722,6 +1904,8 @@ pub async fn execute_project(
                         None
                     };
 
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                     let exec_result = if let Some(dispatch) = column_merge_dispatch.as_ref() {
                         // MP11 (`incremental_models.md` §"Per-cell admission"):
                         // the live `UpstreamMutation` cell resolved to
@@ -1752,6 +1936,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     suppression,
                                     &partition,
+                                    &retry_policy,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1789,6 +1974,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     suppression,
                                     &partition,
+                                    &retry_policy,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1837,6 +2023,7 @@ pub async fn execute_project(
                                 &partition.start,
                                 &partition.end,
                                 smelt_backend::maintenance_dialect(backend.dialect()),
+                                &retry_policy,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -1915,17 +2102,19 @@ pub async fn execute_project(
                             unique_key: inc_plan.config.unique_key.clone(),
                         };
 
-                        backend
-                            .execute_model_incremental(
+                        let db_name = plan.model_file.db_name_owned();
+                        retry_statement_group(request, run_id, &plan.name, reporter, || {
+                            backend.execute_model_incremental(
                                 schema,
-                                &plan.model_file.db_name_owned(),
+                                &db_name,
                                 &compiled.sql,
                                 Materialization::Table,
-                                strategy,
+                                strategy.clone(),
                                 false,
                             )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
                     };
 
                     total_rows += exec_result.row_count;
@@ -2129,6 +2318,7 @@ pub async fn execute_project(
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                     bootstrap_self_ref_empty_target(
+                        request,
                         backend,
                         schema,
                         &plan.model_file,
@@ -2139,14 +2329,12 @@ pub async fn execute_project(
                     )
                     .await?;
 
-                    backend
-                        .insert_into_from_query(
-                            schema,
-                            &plan.model_file.db_name_owned(),
-                            &compiled.sql,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let db_name = plan.model_file.db_name_owned();
+                    retry_statement_group(request, run_id, &plan.name, reporter, || {
+                        backend.insert_into_from_query(schema, &db_name, &compiled.sql)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                     let row_count = backend
                         .get_row_count(schema, &plan.model_file.db_name_owned())
@@ -2159,16 +2347,12 @@ pub async fn execute_project(
                         preview: None,
                     }
                 } else {
-                    backend
-                        .execute_model(
-                            schema,
-                            &plan.model_file.db_name_owned(),
-                            &compiled.sql,
-                            mat,
-                            false,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                    let db_name = plan.model_file.db_name_owned();
+                    retry_statement_group(request, run_id, &plan.name, reporter, || {
+                        backend.execute_model(schema, &db_name, &compiled.sql, mat, false)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
                 };
 
                 total_rows = exec_result.row_count;
@@ -2677,7 +2861,9 @@ fn build_model_plans(
 /// The emitted DDL comes from the pure single-owner emitter
 /// (`smelt_logical::maintenance::emit::emit_create_empty_table`); this
 /// function only resolves inputs, guards, reports, and executes.
+#[allow(clippy::too_many_arguments)]
 async fn bootstrap_self_ref_empty_target(
+    request: &ExecuteRequest,
     backend: &dyn Backend,
     schema: &str,
     model_file: &smelt_core::ModelFile,
@@ -2740,10 +2926,11 @@ async fn bootstrap_self_ref_empty_target(
         smelt_backend::maintenance_dialect(backend.dialect()),
     );
     reporter.maintenance_statements(run_id, model_display_name, None, &group);
-    backend
-        .execute_statement_group(&group)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    retry_statement_group(request, run_id, model_display_name, reporter, || {
+        backend.execute_statement_group(&group)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
 }
 
