@@ -2117,6 +2117,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../examples/web-analytics/deduplication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication Without the Workaround
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
         
   
@@ -3099,8 +3127,9 @@
 </ul>
 <div class="admonition warning">
 <p class="admonition-title">Forbidden combinations</p>
-<p><code>grain: key</code> models cannot declare a <code>timeseries:</code> block (the output has no partition column — the partition shape comes from the source) and cannot declare a <code>batched:</code> block (<code>grain: key</code> and <code>grain: partition</code> are sibling refresh strategies with different equivalence contracts). Combining them produces a <code>KeyedForbidsTimeseries</code> or <code>KeyedForbidsBatched</code> error. <code>refresh: incremental</code> on an <code>ephemeral</code> model is also a hard error.</p>
+<p><code>grain: key</code> models cannot declare a <code>batched:</code> block (<code>grain: key</code> and <code>grain: partition</code> are sibling refresh strategies with different equivalence contracts) — combining them produces <code>KeyedForbidsBatched</code>. <code>refresh: incremental</code> on an <code>ephemeral</code> model is also a hard error.</p>
 </div>
+<p><code>grain: key</code> and <code>timeseries:</code> are <strong>not</strong> a forbidden combination — the key axis (identity) and the time axis (clock) are independent, and declaring both is a first-class shape of its own: the <a href="../incremental-models/#the-composed-shape-key-time">composed shape</a>, a keyed output that is also time-partitioned. It requires one more fact beyond a bare <code>grain: key</code> declaration: proof, or a checked declaration, that key temporal locality holds (every duplicate delivery of one key stays within a bounded window of itself on the event axis). A <code>timeseries:</code> block on a <code>grain: key</code> model that satisfies none of the three locality routes is refused (<code>KeyedForbidsTimeseries</code>, naming the missing route) — the composed shape is opt-in on the declared facts, not automatic.</p>
 <div class="admonition note">
 <p class="admonition-title">Reprocessing</p>
 <p>Reprocessing an already-merged window is refused when detected. If a past window's data changes, run with <code>--full-refresh</code> to truncate and rebuild from scratch.</p>
@@ -3185,7 +3214,7 @@
 <tr>
 <td>Declares <code>timeseries:</code>?</td>
 <td>Yes (the model's output is a timeseries)</td>
-<td>Never — forbidden (<code>KeyedForbidsTimeseries</code>); reads partition shape from the source</td>
+<td>By default, no (reads partition shape from the source) — <strong>may</strong> also declare <code>timeseries:</code> to become the <a href="../incremental-models/#the-composed-shape-key-time">composed shape</a> once key temporal locality is established; refused (<code>KeyedForbidsTimeseries</code>) otherwise</td>
 </tr>
 <tr>
 <td>Equivalence contract</td>

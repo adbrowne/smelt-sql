@@ -1862,6 +1862,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../examples/web-analytics/deduplication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication Without the Workaround
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
         
   
@@ -2245,6 +2273,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#mutation-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mutation profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#supported-types" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2554,6 +2593,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#mutation-profile" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Mutation profile
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#supported-types" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2647,6 +2697,36 @@
 <td>—</td>
 <td>Not allowed. Sources are externally managed. Produces a hard error.</td>
 </tr>
+<tr>
+<td><code>timeseries</code></td>
+<td>no</td>
+<td>absent</td>
+<td>Declares the source's time dimension (<code>event_time_column</code>, <code>partition_column</code>, <code>granularity</code>) — same shape as a model's <code>timeseries:</code> block. See <a href="../timeseries/">Timeseries reference</a>.</td>
+</tr>
+<tr>
+<td><code>unique_key</code></td>
+<td>no</td>
+<td>absent</td>
+<td>Identity column(s) — a string or list. Required alongside <code>referential_integrity</code> (a subset of it), and consumed as the once-write/functional-dependency identity a downstream <code>grain: key</code> model's <a href="../timeseries/#interaction-with-grain-key">key temporal locality</a> can key off.</td>
+</tr>
+<tr>
+<td><code>mutation_profile</code></td>
+<td>no</td>
+<td>absent (treated as unclocked/worst-case)</td>
+<td>How this source's underlying data changes over time — <code>append_only</code>, <code>mutable_snapshot</code>, or <code>change_feed</code>, bare-string or structured (see <a href="#mutation-profile">Mutation profile</a> below).</td>
+</tr>
+<tr>
+<td><code>source_lateness</code></td>
+<td>no</td>
+<td>absent</td>
+<td>Interval (e.g. <code>'2 hours'</code>) declaring how far behind "now" this source's data may lag; folded into a downstream model's read window.</td>
+</tr>
+<tr>
+<td><code>referential_integrity</code></td>
+<td>no</td>
+<td>absent</td>
+<td>Column(s) — a subset of <code>unique_key</code> — guaranteed to have a matching row for every value a consuming model's inner-join enrichment reads by. Narrows an enrichment <code>MERGE</code>'s recompute to a point lookup on the changed key(s); re-checked every run, never trusted silently. See <a href="../../guide/sources/#declaring-referential-integrity">Declaring referential integrity</a>.</td>
+</tr>
 </tbody>
 </table>
 <h2 id="column-keys">Column keys<a class="headerlink" href="#column-keys" title="Permanent link">&para;</a></h2>
@@ -2711,6 +2791,52 @@
 <a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">VARCHAR</span>
 </code></pre></div>
 <p>With <code>name: warehouse.users_v2</code>, smelt emits <code>FROM warehouse.users_v2</code> in compiled SQL instead of the default <code>&lt;target_schema&gt;.sources_raw_users</code>.</p>
+<h2 id="mutation-profile">Mutation profile<a class="headerlink" href="#mutation-profile" title="Permanent link">&para;</a></h2>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">mutation_profile</span><span class="p">:</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">append_only</span><span class="w">          </span><span class="c1"># append_only | mutable_snapshot | change_feed</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">  </span><span class="nt">lateness</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;3</span><span class="nv"> </span><span class="s">days&#39;</span><span class="w">         </span><span class="c1"># append_only only</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">  </span><span class="nt">redelivery</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">at_least_once</span><span class="w">  </span><span class="c1"># append_only only</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">  </span><span class="nt">key_recurrence</span><span class="p">:</span><span class="w">            </span><span class="c1"># any kind</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="w">    </span><span class="nt">key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">event_id</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">    </span><span class="nt">window</span><span class="p">:</span><span class="w"> </span><span class="s">&#39;3</span><span class="nv"> </span><span class="s">days&#39;</span>
+</code></pre></div>
+<p><code>mutation_profile</code> accepts a bare string (<code>mutation_profile: change_feed</code>) as shorthand for <code>{ kind: change_feed }</code>, or the structured block above for <code>kind:</code> plus sub-facts scoped to it:</p>
+<table>
+<thead>
+<tr>
+<th>Field</th>
+<th>Applies to <code>kind:</code></th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>kind</code></td>
+<td>any</td>
+<td><code>append_only</code>, <code>mutable_snapshot</code>, or <code>change_feed</code>.</td>
+</tr>
+<tr>
+<td><code>lateness</code></td>
+<td><code>append_only</code></td>
+<td>How late a row for an already-passed partition may still arrive.</td>
+</tr>
+<tr>
+<td><code>redelivery</code></td>
+<td><code>append_only</code></td>
+<td>Redelivery posture — e.g. <code>at_least_once</code> for a feed that may redeliver a row identically.</td>
+</tr>
+<tr>
+<td><code>retractions</code>, <code>ordered</code>, <code>delta_identity</code></td>
+<td><code>change_feed</code></td>
+<td>Feed-shape facts describing how the change feed itself is structured.</td>
+</tr>
+<tr>
+<td><code>key_recurrence.key</code> / <code>key_recurrence.window</code></td>
+<td>any</td>
+<td>The declared <strong>recurrence bound</strong>: every pair of rows sharing the named key(s) lies within <code>window</code> of each other on the event-time axis. This is route 3 (recurrence-bounded) of a downstream <code>grain: key</code> model's <a href="../timeseries/#interaction-with-grain-key">key temporal locality</a> — a checked declaration, not a proof: violations fail the consuming run transactionally (<code>KeyedRecurrenceBoundViolated</code>) rather than silently producing a wrong answer. See the <a href="../../examples/web-analytics/deduplication/">deduplication tutorial</a> for a worked example.</td>
+</tr>
+</tbody>
+</table>
 <h2 id="supported-types">Supported types<a class="headerlink" href="#supported-types" title="Permanent link">&para;</a></h2>
 <table>
 <thead>

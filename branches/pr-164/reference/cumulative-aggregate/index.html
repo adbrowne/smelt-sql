@@ -1862,6 +1862,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../examples/web-analytics/deduplication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication Without the Workaround
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
         
   
@@ -2820,7 +2848,7 @@
 </tr>
 <tr>
 <td><code>KeyedForbidsTimeseries</code></td>
-<td>A <code>grain: key</code> model declares a <code>timeseries:</code> block</td>
+<td>A <code>grain: key</code> model declares a <code>timeseries:</code> block but none of the three <a href="../../guide/incremental-models/#the-composed-shape-key-time">key temporal locality</a> routes admits it</td>
 </tr>
 <tr>
 <td><code>KeyedForbidsBatched</code></td>
@@ -2841,6 +2869,7 @@
 <li>One row per <code>unique_key</code> value (the <code>GROUP BY</code> column list).</li>
 <li>Per-key columns whose values reflect the combined state across every processed source window.</li>
 <li>By default: <strong>no</strong> <code>partition_column</code>, <strong>no</strong> <code>event_time_column</code>, and <strong>no</strong> <code>timeseries:</code> declaration on the model itself.</li>
+<li>A model <strong>may</strong> additionally declare <code>timeseries:</code> to time-partition its keyed output — the composed (key + time) shape — when key temporal locality can be established; see <a href="../timeseries/#interaction-with-grain-key">Timeseries reference</a> and the <a href="../../guide/incremental-models/#the-composed-shape-key-time">composed-shape guide</a>.</li>
 </ul>
 <p>Downstream consumers see the key-grain output as a lookup — there is no partition information to push down. Joins to the table read it in full each run, identical to the treatment of any non-<code>timeseries:</code> source.</p>
 <h2 id="related-references">Related references<a class="headerlink" href="#related-references" title="Permanent link">&para;</a></h2>
