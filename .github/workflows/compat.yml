@@ -30,6 +30,8 @@ jobs:
           filters: |
             spark:
               - 'crates/smelt-backend-spark/**'
+              - 'crates/smelt-logical/**'
+              - 'crates/smelt-runtime/**'
               - 'crates/smelt-cli/tests/*parity*'
               - 'crates/smelt-types/src/signatures.rs'
               - 'crates/smelt-db/src/type_inference*/**'
