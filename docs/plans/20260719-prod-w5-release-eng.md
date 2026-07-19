@@ -64,7 +64,7 @@ The production-release review found the release plumbing genuinely strong (tag-t
 | 2     | done     | (this commit) | 2026-07-20 |
 | 3     | done     | (this commit) | 2026-07-20 |
 | 4     | done     | (this commit) | 2026-07-20 |
-| 5     | pending  |        |      |
+| 5     | done     | (this commit) | 2026-07-20 |
 | 6     | pending  |        |      |
 
 ## Phase detail
@@ -219,6 +219,8 @@ The production-release review found the release plumbing genuinely strong (tag-t
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 5 (2026-07-20)**: creating and pushing the external `adbrowne/homebrew-smelt` tap repo is human-gated — Andrew owns that repo. Until it exists, `installation.md` does not gain a Homebrew subsection (would promise a channel that isn't live yet); `packaging/homebrew/README.md` documents the bootstrap once the tap repo is created. Formula sha256 placeholders are filled by `scripts/update-homebrew-formula.sh` after the first tagged release with standalone artifacts to fetch.
 
 ## Verification
 

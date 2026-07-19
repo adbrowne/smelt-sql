@@ -73,9 +73,11 @@ and are not part of this checklist.
 - **Docker image** — the `docker` job in `release.yml` builds, smoke-tests,
   and pushes automatically; `docker pull ghcr.io/adbrowne/smelt:X.Y.Z` once
   to sanity-check after the workflow completes.
-- **Homebrew tap** — bump the formula in the `homebrew-smelt` tap repo (a
-  separate repo Andrew owns) to point at the new tag's tarball + updated
-  SHA256; this is not driven by `release.yml`.
+- **Homebrew tap** — run `scripts/update-homebrew-formula.sh X.Y.Z` to
+  refresh `packaging/homebrew/Formula/smelt.rb`'s version + sha256s from the
+  new release's standalone tarballs, then copy the updated formula into the
+  `homebrew-smelt` tap repo (a separate repo Andrew owns) and push; this is
+  not driven by `release.yml`. See `packaging/homebrew/README.md`.
 - **Announcement** — post the GitHub release notes wherever the project
   announces releases.
 
