@@ -40,7 +40,7 @@ top-to-bottom; the first sub-plan whose Status is **not** `done` and that still 
 | Sub-plan | What it delivers | Status |
 |----------|------------------|--------|
 | [`docs/plans/20260718-quality-grind-t1.md`](20260718-quality-grind-t1.md) | **Tier 1 — small, root-caused fixes.** Parser ledger categories triaged "Small" (`NOT`-prefixed binary operators, `==`, quoted table names in FROM, `RANGE` as identifier/function, `NULL::TYPE`, parenthesized set-op trailing ORDER BY), the TABLESAMPLE/alias ordering bug, VALUES-body CTE arity, sub-day interval mis-parse, UTF-8 diagnostic positions + smelt-ui LineIndex, registry gaps (`to_seconds`, `md5`), and the documentation-gap batch. | done (2026-07-19) |
-| [`docs/plans/20260718-quality-grind-t2.md`](20260718-quality-grind-t2.md) | **Tier 2 — well-understood, larger.** Property-test generator deferred items (aggregate FILTER, ordered-set aggregates / WITHIN GROUP, two-column aggregates, ARRAY, ROW/STRUCT), the smelt-planner↔smelt-logical duplicated-module consolidation, the cold-Salsa 2000-model benchmark regression investigation, and two CLI ergonomics fixes. | pending |
+| [`docs/plans/20260718-quality-grind-t2.md`](20260718-quality-grind-t2.md) | **Tier 2 — well-understood, larger.** Property-test generator deferred items (aggregate FILTER, ordered-set aggregates / WITHIN GROUP, two-column aggregates, ARRAY, ROW/STRUCT), the smelt-planner↔smelt-logical duplicated-module consolidation, the cold-Salsa 2000-model benchmark regression investigation, and two CLI ergonomics fixes. | done (2026-07-19) |
 | [`docs/plans/20260718-quality-grind-t3.md`](20260718-quality-grind-t3.md) | **Tier 3 — ratified decisions (2026-07-18).** Comma-join = cross join (grammar + printer, then join-type classification + oracle-verified schema expansion, closing the 25-entry ledger category), and P7d close-out hygiene (stale `meta_config_e2e.rs` comment, stale `docs/TODO.md` §P7c section — the Map-consumption surface chosen under D-QG-1 was found already landed as P7d). | done (2026-07-19) |
 
 ## Progress tracking (human-facing overview)
@@ -48,7 +48,7 @@ top-to-bottom; the first sub-plan whose Status is **not** `done` and that still 
 | Tier | Sub-plan | Phases | Status |
 |------|----------|--------|--------|
 | 1 | 20260718-quality-grind-t1.md | 12 | done (2026-07-19) |
-| 2 | 20260718-quality-grind-t2.md | 9 | pending |
+| 2 | 20260718-quality-grind-t2.md | 9 | done (2026-07-19) |
 | 3 | 20260718-quality-grind-t3.md | 3 | done (2026-07-19) |
 
 ## Tier 3 — decision queue (NOT loop work)

@@ -65,7 +65,7 @@ since 2026-07-09.
 | 6     | done    | refactor(planner): consume smelt-logical analysis modules, delete duplicated copies (part 1) | 2026-07-19 |
 | 7     | done    | refactor(planner): consume smelt-logical rules/graph/lowering, delete duplicated copies (part 2) | 2026-07-19 |
 | 8     | done    | perf(bench): profile cold-Salsa 2000-model regression; findings + decision brief | 2026-07-19 |
-| 9     | blocked | (see Blocked phases) | 2026-07-19 |
+| 9     | done    | fix(cli): delete unreachable smelt-test skip warning (9(b) dropped per human decision) | 2026-07-19 |
 
 ---
 
@@ -393,6 +393,15 @@ implementing it as literally written requires a new, unspecified design decision
   - Recommendation: option 2 (drop 9(b), delete the dead `warn!`) unless a human confirms
     the "boolean-SELECT file under `tests/`" heuristic is worth the false-positive risk.
   - Part (a) needs no further action; this block is solely about 9(b)'s scope.
+
+**Resolved 2026-07-19.** Human decision: option 2 — drop 9(b), delete the dead code.
+The unreachable `warn!("SKIP {} (no smelt.test declarations found)", ...)` at
+`crates/smelt-cli/src/commands/test.rs` (formerly lines 503-507, inside the
+`for test_model in &selected_tests` loop, itself pre-filtered by `ModelFile::is_test()`)
+was deleted along with the now-unused `warn` import. Verified: `cargo build -p
+smelt-cli` and `cargo clippy -p smelt-cli --all-targets` clean;
+`smelt_test_new_syntax`, `test_inlining_diagnostics`, and the `e2e` suite's
+`verbose_flag::*` / `meta_config_e2e::*` tests all green. Phase 9 marked `done`.
 
 ## Bench findings
 

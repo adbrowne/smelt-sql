@@ -5,7 +5,7 @@ use smelt_cli::{
 use smelt_core::graph::DependencyGraph;
 use std::collections::HashMap;
 
-use tracing::{debug, warn};
+use tracing::debug;
 
 use crate::helpers::{print_property_test_result, print_test_result};
 use crate::TestArgs;
@@ -500,11 +500,6 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
             }
         }
         // ── End smelt.test path ──────────────────────────────────────────────
-        // A test file with no smelt.test declarations is skipped (warn).
-        warn!(
-            "SKIP {} (no smelt.test declarations found)",
-            test_model.name
-        );
     }
 
     // 6. Output results
