@@ -1111,6 +1111,138 @@ pub fn arb_composed_route3_schedule() -> impl Strategy<Value = ComposedRoute3Sch
     })
 }
 
+// =============================================================================
+// `EnrichmentEdgeRecipe` (`docs/plans/20260715-composed-axes-conditional-
+// maintenance.md` Phase E4): a model-edge enrichment shape for the
+// delta-restricted-vs-widened-scan equivalence gate. Styled after the real
+// `examples/web_analytics` shape `crates/smelt-runtime/tests/
+// web_analytics_session_delta_restriction.rs` already exercises
+// (`silver.events_deduped` -> `silver.sessions`, event-grain enrichment):
+// column/table names match that fixture so the recipe's own P1 closure
+// verdict is derived through the SAME real production entry point
+// (`smelt_logical::maintenance::derive::append_model_edge_cells`), not a
+// hand-typed classification.
+// =============================================================================
+
+/// How the enrichment scope's own join is shaped — exactly one of the four
+/// is closure-admissible for a MODEL EDGE (unlike a source edge, a model
+/// edge's row-preservation conjunct never has a `referential_integrity`
+/// declaration to consult — `derive::model_edge_enrichment_closure` always
+/// passes `None` — so only [`EnrichmentJoinKind::LeftJoin`] proves P1
+/// `Closed`; both `InnerJoin` and `MembershipPredicate` are closure-failing
+/// siblings for two different conjuncts (row preservation, membership
+/// predicate)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrichmentJoinKind {
+    /// `LEFT JOIN`, payload-only, no membership predicate — all five
+    /// conjuncts prove; P1 is `Closed`.
+    LeftJoin,
+    /// Bare inner `JOIN` — row preservation (conjunct 4) cannot be proven
+    /// for a model edge (no `referential_integrity` world-fact applies);
+    /// `Open`.
+    InnerJoin,
+    /// `LEFT JOIN` plus a `WHERE` predicate testing an enrichment-side
+    /// column — membership predicate (conjunct 5) fails; `Open`.
+    MembershipPredicate,
+}
+
+/// A model-edge enrichment recipe: `silver.events_deduped` (driving,
+/// clocked) enriched by a `LEFT JOIN`/`JOIN` against `silver.sessions`
+/// (the joined model edge), varied only by [`EnrichmentJoinKind`] — the
+/// pool's generative surface for this phase is the SCHEDULE (which keys
+/// change and how), not the body shape, mirroring [`crate::dag`]'s own
+/// documented convention.
+#[derive(Debug, Clone, Copy)]
+pub struct EnrichmentEdgeRecipe {
+    pub join_kind: EnrichmentJoinKind,
+}
+
+impl EnrichmentEdgeRecipe {
+    pub fn new(join_kind: EnrichmentJoinKind) -> Self {
+        Self { join_kind }
+    }
+
+    /// Whether this shape is expected to prove P1 `Closed` — recorded on
+    /// the recipe itself (not re-derived by the gate) so the pool's
+    /// admission-rate floor can assert against a known expectation.
+    pub fn expects_closed(self) -> bool {
+        matches!(self.join_kind, EnrichmentJoinKind::LeftJoin)
+    }
+
+    /// The driving model edge's bare address — the `Trigger::NewData`
+    /// source name this recipe's creation cell keys off of.
+    pub fn driving_source(self) -> &'static str {
+        "silver.events_deduped"
+    }
+
+    /// The joined (enrichment) model edge's bare address.
+    pub fn joined_source(self) -> &'static str {
+        "silver.sessions"
+    }
+
+    /// The two model edges this recipe's scope reads, in the shape
+    /// `smelt_logical::maintenance::derive::append_model_edge_cells` expects.
+    pub fn model_edges(self) -> Vec<smelt_logical::maintenance::derive::ModelEdge> {
+        vec![
+            smelt_logical::maintenance::derive::ModelEdge {
+                name: self.driving_source().to_string(),
+                clock_col: Some("event_date".to_string()),
+                unique_key: vec!["event_id".to_string()],
+            },
+            smelt_logical::maintenance::derive::ModelEdge {
+                name: self.joined_source().to_string(),
+                clock_col: Some("event_date".to_string()),
+                unique_key: vec!["device_id".to_string()],
+            },
+        ]
+    }
+
+    /// The model's own `SELECT` body — column names match
+    /// `web_analytics_session_delta_restriction.rs`'s
+    /// `EVENTS_ENRICHED_SQL` fixture.
+    pub fn model_body(self) -> String {
+        let join = match self.join_kind {
+            EnrichmentJoinKind::LeftJoin | EnrichmentJoinKind::MembershipPredicate => "LEFT JOIN",
+            EnrichmentJoinKind::InnerJoin => "JOIN",
+        };
+        let where_clause = match self.join_kind {
+            EnrichmentJoinKind::MembershipPredicate => " WHERE s.session_utm_campaign IS NOT NULL",
+            _ => "",
+        };
+        format!(
+            "SELECT e.event_id, e.device_id, e.event_date, e.utm_campaign AS event_utm_campaign, \
+             s.session_id, s.utm_campaign AS session_utm_campaign \
+             FROM smelt.silver.events_deduped e {join} smelt.silver.sessions s \
+             ON e.device_id = s.device_id{where_clause}"
+        )
+    }
+}
+
+/// A generated schedule for `delta_restricted_equals_widened_scan_at_fixed_s`:
+/// [`EnrichmentEdgeRecipe`]'s pool is fixed-shape (three [`EnrichmentJoinKind`]
+/// variants); the generative surface is which of `total` fixed baseline keys
+/// this run's upstream delta touched (a non-empty, proper subset — at least
+/// one key changes, at least one stays untouched so the equivalence claim is
+/// non-vacuous).
+#[derive(Debug, Clone)]
+pub struct EnrichmentEdgeSchedule {
+    pub touched_indices: Vec<usize>,
+}
+
+pub fn arb_enrichment_edge_recipe() -> impl Strategy<Value = EnrichmentEdgeRecipe> {
+    prop_oneof![
+        Just(EnrichmentJoinKind::LeftJoin),
+        Just(EnrichmentJoinKind::InnerJoin),
+        Just(EnrichmentJoinKind::MembershipPredicate),
+    ]
+    .prop_map(EnrichmentEdgeRecipe::new)
+}
+
+pub fn arb_enrichment_edge_schedule(total: usize) -> impl Strategy<Value = EnrichmentEdgeSchedule> {
+    proptest::sample::subsequence((0..total).collect::<Vec<usize>>(), 1..total)
+        .prop_map(|touched_indices| EnrichmentEdgeSchedule { touched_indices })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

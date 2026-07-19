@@ -102,7 +102,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | E1 | Spec diff: `model_properties.md` P1 skeleton-source closure; `sources.md` referential-integrity world-fact + count-preservation tripwire | done (2026-07-19) |
 | E2 | P1 skeleton-source-closure proof (fail-closed to `Open`) | done (2026-07-19) |
 | E3 | T3 delta-restricted compute over model edges (web-analytics events→sessions chain demo) | done (2026-07-19) |
-| E4 | Conformance legs: delta-restricted vs widened-scan equivalence; empty-delta no-op cascade end-to-end | pending |
+| E4 | Conformance legs: delta-restricted vs widened-scan equivalence; empty-delta no-op cascade end-to-end | done (2026-07-19) |
 | F1 | Spec diff: fingerprint sidecar (naming, storage, transactionality, invalidation; digest stance vs `output_fingerprint.md`); P4 projection derivation | pending |
 | F2 | P4 fingerprint-projection derivation (fail-closed: unprojectable ⇒ full-row digest) | pending |
 | F3 | T4 sidecar DDL/DML via emitters, upserted in the consuming write's transaction; external `mutable_snapshot` delta derivation | pending |

@@ -2295,7 +2295,17 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
   and declared-recurrence-bounded with in-bound redeliveries (both driven directly against a real
   DuckDB backend, the workaround `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`
   also uses) — asserting whole-table and per-slice equivalence after every step, gated by its own
-  admission-rate floor (`SMELT_CONFORMANCE_COMPOSED_CASES` scales its sample depth). The
+  admission-rate floor (`SMELT_CONFORMANCE_COMPOSED_CASES` scales its sample depth). A generated
+  model-edge enrichment recipe family (one closure-admissible `LEFT JOIN` shape and its two
+  closure-failing siblings — a bare inner join, and a membership predicate over an enrichment
+  column) drives the delta-restricted-vs-widened-scan choice both ways over the same fixed
+  processed-input set `S` — its own P1 skeleton-source-closure verdict, derived through the real
+  per-cell derivation rather than asserted, gates which cases the equivalence check runs, and the
+  end states must be bit-identical; a second case drives a fully-suppressed conditional write
+  through its own real observed-delta recording and asserts the cascade this composition exists
+  to unlock — zero rows written, a present-and-empty recorded delta, zero regions scheduled across
+  every downstream consumer, and an end state still equal to a from-scratch full-refresh oracle —
+  both gated by their own admission-rate floor. The
   key-determined route's merge mechanics (write-once partition, additive fold) are exercised this
   way against real DuckDB, but its slice-pruned target scan is not — the driver runs every
   key-determined step with the slice predicate omitted because DuckDB's `MERGE` binder refuses the
