@@ -63,7 +63,7 @@ explicitly parked. Decisions recorded inline as they are made.
 | D-QG-2 | Implicit comma-join semantics (25 ledger entries) | Whether `FROM a, b` becomes a first-class cross-join in `JoinClause::join_type()` (inference semantics, not grammar) | **decided 2026-07-18: implement** (comma-join = cross join) — scaffolded into [`20260718-quality-grind-t3.md`](20260718-quality-grind-t3.md) |
 | D-QG-3 | ON-join `SELECT *` right-side expansion (`docs/TODO.md` 2026-07-12) | Admitting duplicate column names into inferred schemas — affects find-by-name consumers, LSP completion, input-constraint keying | **decided 2026-07-18: defer** — current left-side-only behavior stays pinned by `on_join_star_current_behavior_left_side_only`; revisit when it bites a real workspace |
 | D-QG-4 | `smelt bakeoff` CLI (ROADMAP §10, deferred) | Three design questions: single-technique force-execute plumbing, `--pin` frontmatter round-trip, `smelt-cli` commands-module visibility | **decided 2026-07-18: keep parked** — nothing else blocks on it |
-| D-QG-5 | Cold-Salsa benchmark ceiling (fed by T2 Phase 8's profile) | Optimize the offending analysis vs raise the 10s ceiling | open — awaiting T2·P8 findings |
+| D-QG-5 | Cold-Salsa benchmark ceiling (fed by T2 Phase 8's profile) | Optimize the offending analysis vs raise the 10s ceiling | **resolved 2026-07-19: moot** — T2·P8 found the regression was already fixed by `bf881006` (2026-07-11), an ancestor of this branch's HEAD; current numbers (~395ms/~334ms) are ~25x under the 10s ceiling. `docs/ROADMAP.md`'s still-red entry was stale (never updated after the fix) and has been corrected. Neither branch of this decision applies. |
 
 ## Deferred during implementation
 

@@ -64,7 +64,7 @@ since 2026-07-09.
 | 5     | done    | test(props): generate ROW/STRUCT constructors with field-exact comparison | 2026-07-19 |
 | 6     | done    | refactor(planner): consume smelt-logical analysis modules, delete duplicated copies (part 1) | 2026-07-19 |
 | 7     | done    | refactor(planner): consume smelt-logical rules/graph/lowering, delete duplicated copies (part 2) | 2026-07-19 |
-| 8     | pending |        |      |
+| 8     | done    | perf(bench): profile cold-Salsa 2000-model regression; findings + decision brief | 2026-07-19 |
 | 9     | pending |        |      |
 
 ---
@@ -346,7 +346,44 @@ if it documents the flag (timeless wording).
 
 ## Bench findings
 
-(Phase 8 writes its dated profile breakdown here.)
+**2026-07-19 (Phase 8).** The regression was already fixed before this programme
+started, by `bf881006` ("fix(db): cache smelt.yml parse for maintenance/state
+queries, fix O(N) CI bench regression", 2026-07-11), which is an ancestor of
+this branch's HEAD. Root cause per that commit: `maintenance_plan`,
+`maintenance_plan_report`, and the `state.mode` widening check each re-parsed
+`smelt.yml`'s full YAML text on every per-file Salsa query instead of going
+through a cached tracked query — O(N) `serde_yaml` reparsing across the
+2000-model workspace. The fix added `project_maintenance_config` and
+`project_state_mode` tracked queries (mirroring `project_paths`) so the config
+parses once per revision.
+
+Reproduced locally on this branch (`cargo run -p smelt-bench --bin save-results
+--release`, commit `906ac54`, best-of-3):
+
+| Metric | Value | Ceiling |
+|---|---|---|
+| `initial_load_ms` | 394.5 | 10,000 |
+| `full_diagnostics_ms` | 333.9 | 10,000 |
+
+Both ~25x under the 10s ceiling — no catastrophic regression present. The
+per-analysis decomposition (`decompose_initial_load`, best-of-8, 1000 SQL
+files) confirms no new hot spot in the walk/monotonicity-trace/skew-classifier
+analyses added around PR #151:
+
+| Pass | Best (ms) |
+|---|---|
+| ingest (inputs) | 0.4 |
+| `all_models` | 13.5 |
+| `type_context` (all) | 121.3 |
+| `file_diagnostics` (all) | 381.7 |
+| — diag work beyond type_context | 260.5 |
+
+**Conclusion: no fix needed in this phase — the docs/ROADMAP.md "Deferred-Work
+Backlog" entry describing this as still-red is stale** (it was added the same
+day as the regression, before `bf881006` landed hours later, and was never
+updated). Corrected in this commit. D-QG-5 in the master plan is resolved as
+moot: the regression that motivated the "optimize vs raise ceiling" decision
+no longer exists, so neither branch of that decision applies.
 
 ## Deferred during implementation
 
