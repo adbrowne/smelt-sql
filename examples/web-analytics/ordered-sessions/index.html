@@ -1870,6 +1870,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../deduplication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication Without the Workaround
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../sessions/" class="md-nav__link">
         
   
@@ -2579,7 +2607,7 @@ part of the plan:</p>
 <a id="__codelineno-0-7" name="__codelineno-0-7" href="#__codelineno-0-7"></a><span class="w">  </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">_smelt_output_clamp</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
 <a id="__codelineno-0-8" name="__codelineno-0-8" href="#__codelineno-0-8"></a><span class="k">COMMIT</span>
 <a id="__codelineno-0-9" name="__codelineno-0-9" href="#__codelineno-0-9"></a>
-<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">-- trigger: NewData { source: &quot;silver.events_parsed&quot; }</span>
+<a id="__codelineno-0-10" name="__codelineno-0-10" href="#__codelineno-0-10"></a><span class="c1">-- trigger: NewData { source: &quot;silver.events_deduped&quot; }</span>
 <a id="__codelineno-0-11" name="__codelineno-0-11" href="#__codelineno-0-11"></a><span class="k">BEGIN</span>
 <a id="__codelineno-0-12" name="__codelineno-0-12" href="#__codelineno-0-12"></a><span class="w">  </span><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2026-04-09&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">session_start_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2026-04-11&#39;</span>
 <a id="__codelineno-0-13" name="__codelineno-0-13" href="#__codelineno-0-13"></a><span class="w">  </span><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">main</span><span class="p">.</span><span class="n">silver_sessions_chained</span><span class="w"> </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>

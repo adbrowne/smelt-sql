@@ -1862,6 +1862,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../examples/web-analytics/deduplication/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Deduplication Without the Workaround
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../examples/web-analytics/sessions/" class="md-nav__link">
         
   
@@ -3458,13 +3486,13 @@
 <p>Every <code>refresh: incremental</code> model with a declared <code>grain:</code> derives a maintenance plan whose cells carry a derived scan clamp per input — the same window the maintenance SQL itself reads (<code>smelt explain &lt;model&gt;</code> prints it). <code>--since-upstream</code> composes those clamps into a propagation graph and walks it forward from <strong>caller-declared</strong> per-source deltas: for each <code>--source &lt;address&gt; --landed &lt;start&gt;..&lt;end&gt;</code> pair, the delta reflects through every downstream edge, dirtying exactly the partitions that delta can affect, recursively through the dependency chain. The dirty set is printed before anything runs, then <code>smelt</code> runs exactly those <code>(model, region)</code> pairs — never a partition outside the propagated set.</p>
 <p><code>--source</code> and <code>--landed</code> are repeatable and pair up positionally: the first <code>--source</code> pairs with the first <code>--landed</code>, and so on. A source named without a matching <code>--landed</code> interval contributes nothing for that invocation — there is no implicit whole-table fallback and no automatic discovery of what changed. The runner (or an external poller that watches the real upstream systems) is responsible for telling <code>smelt</code> what landed; a cron tick is only the trigger to ask.</p>
 <p>An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (<code>bronze</code>), with its <code>sources.</code> breadcrumb (<code>sources.bronze</code>), or with the full <code>smelt.</code> prefix (<code>smelt.sources.bronze</code>) — all three resolve identically.</p>
-<p><code>--source</code> also accepts an <strong>upstream maintained model</strong> as the delta origin — a model's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp <code>smelt explain</code> reports for it), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op.</p>
+<p><code>--source</code> accepts any <strong>clocked provider</strong> as the delta origin — a declared source, or an upstream maintained model, whether ordinary (<code>grain: partition</code>/<code>key_per_partition</code>) or a <strong>locality-admitted composed model</strong> (<code>grain: key</code> plus an admitted <code>timeseries:</code> block — see <a href="../../guide/incremental-models/#the-composed-shape-key-time">the composed shape</a>). A model origin's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp <code>smelt explain</code> reports for it — a composed origin's edge carries its admitted route's own margin), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op. A <strong>bare</strong> keyed model (no admitted <code>timeseries:</code>) still refuses fail-loud as a <code>--source</code> origin, the same as anywhere else in the propagation graph — it has no partition axis for interval dirt to propagate over.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1"># silver.events_parsed finished a run over Jan 3; propagate that landed</span>
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="c1"># window to everything downstream of it (the origin model is not re-run).</span>
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>smelt<span class="w"> </span>run<span class="w"> </span>--since-upstream<span class="w"> </span><span class="se">\</span>
 <a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="w">  </span>--source<span class="w"> </span>silver.events_parsed<span class="w"> </span>--landed<span class="w"> </span><span class="m">2026</span>-01-03..2026-01-04
 </code></pre></div>
-<p>A model whose dependency graph contains a cycle, a self-reference, or a keyed-grain node (no partition axis for interval dirt) refuses the whole <code>--since-upstream</code> invocation with a named error rather than guessing.</p>
+<p>A model whose dependency graph contains a cycle, a self-reference, or a <strong>bare</strong> keyed-grain node (no admitted time axis, so no partition axis for interval dirt to propagate over) refuses the whole <code>--since-upstream</code> invocation with a named error rather than guessing. A locality-admitted composed node is not refused — it participates in propagation like any other clocked node, both as an intermediate stage and as the <code>--source</code> origin itself.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1"># Two sources landed data since the last propagation; run exactly the</span>
 <a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="c1"># partitions each delta can affect.</span>
 <a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a>smelt<span class="w"> </span>run<span class="w"> </span>--since-upstream<span class="w"> </span><span class="se">\</span>
@@ -4559,9 +4587,40 @@
 cell (trigger, corner, technique), the <code>ledger_catch_up</code> flag (whether the cell routes through
 the <a href="../../guide/incremental-models/#the-reconciliation-ledger">reconciliation ledger</a>), the
 derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-and the model's inbound edges. This only applies to incremental models (<code>refresh: incremental</code>
-with a <code>grain:</code> declared)
-— other models print a one-line notice instead.</p>
+the model's own <strong>Relation Contract</strong> (its clock, identity, and derived <code>grain</code> label), and one
+contract block per <strong>inbound edge</strong>. This only applies to incremental models (<code>refresh:
+incremental</code> with a <code>grain:</code> declared) — other models print a one-line notice instead.</p>
+<p>A <code>ColumnScopedMerge</code> cell's block additionally prints an <code>observed-delta recording:</code> line —
+the only technique family recording is wired for today (<code>KeyedFold</code> and the staged-candidate
+write family do not record yet, so their cells print no such line at all). The line still says
+<code>yes</code> or <code>no</code>: recording only actually fires when the cell's matched arm can suppress the write
+for unchanged rows, which needs a proven per-row identity (<code>region key:</code> must be <code>Key(...)</code>,
+never <code>WholeRow</code>) over columns all proven comparable across runs — a cell that fails either
+check falls back to an unconditional rewrite at runtime and has nothing to record, so its line
+reads <code>no</code>. For a composed (key + time)
+model, the <code>Key temporal locality:</code> block prints an <code>observed-delta projection:</code> line alongside
+its route and settle bound: <code>exact (key-embedded)</code> / <code>exact (key-determined)</code> for locality
+routes 1–2, <code>widened by `r` + margins</code> for route 3, since a key's stored partition can move
+under that route. A bare keyed model (no established locality) prints no <code>Key temporal
+locality:</code> block and no projection line — see <a href="../../guide/incremental-models/#observed-deltas-and-no-op-cascades">Observed deltas and no-op
+cascades</a>. Both lines are
+static facts about the derived plan, not about a specific past run: <code>smelt explain</code> never opens
+a backend connection, so it reports what a cell's technique <em>would</em> record and how its route
+<em>would</em> project.</p>
+<p>Every cell also prints an <code>admissible write patterns:</code> line — the physical addressing patterns
+(<code>region</code>, <code>keyed</code>, <code>column</code>, <code>update</code>, <code>full_rebuild</code>, and any backend-contributed pattern) the
+cell's own declared facts and target backend admit — and a <code>write pin:</code> line showing the
+<a href="../smelt-yml/#cellswrite--the-physical-addressing-pin"><code>maintenance.cells[].write</code> pin</a>, if one is
+set (<code>(none)</code> otherwise). A <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell additionally prints a
+<code>write variant:</code> line naming whether that cell's matched arm resolves suppressed or unconditional
+and why — <code>preference</code> (the structural steady-state-vs-first-build default), <code>first-build posture</code>,
+or a <code>technique:</code>/<code>prefer:</code> pin's own name — see <a href="../../guide/incremental-models/#steering-prefer--technique">Steering: prefer /
+technique</a>.</p>
+<p>An inbound edge is either a declared source (<code>sources.*</code>) or an upstream maintained model —
+both render through the identical <code>clock:</code> / <code>identity:</code> / <code>derived grain:</code> rows, labelled
+<code>(source)</code> or <code>(model)</code> so it's clear which provider filled them. A row prints <code>(none)</code> when
+that provider declares neither fact — a source with no <code>timeseries:</code> and no <code>unique_key:</code> is
+legal and simply has nothing to summarize, never an error.</p>
 <p>Add <code>--show-sql</code> to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
 compiled through the same compiler a real run uses, including the real ephemeral resolver (so a
@@ -4581,6 +4640,13 @@ directly off an ephemeral ref (e.g. <code>SUM(rate)</code> where <code>rate</cod
 ephemeral model) casts to the <code>BIGINT</code> default rather than its real type — this is a compile-order
 limitation in the shared compiler that a real run hits identically, so <code>--show-sql</code> still matches
 what a run executes, casting quirk included. See <code>docs/specs/cli.md</code> Known Divergences.</p>
+<p>A second, currently wider divergence: for a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell whose write is
+<a href="../../guide/incremental-models/#conditional-writes">conditionally suppressed</a> at run time, <code>--show-sql</code>
+always renders the unconditional matched arm (<code>WHEN MATCHED THEN UPDATE SET *</code>/the plain fold), never
+the <code>IS DISTINCT FROM</code>-guarded suppressed form the live run actually executes — the report hasn't been
+wired to the same suppression check yet. The cell's <code>region key:</code> row (<code>WholeRow</code> vs. a named key) is
+still a reliable signal for one half of the admission rule: a <code>WholeRow</code> region key means that cell
+never suppresses, regardless of what <code>--show-sql</code> prints.</p>
 <p><strong>Examples:</strong></p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="c1"># Show the explain output</span>
 <a id="__codelineno-41-2" name="__codelineno-41-2" href="#__codelineno-41-2"></a>smelt<span class="w"> </span>explain
@@ -4625,7 +4691,16 @@ what a run executes, casting quirk included. See <code>docs/specs/cli.md</code> 
 <a id="__codelineno-42-17" name="__codelineno-42-17" href="#__codelineno-42-17"></a>
 <a id="__codelineno-42-18" name="__codelineno-42-18" href="#__codelineno-42-18"></a>Refusals: (none)
 <a id="__codelineno-42-19" name="__codelineno-42-19" href="#__codelineno-42-19"></a>
-<a id="__codelineno-42-20" name="__codelineno-42-20" href="#__codelineno-42-20"></a>Inbound edges: (none)
+<a id="__codelineno-42-20" name="__codelineno-42-20" href="#__codelineno-42-20"></a>Relation contract:
+<a id="__codelineno-42-21" name="__codelineno-42-21" href="#__codelineno-42-21"></a>  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+<a id="__codelineno-42-22" name="__codelineno-42-22" href="#__codelineno-42-22"></a>  identity: (none)
+<a id="__codelineno-42-23" name="__codelineno-42-23" href="#__codelineno-42-23"></a>  derived grain: partition
+<a id="__codelineno-42-24" name="__codelineno-42-24" href="#__codelineno-42-24"></a>
+<a id="__codelineno-42-25" name="__codelineno-42-25" href="#__codelineno-42-25"></a>Inbound edges: sources.raw.events
+<a id="__codelineno-42-26" name="__codelineno-42-26" href="#__codelineno-42-26"></a>  - sources.raw.events (source)
+<a id="__codelineno-42-27" name="__codelineno-42-27" href="#__codelineno-42-27"></a>      clock:    (none)
+<a id="__codelineno-42-28" name="__codelineno-42-28" href="#__codelineno-42-28"></a>      identity: event_id
+<a id="__codelineno-42-29" name="__codelineno-42-29" href="#__codelineno-42-29"></a>      derived grain: key
 </code></pre></div>
 <hr />
 <h2 id="smelt-ui">smelt ui<a class="headerlink" href="#smelt-ui" title="Permanent link">&para;</a></h2>
