@@ -275,7 +275,28 @@ The v0.5 release review positions Spark as beta unless promoted (decision D1). T
 
 #### Phase 7 evidence
 
-(recorded at execution time)
+- **Empirical gate check (finding 1).** Tracking PR opened:
+  [#165](https://github.com/adbrowne/smelt-sql/pull/165) (`worktree-production` → `main`,
+  Spark-relevant paths touched). On the PR head: `Detect Spark-relevant changes` **pass**;
+  `Spark Parity Tests (Delta, Docker)` **pass** (3m55s); `Type Property Tests
+  (DuckDB + Spark)` **pass** (2m5s); `Spark SQL Integration Tests (Docker)` **skipping**
+  (correctly stays nightly/label-gated). The per-PR gate is verified end-to-end: fires on
+  Spark-relevant paths, runs green, corpus-driven job stays nightly-only.
+- **Sweep re-run (finding 4), 2026-07-20, live server `sc://localhost:15002`
+  (worktree-bound container), `DUCKDB_LIB_DIR` set.**
+  - `cargo test -p smelt-backend-spark --quiet`: 5 test binaries, **31 passed, 0 failed,
+    0 ignored** (27+2+1+1+0), zero `skip` matches in output.
+  - `cargo test -p smelt-cli --features smelt-cli/spark --quiet`: 27 test binaries,
+    **647 passed, 1 failed, 1 ignored**. The single failure
+    (`materialization_parity::view_and_table_materialize_consistently_on_both`,
+    "Spark backend not available") was an environment race, not a regression: the
+    autonomy loop's concurrent non-Spark `cargo build` in the same worktree overwrote
+    the shared `target/debug/smelt` binary mid-sweep (the test spawns
+    `CARGO_BIN_EXE_smelt`); an immediate isolated rerun of the same test binary is
+    green (2 passed, 0 failed). The 1 ignored test is the pre-existing non-Spark
+    `example_diagnostics` `ConfigLoaderDuplicateMapKey` case (untriggerable via real
+    files), not a Spark assertion. Zero `skip` matches in either sweep log (the one
+    grep hit is the test *name* `probe_skips_are_counted_never_silent`).
 
 ## Deferred during implementation
 
