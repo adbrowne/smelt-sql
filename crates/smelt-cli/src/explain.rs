@@ -1728,6 +1728,7 @@ mod tests {
                 proven_mismatch: None,
             },
             skeleton_source_closure: None,
+            fingerprint_projections: std::collections::BTreeMap::new(),
         };
 
         let source_timeseries = smelt_planner::SourceTimeseriesMap::new();

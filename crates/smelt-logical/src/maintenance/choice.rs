@@ -767,6 +767,7 @@ mod tests {
                     proven_mismatch: None,
                 },
                 skeleton_source_closure: None,
+                fingerprint_projections: std::collections::BTreeMap::new(),
             }],
             refusals: vec![],
             key_locality: None,

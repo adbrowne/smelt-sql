@@ -36,6 +36,7 @@ pub mod skeleton;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+pub use crate::analysis::fingerprint::Projection as FingerprintProjection;
 pub use crate::analysis::skeleton_closure::SkeletonSourceClosure;
 use crate::analysis::walk::{ColumnComparability, Comparability};
 
@@ -252,6 +253,20 @@ pub struct PlanCell {
     /// a refusal. No consumer reads this yet (that is a later phase's
     /// scope, the delta-restricted enrichment join transform).
     pub skeleton_source_closure: Option<SkeletonSourceClosure>,
+    /// The fingerprint-projection verdict (P4, `model_properties.md`
+    /// §"Fingerprint projection") for each external source this cell reads,
+    /// keyed by source name — which of that source's columns feed the
+    /// model's output, the column set a row-content fingerprint sidecar
+    /// (`sources.md` §"The fingerprint sidecar") would digest instead of
+    /// the source's full row. Plain data, derived once per model by
+    /// [`crate::analysis::fingerprint::fingerprint_projection`] and shared
+    /// across every cell of that model (the projection is a property of
+    /// the model's own SQL against a source, not of any one trigger/
+    /// technique). Empty for a model-edge cell (`derive::
+    /// append_model_edge_cells`) — P4 is defined over external sources, not
+    /// upstream maintained models. No consumer reads this yet (that is
+    /// F3's sidecar-build/diff-query scope).
+    pub fingerprint_projections: BTreeMap<String, FingerprintProjection>,
 }
 
 /// A fail-loud refusal: the trigger has no admissible technique, or admitting

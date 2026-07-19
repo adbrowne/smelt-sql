@@ -2012,6 +2012,7 @@ mod tests {
                 proven_mismatch: None,
             },
             skeleton_source_closure: None,
+            fingerprint_projections: std::collections::BTreeMap::new(),
         }
     }
 
@@ -2034,6 +2035,7 @@ mod tests {
                 proven_mismatch: None,
             },
             skeleton_source_closure: None,
+            fingerprint_projections: std::collections::BTreeMap::new(),
         }
     }
 

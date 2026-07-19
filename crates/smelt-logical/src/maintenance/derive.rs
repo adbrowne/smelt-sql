@@ -6,15 +6,17 @@
 //! classifiers that do not exist yet (column groups, skeleton roles) — see
 //! the module doc in [`super`].
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use smelt_types::SqlFunction;
 
 use super::{
-    ColumnGroup, Corner, Grain, MaintenancePlan, MutationProfile, OutputSpec, PartitionLocal,
-    PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp, SourceFacts, Technique, Trigger,
+    ColumnGroup, Corner, FingerprintProjection, Grain, MaintenancePlan, MutationProfile,
+    OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp,
+    SourceFacts, Technique, Trigger,
 };
 use crate::analysis::discriminants::combiner_discriminants;
+use crate::analysis::fingerprint::fingerprint_projection;
 use crate::analysis::input_delta::{
     input_delta_discovery, InputDeltaKind, MutationProfile as DeltaMutationProfile, SourceShape,
 };
@@ -275,6 +277,11 @@ pub fn append_model_edge_cells(
             ledger_catch_up: false,
             row_identity: identity.clone(),
             skeleton_source_closure: enrichment_closure.clone(),
+            // P4 is defined over external sources, not upstream maintained
+            // models — a model-edge cell carries no fingerprint-projection
+            // verdicts (`PlanCell::fingerprint_projections`'s documented
+            // empty case).
+            fingerprint_projections: BTreeMap::new(),
         });
     }
 }
@@ -467,7 +474,33 @@ pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> Ma
             Trigger::Backfill => derive_backfill(inputs, &bounds, &identity, &mut plan),
         }
     }
+
+    // P4 fingerprint projection (`model_properties.md` §"Fingerprint
+    // projection"): a property of the model's own SQL against each
+    // declared source, not of any one trigger/technique — derived once and
+    // shared across every cell this model produced, mirroring how
+    // `identity` above is one row-identity verdict shared by every cell.
+    let projections = model_fingerprint_projections(inputs);
+    if !projections.is_empty() {
+        for cell in &mut plan.cells {
+            cell.fingerprint_projections = projections.clone();
+        }
+    }
+
     plan
+}
+
+/// Derive the P4 fingerprint-projection verdict (`model_properties.md`
+/// §"Fingerprint projection") of `inputs.sql` against every one of
+/// `inputs.sources` — the column set a row-content fingerprint sidecar
+/// would digest for each. Pure data; no sidecar/digest machinery here
+/// (that is F3's scope).
+fn model_fingerprint_projections(inputs: &ModelInputs) -> BTreeMap<String, FingerprintProjection> {
+    inputs
+        .sources
+        .iter()
+        .map(|s| (s.name.clone(), fingerprint_projection(inputs.sql, &s.name)))
+        .collect()
 }
 
 /// Creation: new rows in the driving source. Partition grain recomputes the
@@ -498,6 +531,7 @@ fn derive_new_data(
                 ledger_catch_up: false,
                 row_identity: identity.clone(),
                 skeleton_source_closure: None,
+                fingerprint_projections: BTreeMap::new(),
             });
         }
         Grain::Key { .. } => {
@@ -632,6 +666,7 @@ fn derive_new_data(
                 ledger_catch_up: false,
                 row_identity: identity.clone(),
                 skeleton_source_closure: None,
+                fingerprint_projections: BTreeMap::new(),
             });
         }
     }
@@ -706,6 +741,7 @@ fn derive_mutation(
             ledger_catch_up: false,
             row_identity: identity.clone(),
             skeleton_source_closure: None,
+            fingerprint_projections: BTreeMap::new(),
         });
     }
 }
@@ -755,6 +791,7 @@ fn derive_column_added(
                     ledger_catch_up: true,
                     row_identity: identity.clone(),
                     skeleton_source_closure: None,
+                    fingerprint_projections: BTreeMap::new(),
                 }),
                 Some(ModelDiff::NotAdditive { reason }) => {
                     plan.refusals.push(Refusal::NoAdmissibleTechnique {
@@ -830,6 +867,7 @@ fn derive_column_added(
             ledger_catch_up: true,
             row_identity: identity.clone(),
             skeleton_source_closure: None,
+            fingerprint_projections: BTreeMap::new(),
         });
     }
 }
@@ -853,6 +891,7 @@ fn derive_backfill(
         ledger_catch_up: false,
         row_identity: identity.clone(),
         skeleton_source_closure: None,
+        fingerprint_projections: BTreeMap::new(),
     });
 }
 
