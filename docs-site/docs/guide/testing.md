@@ -416,13 +416,39 @@ smelt check — declarative column tests
   PROVEN  orders.order_id.unique — no scan emitted
 ```
 
-A test that isn't proven is designed to lower to the same failing-rows scan machinery
-as a hand-written `smelt.check` — zero rows returned means the test passes. That scan
-is not wired up yet: today, an unproven test (including every `accepted_values` and
-`relationships` test, which have no proof path) is parsed and validated but does not
-run a scan or appear in the PASS/FAIL/WARN report. Only proven verdicts are reported
-currently. Declarative column tests are always `error`-severity; there is no
-`warn`-severity form today.
+### Unproven tests run as a scan
+
+A test that isn't proven lowers to the same failing-rows scan machinery as a
+hand-written `smelt.check`, run by `smelt check`: zero rows returned means the
+test passes, one or more rows is a violation. `accepted_values` and
+`relationships` have no proof path today, so they always run as a scan. The
+generated failing-rows predicate per kind:
+
+| Kind | Failing-rows predicate |
+|------|------------------------|
+| `not_null` | the column `IS NULL` |
+| `unique` | the column's value appears more than once |
+| `accepted_values` | the column's value is not `NULL` and not in the accepted list |
+| `relationships` | the column's value is not `NULL` and has no matching row in `to.field` (a left-anti-join) |
+
+```
+$ smelt check
+
+smelt check — declarative column tests
+
+  PROVEN  orders.order_id.not_null — no scan emitted
+  PROVEN  orders.order_id.unique — no scan emitted
+
+smelt check
+
+  PASS  orders.status.accepted_values
+  FAIL  orders.customer_id.relationships — 1 violating row(s)
+```
+
+Proven and scanned tests for a model are reported together, distinguished by
+verdict kind, so it's visible at a glance which of a model's tests cost a scan
+and which didn't. Declarative column tests are always `error`-severity; there
+is no `warn`-severity form today.
 
 ## Comparison behavior
 

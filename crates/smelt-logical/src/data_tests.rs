@@ -16,6 +16,7 @@
 //! an undecidable or absent input resolves to [`TestVerdict::NeedsScan`],
 //! never to a claimed proof.
 
+use smelt_core::metadata::ColumnTest;
 use std::collections::BTreeSet;
 
 /// Verdict for a single declarative column test's proof step.
@@ -73,9 +74,155 @@ pub fn resolve_unique_verdict(
     }
 }
 
+// ── Scan lowering (step 2: "Lower to a scan when unproven") ────────────────
+
+/// One unproven declarative column test, lowered to a failing-rows SELECT
+/// (`docs/specs/data_tests.md` §Semantics step 2). A pure text emitter — no
+/// backend or Salsa dependency. The caller wraps `failing_rows_sql` in a
+/// `smelt.check <name> AS (...)` declaration and drives it through the
+/// existing `smelt_runtime::run_single_check` machinery exactly like a
+/// hand-authored `smelt.check` (run-pipeline parity rule,
+/// `docs/specs/architecture.md` §"Run pipeline parity rule (CLI ↔ UI)") —
+/// this module never executes SQL itself.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ScanLowering {
+    /// `"not_null"` | `"unique"` | `"accepted_values"` | `"relationships"`.
+    pub kind: &'static str,
+    /// The failing-rows SELECT body (no `smelt.check ... AS (...)` wrapper).
+    /// Zero rows = the test passes. References upstream models with the same
+    /// `smelt.<model>` addressing a hand-authored check uses, so ref
+    /// extraction, `CheckTargetNotBuilt` detection, and compilation all go
+    /// through the same path a real check does.
+    pub failing_rows_sql: String,
+}
+
+/// Lower one already-validated `ColumnTest` to its failing-rows scan.
+///
+/// Every test that reaches this function is expected to already have passed
+/// `smelt_core::metadata::validate_column_tests` (unknown kinds and malformed
+/// parameterized shapes are hard diagnostics raised earlier,
+/// `docs/specs/data_tests.md` §"Fail-loud validation"). This function stays
+/// fail-safe regardless: a shape it cannot lower returns `Err` naming the
+/// column and the problem, rather than emitting SQL that silently tests
+/// nothing or panicking.
+pub fn lower_column_test(
+    model_name: &str,
+    column: &str,
+    test: &ColumnTest,
+) -> Result<ScanLowering, String> {
+    match test {
+        ColumnTest::Simple(kind) if kind == "not_null" => Ok(ScanLowering {
+            kind: "not_null",
+            failing_rows_sql: format!("SELECT * FROM smelt.{model_name} WHERE {column} IS NULL"),
+        }),
+        ColumnTest::Simple(kind) if kind == "unique" => Ok(ScanLowering {
+            kind: "unique",
+            failing_rows_sql: format!(
+                "SELECT {column} FROM smelt.{model_name} GROUP BY {column} HAVING COUNT(*) > 1"
+            ),
+        }),
+        ColumnTest::Simple(other) => Err(format!(
+            "unrecognized column test kind '{other}' on column '{column}'"
+        )),
+        ColumnTest::Parameterized(params) => {
+            if params.len() != 1 {
+                return Err(format!(
+                    "unsupported parameterized test shape on column '{column}'"
+                ));
+            }
+            let Some((param_kind, value)) = params.iter().next() else {
+                return Err(format!(
+                    "empty parameterized test entry on column '{column}'"
+                ));
+            };
+            match param_kind.as_str() {
+                "accepted_values" => lower_accepted_values(model_name, column, value),
+                "relationships" => lower_relationships(model_name, column, value),
+                other => Err(format!(
+                    "unrecognized column test kind '{other}' on column '{column}'"
+                )),
+            }
+        }
+    }
+}
+
+fn lower_accepted_values(
+    model_name: &str,
+    column: &str,
+    value: &serde_yaml::Value,
+) -> Result<ScanLowering, String> {
+    let Some(seq) = value.as_sequence() else {
+        return Err(format!(
+            "accepted_values on column '{column}' must be a list"
+        ));
+    };
+    if seq.is_empty() {
+        return Err(format!(
+            "accepted_values on column '{column}' must be non-empty"
+        ));
+    }
+    let mut literals = Vec::with_capacity(seq.len());
+    for item in seq {
+        match render_scalar_literal(item) {
+            Some(lit) => literals.push(lit),
+            None => {
+                return Err(format!(
+                    "accepted_values on column '{column}' contains an unsupported literal: {item:?}"
+                ))
+            }
+        }
+    }
+    Ok(ScanLowering {
+        kind: "accepted_values",
+        failing_rows_sql: format!(
+            "SELECT * FROM smelt.{model_name} WHERE {column} IS NOT NULL AND {column} NOT IN ({})",
+            literals.join(", ")
+        ),
+    })
+}
+
+fn lower_relationships(
+    model_name: &str,
+    column: &str,
+    value: &serde_yaml::Value,
+) -> Result<ScanLowering, String> {
+    let mapping = value.as_mapping();
+    let to = mapping
+        .and_then(|m| m.get(serde_yaml::Value::String("to".to_string())))
+        .and_then(|v| v.as_str());
+    let field = mapping
+        .and_then(|m| m.get(serde_yaml::Value::String("field".to_string())))
+        .and_then(|v| v.as_str());
+    match (to, field) {
+        (Some(to), Some(field)) if !to.is_empty() && !field.is_empty() => Ok(ScanLowering {
+            kind: "relationships",
+            failing_rows_sql: format!(
+                "SELECT c.* FROM smelt.{model_name} c WHERE c.{column} IS NOT NULL AND NOT EXISTS \
+                 (SELECT 1 FROM smelt.{to} p WHERE p.{field} = c.{column})"
+            ),
+        }),
+        _ => Err(format!(
+            "relationships test on column '{column}' must declare `to` and `field`"
+        )),
+    }
+}
+
+/// Render a YAML scalar as a SQL literal. `None` for non-scalar values
+/// (sequences/mappings/null), which `lower_accepted_values` treats as an
+/// unsupported literal rather than silently coercing.
+fn render_scalar_literal(value: &serde_yaml::Value) -> Option<String> {
+    match value {
+        serde_yaml::Value::String(s) => Some(format!("'{}'", s.replace('\'', "''"))),
+        serde_yaml::Value::Number(n) => Some(n.to_string()),
+        serde_yaml::Value::Bool(b) => Some(if *b { "TRUE" } else { "FALSE" }.to_string()),
+        _ => None,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::collections::BTreeMap;
 
     #[test]
     fn not_null_proven_when_schema_says_non_nullable() {
@@ -120,5 +267,117 @@ mod tests {
     fn unique_needs_scan_when_no_known_key_sets() {
         let verdict = resolve_unique_verdict(&["id".to_string()], &[]);
         assert_eq!(verdict, TestVerdict::NeedsScan);
+    }
+
+    // ── lower_column_test — generated_sql_is_emitter_authored ──────────────
+
+    #[test]
+    fn lower_not_null_emits_is_null_predicate() {
+        let test = ColumnTest::Simple("not_null".to_string());
+        let lowering = lower_column_test("revenue", "amount", &test).unwrap();
+        assert_eq!(lowering.kind, "not_null");
+        assert_eq!(
+            lowering.failing_rows_sql,
+            "SELECT * FROM smelt.revenue WHERE amount IS NULL"
+        );
+    }
+
+    #[test]
+    fn lower_unique_emits_group_by_having_predicate() {
+        let test = ColumnTest::Simple("unique".to_string());
+        let lowering = lower_column_test("revenue", "order_id", &test).unwrap();
+        assert_eq!(lowering.kind, "unique");
+        assert_eq!(
+            lowering.failing_rows_sql,
+            "SELECT order_id FROM smelt.revenue GROUP BY order_id HAVING COUNT(*) > 1"
+        );
+    }
+
+    #[test]
+    fn lower_accepted_values_emits_not_in_predicate() {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "accepted_values".to_string(),
+            serde_yaml::Value::Sequence(vec![
+                serde_yaml::Value::String("pending".to_string()),
+                serde_yaml::Value::String("shipped".to_string()),
+            ]),
+        );
+        let test = ColumnTest::Parameterized(params);
+        let lowering = lower_column_test("revenue", "status", &test).unwrap();
+        assert_eq!(lowering.kind, "accepted_values");
+        assert_eq!(
+            lowering.failing_rows_sql,
+            "SELECT * FROM smelt.revenue WHERE status IS NOT NULL AND status NOT IN ('pending', 'shipped')"
+        );
+    }
+
+    #[test]
+    fn lower_accepted_values_escapes_quotes_in_string_literals() {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "accepted_values".to_string(),
+            serde_yaml::Value::Sequence(vec![serde_yaml::Value::String("O'Brien".to_string())]),
+        );
+        let test = ColumnTest::Parameterized(params);
+        let lowering = lower_column_test("revenue", "status", &test).unwrap();
+        assert!(
+            lowering.failing_rows_sql.contains("'O''Brien'"),
+            "expected escaped literal, got: {}",
+            lowering.failing_rows_sql
+        );
+    }
+
+    #[test]
+    fn lower_relationships_emits_not_exists_anti_join() {
+        let mut inner = serde_yaml::Mapping::new();
+        inner.insert(
+            serde_yaml::Value::String("to".to_string()),
+            serde_yaml::Value::String("customers".to_string()),
+        );
+        inner.insert(
+            serde_yaml::Value::String("field".to_string()),
+            serde_yaml::Value::String("id".to_string()),
+        );
+        let mut params = BTreeMap::new();
+        params.insert(
+            "relationships".to_string(),
+            serde_yaml::Value::Mapping(inner),
+        );
+        let test = ColumnTest::Parameterized(params);
+        let lowering = lower_column_test("revenue", "customer_id", &test).unwrap();
+        assert_eq!(lowering.kind, "relationships");
+        assert_eq!(
+            lowering.failing_rows_sql,
+            "SELECT c.* FROM smelt.revenue c WHERE c.customer_id IS NOT NULL AND NOT EXISTS \
+             (SELECT 1 FROM smelt.customers p WHERE p.id = c.customer_id)"
+        );
+    }
+
+    #[test]
+    fn lower_accepted_values_rejects_empty_list() {
+        let mut params = BTreeMap::new();
+        params.insert(
+            "accepted_values".to_string(),
+            serde_yaml::Value::Sequence(vec![]),
+        );
+        let test = ColumnTest::Parameterized(params);
+        assert!(lower_column_test("revenue", "status", &test).is_err());
+    }
+
+    #[test]
+    fn lower_relationships_rejects_missing_field() {
+        let mut inner = serde_yaml::Mapping::new();
+        inner.insert(
+            serde_yaml::Value::String("to".to_string()),
+            serde_yaml::Value::String("customers".to_string()),
+        );
+        let mut params = BTreeMap::new();
+        params.insert(
+            "relationships".to_string(),
+            serde_yaml::Value::Mapping(inner),
+        );
+        let test = ColumnTest::Parameterized(params);
+        assert!(lower_column_test("revenue", "customer_id", &test).is_err());
     }
 }

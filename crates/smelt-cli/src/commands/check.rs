@@ -23,12 +23,35 @@ use smelt_cli::{
 use smelt_core::{
     graph::DependencyGraph,
     metadata::{CheckSeverity, ColumnTest},
+    ModelFile, ModelId, ModelKind,
 };
-use smelt_logical::{resolve_not_null_verdict, resolve_unique_verdict, TestVerdict};
+use smelt_logical::{
+    lower_column_test, resolve_not_null_verdict, resolve_unique_verdict, ScanLowering, TestVerdict,
+};
 use smelt_runtime::{run_single_check, CheckStatus};
 use std::collections::{HashMap, HashSet};
+use std::path::PathBuf;
 
 use crate::CheckArgs;
+
+/// One unproven declarative column test, lowered and ready to execute
+/// through the same `run_single_check` machinery a hand-authored
+/// `smelt.check` uses (`docs/specs/data_tests.md` §Semantics step 2).
+struct PendingScan {
+    model_name: String,
+    column: String,
+    lowering: ScanLowering,
+}
+
+/// A declarative column test whose shape `lower_column_test` could not lower
+/// (defensive — expected to be unreachable for tests that already passed
+/// `validate_column_tests`, but fail-loud rather than silently skipped;
+/// `docs/specs/data_tests.md` §"Fail-loud validation").
+struct UnlowerableTest {
+    model_name: String,
+    column: String,
+    message: String,
+}
 
 // ── Public entry point ──────────────────────────────────────────────────────
 
@@ -85,18 +108,22 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
         .collect();
 
     // Declarative column tests (`columns.<c>.tests`, `docs/specs/data_tests.md`)
-    // — proven-verdict short-circuit. Runs unconditionally (independent of
-    // whether the project has any `smelt.check` declarations or a `--select`
-    // match), since a project may declare column tests without ever declaring
-    // a hand-authored check.
+    // — proven-verdict short-circuit plus scan lowering for everything left
+    // unproven. Runs unconditionally (independent of whether the project has
+    // any `smelt.check` declarations or a `--select` match), since a project
+    // may declare column tests without ever declaring a hand-authored check.
     //
     // Consult derived properties first (inferred nullability for `not_null`,
     // the declared `unique_key:` for `unique`); a proven verdict is reported
-    // here with no scan. An unproven verdict falls through to a scan lowered
-    // through this same check machinery — wiring that scan into the run below
-    // is separate follow-on scope (`docs/plans/20260719-prod-w3-adoption.md`);
-    // this phase only lands the proof step and its no-scan reporting.
+    // here with no scan. Every other test — `accepted_values`/`relationships`
+    // (no proof path exists for either today), and any `not_null`/`unique`
+    // the proof step could not decide — lowers to a failing-rows scan
+    // (`smelt_logical::lower_column_test`) collected into `pending_scans` and
+    // driven through the same `run_single_check` machinery as the
+    // `smelt.check` loop below, once the compiler/backend are ready.
     let mut proven_count = 0usize;
+    let mut pending_scans: Vec<PendingScan> = Vec::new();
+    let mut unlowerable: Vec<UnlowerableTest> = Vec::new();
     if regular_models
         .iter()
         .any(|m| model_has_column_tests(m.metadata.as_deref()))
@@ -125,30 +152,50 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
                 columns.sort_by(|a, b| a.0.cmp(b.0));
                 for (column, col_meta) in columns {
                     for test in &col_meta.tests {
-                        let (label, verdict) = match test {
+                        // Only `not_null`/`unique` have a proof step
+                        // (`docs/specs/data_tests.md` §"Known Divergences" —
+                        // `accepted_values`/`relationships` are always
+                        // unproven). An undecidable proof is fail-safe:
+                        // it falls through to `NeedsScan`, never a claimed
+                        // pass.
+                        let verdict = match test {
                             ColumnTest::Simple(kind) if kind == "not_null" => {
                                 let is_non_nullable = column_non_nullable(&typed_schema, column);
-                                ("not_null", resolve_not_null_verdict(is_non_nullable))
+                                Some(resolve_not_null_verdict(is_non_nullable))
                             }
-                            ColumnTest::Simple(kind) if kind == "unique" => (
-                                "unique",
-                                resolve_unique_verdict(
+                            ColumnTest::Simple(kind) if kind == "unique" => {
+                                Some(resolve_unique_verdict(
                                     std::slice::from_ref(column),
                                     &known_key_sets,
-                                ),
-                            ),
-                            // accepted_values/relationships have no proof
-                            // path today (`docs/specs/data_tests.md`
-                            // §"Known Divergences") — always needs a scan,
-                            // not yet wired here.
-                            _ => continue,
+                                ))
+                            }
+                            _ => None,
                         };
-                        if verdict == TestVerdict::Proven {
+
+                        if verdict == Some(TestVerdict::Proven) {
+                            let label = match test {
+                                ColumnTest::Simple(kind) => kind.as_str(),
+                                ColumnTest::Parameterized(_) => "unknown",
+                            };
                             println!(
                                 "  PROVEN  {}.{}.{} — no scan emitted",
                                 model.name, column, label
                             );
                             proven_count += 1;
+                            continue;
+                        }
+
+                        match lower_column_test(&model.name, column, test) {
+                            Ok(lowering) => pending_scans.push(PendingScan {
+                                model_name: model.name.clone(),
+                                column: column.clone(),
+                                lowering,
+                            }),
+                            Err(message) => unlowerable.push(UnlowerableTest {
+                                model_name: model.name.clone(),
+                                column: column.clone(),
+                                message,
+                            }),
                         }
                     }
                 }
@@ -159,7 +206,7 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
         }
     }
 
-    if check_models.is_empty() {
+    if check_models.is_empty() && pending_scans.is_empty() && unlowerable.is_empty() {
         println!("No checks found.");
         return Ok(());
     }
@@ -181,7 +228,7 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
             .collect()
     };
 
-    if selected_checks.is_empty() {
+    if selected_checks.is_empty() && pending_scans.is_empty() && unlowerable.is_empty() {
         println!("No checks matched the selection.");
         return Ok(());
     }
@@ -304,6 +351,85 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
         }
     }
 
+    // 8b. Run every unproven declarative column test's lowered scan through
+    // the same `run_single_check` machinery (run-pipeline parity — no second
+    // execution path). Each scan is wrapped as a synthetic error-severity
+    // `smelt.check` (`docs/specs/data_tests.md` §Semantics: declarative
+    // column tests are error-severity only).
+    for pending in &pending_scans {
+        let label = format!(
+            "{}.{}.{}",
+            pending.model_name, pending.column, pending.lowering.kind
+        );
+        let check_ident = format!(
+            "{}__{}__{}",
+            pending.model_name, pending.column, pending.lowering.kind
+        );
+        let check_model = build_scan_check_model(&check_ident, &pending.lowering.failing_rows_sql);
+
+        let outcome = run_single_check(
+            compiler,
+            backend,
+            schema,
+            &check_model,
+            CheckSeverity::Error,
+            &ephemeral_names,
+            &ephemeral_resolver,
+        )
+        .await?;
+
+        if args.verbose {
+            if let Some(sql) = &outcome.sql {
+                println!("  -- Compiled SQL for {label}:");
+                println!("{}", sql);
+            }
+        }
+
+        match outcome.status {
+            CheckStatus::Pass => {
+                println!("  PASS  {label}");
+                pass_count += 1;
+            }
+            CheckStatus::Fail => {
+                let detail = outcome.message.as_deref().unwrap_or("violation");
+                println!("  FAIL  {label} — {detail}");
+                for row in &outcome.sample {
+                    println!("    {:?}", row);
+                }
+                fail_count += 1;
+            }
+            CheckStatus::Warn => {
+                // Declarative column tests are error-severity only
+                // (`docs/specs/data_tests.md` §Semantics "Severity") —
+                // `run_single_check` never returns `Warn` for the
+                // `CheckSeverity::Error` we always pass above, but handle it
+                // rather than silently drop a status this match must cover.
+                let detail = outcome.message.as_deref().unwrap_or("violation");
+                println!("  WARN  {label} — {detail}");
+                for row in &outcome.sample {
+                    println!("    {:?}", row);
+                }
+                warn_count += 1;
+            }
+            CheckStatus::TargetNotBuilt => {
+                let detail = outcome.message.as_deref().unwrap_or("CheckTargetNotBuilt");
+                println!("  FAIL  {label} — {detail}");
+                fail_count += 1;
+            }
+        }
+    }
+
+    // A test `lower_column_test` could not lower is a hard failure, not a
+    // silent skip (fail-loud discipline) — this is expected to be
+    // unreachable for tests that already passed `validate_column_tests`.
+    for bad in &unlowerable {
+        println!(
+            "  FAIL  {}.{}.<test> — {}",
+            bad.model_name, bad.column, bad.message
+        );
+        fail_count += 1;
+    }
+
     // 9. Summary and exit code.
     let total = pass_count + fail_count + warn_count;
     println!(
@@ -359,4 +485,35 @@ fn column_non_nullable(schema: &smelt_db::ModelSchema, column: &str) -> Option<b
         return None;
     }
     col.data_type.as_ref().map(|tc| !tc.nullable)
+}
+
+/// Build a synthetic `ModelFile` wrapping one lowered declarative-test scan
+/// as a `smelt.check <check_ident> AS (<failing_rows_sql>)` declaration, so
+/// it can be driven through `run_single_check` exactly like a hand-authored
+/// check (run-pipeline parity rule, `docs/specs/architecture.md` §"Run
+/// pipeline parity rule (CLI ↔ UI)").
+///
+/// `refs` is computed by parsing the generated content through the same
+/// `smelt_core::extract_refs` every real model file uses — not hand-authored
+/// — so `CheckTargetNotBuilt` detection and ephemeral-CTE inlining see
+/// exactly the same references a hand-written check with this body would
+/// produce.
+fn build_scan_check_model(check_ident: &str, failing_rows_sql: &str) -> ModelFile {
+    let content = format!("smelt.check {check_ident} AS (\n{failing_rows_sql}\n)\n");
+    let parse = smelt_parser::parse(&content);
+    let refs = smelt_parser::ast::File::cast(parse.syntax())
+        .map(|file| smelt_core::extract_refs(&file))
+        .unwrap_or_default();
+    let path = PathBuf::from(format!("<declarative-test>/{check_ident}.sql"));
+    ModelFile {
+        name: check_ident.to_string(),
+        path: path.clone(),
+        content,
+        refs,
+        parse_errors: parse.errors,
+        metadata: None,
+        kind: ModelKind::Sql,
+        model_id: ModelId::from_path(path),
+        address_segments: vec![check_ident.to_string()],
+    }
 }
