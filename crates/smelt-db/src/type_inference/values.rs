@@ -217,16 +217,22 @@ pub fn check_cte_alias_arity(cte: &Cte) -> Vec<Diagnostic> {
         return out; // no column list declared → no check
     }
 
-    // Get the inner SELECT statement.
-    let select_stmt: SelectStmt = match cte.query().and_then(|q| q.select_stmt()) {
-        Some(s) => s,
-        None => return out, // no SELECT body (e.g. VALUES CTE) → skip
-    };
-
-    // Count inner SELECT items; skip if wildcard SELECT.
-    let inner_count = match select_non_wildcard_item_count(&select_stmt) {
-        Some(n) => n,
-        None => return out, // wildcard or empty → can't statically check
+    // Get the inner query body — either a SELECT statement wrapped in a
+    // SUBQUERY child, or (for a VALUES-body CTE) a VALUES_CLAUSE that sits
+    // directly under the CTE node with no SUBQUERY wrapper.
+    let inner_count = if let Some(select_stmt) = cte.query().and_then(|q| q.select_stmt()) {
+        // Count inner SELECT items; skip if wildcard SELECT.
+        match select_non_wildcard_item_count(&select_stmt) {
+            Some(n) => n,
+            None => return out, // wildcard or empty → can't statically check
+        }
+    } else if let Some(values_clause) = cte.syntax().children().find_map(ValuesClause::cast) {
+        match values_column_count(&values_clause) {
+            Some(n) => n,
+            None => return out, // empty VALUES → no static column count to compare
+        }
+    } else {
+        return out;
     };
 
     if explicit_names.len() == inner_count {

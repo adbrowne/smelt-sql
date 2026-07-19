@@ -140,6 +140,13 @@ FULL OUTER JOIN e ON a.id = e.id
 CROSS JOIN f
 ```
 
+Comma-separated FROM items (`FROM a, b`) are also supported and are equivalent to `CROSS JOIN`:
+
+```sql
+FROM a, b
+WHERE a.id = b.id
+```
+
 ## Window functions
 
 ```sql

@@ -144,18 +144,47 @@ impl Display for SelectStmt {
             write!(f, " WINDOW {}", window_clause)?;
         }
 
-        // ORDER BY clause
-        if let Some(order_by_clause) = self.order_by_clause() {
-            write!(f, " {}", order_by_clause)?;
+        let order_by_clause = self.order_by_clause();
+        let limit_clause = self.limit_clause();
+        let set_op = get_set_operation(self.syntax());
+
+        // A trailing ORDER BY/LIMIT parsed *after* a parenthesized set-op
+        // operand (`A UNION (B) ORDER BY x`) is a sibling of the set-op
+        // keyword that sits later in source order — its own text range
+        // starts after the keyword's. Distinguish that from the historical
+        // pre-set-op position (a per-operand clause on a SELECT_STMT that
+        // also happens to carry a nested set-op tail) so printing doesn't
+        // silently move the clause across the UNION and re-attach it to
+        // the wrong operand (see `keyword_offset` doc on `SetOperation`).
+        let is_trailing = |clause_start: usize| {
+            set_op
+                .as_ref()
+                .is_some_and(|op| clause_start > op.keyword_offset)
+        };
+
+        let order_by_is_trailing = order_by_clause
+            .as_ref()
+            .is_some_and(|c| is_trailing(usize::from(c.syntax().text_range().start())));
+        let limit_is_trailing = limit_clause
+            .as_ref()
+            .is_some_and(|c| is_trailing(usize::from(c.syntax().text_range().start())));
+
+        // ORDER BY clause (pre-set-op position)
+        if !order_by_is_trailing {
+            if let Some(order_by_clause) = &order_by_clause {
+                write!(f, " {}", order_by_clause)?;
+            }
         }
 
-        // LIMIT clause
-        if let Some(limit_clause) = self.limit_clause() {
-            write!(f, " {}", limit_clause)?;
+        // LIMIT clause (pre-set-op position)
+        if !limit_is_trailing {
+            if let Some(limit_clause) = &limit_clause {
+                write!(f, " {}", limit_clause)?;
+            }
         }
 
         // Set operations: UNION / INTERSECT / EXCEPT
-        if let Some(set_op) = get_set_operation(self.syntax()) {
+        if let Some(set_op) = set_op {
             write!(f, " {}", set_op.keyword)?;
             if set_op.all {
                 write!(f, " ALL")?;
@@ -167,6 +196,18 @@ impl Display for SelectStmt {
                 SetOperand::Select(select) => write!(f, " {}", select)?,
                 SetOperand::Paren(subquery) => write!(f, " {}", subquery)?,
                 SetOperand::None => {}
+            }
+        }
+
+        // Trailing ORDER BY/LIMIT after a parenthesized set-op operand.
+        if order_by_is_trailing {
+            if let Some(order_by_clause) = &order_by_clause {
+                write!(f, " {}", order_by_clause)?;
+            }
+        }
+        if limit_is_trailing {
+            if let Some(limit_clause) = &limit_clause {
+                write!(f, " {}", limit_clause)?;
             }
         }
 
@@ -238,9 +279,15 @@ impl Display for FromClause {
             write!(f, "{}", first_table)?;
         }
 
-        // Get all JOINs
+        // Get all JOINs. A comma-join (`FROM a, b`) prints as `, b` rather
+        // than ` JOIN b` — fidelity requires preserving the comma form
+        // rather than rewriting it to `CROSS JOIN`.
         for join in self.joins() {
-            write!(f, " {}", join)?;
+            if join.is_comma_join() {
+                write!(f, ", {}", join)?;
+            } else {
+                write!(f, " {}", join)?;
+            }
         }
 
         Ok(())
@@ -264,6 +311,10 @@ impl Display for TableRef {
             // rest of this printer's approach of falling back to source text
             // for constructs without a dedicated Display impl.
             write!(f, "{}", subquery.syntax().text())?;
+        } else if let Some(quoted) = self.quoted_identifier_path_text() {
+            // Double-quoted table/schema name(s) — re-emit with quotes
+            // intact (`identifier()` strips them for resolution callers).
+            write!(f, "{}", quoted)?;
         } else if let Some(ident) = self.identifier() {
             write!(f, "{}", ident)?;
         } else if let Some(inner) = self.syntax().children().find_map(TableRef::cast) {
@@ -274,26 +325,32 @@ impl Display for TableRef {
             // double-printed.
             write!(f, "({}", inner)?;
             for join in self.syntax().children().filter_map(JoinClause::cast) {
-                write!(f, " {}", join)?;
+                if join.is_comma_join() {
+                    write!(f, ", {}", join)?;
+                } else {
+                    write!(f, " {}", join)?;
+                }
             }
             write!(f, ")")?;
         } else {
             write!(f, "{}", self.syntax().text())?;
-        }
-
-        // TABLESAMPLE / PIVOT / UNPIVOT clauses sit between the base
-        // reference and the alias; print them verbatim (no dedicated
-        // pretty-printer exists for these yet).
-        for clause in self
-            .syntax()
-            .children()
-            .filter(|n| matches!(n.kind(), TABLESAMPLE_CLAUSE | PIVOT_CLAUSE | UNPIVOT_CLAUSE))
-        {
-            write!(f, " {}", clause.text())?;
+            // The raw-text fallback above already prints this whole
+            // TABLE_REF node's source text verbatim, including any
+            // TABLESAMPLE/PIVOT/UNPIVOT clauses and alias it contains —
+            // printing them again below would double-print. This branch is
+            // believed unreachable now that the subquery/nested/identifier
+            // branches above are explicit, but guard defensively (see
+            // docs/TODO.md "TABLESAMPLE/PIVOT/UNPIVOT vs alias ordering").
+            return Ok(());
         }
 
         // Raw alias token text (quotes intact for `AS "quoted"`) — see the
-        // matching note on `Display for SelectItem`.
+        // matching note on `Display for SelectItem`. Printed *before*
+        // TABLESAMPLE/PIVOT/UNPIVOT: DuckDB v1.5.4 requires
+        // `base AS alias TABLESAMPLE(...)` and rejects the reverse order
+        // (oracle-verified). PIVOT/UNPIVOT accept the alias either before or
+        // after (also oracle-verified), so printing alias-first here is safe
+        // for those too, and keeps a single consistent print order.
         if let Some(alias) = self.alias_token_text().or_else(|| self.alias()) {
             write!(f, " AS {}", alias)?;
             if let Some(cols) = self.alias_column_names() {
@@ -303,12 +360,31 @@ impl Display for TableRef {
             }
         }
 
+        // TABLESAMPLE / PIVOT / UNPIVOT clauses; print them verbatim (no
+        // dedicated pretty-printer exists for these yet).
+        for clause in self
+            .syntax()
+            .children()
+            .filter(|n| matches!(n.kind(), TABLESAMPLE_CLAUSE | PIVOT_CLAUSE | UNPIVOT_CLAUSE))
+        {
+            write!(f, " {}", clause.text())?;
+        }
+
         Ok(())
     }
 }
 
 impl Display for JoinClause {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        if self.is_comma_join() {
+            // No `JOIN` keyword, no condition — the caller (`FromClause`/
+            // `TableRef` Display) prints the leading `, ` separator.
+            if let Some(table_ref) = self.table_ref() {
+                write!(f, "{}", table_ref)?;
+            }
+            return Ok(());
+        }
+
         if self.is_natural() {
             write!(f, "NATURAL ")?;
         }
@@ -703,6 +779,17 @@ struct SetOperation {
     all: bool,
     by_name: bool,
     operand: SetOperand,
+    /// Source offset of the UNION/INTERSECT/EXCEPT keyword token itself.
+    /// Used to decide whether a sibling ORDER BY/LIMIT clause on the same
+    /// SELECT_STMT node was parsed *before* the set-op keyword (the
+    /// historical position — a per-operand clause on a SELECT_STMT that
+    /// happens to also carry a nested set-op tail) or *after* the operand
+    /// (a trailing clause on a parenthesized operand — `A UNION (B) ORDER
+    /// BY x` — which binds to the whole set operation per DuckDB
+    /// semantics; see `parse_set_op_tail` in `parser/select.rs`). Printing
+    /// must preserve that positional distinction or it silently
+    /// re-attaches the clause to the wrong operand.
+    keyword_offset: usize,
 }
 
 /// The right-hand operand of a set operation: a bare `SELECT_STMT`
@@ -727,10 +814,12 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
     let mut op_kind = None;
     let mut has_all = false;
     let mut has_by_name = false;
+    let mut keyword_offset = 0usize;
 
     for (i, token) in tokens.iter().enumerate() {
         if set_op_kinds.contains(&token.kind()) {
             op_kind = Some(token.kind());
+            keyword_offset = usize::from(token.text_range().start());
             // Check for ALL after the keyword.
             let non_trivia: Vec<_> = tokens[i + 1..]
                 .iter()
@@ -797,6 +886,7 @@ fn get_set_operation(node: &SyntaxNode) -> Option<SetOperation> {
         all: has_all,
         by_name: has_by_name,
         operand,
+        keyword_offset,
     })
 }
 
@@ -841,6 +931,26 @@ mod tests {
     #[test]
     fn test_select_join() {
         assert_round_trip("SELECT * FROM users INNER JOIN orders ON users.id = orders.user_id");
+    }
+
+    #[test]
+    fn test_comma_join_two_tables() {
+        assert_round_trip("SELECT * FROM users, orders");
+    }
+
+    #[test]
+    fn test_comma_join_three_tables() {
+        assert_round_trip("SELECT * FROM a, b, c");
+    }
+
+    #[test]
+    fn test_comma_join_mixed_with_explicit_join() {
+        assert_round_trip("SELECT * FROM a, b JOIN c ON b.id = c.id");
+    }
+
+    #[test]
+    fn test_comma_join_with_aliases() {
+        assert_round_trip("SELECT * FROM users AS u, orders AS o");
     }
 
     #[test]

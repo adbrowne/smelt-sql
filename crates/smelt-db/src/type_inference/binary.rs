@@ -297,8 +297,11 @@ pub fn infer_binary_expr_type(binary: &BinaryExpr, ctx: &TypeContext) -> Option<
             })
         }
 
-        // Pattern matching operators - always return Boolean
-        "LIKE" | "ILIKE" | "GLOB" | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
+        // Pattern matching operators - always return Boolean. Includes the
+        // NOT-prefixed forms (`NOT LIKE`, `NOT ILIKE`, `NOT SIMILAR TO`) —
+        // negation doesn't change the result type or nullability.
+        "LIKE" | "ILIKE" | "GLOB" | "SIMILAR TO" | "NOT LIKE" | "NOT ILIKE" | "NOT SIMILAR TO"
+        | "~" | "~*" | "!~" | "!~*" => Some(TypedColumn {
             data_type: DataType::Boolean,
             nullable: true,
         }),

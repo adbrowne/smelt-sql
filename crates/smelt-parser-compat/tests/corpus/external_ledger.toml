@@ -35,10 +35,6 @@ note = "An ORDER BY clause inside an aggregate/window function call's argument l
 category = "aggregate_call_order_by_clause"
 note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
 
-["c37e044f4cdbca2b"]
-category = "aggregate_call_order_by_clause"
-note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
-
 ["430fadb76ce45e99"]
 category = "aggregate_call_order_by_clause"
 note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
@@ -59,17 +55,9 @@ note = "sqllogictest ${...} template placeholder substituted at test-run time by
 category = "star_exclude_clause"
 note = "SELECT * EXCLUDE (col_list) is not parsed at all (recategorized: the chained-dot column reference inside the EXCLUDE list now parses fine on its own; the blocker is the missing star-exclude clause grammar, which is out of scope for this pass since it also needs wildcard-expansion semantics in smelt-db)"
 
-["d4664bad27b9ae0f"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["68209df8cf51bf2f"]
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
-
-["f6ebc1f04febf925"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["4ad43ad287680e7f"]
 category = "sqllogictest_template_placeholder"
@@ -135,22 +123,6 @@ note = "Dollar-quoted string or backslash-escape string literal form is not pars
 category = "map_type_or_literal"
 note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (tracked gaps.rs::duckdb_map_literal)"
 
-["e7f8101e8ebcb4aa"]
-category = "sqllogictest_template_placeholder"
-note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
-
-["4d1c47594b381d8e"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
-
-["bfd77a838c18b1ee"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
-["f4f84f035bf107c7"]
-category = "double_equals_operator"
-note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
-
 ["fe081f2437428f8a"]
 category = "array_subscript_negative_or_slice"
 note = "Array negative-index or slice subscript syntax is not parsed"
@@ -204,8 +176,8 @@ category = "file_glob_or_path_literal_from"
 note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
 ["4b5f29a8027c361a"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
+category = "file_glob_or_path_literal_from"
+note = "A single-quoted file-path string literal used directly as a FROM target is not parsed (the statement's original RANGE-keyword failure was fixed by the quality-grind range_keyword_as_identifier_or_function phase; this is the distinct root cause left once that one is gone)"
 
 ["3156d5843df8e3df"]
 category = "file_glob_or_path_literal_from"
@@ -235,14 +207,6 @@ note = "A glob/path string literal used directly as a FROM target is not parsed"
 category = "recursive_cte_cycle_using_key"
 note = "WITH RECURSIVE ... USING KEY cycle-detection clause is not parsed"
 
-["4bfa6e902d2fed4e"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
-["0287efd3e8516d74"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["8bd4b8deb3f3dbf4"]
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
@@ -259,13 +223,9 @@ note = "sqllogictest ${...} template placeholder substituted at test-run time by
 category = "if_function_vs_ternary_ambiguity"
 note = "SQL IF(cond, a, b) 3-argument function call is not parsed; IF is reserved for the meta-language ternary and is not in at_keyword_as_function_name's list"
 
-["0a525a0e6cb3124d"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
-
 ["11364d332cae94d5"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
+category = "interval_string_literal_unit_in_arg_list"
+note = "A DuckDB-style `interval '1' day` typed string literal with a trailing unit keyword is only consumed correctly at SELECT-item top level (where the unit is accidentally swallowed as an implicit column alias); inside a function argument list the unit keyword is left dangling and fails with 'Expected RPAREN'. The statement's original RANGE-keyword failure was fixed by the quality-grind range_keyword_as_identifier_or_function phase; this is the distinct root cause left once that one is gone."
 
 ["bb786c3a21b69bb3"]
 category = "lambda_or_lateral_syntax"
@@ -339,10 +299,6 @@ note = "DuckDB's ^@ string starts-with operator is not parsed"
 category = "caret_at_string_starts_with_operator"
 note = "DuckDB's ^@ string starts-with operator is not parsed"
 
-["62a960aea7213de2"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["eb04a0882f486e64"]
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
@@ -359,25 +315,9 @@ note = "DuckDB ASOF JOIN is not parsed"
 category = "file_glob_or_path_literal_from"
 note = "quoted file-path/glob string literal used directly as a FROM table source (DuckDB file-scan shorthand) is not parsed"
 
-["3fc21ada2d17e40e"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
-["24b75a39c9c0bf23"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["f4619b3187dea570"]
 category = "join_condition_missing_after_join"
 note = "A JOIN whose ON/USING condition itself contains a construct smelt can't parse leaves the table-ref parser positioned such that the JOIN's required table reference is reported missing"
-
-["32b190f08513f4c0"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
-["f1c243266bfc7ecd"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["c566463312d1e03f"]
 category = "file_glob_or_path_literal_from"
@@ -403,14 +343,6 @@ note = "quoted file-path/glob string literal used directly as a FROM table sourc
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
-["32f26decb2020f32"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
-["34c0d550b05d75c8"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["ed076a4bed786a82"]
 category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
@@ -435,14 +367,6 @@ note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in 
 category = "star_exclude_or_rename_clause"
 note = "SELECT * modifier clauses (EXCLUDE(...), RENAME(...)) are not parsed in all positions (nested in list comprehensions, or with a trailing comma in the column list)"
 
-["4d0dd132657b256e"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
-["fbe13b47bb1dacaf"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["dca844a46bc203da"]
 category = "describe_as_table_source"
 note = "DESCRIBE ... used as a nested table source (SELECT ... FROM (DESCRIBE SELECT ...))  is not parsed"
@@ -463,33 +387,17 @@ note = "A row-value constructor compared with a binary operator, ANY/ALL subquer
 category = "row_value_comparison"
 note = "A row-value constructor compared with a binary operator, ANY/ALL subquery, IN subquery, or OVERLAPS (e.g. (a,b) < (c,d), (a,b) NOT IN (SELECT ...)) is not parsed"
 
-["8ffa23b311216bca"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["a2a0218136085c71"]
 category = "exists_with_cte_subquery"
 note = "EXISTS(...) whose body is a CTE-scoped subquery (WITH ... SELECT) is not parsed; parse_exists_expr expects a bare SELECT"
-
-["c1307297692b3fcc"]
-category = "quoted_table_name_in_from"
-note = "A double-quoted table name in FROM position (e.g. FROM 'flights' (double-quoted in the source)) is not parsed; parse_table_ref only accepts IDENT, not the STRING token smelt's lexer produces for double-quoted text"
-
-["909102b28165f9f6"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["4e81a9226eafcc77"]
 category = "information_schema_roundtrip"
 note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
 
-["1fdfbfc3284379d1"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["98685dc6055e7793"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
+category = "table_valued_function_as_join_operand"
+note = "range(a) as the right-hand operand of a JOIN/comma-join is not parsed: parse_join_clause's table-ref guard only accepts IDENT/LATERAL_KW/LPAREN, excluding table-function keywords like RANGE_KW/GLOB_KW; this also reproduces for an explicit JOIN range(...), so it is a JOIN-operand-shape gap, not the comma marker itself, which now parses cleanly (docs/plans/20260718-quality-grind-t3.md Phase 1)"
 
 ["4444edd7851561d6"]
 category = "duckdb_typed_literal_prefix"
@@ -499,14 +407,6 @@ note = "A DuckDB typed-string-literal prefix outside the recognized keyword set 
 category = "sqllogictest_template_placeholder"
 note = "sqllogictest ${...} template placeholder substituted at test-run time by the upstream harness, never valid standalone SQL"
 
-["bedcd41917f4c6be"]
-category = "double_equals_operator"
-note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
-
-["55e2372801d9d8d6"]
-category = "double_equals_operator"
-note = "DuckDB's `==` equality operator (alias for `=`) is not parsed"
-
 ["adbd9123def3a1ae"]
 category = "postfix_dot_field_access_on_parenthesized_expr"
 note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
@@ -514,10 +414,6 @@ note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (tes
 ["86d5f8c89a0e4fe2"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
-
-["9aec02ab7e317a8e"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["d01c409e1c257644"]
 category = "sqllogictest_template_placeholder"
@@ -550,10 +446,6 @@ note = "MAP {k: v} literal or MAP(key_type, value_type) type is not parsed (trac
 ["b53b84a4bb09b36a"]
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
-
-["01c0f2fdd4823d7d"]
-category = "array_subscript_negative_or_slice"
-note = "Array negative-index or slice subscript syntax is not parsed"
 
 ["364300d0dca2b341"]
 category = "array_subscript_slice_with_negative_step"
@@ -614,10 +506,6 @@ note = "A window-frame bound that is a column/expression rather than a literal (
 ["2eeeab6e1921780c"]
 category = "window_frame_non_integer_bound"
 note = "Window RANGE BETWEEN frame with a non-plain-integer bound (interval/float/NaN/EXCLUDE) is not parsed"
-
-["a8c6b4e0e85d910f"]
-category = "range_keyword_as_identifier_or_function"
-note = "RANGE is a reserved keyword (window-frame RANGE clause); DuckDB's range(...) table/scalar function and bare `range` column references are not parsed"
 
 ["f7fd82844d7f1224"]
 category = "multidim_array_type_literal"
@@ -687,10 +575,6 @@ note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix
 category = "quoted_type_name_cast"
 note = "PostgreSQL double-quoted type name in a cast (e.g. ::'char' (double-quoted in the source)) is not parsed as a type name"
 
-["fad296cb1984b3c2"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["a09178ce769ac702"]
 category = "aggregate_call_order_by_clause"
 note = "An ORDER BY clause inside an aggregate/window function call's argument list (ordered-set aggregates like WITHIN GROUP, or DuckDB's agg(expr ORDER BY ...) / array_agg(DISTINCT ... ORDER BY ...) direct form) is not parsed"
@@ -719,10 +603,6 @@ note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (tes
 category = "postfix_dot_field_access_on_parenthesized_expr"
 note = "Postfix `.field` or `.*` access on a parenthesized expression (e.g. (test_conv(...)).*, (NULL::compositetable).oid) is not parsed"
 
-["eb37ac7ea2d5b1a5"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
-
 ["9ba1807ec4998afc"]
 category = "postgres_table_inheritance_wildcard"
 note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning include child tables) is not parsed"
@@ -738,18 +618,6 @@ note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning inclu
 ["b99ec95b79923245"]
 category = "select_into_clause"
 note = "SELECT ... INTO [TABLE] target (PostgreSQL's SELECT-INTO table-creation form) is not parsed"
-
-["bd85096b1212237c"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
-
-["b6df6d802fb49130"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
-["87ca4960829e3b9d"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
 
 ["b2ac103355cb7e31"]
 category = "information_schema_roundtrip"
@@ -871,10 +739,6 @@ note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day
 category = "postgres_interval_range_qualifier"
 note = "PostgreSQL's INTERVAL range-qualifier suffix (e.g. interval '1 2:03' day to minute, ... hour to second(2)) is not parsed"
 
-["0b571b09988e1c59"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["d7de0c9a7a556220"]
 category = "row_constructor_field_star_projection"
 note = "`table.*` used inside a function-call argument or after a nested-record projection (count(t2.*), tststats.priv_test_tbl.* > (1,1)) is not parsed"
@@ -882,14 +746,6 @@ note = "`table.*` used inside a function-call argument or after a nested-record 
 ["60a4afc966b46247"]
 category = "lambda_or_lateral_syntax"
 note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
-
-["d85681c984b12038"]
-category = "lambda_or_lateral_syntax"
-note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
-
-["4c93773454a47930"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["b10c367899b34065"]
 category = "dollar_quoted_or_backslash_literal"
@@ -1035,10 +891,6 @@ note = "PostgreSQL range-type constructors/operators (numrange, nummultirange, .
 category = "multidim_array_type_literal"
 note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VARCHAR[]) is not parsed"
 
-["83272f10c183f2ac"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["ee6959fa1df17a5f"]
 category = "postgres_typed_literal_prefix"
 note = "A non-keyword PostgreSQL type name used as a typed-string-literal prefix (e.g. int2 '0', numeric 'NaN', json '{...}') is not parsed; only a fixed keyword set (DATE, TIME, TIMESTAMP, INTERVAL, ...) is recognized in this position"
@@ -1059,26 +911,6 @@ note = "A numeric literal immediately followed by an identifier-continuation cha
 category = "numeric_literal_followed_by_ident_no_space"
 note = "A numeric literal immediately followed by an identifier-continuation character with no separating whitespace (e.g. 0.0a, 0b, 1x) is intentionally lexed as a single fail-loud ERROR token rather than silently split (see lexer.rs consume_number's documented rationale, verified against DuckDB); this PostgreSQL corpus sample exercises the same ambiguous shape"
 
-["9c8fe5f0b0ea90e8"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
-
-["3226a1a01d7c5be1"]
-category = "not_prefixed_binary_operator"
-note = "A NOT-prefixed binary comparison/operator form (NOT IN, NOT ILIKE, bare `expr NOT NULL` without IS) is not parsed"
-
-["4fed97a9b0057d83"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
-["e55b6152c35d6208"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
-["cdfce3fe07642069"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
-
 ["0f783c77304dc0a5"]
 category = "malformed_corpus_statement"
 note = "This corpus line is a truncated/malformed extraction artifact (unbalanced quotes or parens from the upstream test file), not valid SQL in any dialect"
@@ -1095,10 +927,6 @@ note = "Multi-dimensional or bracket array type literal/cast (e.g. INT[2][2], VA
 category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
 
-["c38be65d41d4fd27"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
-
 ["761352dd4a45659d"]
 category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
@@ -1112,8 +940,8 @@ category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
 
 ["a1e4b25c020f937c"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
+category = "table_valued_function_as_join_operand"
+note = "ROWS FROM(...) (SQL:2003 multi-table-function form) is not parsed as a table primary at all, and the leading VALUES-derived-table comma-join hits the same JOIN-operand-shape gap as hash 98685dc6055e7793; the comma marker itself now parses cleanly (docs/plans/20260718-quality-grind-t3.md Phase 1)"
 
 ["9480ec7e9fa51e51"]
 category = "with_ordinality"
@@ -1146,10 +974,6 @@ note = "ORDER BY col USING <operator> (custom operator-class ordering direction)
 ["adb984cf2cd20351"]
 category = "postgres_table_inheritance_wildcard"
 note = "PostgreSQL table-inheritance wildcard suffix (FROM table*, meaning include child tables) is not parsed"
-
-["6a9839262562ec1a"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
 
 ["2d9242102c8a8704"]
 category = "select_into_clause"
@@ -1207,21 +1031,13 @@ note = "LIKE ... ESCAPE 'char' custom escape-character clause is not parsed"
 category = "like_escape_clause"
 note = "LIKE ... ESCAPE 'char' custom escape-character clause is not parsed"
 
-["3419183ec6d2f76e"]
-category = "set_operation_nesting"
-note = "A parenthesized query used as a scalar-subquery expression whose *own* first (unparenthesized) operand is itself parenthesized — `((SELECT …) UNION SELECT …)` — is not parsed; the parenthesized right-hand operand of an explicit UNION/EXCEPT/INTERSECT (`A UNION (B)`) and nested `(((SELECT …)))` forms now parse"
-
-["96df5cd72067098a"]
-category = "lambda_or_lateral_syntax"
-note = "Lambda-arrow/`lambda x, y: ...`/LATERAL join syntax used in a form not yet parsed"
-
 ["79cdb2200dc2cadc"]
 category = "tablesample_custom_method_name"
 note = "TABLESAMPLE with a non-keyword (custom/extension) sampling-method name is not parsed; only the recognized keyword set (BERNOULLI, SYSTEM, ...) is"
 
 ["d63aa08ca702f3ab"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
+category = "information_schema_roundtrip"
+note = "same root cause as the information_schema_roundtrip category: smelt prints a schema-qualified table reference (pg_catalog.pg_tablespace) without its middle segment (silent mis-parse); the comma-join marker itself now parses cleanly (docs/plans/20260718-quality-grind-t3.md Phase 1) — this entry's remaining failure is the qualified-name printer gap, unrelated to comma-join syntax"
 
 ["348bff3f69bc56c0"]
 category = "postgres_variadic_array_argument"
@@ -1286,10 +1102,6 @@ note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) 
 ["7ed8a1b8e866de24"]
 category = "fulltext_search_operators"
 note = "PostgreSQL full-text search operators/types (tsvector/tsquery, @@, <->) are not parsed"
-
-["a2336f1f88e308b0"]
-category = "regtype_regclass_cast"
-note = "PostgreSQL OID alias types (regtype/regclass/regproc/regoper) cast syntax is not parsed/bound the same way"
 
 ["191708174fb6c5c1"]
 category = "select_with_no_target_list"

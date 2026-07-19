@@ -133,44 +133,98 @@ impl<'a> super::Parser<'a> {
 
         // Set operations: UNION / INTERSECT / EXCEPT
         self.skip_trivia();
-        if self.at_any(&[UNION_KW, INTERSECT_KW, EXCEPT_KW]) {
-            self.advance(); // consume UNION/INTERSECT/EXCEPT
-            self.skip_trivia();
-            // Optional ALL
-            if self.at(ALL_KW) {
-                self.advance();
-            }
-            self.skip_trivia();
-            // Optional BY NAME (DuckDB): unify operands by column name
-            // rather than position. `BY` is the reserved `BY_KW` (shared
-            // with `GROUP BY`/`ORDER BY`); `NAME` is a contextual keyword
-            // (lexed as plain IDENT), matched only in this exact sequence
-            // so it stays an ordinary identifier everywhere else
-            // (`SELECT name FROM t`).
-            if self.at(BY_KW)
-                && self
-                    .peek_nth_non_trivia_text(1)
-                    .is_some_and(|t| t.eq_ignore_ascii_case("NAME"))
-            {
-                self.advance(); // BY
-                self.skip_trivia();
-                self.advance(); // NAME
-                self.skip_trivia();
-            }
-            // Parse next operand: a plain SELECT/WITH statement, or a
-            // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
-            // arbitrarily nested. The parenthesized form recurses through
-            // `parse_query_expr`, so it carries its own set-op tail and
-            // ORDER BY/LIMIT inside the parens.
-            if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(LPAREN) {
-                self.parse_query_expr();
-            } else {
-                self.error("Expected SELECT after set operation".to_string());
-            }
-        }
+        self.parse_set_op_tail();
 
         self.depth -= 1;
         self.finish_node();
+    }
+
+    /// Parses a trailing `UNION`/`INTERSECT`/`EXCEPT` set-op tail (operator,
+    /// optional `ALL`/`BY NAME`, right-hand operand) directly onto whatever
+    /// node is currently open, plus — when the right-hand operand is
+    /// parenthesized — any trailing `ORDER BY`/`LIMIT`/`OFFSET` that follows
+    /// it. Does nothing if the current token isn't a set-op keyword.
+    ///
+    /// Shared by `parse_select_stmt` (the common `A UNION B` case, where the
+    /// "currently open node" is the `SELECT_STMT` itself) and the
+    /// expression-level parenthesized-query primary in `expr.rs` (the
+    /// `((A) UNION B)` case, where the first operand is itself parenthesized
+    /// and the whole thing is a scalar-subquery expression).
+    pub(super) fn parse_set_op_tail(&mut self) {
+        if !self.at_any(&[UNION_KW, INTERSECT_KW, EXCEPT_KW]) {
+            return;
+        }
+        self.advance(); // consume UNION/INTERSECT/EXCEPT
+        self.skip_trivia();
+        // Optional ALL
+        if self.at(ALL_KW) {
+            self.advance();
+        }
+        self.skip_trivia();
+        // Optional BY NAME (DuckDB): unify operands by column name
+        // rather than position. `BY` is the reserved `BY_KW` (shared
+        // with `GROUP BY`/`ORDER BY`); `NAME` is a contextual keyword
+        // (lexed as plain IDENT), matched only in this exact sequence
+        // so it stays an ordinary identifier everywhere else
+        // (`SELECT name FROM t`).
+        if self.at(BY_KW)
+            && self
+                .peek_nth_non_trivia_text(1)
+                .is_some_and(|t| t.eq_ignore_ascii_case("NAME"))
+        {
+            self.advance(); // BY
+            self.skip_trivia();
+            self.advance(); // NAME
+            self.skip_trivia();
+        }
+        // Parse next operand: a plain SELECT/WITH statement, or a
+        // parenthesized query — `A UNION (B)`, `A UNION ((B) EXCEPT C)`,
+        // arbitrarily nested. The parenthesized form recurses through
+        // `parse_query_expr`, so it carries its own set-op tail and
+        // ORDER BY/LIMIT inside the parens.
+        let operand_was_parenthesized = self.at(LPAREN);
+        if self.at(SELECT_KW) || self.at(WITH_KW) || self.at(LPAREN) {
+            self.parse_query_expr();
+        } else {
+            self.error("Expected SELECT after set operation".to_string());
+        }
+
+        // DuckDB semantics: a trailing ORDER BY/LIMIT/OFFSET *after* a
+        // parenthesized set-op operand binds to the whole set operation,
+        // not to the parenthesized operand — `A UNION (B) ORDER BY x`
+        // orders the union's result, it does not reach inside `(B)`'s
+        // own (already-closed) parens. When the operand is unparenthesized
+        // (`A UNION B ORDER BY x`), the recursive `parse_select_stmt` call
+        // above already consumed the trailing ORDER BY/LIMIT as part of
+        // operand B's own grammar, which is equivalent since B is the
+        // last operand either way — so this block only needs to run for
+        // the parenthesized case, where the parens already closed the
+        // operand off from anything that follows.
+        if operand_was_parenthesized {
+            self.skip_trivia();
+            if self.at(ORDER_KW) {
+                self.parse_order_by_clause();
+            }
+
+            self.skip_trivia();
+            let has_limit = self.at(LIMIT_KW);
+            if has_limit {
+                self.parse_limit_clause();
+            }
+
+            self.skip_trivia();
+            if self.at(OFFSET_KW) && !has_limit {
+                self.start_node(LIMIT_CLAUSE);
+                self.advance(); // OFFSET
+                self.skip_trivia();
+                if self.at(NUMBER) {
+                    self.advance();
+                } else {
+                    self.error("Expected number after OFFSET".to_string());
+                }
+                self.finish_node();
+            }
+        }
     }
 
     /// Parses a full query expression: either a plain `SELECT`/`WITH`
@@ -350,10 +404,26 @@ impl<'a> super::Parser<'a> {
         // Parse first table reference (required)
         self.parse_table_ref();
 
-        // Parse zero or more JOIN clauses
+        // Parse zero or more JOIN clauses, including the ANSI-89 implicit
+        // comma-separated form (`FROM a, b`), which reuses the same
+        // JOIN_CLAUSE node kind — see `JoinClause::is_comma_join`.
         loop {
             self.skip_trivia();
-            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
+            if self.at(COMMA) {
+                // Peek BEFORE consuming: `IDENT COLON` after the comma marks a
+                // record-literal field boundary (e.g. `materialization: 'x'`
+                // following `body: SELECT * FROM orders, …` inside a
+                // `ModelDef { … }`), not another comma-joined table reference.
+                // Breaking without consuming leaves the COMMA in the stream
+                // for the enclosing record-literal parser — mirrors the same
+                // guard in `parse_select_list`.
+                if self.peek_nth_non_trivia(1) == Some(IDENT)
+                    && self.peek_nth_non_trivia(2) == Some(COLON)
+                {
+                    break;
+                }
+                self.parse_join_clause();
+            } else if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
                 || self.at_contextual_keyword("NATURAL")
             {
                 self.parse_join_clause();
@@ -461,6 +531,7 @@ impl<'a> super::Parser<'a> {
                     self.skip_trivia();
                     if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
                         || self.at_contextual_keyword("NATURAL")
+                        || self.at(COMMA)
                     {
                         self.parse_join_clause();
                     } else {
@@ -496,10 +567,15 @@ impl<'a> super::Parser<'a> {
             self.start_node_at(checkpoint, FUNCTION_CALL);
             self.parse_arg_list();
             self.finish_node(); // Close FUNCTION_CALL
-        } else if self.at(IDENT) {
-            // Use builder checkpoint for proper lookahead
+        } else if self.at(IDENT) || self.at_quoted_ident_alias() {
+            // Use builder checkpoint for proper lookahead. `at_quoted_ident_alias()`
+            // accepts a double-quoted identifier lexed as STRING (`FROM "flights"`) —
+            // see the comment on that helper in parser/mod.rs. A single-quoted STRING
+            // (`FROM 'x.parquet'`, a file-glob/path literal) is deliberately excluded:
+            // that helper checks the leading quote character precisely so the two
+            // token shapes stay distinguished.
             let checkpoint = self.builder.checkpoint();
-            self.advance(); // Consume IDENT
+            self.advance(); // Consume IDENT or double-quoted identifier
             self.skip_trivia();
 
             if self.at(LPAREN) {
@@ -510,11 +586,16 @@ impl<'a> super::Parser<'a> {
             } else if self.at(DOT) {
                 // Could be schema.table, db.schema.table (arbitrary-depth
                 // qualification), or namespace.func(). Consume DOT + IDENT
-                // pairs in a loop so any qualification depth is accepted.
+                // (or double-quoted identifier) pairs in a loop so any
+                // qualification depth is accepted, quoted or not.
                 while self.at(DOT) {
                     self.advance(); // Consume DOT
                     self.skip_trivia();
-                    self.expect(IDENT); // Consume next segment IDENT
+                    if self.at_quoted_ident_alias() {
+                        self.advance(); // Consume next segment (double-quoted identifier)
+                    } else {
+                        self.expect(IDENT); // Consume next segment IDENT
+                    }
                     self.skip_trivia();
                     if self.at(LPAREN) || !self.at(DOT) {
                         break;
@@ -534,7 +615,23 @@ impl<'a> super::Parser<'a> {
             self.error("Expected table reference".to_string());
         }
 
-        // Optional TABLESAMPLE clause (PostgreSQL)
+        // Optional alias, with an optional column list. The alias may be
+        // explicit (`AS t`) or implicit (`t`); the `(c1, c2, …)` column list
+        // attaches to either form identically.
+        //
+        // DuckDB v1.5.4 requires the alias to appear *before* TABLESAMPLE
+        // (`base AS alias TABLESAMPLE(...)`) and rejects the reverse order
+        // (oracle-verified — see docs/TODO.md "TABLESAMPLE/PIVOT/UNPIVOT vs
+        // alias ordering"). Parse it here, in the DuckDB-valid position, so
+        // the printer can emit alias-first. The legacy alias-last position
+        // (`base TABLESAMPLE(...) [PIVOT/UNPIVOT (...)] AS alias`) is still
+        // accepted below for lenience — but only if no alias was found here
+        // — so older smelt SQL keeps parsing; the printer, however, only
+        // ever emits the alias-first form (see `printer.rs`).
+        self.skip_trivia();
+        let mut alias_parsed = self.try_parse_table_alias();
+
+        // Optional TABLESAMPLE clause (PostgreSQL/DuckDB)
         self.skip_trivia();
         if self.at(TABLESAMPLE_KW) {
             self.start_node(TABLESAMPLE_CLAUSE);
@@ -579,10 +676,22 @@ impl<'a> super::Parser<'a> {
             self.parse_unpivot_clause();
         }
 
-        // Optional alias, with an optional column list. The alias may be
-        // explicit (`AS t`) or implicit (`t`); the `(c1, c2, …)` column list
-        // attaches to either form identically.
-        self.skip_trivia();
+        // Legacy alias-last position: only consulted if no alias was found
+        // in the DuckDB-valid position above.
+        if !alias_parsed {
+            self.skip_trivia();
+            alias_parsed = self.try_parse_table_alias();
+        }
+        let _ = alias_parsed;
+
+        self.finish_node();
+    }
+
+    /// Parse an optional table alias (`AS t` or implicit `t`), with its
+    /// optional column list. Returns `true` if an alias was consumed, `false`
+    /// if the current position has no alias to parse (caller should try
+    /// again at another valid alias position, if any).
+    fn try_parse_table_alias(&mut self) -> bool {
         if self.at(AS_KW) {
             self.advance();
             self.skip_trivia();
@@ -592,6 +701,7 @@ impl<'a> super::Parser<'a> {
                 self.expect(IDENT);
             }
             self.parse_alias_column_list();
+            true
         } else if self.at(IDENT) && !self.at_keyword_that_ends_table_ref() {
             // Implicit alias (no AS keyword). Only consume if it's not a
             // keyword that would end the table ref. Deliberately does not
@@ -604,9 +714,10 @@ impl<'a> super::Parser<'a> {
             // rather than half-wired here.
             self.advance();
             self.parse_alias_column_list();
+            true
+        } else {
+            false
         }
-
-        self.finish_node();
     }
 
     /// Parse an optional alias column list `(c1, c2, …)` immediately following
@@ -743,6 +854,22 @@ impl<'a> super::Parser<'a> {
     #[allow(clippy::if_same_then_else)]
     pub(super) fn parse_join_clause(&mut self) {
         self.start_node(JOIN_CLAUSE);
+
+        // ANSI-89 implicit comma-separated cross join: `FROM a, b`. Ratified
+        // (2026-07-18, master D-QG-2) as a cross join — `JoinClause::join_type`
+        // classifies it accordingly (Phase 2). No JOIN keyword, no condition.
+        if self.at(COMMA) {
+            self.advance();
+            self.skip_trivia();
+            if !self.at(IDENT) && !self.at(LATERAL_KW) && !self.at(LPAREN) {
+                self.error("Expected table reference after ','".to_string());
+                self.finish_node();
+                return;
+            }
+            self.parse_table_ref();
+            self.finish_node();
+            return;
+        }
 
         // Optional NATURAL modifier (contextual keyword): `NATURAL [INNER |
         // LEFT [OUTER] | RIGHT [OUTER] | FULL [OUTER]] JOIN`. Join columns

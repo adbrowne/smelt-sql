@@ -114,10 +114,17 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
         return infer_list_comprehension_type(&comp, ctx);
     }
 
-    // Try array literal
-    if let Some(array_lit) = expr.as_array_literal() {
-        return infer_array_literal_type(&array_lit, ctx);
-    }
+    // Try array subscript/slice BEFORE array literal: when the subscripted or
+    // sliced base is itself an inline literal (`[1, 2, 3][1]`), the parser
+    // emits ARRAY_LITERAL and ARRAY_SUBSCRIPT (or ARRAY_SLICE) as *sibling*
+    // direct children of the same outer EXPRESSION node — the literal is not
+    // nested inside the subscript/slice node. That means the outer expr
+    // satisfies `as_array_literal()` too, and checking it first would resolve
+    // the whole expression to the literal's own `Array<T>` type, silently
+    // discarding the subscript/slice. Checking the more specific
+    // subscript/slice wrapper first keeps the dispatch on the
+    // actually-matching (outermost) construct, mirroring the
+    // list-comprehension-before-array-literal precedence just above.
 
     // Try array subscript
     if let Some(_subscript) = expr.as_array_subscript() {
@@ -127,6 +134,11 @@ pub fn infer_expression_type(expr: &Expr, ctx: &TypeContext) -> Option<TypedColu
     // Try array slice
     if let Some(_slice) = expr.as_array_slice() {
         return infer_array_slice_type(expr, ctx);
+    }
+
+    // Try array literal
+    if let Some(array_lit) = expr.as_array_literal() {
+        return infer_array_literal_type(&array_lit, ctx);
     }
 
     // Try ROW constructor

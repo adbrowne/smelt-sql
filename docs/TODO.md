@@ -61,10 +61,6 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 - [ ] **WITHIN GROUP (ORDER BY)** — For STRING_AGG/LISTAGG, parsed but not generated
 - [x] **EXTRACT parser support** — `EXTRACT(YEAR FROM col)` and `MAKE_DATE`/`MAKE_TIMESTAMP` are now exercised end-to-end by `expr_kind_strategy()`. Phase 58 (April 27, 2026) confirmed the historical `FROM`-inside-EXTRACT bug had already been fixed across the parser, AST, alias extraction, and type inference; a dedicated regression test (`crates/smelt-db/tests/extract_alias_extraction.rs`) was added before re-enabling the generator entries.
 
-## smelt test
-
-- [ ] **Graph-aware selectors for `smelt test --select`** — Currently `--select` uses substring matching on test names. Should support the same graph-aware selector syntax as `smelt run` (e.g., `tag:X`, `+model_name`, `model_name+`).
-
 ### Known DuckDB Incompatibilities (discovered during generator expansion)
 
 - **INITCAP**: Not available in DuckDB (no simple equivalent)
@@ -89,43 +85,19 @@ Reviewer-raised gaps adjacent to `docs/plans/20260528-source-leaf-name-collision
 - [x] **JOIN-side parallel of the `smelt.sources.*` shadow.** Closed incidentally by the generator-emission Phase 2 fix (commit `37bc3845`): `resolve_table_ref_schema` was updated to route `smelt.<path>` value-form JOIN references through the same `resolved_columns_for_path` method that `process_table_ref_pure` uses. The hand-authored-first ordering in that method, combined with W3's pre-existing collision discard, makes the same leaf-collision class unreachable in JOIN context. No targeted test was added — the existing per-entity-fixture test in `crates/smelt-db/tests/source_leaf_collision.rs` exercises the FROM-clause path; a JOIN-clause analogue is a worthwhile defensive addition but not blocking.
 - [ ] **VALUES-body CTE arity check.** `check_cte_alias_arity` (`crates/smelt-db/src/type_inference/values.rs`, added in commit 47d874a4) returns early when the CTE body isn't a `SELECT`, so `WITH cte(a) AS (VALUES (1, 2)) SELECT * FROM cte` is silently exempt from the `AliasColumnArityMismatch` diagnostic that the SELECT-body case enforces. Symmetric coverage is a small extension — the underlying VALUES column count is already available via `Subquery::values_clause()` (commit 86f755fe) and `infer_values_columns` (commit 01fc027f). Mirror the SELECT-body path's arity check.
 
-## P7c (diagnostic-parity) — PAUSED for a design decision (2026-06-03)
+## P7c (diagnostic-parity) — resolved 2026-07-19
 
-`docs/plans/20260531-diagnostic-parity.md` P7c (config-loader build-path execution)
-is **partially landed and the tree is red at pre-flight** (`example_diagnostics::
-meta_config_clean_workspace` fails). Commit `58c2fcd4` shipped the P7c detector
-(bare `List<…>`/`Map<…>` loaders in scalar position → `MetaListInScalarPosition`),
-the **List<…>** build-path lowering, and `meta_config_e2e.rs` — but left the
-`examples/meta_config` models (`cohorts.sql`, `tenants.sql`) in their now-forbidden
-bare `SELECT smelt.config.load_yaml(...)` form, so analysis is red.
-
-**List loader is finishable now:** `cohorts.sql` rewrites cleanly to a consuming
-form (`reduce(map(load_yaml('configs/cohorts.yaml', List<…>), fn c => c.region),
-concat_with(', '))`) — verified analysis-clean; the List form already builds +
-executes (`meta_config_e2e.rs`).
-
-**Map loader is blocked — needs a human decision.** A `Map<Text, …>` loader value
-has **no parser-supported in-model consumer**: `load_yaml(...) |> m => m.keys()`
-fails ("pipe RHS must be a function call" / "Expected RPAREN, found ARROW") and
-`load_yaml(...).keys()` fails ("Expected RPAREN, found DOT"). Loader-result
-consumption through SELECT expressions is documented as deferred wiring
-(`crates/smelt-cli/tests/example_diagnostics.rs:1531-1534`). So the bare Map form
-(now forbidden by the P7c detector) has no clean replacement. The Map root-shape
-loader is woven through docs: `docs-site/docs/meta-language/{maps.md,config-loaders.md,
-reference.md}` and the canonical `examples/meta_config/models/tenants.sql`.
-
-Decision needed (pick one direction):
-- **(A) Drop Map-in-model.** Accept that a `Map<…>` loader cannot be consumed in a
-  model SELECT today; convert/remove `tenants.sql`, walk back the `maps.md` /
-  `config-loaders.md` / `reference.md` worked examples, and record a Known
-  Divergence in `meta_config_loading.md`. (If `tenants` is converted to a clean
-  `List` loader, `meta_config` could come **off** `KNOWN_UNBUILDABLE` entirely.)
-- **(B) Wire Map consumption.** Implement a parser/analyzer-supported binding form
-  (e.g. `m.entries()` / `m.keys()` reachable from a SELECT expr) so a Map loader
-  can be consumed, then give `tenants.sql` a clean consuming form. Larger scope.
-- **(C) Exempt bare Map/List loaders from the detector** when no consumer exists —
-  contradicts the just-committed P7c forbid-bare-loaders design decision
-  (`3c58cd29`), so only with Andrew's sign-off.
+The Map-loader decision this section tracked (direction A/B/C below) resolved
+as **(B) Wire Map consumption**: P7d (commit `ab22f990`) implemented Map API
+postfix method calls (`.entries()` / `.keys()` / `.values()` / `.get()` /
+`.has()`) on loader-result values, lowered at build time by
+`smelt-runtime::meta_eval`. `tenants.sql` was given a clean consuming form
+using this API, `examples/meta_config` builds and executes cleanly end-to-end,
+and it is no longer on the `example_builds` `KNOWN_UNBUILDABLE` allow-list.
+See `docs/specs/meta_config_loading.md` §"Known Divergences / Open Questions"
+for the residual gaps (recursive schemas, per-key deep-merge overlays,
+`Optional<V>` schema fields) and `docs/plans/20260509-meta-language-overall.md`
+for the P7d phase history.
 
 ## Pre-existing issues surfaced by the clock-vs-root sessions plan (2026-07-12)
 

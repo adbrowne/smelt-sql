@@ -221,3 +221,17 @@ fn unrecognized_function_still_warns() {
     assert_eq!(types.len(), 1);
     assert_eq!(types[0].data_type, DataType::unknown_dynamic());
 }
+
+#[test]
+fn to_seconds_and_md5_registered() {
+    let md5 = BuiltinRegistry::resolve("MD5").expect("MD5 present");
+    assert_eq!(md5.kind, ExprKind::Scalar);
+    let to_seconds = BuiltinRegistry::resolve("TO_SECONDS").expect("TO_SECONDS present");
+    assert_eq!(to_seconds.kind, ExprKind::Scalar);
+
+    assert_eq!(SqlFunction::from_name("MD5"), Some(SqlFunction::Md5));
+    assert_eq!(
+        SqlFunction::from_name("TO_SECONDS"),
+        Some(SqlFunction::ToSeconds)
+    );
+}

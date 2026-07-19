@@ -182,6 +182,20 @@ pub enum ExprKind {
     Like,
     /// Regex operators (~, ~*) → Boolean.
     Regex,
+    /// Array literal, e.g. `[1, 2, 3]` → Array<T>.
+    ArrayLiteral,
+    /// Array subscript, e.g. `arr[1]` → T (nullable — out-of-bounds is NULL).
+    ArraySubscript,
+    /// Array slice, e.g. `arr[1:2]` → Array<T>.
+    ArraySlice,
+    /// ROW constructor, e.g. `ROW(1, 'x')` → Struct with positional fields.
+    /// DuckDB's own `ROW(...)` yields anonymous ("") field names; smelt names
+    /// them positionally (v1, v2, ...) — a documented `ByDesign` divergence
+    /// (see `row_constructor_field_naming` in `divergences.rs`).
+    RowConstructor,
+    /// DuckDB struct/dict literal, e.g. `{'a': 1, 'b': 'x'}` → Struct with
+    /// the literal's own key names as field names (field-exact, no leniency).
+    BraceStructLiteral,
 }
 
 // ---- Function descriptors ----
@@ -191,6 +205,11 @@ pub enum ExprKind {
 pub enum ExtraArg {
     /// Re-use the same column as the first argument.
     SameAsFirst,
+    /// A different numeric column than the first argument, for true
+    /// two-column aggregates (CORR, COVAR_POP, COVAR_SAMP, REGR_SLOPE). Falls
+    /// back to the first argument's column when no second numeric column
+    /// exists in scope.
+    SecondNumericColumn,
     /// An integer literal.
     IntLiteral(&'static str),
     /// A string literal (will be single-quoted).
@@ -741,6 +760,15 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::Text,
         },
+        // LISTAGG is DuckDB's SQL-standard alias for STRING_AGG (same plain-call
+        // shape: `LISTAGG(col, sep)` → Text; registered in BuiltinRegistry).
+        FuncDesc {
+            name: "LISTAGG",
+            input: FuncInput::String,
+            extra_args: &[ExtraArg::StringLiteral(",")],
+            prepend_literal: None,
+            output_type: DataType::Text,
+        },
         // Any-type aggregates
         FuncDesc {
             name: "ANY_VALUE",
@@ -808,24 +836,35 @@ pub fn core_functions() -> Vec<FuncDesc> {
             output_type: DataType::Text,
         },
         // Two-argument statistical aggregates → Double (DuckDB and smelt agree).
+        // The second argument is a genuinely different numeric column
+        // (`SecondNumericColumn`), not the same column twice — DuckDB accepts
+        // same-column calls too, but that would never exercise the generator's
+        // multi-column selection path.
         FuncDesc {
             name: "CORR",
             input: FuncInput::NumericAggregate,
-            extra_args: &[ExtraArg::SameAsFirst],
+            extra_args: &[ExtraArg::SecondNumericColumn],
             prepend_literal: None,
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "COVAR_POP",
             input: FuncInput::NumericAggregate,
-            extra_args: &[ExtraArg::SameAsFirst],
+            extra_args: &[ExtraArg::SecondNumericColumn],
             prepend_literal: None,
             output_type: DataType::Double,
         },
         FuncDesc {
             name: "COVAR_SAMP",
             input: FuncInput::NumericAggregate,
-            extra_args: &[ExtraArg::SameAsFirst],
+            extra_args: &[ExtraArg::SecondNumericColumn],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "REGR_SLOPE",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[ExtraArg::SecondNumericColumn],
             prepend_literal: None,
             output_type: DataType::Double,
         },
@@ -837,10 +876,41 @@ pub fn core_functions() -> Vec<FuncDesc> {
             prepend_literal: None,
             output_type: DataType::unknown_dynamic(), // arg-dependent
         },
+        // Ordered-set aggregates: `PERCENTILE_CONT(f) WITHIN GROUP (ORDER BY col)`.
+        // The parser now accepts the generic `WITHIN GROUP` call-modifier clause
+        // (any function name), and DuckDB itself binds it specifically for
+        // percentile_cont/percentile_disc (probed directly against DuckDB —
+        // `percentile_cont`/`percentile_disc` have no direct-arg scalar-function
+        // form; WITHIN GROUP is the only accepted shape). The `sql` for these two
+        // is built specially in `generate_expr` (the fraction argument plus a
+        // WITHIN GROUP ORDER BY over the compatible column), not via the generic
+        // arg-join path below.
+        FuncDesc {
+            name: "PERCENTILE_CONT",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
+        FuncDesc {
+            name: "PERCENTILE_DISC",
+            input: FuncInput::NumericAggregate,
+            extra_args: &[],
+            prepend_literal: None,
+            output_type: DataType::Double,
+        },
         // NOTE: INITCAP and TO_CHAR are not DuckDB scalar functions, and the
-        // SQL-standard `POSITION(x IN y)` / `PERCENTILE_CONT(f) WITHIN GROUP`
-        // forms are deferred parser grammar. They are intentionally not
-        // generated here — the differential-parsing gaps track them instead.
+        // SQL-standard `POSITION(x IN y)` form is deferred parser grammar (see
+        // gaps.rs). `STRING_AGG`/`LISTAGG` are also intentionally NOT generated
+        // with `WITHIN GROUP` here: unlike PERCENTILE_CONT/PERCENTILE_DISC,
+        // DuckDB's binder rejects it for these two names — probed directly:
+        // `string_agg(x, ',') WITHIN GROUP (ORDER BY y)` fails with `Parser
+        // Error: Unknown ordered aggregate "string_agg"` (same for `listagg`).
+        // DuckDB's real ordered form for these is `string_agg(x, sep ORDER BY
+        // y)` (ORDER BY inside the call's argument list), which is the
+        // still-open `aggregate_call_order_by_clause` parser gap (see
+        // docs/TODO.md), not the WITHIN GROUP clause. They are intentionally
+        // not generated here — the differential-parsing gaps track them instead.
     ]
 }
 
@@ -891,9 +961,19 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
             DataType::SmallInt | DataType::Integer | DataType::BigInt => DataType::Double,
             other => other.clone(),
         },
-        "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP" | "COVAR_SAMP" => {
-            DataType::Double
-        }
+        // PERCENTILE_CONT/PERCENTILE_DISC: this mirrors smelt's *actual* current
+        // inference (BuiltinRegistry's fixed `Double` signature), not DuckDB's
+        // real behavior. DuckDB's WITHIN GROUP form is arg-dependent — probed
+        // directly: percentile_cont interpolates like MEDIAN (integer → Double,
+        // Decimal/Double preserved) and percentile_disc always preserves the
+        // exact input type (Integer/BigInt/Decimal/Double unchanged) — but
+        // smelt's type inference doesn't yet see the WITHIN GROUP ORDER BY
+        // expression's type at all (no AST accessor for it), so it can't
+        // compute the real answer. The resulting divergences are registered in
+        // divergences.rs (`percentile_ordered_set_decimal`, `percentile_disc_integer`,
+        // `percentile_disc_bigint`) rather than fixed here.
+        "PERCENTILE_CONT" | "PERCENTILE_DISC" | "CORR" | "COVAR_POP" | "COVAR_SAMP"
+        | "REGR_SLOPE" => DataType::Double,
         "ARRAY_AGG" => DataType::Array(Box::new(arg_type.clone())),
         "AGE" => DataType::Interval,
         "MODE" => arg_type.clone(),
@@ -921,7 +1001,7 @@ pub fn function_return_type(func_name: &str, arg_type: &DataType) -> DataType {
         // String functions
         "UPPER" | "LOWER" | "TRIM" | "LTRIM" | "RTRIM" | "REVERSE" | "CONCAT" | "REPLACE"
         | "REPEAT" | "LPAD" | "RPAD" | "INITCAP" | "TRANSLATE" | "TO_CHAR" | "SUBSTRING"
-        | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" | "STRING_AGG" => DataType::Text,
+        | "SUBSTR" | "LEFT" | "RIGHT" | "SPLIT_PART" | "STRING_AGG" | "LISTAGG" => DataType::Text,
         // JSON functions
         "TO_JSON"
         | "JSON_OBJECT"
@@ -996,6 +1076,11 @@ pub fn expr_kind_strategy() -> impl Strategy<Value = ExprKind> {
         1 => Just(ExprKind::Regex),
         1 => Just(ExprKind::Extract),
         1 => Just(ExprKind::MakeTemporal),
+        1 => Just(ExprKind::ArrayLiteral),
+        1 => Just(ExprKind::ArraySubscript),
+        1 => Just(ExprKind::ArraySlice),
+        1 => Just(ExprKind::RowConstructor),
+        1 => Just(ExprKind::BraceStructLiteral),
     ]
 }
 
@@ -1113,20 +1198,55 @@ pub fn generate_expr(
 
             let return_type = function_return_type(func.name, &compatible_col.data_type);
 
-            // Build argument list
-            let mut args = Vec::new();
-            if let Some(lit) = func.prepend_literal {
-                args.push(format!("'{lit}'"));
-            }
-            args.push(compatible_col.name.clone());
-            for extra in func.extra_args {
-                match extra {
-                    ExtraArg::SameAsFirst => args.push(compatible_col.name.clone()),
-                    ExtraArg::IntLiteral(v) => args.push(v.to_string()),
-                    ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
+            // Ordered-set aggregates: `PERCENTILE_CONT`/`PERCENTILE_DISC` take
+            // their sort key from a `WITHIN GROUP (ORDER BY ...)` clause, not
+            // from the argument list — the compatible column goes there, and
+            // the call itself takes only the fraction literal. See the
+            // `FuncDesc` entries above for why this can't go through the
+            // generic arg-join path below.
+            let mut sql = if matches!(func.name, "PERCENTILE_CONT" | "PERCENTILE_DISC") {
+                format!(
+                    "{}(0.5) WITHIN GROUP (ORDER BY {})",
+                    func.name, compatible_col.name
+                )
+            } else {
+                // Build argument list
+                let mut args = Vec::new();
+                if let Some(lit) = func.prepend_literal {
+                    args.push(format!("'{lit}'"));
                 }
+                args.push(compatible_col.name.clone());
+                for extra in func.extra_args {
+                    match extra {
+                        ExtraArg::SameAsFirst => args.push(compatible_col.name.clone()),
+                        ExtraArg::SecondNumericColumn => {
+                            let second = columns
+                                .iter()
+                                .find(|c| c.data_type.is_numeric() && c.name != compatible_col.name)
+                                .unwrap_or(compatible_col);
+                            args.push(second.name.clone());
+                        }
+                        ExtraArg::IntLiteral(v) => args.push(v.to_string()),
+                        ExtraArg::StringLiteral(v) => args.push(format!("'{v}'")),
+                    }
+                }
+                format!("{}({})", func.name, args.join(", "))
+            };
+
+            // Aggregates: sometimes wrap in FILTER (WHERE ...) to exercise the
+            // possibly-empty-group path (DuckDB already accepts this on every
+            // aggregate; see crates/smelt-parser/src/parser/tests.rs FILTER tests).
+            if matches!(
+                func.input,
+                FuncInput::AnyAggregate
+                    | FuncInput::NumericAggregate
+                    | FuncInput::BooleanAggregate
+                    | FuncInput::IntegerAggregate
+            ) && (expr_idx + func_idx).is_multiple_of(3)
+            {
+                let predicate = generate_filter_predicate(columns, &compatible_col.name);
+                sql = format!("{sql} FILTER (WHERE {predicate})");
             }
-            let sql = format!("{}({})", func.name, args.join(", "));
 
             Some(TypedExpr {
                 sql,
@@ -1359,6 +1479,94 @@ pub fn generate_expr(
                     },
                 })
             }
+        }
+
+        ExprKind::ArrayLiteral => {
+            // [<lit>, <lit>, <lit>] — three copies of the same base-type literal
+            // so DuckDB and smelt agree on a single, unambiguous element type
+            // (no cross-element promotion to reason about).
+            let bases = BaseType::all();
+            let base = bases[func_idx % bases.len()];
+            let elem_sql = base.cast_sql();
+            Some(TypedExpr {
+                sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}]"),
+                alias,
+                expected_smelt_type: DataType::Array(Box::new(base.to_smelt_type())),
+            })
+        }
+
+        ExprKind::ArraySubscript => {
+            // [<lit>, <lit>, <lit>][idx] — subscript an inline array literal
+            // (the column pool has no Array-typed columns). Alternates between
+            // an in-bounds index (1-based) and a deliberately out-of-bounds one
+            // to exercise DuckDB's out-of-bounds-is-NULL behavior; either way
+            // the inferred type is `nullable: true` (see
+            // `infer_array_subscript_type`), so the expected type is the same
+            // in both cases.
+            let bases = BaseType::all();
+            let base = bases[func_idx % bases.len()];
+            let elem_sql = base.cast_sql();
+            let idx = if (expr_idx + func_idx).is_multiple_of(2) {
+                1
+            } else {
+                99
+            };
+            Some(TypedExpr {
+                sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}][{idx}]"),
+                alias,
+                expected_smelt_type: base.to_smelt_type(),
+            })
+        }
+
+        ExprKind::ArraySlice => {
+            // [<lit>, <lit>, <lit>][1:2] — slice of an inline array literal,
+            // same element-type-agreement reasoning as ArrayLiteral above.
+            let bases = BaseType::all();
+            let base = bases[func_idx % bases.len()];
+            let elem_sql = base.cast_sql();
+            Some(TypedExpr {
+                sql: format!("[{elem_sql}, {elem_sql}, {elem_sql}][1:2]"),
+                alias,
+                expected_smelt_type: DataType::Array(Box::new(base.to_smelt_type())),
+            })
+        }
+
+        ExprKind::RowConstructor => {
+            // ROW(<lit1>, <lit2>) — two distinct base types so the fields are
+            // typed differently. DuckDB itself accepts ROW(...); the STRUCT(...)
+            // literal syntax smelt also parses does NOT parse in real DuckDB
+            // (verified against DuckDB 1.4.4: `STRUCT(1 AS a, 2 AS b)` is a
+            // parser error there — struct_pack's named-arg form is its actual
+            // equivalent), so only ROW(...) and the brace form below are safe
+            // to generate against the oracle.
+            let bases = BaseType::all();
+            let base1 = bases[func_idx % bases.len()];
+            let base2 = bases[(func_idx + 1) % bases.len()];
+            Some(TypedExpr {
+                sql: format!("ROW({}, {})", base1.cast_sql(), base2.cast_sql()),
+                alias,
+                expected_smelt_type: DataType::Struct(vec![
+                    ("v1".to_string(), base1.to_smelt_type()),
+                    ("v2".to_string(), base2.to_smelt_type()),
+                ]),
+            })
+        }
+
+        ExprKind::BraceStructLiteral => {
+            // {'a': <lit1>, 'b': <lit2>} — DuckDB's native struct/dict literal;
+            // smelt extracts the quoted key text verbatim as the field name, so
+            // (unlike ROW) this is field-exact against DuckDB with no leniency.
+            let bases = BaseType::all();
+            let base1 = bases[func_idx % bases.len()];
+            let base2 = bases[(func_idx + 1) % bases.len()];
+            Some(TypedExpr {
+                sql: format!("{{'a': {}, 'b': {}}}", base1.cast_sql(), base2.cast_sql()),
+                alias,
+                expected_smelt_type: DataType::Struct(vec![
+                    ("a".to_string(), base1.to_smelt_type()),
+                    ("b".to_string(), base2.to_smelt_type()),
+                ]),
+            })
         }
     }
 }
@@ -1942,6 +2150,21 @@ pub fn assemble_cte_query(
 /// query's. This stresses type propagation through a nested CTE boundary.
 pub fn wrap_in_outer_cte(inner_sql: &str) -> String {
     format!("WITH wrapped AS ({inner_sql}) SELECT * FROM wrapped")
+}
+
+/// Generate a per-row boolean predicate for an aggregate's `FILTER (WHERE ...)`
+/// clause. Unlike `generate_having_predicate`, this must NOT reference an
+/// aggregate — FILTER's WHERE is evaluated per input row, before aggregation.
+fn generate_filter_predicate(columns: &[TypedSource], exclude: &str) -> String {
+    let pred_col = columns
+        .iter()
+        .find(|c| c.name != exclude)
+        .unwrap_or(&columns[0]);
+    match &pred_col.data_type {
+        DataType::Boolean => pred_col.name.clone(),
+        dt if dt.is_numeric() => format!("{} > 0", pred_col.name),
+        _ => format!("{} IS NOT NULL", pred_col.name),
+    }
 }
 
 /// Generate a HAVING predicate for GROUP BY queries.

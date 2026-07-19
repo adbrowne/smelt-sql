@@ -230,6 +230,32 @@ impl<'a> super::Parser<'a> {
 
         loop {
             self.skip_trivia();
+
+            // Lookahead for the NOT-prefixed binary-operator forms: `NOT
+            // IN`, `NOT LIKE`, `NOT ILIKE`, `NOT BETWEEN`, `NOT SIMILAR TO`,
+            // and the bare `expr NOT NULL` sugar for `expr IS NOT NULL`
+            // (verified against a live DuckDB: `SELECT 1 WHERE 1 NOT NULL`
+            // executes identically to `... WHERE 1 IS NOT NULL`). A bare
+            // `NOT` not followed by one of these keywords is the unary
+            // boolean NOT, already consumed at `parse_unary_expr`'s tighter
+            // precedence level before this loop ever runs — this lookahead
+            // only fires for a `NOT` appearing *after* a fully-parsed left
+            // operand. DuckDB itself rejects `NOT GLOB` (verified against a
+            // live DuckDB), so GLOB is intentionally excluded — matches the
+            // pre-existing `not_glob_not_supported` regression test.
+            let not_prefixed_kw = if self.at(NOT_KW) {
+                self.peek_nth_non_trivia_text(1)
+                    .map(str::to_ascii_uppercase)
+            } else {
+                None
+            };
+            let is_not_in = not_prefixed_kw.as_deref() == Some("IN");
+            let is_not_like = not_prefixed_kw.as_deref() == Some("LIKE");
+            let is_not_ilike = not_prefixed_kw.as_deref() == Some("ILIKE");
+            let is_not_between = not_prefixed_kw.as_deref() == Some("BETWEEN");
+            let is_not_similar = not_prefixed_kw.as_deref() == Some("SIMILAR");
+            let is_not_null = not_prefixed_kw.as_deref() == Some("NULL");
+
             if self.at_any(&[
                 EQ,
                 NE,
@@ -284,22 +310,69 @@ impl<'a> super::Parser<'a> {
                     self.parse_collate_expr(); // right operand
                 }
                 self.finish_node();
-            } else if self.at(BETWEEN_KW) {
+            } else if is_not_null {
+                // Bare `expr NOT NULL` — sugar for `expr IS NOT NULL`.
+                self.start_node_at(checkpoint, BINARY_EXPR);
+                self.advance(); // consume NOT
+                self.skip_trivia();
+                self.advance(); // consume NULL
+                self.finish_node();
+            } else if self.at(BETWEEN_KW) || is_not_between {
                 // BETWEEN low AND high — use checkpoint to include left operand
                 self.start_node_at(checkpoint, BETWEEN_EXPR);
+                if is_not_between {
+                    self.advance(); // consume NOT
+                    self.skip_trivia();
+                }
                 self.parse_between_body();
                 self.finish_node();
-            } else if self.at(IN_KW) {
+            } else if self.at(IN_KW) || is_not_in {
                 // IN (values...) — use checkpoint to include left operand
                 self.start_node_at(checkpoint, IN_EXPR);
+                if is_not_in {
+                    self.advance(); // consume NOT
+                    self.skip_trivia();
+                }
                 self.parse_in_body();
                 self.finish_node();
-            } else if self.at(LIKE_KW) || self.at(ILIKE_KW) || self.at(GLOB_KW) {
-                // LIKE / ILIKE / GLOB pattern. DuckDB rejects `NOT GLOB` (verified
-                // via the oracle), matching the existing NOT LIKE limitation, so
-                // there is no dedicated NOT-prefixed form here.
+            } else if self.at(LIKE_KW)
+                || self.at(ILIKE_KW)
+                || self.at(GLOB_KW)
+                || is_not_like
+                || is_not_ilike
+            {
+                // LIKE / ILIKE / GLOB pattern, optionally NOT-prefixed
+                // (NOT LIKE / NOT ILIKE). DuckDB rejects `NOT GLOB`
+                // (verified via the oracle), so there is no dedicated
+                // NOT-prefixed form for GLOB.
                 self.start_node_at(checkpoint, BINARY_EXPR);
+                if is_not_like || is_not_ilike {
+                    self.advance(); // consume NOT
+                    self.skip_trivia();
+                }
                 self.advance(); // consume LIKE/ILIKE/GLOB
+                self.skip_trivia();
+                self.parse_collate_expr();
+                self.finish_node();
+            } else if self.at_similar_to() || is_not_similar {
+                // SIMILAR TO / NOT SIMILAR TO pattern. `SIMILAR` and `TO`
+                // are both unreserved in DuckDB/PostgreSQL (no dedicated
+                // token kind — verified `SELECT 1 AS similar`/`AS to` parse
+                // as plain identifiers against a live DuckDB), so this is a
+                // two-token contextual-keyword lookahead, same convention as
+                // `peek_grouping_sets_clause`.
+                self.start_node_at(checkpoint, BINARY_EXPR);
+                if is_not_similar {
+                    self.advance(); // consume NOT
+                    self.skip_trivia();
+                }
+                self.advance(); // consume SIMILAR
+                self.skip_trivia();
+                if self.at_contextual_keyword("TO") {
+                    self.advance(); // consume TO
+                } else {
+                    self.error("Expected TO after SIMILAR".to_string());
+                }
                 self.skip_trivia();
                 self.parse_collate_expr();
                 self.finish_node();
@@ -307,6 +380,15 @@ impl<'a> super::Parser<'a> {
                 break;
             }
         }
+    }
+
+    /// True when positioned at the contextual `SIMILAR TO` keyword pair
+    /// (see [`parse_comparison_expr`](Self::parse_comparison_expr) for why
+    /// this is a text lookahead rather than a token-kind check). Pure
+    /// lookahead; consumes nothing.
+    fn at_similar_to(&self) -> bool {
+        self.at_contextual_keyword("SIMILAR")
+            && matches!(self.peek_nth_non_trivia_text(1), Some(t) if t.eq_ignore_ascii_case("TO"))
     }
 
     /// Parse a COLLATE expression: `expr COLLATE collation_name`.
@@ -563,8 +645,16 @@ impl<'a> super::Parser<'a> {
                 self.expect(RPAREN);
                 self.finish_node();
             } else if self.at(LPAREN) && self.at_parenthesized_query_start() {
+                // `((A) UNION B)` — the query inside these outer parens has
+                // a parenthesized *first* operand of its own set-op tail,
+                // e.g. `((SELECT 2) UNION SELECT 2)` used as a scalar
+                // subquery. `parse_query_expr` only consumes the leading
+                // `(A)`; the set-op tail (`UNION B`, plus any trailing
+                // ORDER BY/LIMIT after a parenthesized `B`) is parsed here.
                 self.start_node_at(checkpoint, SUBQUERY);
                 self.parse_query_expr();
+                self.skip_trivia();
+                self.parse_set_op_tail();
                 self.skip_trivia();
                 self.expect(RPAREN);
                 self.finish_node();
@@ -2002,6 +2092,18 @@ impl<'a> super::Parser<'a> {
 
     /// Check if current token is a keyword that can also be used as a function name
     pub(super) fn at_keyword_as_function_name(&self) -> bool {
+        // RANGE is the window-frame unit keyword (`RANGE BETWEEN …`), but
+        // that form is parsed by a dedicated frame-clause dispatch that
+        // checks for RANGE_KW before expression parsing is ever reached
+        // (see parse_window_frame). Everywhere else RANGE is either
+        // DuckDB's range(...) table/scalar function or a plain column
+        // name (e.g. `SELECT range AS id, range % 5 FROM range(13)`), so —
+        // unlike the LPAREN-gated keywords below — it is accepted here
+        // even without a following `(`; the caller's bare-keyword branch
+        // then wraps it as a plain identifier expression.
+        if self.at(RANGE_KW) {
+            return true;
+        }
         if !self.at_any(&[
             FILTER_KW, QUALIFY_KW, PIVOT_KW, UNPIVOT_KW, VALUES_KW, LEFT_KW, RIGHT_KW,
             // Phase B: FN_KW — `fn(args)` where `fn` is used as a SQL function name.

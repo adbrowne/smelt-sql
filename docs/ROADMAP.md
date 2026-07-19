@@ -21,6 +21,8 @@ The items below are the current priority queue, top to bottom. See completed ite
 
 The spine of the near-term roadmap is a single through-thread: **harden against silent failures → cover the missing type-system axes → build virtual environments on that precision → generalise to schema migration.** Spark hardening runs as an elevated parallel track; the remaining items are lower priority. The shared-runtime consolidation, the feature-sweep bug ledger, and the silent-failures hardening that previously headed this queue are now complete — see [Recently Completed](#recently-completed).
 
+**Parallel track (2026-07-18):** the **quality-grind programme** ([master plan](plans/20260718-quality-grind.md)) works the small root-caused deferred items (parser ledger categories, VALUES arity, UTF-8 positions, registry gaps, doc gaps) and the well-understood larger ones (generator deferred coverage, smelt-planner↔smelt-logical consolidation, the cold-Salsa benchmark regression) via a second autonomy loop on `worktree-roadmap_todo`; decision-gated items are queued in the master's "Tier 3 — decision queue".
+
 ### 1. Type-System Axes — Collation
 
 ~~Silent Failures & Code-Health Hardening~~ ✅ (2026-06-10) — see [Recently Completed](#recently-completed).
@@ -847,7 +849,8 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - **Retain-parsed-AST cleanup sweep** — Phase 0 retains the parsed `Expr` on `analyze_select` items; other analyses still re-scan raw text and should retain what's parsed instead: `analysis/mod.rs` clause string-scanning, `source_bounds.rs` textual `INTERVAL`/`RANGE BETWEEN` recognition, `rules/incremental.rs` `Frontmatter::strip`+re-scan, and the `temporal.rs` re-parse sites.
 
 **smelt-logical / smelt-planner extraction**
-- **Consolidate the duplicated analysis modules.** `smelt-planner/src/` still carries a parallel copy of nearly every `smelt-logical` module — `analysis/{mod,source_bounds,temporal}.rs`, `rules/{incremental,cumulative,rule_diagnostics,cube_split}.rs`, `logical.rs`, `graph.rs`, `types.rs`, `lowering/as_struct.rs` — from the recent (incomplete) extraction into `smelt-logical`. Finish the extraction so each analysis lives once (in `smelt-logical`, consumed by both `smelt-db` and `smelt-planner`), leaving `smelt-planner` only its planner-only pieces (`logical_plan_rules.rs`, `plan_printer.rs`, `python_bridge.rs`). Prerequisite context for where any future type-aware analysis moves.
+- ✅ **`analysis/{mod,source_bounds,temporal}.rs`, `logical.rs`, `types.rs` consolidated** (2026-07-19). `smelt-planner`'s local copies were already thin `pub use smelt_logical::…` shims; `lib.rs` now re-exports the `smelt-logical` modules directly (`pub use smelt_logical::{analysis, logical, types};`) and the shim files are deleted. No behaviour change — `cargo tree -p smelt-db -i smelt-planner` still shows no production path.
+- **Remaining duplication.** `smelt-planner/src/` still carries a parallel copy of `rules/{incremental,cumulative,rule_diagnostics,cube_split}.rs`, `graph.rs`, `lowering/as_struct.rs` from the recent (incomplete) extraction into `smelt-logical`. Finish the extraction so each analysis lives once (in `smelt-logical`, consumed by both `smelt-db` and `smelt-planner`), leaving `smelt-planner` only its planner-only pieces (`logical_plan_rules.rs`, `plan_printer.rs`, `python_bridge.rs`). Prerequisite context for where any future type-aware analysis moves.
 
 **Datagen / incremental**
 - Foreign-key resolution inside `JsonObject`/`entity.columns` always resolves to id 1 (`20260517-web-analytics-1-datagen-json-object.md`).
@@ -870,7 +873,7 @@ Concrete work deferred during plan implementation (`docs/plans/`) that is not ot
 - `smelt docs` follow-ons: HTML output, `smelt docs serve`, column-lineage visualization, `smelt docs diff` (`20260329-docs-generate.md`).
 
 **CI / Performance**
-- **Cold-Salsa full-diagnostics regression (2000-model benchmark)** — the `Benchmarks` CI workflow's catastrophic-regression gate (`crates/smelt-bench/src/bin/save_results.rs`, 10s ceiling) has failed on `main` for three consecutive pushes starting 2026-07-09: `initial_load_ms`/`full_diagnostics_ms` are ≈14.8s, up from a healthy baseline well under the ceiling. The jump lines up with the large incremental/batched-refresh feature merges around PR #151 (monotonicity trace, composition walk, and related per-model logical analyses added significant cold-load work across all 2000 models). Needs profiling (`crates/smelt-bench/src/bin/profile_initial_load.rs`) to find which new analysis is driving the blow-up before deciding whether to optimize it or raise the ceiling.
+- ~~Cold-Salsa full-diagnostics regression (2000-model benchmark)~~ — **resolved 2026-07-11** by `bf881006` ("fix(db): cache smelt.yml parse for maintenance/state queries, fix O(N) CI bench regression"): `maintenance_plan`/`maintenance_plan_report`/the `state.mode` widening check were re-parsing `smelt.yml`'s full YAML text on every per-file Salsa query instead of a cached tracked query, an O(N) `serde_yaml` cost across the 2000-model workspace. Fixed via `project_maintenance_config`/`project_state_mode` tracked queries. Confirmed via `docs/plans/20260718-quality-grind-t2.md` Phase 8 (2026-07-19): `initial_load_ms`/`full_diagnostics_ms` are ~395ms/~334ms, ~25x under the 10s ceiling. This entry was previously stale (written the same day the regression appeared, before the same-day fix landed hours later).
 
 ---
 

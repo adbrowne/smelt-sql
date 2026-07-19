@@ -52,6 +52,24 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Varchar { max_length: None }),
             status: DivergenceStatus::ByDesign,
         },
+        // Names the struct-field-naming blanket leniency in `type_comparison.rs`
+        // (`compare_struct_fields`). DuckDB's own `ROW(...)` constructor leaves
+        // fields anonymous (empty name); smelt names positional struct fields
+        // v1, v2, ... for ergonomic dot-access (`infer_row_constructor_type`).
+        // `compare_types` returns Compatible for this pattern and cites this
+        // entry; it never reaches `find_divergence` (struct fields are compared
+        // structurally, not via this registry's exact-type matching), but the
+        // entry exists so the leniency is named and greppable.
+        TypeDivergence {
+            id: "row_constructor_field_naming",
+            description: "ROW(...) — smelt names positional struct fields v1, v2, ...; \
+                DuckDB leaves them anonymous (empty name). Authorises the struct \
+                field-naming Compatible verdict in type_comparison.rs.",
+            smelt_type: DataType::Struct(vec![("v1".to_string(), DataType::Integer)]),
+            duckdb_type: Some(DataType::Struct(vec![(String::new(), DataType::Integer)])),
+            spark_type: None,
+            status: DivergenceStatus::ByDesign,
+        },
         TypeDivergence {
             id: "sum_integer",
             description: "SUM(INTEGER/BIGINT) — smelt infers BigInt, DuckDB returns Decimal(38,0) (HUGEINT via Arrow)",
@@ -113,6 +131,55 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             duckdb_type: None,
             spark_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
+        },
+        // PERCENTILE_CONT/PERCENTILE_DISC ordered-set aggregates: smelt's
+        // BuiltinRegistry signature returns a fixed `Double`, because the
+        // WITHIN GROUP clause's `ORDER BY` expression (where the real,
+        // arg-dependent type lives) isn't yet exposed to type inference — there
+        // is no AST accessor for it (`FunctionCall::arguments()` only sees the
+        // fraction literal, e.g. `0.5`). DuckDB itself (probed directly)
+        // preserves the sort column's type: `percentile_cont` interpolates like
+        // `MEDIAN` (integer widens to Double, Decimal/Double preserved) and
+        // `percentile_disc` always preserves the exact input type (it just
+        // picks an existing row's value, no interpolation). These are smelt
+        // bugs (`KnownBug`, same shape as `round_integer` below) rather than
+        // legitimate backend differences; fixing requires threading the
+        // WITHIN GROUP ORDER BY expression's type through
+        // `try_registry_inference`, which is out of scope for the property-test
+        // generator work that surfaced them.
+        TypeDivergence {
+            id: "percentile_ordered_set_decimal",
+            description: "PERCENTILE_CONT/PERCENTILE_DISC(DECIMAL) WITHIN GROUP — smelt infers \
+                Double (registry-fixed, doesn't see the WITHIN GROUP ORDER BY column type), \
+                DuckDB preserves the input Decimal type for both functions.",
+            smelt_type: DataType::Double,
+            // Wildcard: matches any DuckDB Decimal.
+            duckdb_type: Some(DataType::Decimal {
+                precision: 0,
+                scale: 0,
+            }),
+            spark_type: None,
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "percentile_disc_integer",
+            description: "PERCENTILE_DISC(INTEGER) WITHIN GROUP — smelt infers Double \
+                (registry-fixed), DuckDB preserves Integer (percentile_disc never \
+                interpolates; it returns an actual input value).",
+            smelt_type: DataType::Double,
+            duckdb_type: Some(DataType::Integer),
+            spark_type: None,
+            status: DivergenceStatus::KnownBug,
+        },
+        TypeDivergence {
+            id: "percentile_disc_bigint",
+            description: "PERCENTILE_DISC(BIGINT) WITHIN GROUP — smelt infers Double \
+                (registry-fixed), DuckDB preserves BigInt (percentile_disc never \
+                interpolates; it returns an actual input value).",
+            smelt_type: DataType::Double,
+            duckdb_type: Some(DataType::BigInt),
+            spark_type: None,
+            status: DivergenceStatus::KnownBug,
         },
         TypeDivergence {
             id: "sign_double",
@@ -520,8 +587,31 @@ mod tests {
     #[test]
     fn decimal_wildcard_does_not_match_non_decimal_smelt() {
         let divs = known_divergences();
-        // smelt Double vs DuckDB Decimal must NOT be absorbed by the decimal
-        // wildcard (smelt side is not a Decimal).
+        // smelt Boolean vs DuckDB Decimal must NOT be absorbed by the decimal
+        // wildcard (smelt side is not a Decimal, and no registered divergence
+        // pairs Boolean with Decimal).
+        let found = find_divergence(
+            &DataType::Boolean,
+            &DataType::Decimal {
+                precision: 10,
+                scale: 2,
+            },
+            "duckdb",
+            &divs,
+        );
+        assert!(found.is_none());
+    }
+
+    #[test]
+    fn finds_percentile_ordered_set_decimal_divergence_duckdb() {
+        // smelt Double vs DuckDB Decimal IS a registered divergence now
+        // (`percentile_ordered_set_decimal`, added for PERCENTILE_CONT/
+        // PERCENTILE_DISC's registry-fixed Double signature vs DuckDB's
+        // sort-column-type-preserving WITHIN GROUP behavior) — this
+        // supersedes the old blanket assumption in
+        // `decimal_wildcard_does_not_match_non_decimal_smelt` above that no
+        // such pairing existed.
+        let divs = known_divergences();
         let found = find_divergence(
             &DataType::Double,
             &DataType::Decimal {
@@ -531,7 +621,21 @@ mod tests {
             "duckdb",
             &divs,
         );
-        assert!(found.is_none());
+        assert_eq!(found.unwrap().id, "percentile_ordered_set_decimal");
+    }
+
+    #[test]
+    fn finds_percentile_disc_integer_divergence_duckdb() {
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::Double, &DataType::Integer, "duckdb", &divs);
+        assert_eq!(found.unwrap().id, "percentile_disc_integer");
+    }
+
+    #[test]
+    fn finds_percentile_disc_bigint_divergence_duckdb() {
+        let divs = known_divergences();
+        let found = find_divergence(&DataType::Double, &DataType::BigInt, "duckdb", &divs);
+        assert_eq!(found.unwrap().id, "percentile_disc_bigint");
     }
 
     #[test]

@@ -243,3 +243,53 @@ fn cte_no_alias_list_no_arity_mismatch() {
         diags
     );
 }
+
+// ---------------------------------------------------------------------------
+// Phase 8 TDD: AliasColumnArityMismatch for VALUES-body CTEs (parity with
+// the SELECT-body case above).
+// ---------------------------------------------------------------------------
+
+/// `WITH cte(a) AS (VALUES (1, 2)) SELECT * FROM cte`
+/// One declared column name but the VALUES row has two columns → mismatch.
+/// Must emit exactly one `AliasColumnArityMismatch` diagnostic.
+#[test]
+fn values_body_cte_arity_mismatch() {
+    let sql = "WITH cte(a) AS (VALUES (1, 2)) SELECT a FROM cte\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let arity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::AliasColumnArityMismatch))
+        .collect();
+
+    assert_eq!(
+        arity_diags.len(),
+        1,
+        "expected exactly 1 AliasColumnArityMismatch, got {}:\n  {:?}",
+        arity_diags.len(),
+        diags
+    );
+}
+
+/// Regression: `WITH cte(a, b) AS (VALUES (1, 2)) SELECT a, b FROM cte`
+/// Matching alias count against a VALUES body must emit zero diagnostics.
+#[test]
+fn values_body_cte_arity_match_clean() {
+    let sql = "WITH cte(a, b) AS (VALUES (1, 2)) SELECT a, b FROM cte\n";
+    let (db, ws, sf) = build_db_single_model(sql);
+    let diags = all_diagnostics(&db, ws, sf);
+
+    let arity_diags: Vec<_> = diags
+        .iter()
+        .filter(|d| d.code == Some(DiagnosticCode::AliasColumnArityMismatch))
+        .collect();
+
+    assert_eq!(
+        arity_diags.len(),
+        0,
+        "expected zero AliasColumnArityMismatch for matching VALUES arity, got {}:\n  {:?}",
+        arity_diags.len(),
+        diags
+    );
+}

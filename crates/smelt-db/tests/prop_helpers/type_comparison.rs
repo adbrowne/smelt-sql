@@ -57,7 +57,53 @@ pub fn compare_types(smelt: &DataType, actual: &DataType) -> TypeMatch {
         return compare_types(a, b);
     }
 
+    // Structural recursion for structs: field-exact by default (name and type
+    // must agree per field), but with one named leniency mirroring the string
+    // rule above — `row_constructor_field_naming` (ByDesign, in
+    // `divergences.rs`): DuckDB's `ROW(...)` leaves fields anonymous (empty
+    // name), while smelt names positional struct fields v1, v2, ... for
+    // ergonomic dot-access. A struct field is compared as "compatible" when
+    // the actual (backend) name is empty and the smelt name follows that
+    // convention; any other name mismatch is a genuine Mismatch.
+    if let (DataType::Struct(a), DataType::Struct(b)) = (smelt, actual) {
+        return compare_struct_fields(a, b);
+    }
+
     TypeMatch::Mismatch
+}
+
+fn compare_struct_fields(
+    smelt_fields: &[(String, DataType)],
+    actual_fields: &[(String, DataType)],
+) -> TypeMatch {
+    if smelt_fields.len() != actual_fields.len() {
+        return TypeMatch::Mismatch;
+    }
+
+    let mut compat_reason: Option<&'static str> = None;
+    for (i, ((s_name, s_ty), (a_name, a_ty))) in
+        smelt_fields.iter().zip(actual_fields.iter()).enumerate()
+    {
+        if a_name.is_empty() && *s_name == format!("v{}", i + 1) {
+            compat_reason = Some(
+                "row_constructor_field_naming: smelt names positional struct fields \
+                 v1, v2, ...; DuckDB's ROW(...) leaves them anonymous (ByDesign)",
+            );
+        } else if s_name != a_name {
+            return TypeMatch::Mismatch;
+        }
+
+        match compare_types(s_ty, a_ty) {
+            TypeMatch::Exact => {}
+            TypeMatch::Compatible { reason } => compat_reason = Some(reason),
+            TypeMatch::Mismatch => return TypeMatch::Mismatch,
+        }
+    }
+
+    match compat_reason {
+        Some(reason) => TypeMatch::Compatible { reason },
+        None => TypeMatch::Exact,
+    }
 }
 
 fn is_string_compat(a: &DataType, b: &DataType) -> bool {
@@ -131,5 +177,70 @@ mod tests {
             compare_types(&DataType::Boolean, &DataType::Integer),
             TypeMatch::Mismatch
         );
+    }
+
+    #[test]
+    fn struct_exact_match() {
+        let s = DataType::Struct(vec![
+            ("a".to_string(), DataType::Integer),
+            ("b".to_string(), DataType::Boolean),
+        ]);
+        assert_eq!(compare_types(&s, &s), TypeMatch::Exact);
+    }
+
+    #[test]
+    fn struct_field_type_mismatch_is_mismatch() {
+        let smelt = DataType::Struct(vec![("a".to_string(), DataType::Integer)]);
+        let actual = DataType::Struct(vec![("a".to_string(), DataType::BigInt)]);
+        assert_eq!(compare_types(&smelt, &actual), TypeMatch::Mismatch);
+    }
+
+    #[test]
+    fn struct_field_name_mismatch_is_mismatch() {
+        let smelt = DataType::Struct(vec![("a".to_string(), DataType::Integer)]);
+        let actual = DataType::Struct(vec![("z".to_string(), DataType::Integer)]);
+        assert_eq!(compare_types(&smelt, &actual), TypeMatch::Mismatch);
+    }
+
+    #[test]
+    fn struct_field_count_mismatch_is_mismatch() {
+        let smelt = DataType::Struct(vec![
+            ("a".to_string(), DataType::Integer),
+            ("b".to_string(), DataType::Boolean),
+        ]);
+        let actual = DataType::Struct(vec![("a".to_string(), DataType::Integer)]);
+        assert_eq!(compare_types(&smelt, &actual), TypeMatch::Mismatch);
+    }
+
+    #[test]
+    fn struct_row_constructor_naming_is_compatible() {
+        // smelt names positional ROW(...) fields v1, v2; DuckDB leaves them
+        // anonymous ("") — the `row_constructor_field_naming` ByDesign leniency.
+        let smelt = DataType::Struct(vec![
+            ("v1".to_string(), DataType::Integer),
+            ("v2".to_string(), DataType::Boolean),
+        ]);
+        let actual = DataType::Struct(vec![
+            (String::new(), DataType::Integer),
+            (String::new(), DataType::Boolean),
+        ]);
+        assert!(matches!(
+            compare_types(&smelt, &actual),
+            TypeMatch::Compatible { .. }
+        ));
+    }
+
+    #[test]
+    fn struct_nested_string_field_is_compatible() {
+        // Nested recursion also picks up the text/varchar leniency per field.
+        let smelt = DataType::Struct(vec![("a".to_string(), DataType::Text)]);
+        let actual = DataType::Struct(vec![(
+            "a".to_string(),
+            DataType::Varchar { max_length: None },
+        )]);
+        assert!(matches!(
+            compare_types(&smelt, &actual),
+            TypeMatch::Compatible { .. }
+        ));
     }
 }

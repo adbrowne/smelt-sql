@@ -39,3 +39,15 @@ SELECT a, b, SUM(c) FROM t GROUP BY GROUPING SETS ((a), (b), ())
 SELECT struct_pack(x := a, y := b) AS s FROM t
 SELECT struct_pack(x => a, y => b) AS s FROM t
 SELECT UNNEST([[1, 2, 3]], recursive := true) AS u
+SELECT 2 NOT IN (2, 3) AS x
+SELECT a == 1 AS x FROM t
+SELECT a FROM "t"
+SELECT range(5) AS x
+SELECT range AS x FROM range(3)
+SELECT a FROM t UNION (SELECT a FROM t) ORDER BY a
+SELECT a FROM t UNION (SELECT a FROM t) LIMIT 5
+SELECT ((SELECT 2) UNION SELECT 2)
+SELECT a FROM t AS x TABLESAMPLE (10)
+SELECT * FROM t AS x PIVOT (SUM(a) FOR b IN ('foo', 'bar'))
+SELECT * FROM t AS x UNPIVOT (val FOR name IN (a, c))
+SELECT * FROM (VALUES (1)) t(a), (VALUES (2)) s(b)

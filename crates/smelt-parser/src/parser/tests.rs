@@ -86,6 +86,109 @@ fn test_multiple_joins() {
 }
 
 #[test]
+fn test_comma_join_two_tables() {
+    let input = "SELECT * FROM users, orders";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().expect("should have FROM");
+    assert_eq!(from.joins().count(), 1);
+    let join = from.joins().next().unwrap();
+    assert!(join.is_comma_join(), "should be a comma-join");
+    assert!(join.condition().is_none(), "comma-join has no condition");
+    let table_ref = join.table_ref().expect("should have table ref");
+    assert_eq!(table_ref.identifier().as_deref(), Some("orders"));
+}
+
+#[test]
+fn test_comma_join_three_tables() {
+    let input = "SELECT * FROM a, b, c";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    assert_eq!(from.joins().count(), 2);
+    assert!(from.joins().all(|j| j.is_comma_join()));
+}
+
+#[test]
+fn test_comma_join_mixed_with_explicit_join() {
+    let input = "SELECT * FROM a, b INNER JOIN c ON b.id = c.id";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    let joins: Vec<_> = from.joins().collect();
+    assert_eq!(joins.len(), 2);
+    assert!(joins[0].is_comma_join(), "first join should be comma-join");
+    assert!(
+        !joins[1].is_comma_join(),
+        "second join should be explicit JOIN"
+    );
+    assert_eq!(joins[1].join_type(), Some(JoinType::Inner));
+}
+
+#[test]
+fn test_comma_join_with_aliases() {
+    let input = "SELECT * FROM users AS u, orders o";
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    let join = from.joins().next().unwrap();
+    assert!(join.is_comma_join());
+    let table_ref = join.table_ref().unwrap();
+    assert_eq!(table_ref.alias().as_deref(), Some("o"));
+}
+
+#[test]
+fn test_comma_join_from_clause_does_not_swallow_record_literal_field_boundary() {
+    // Regression: the ANSI-89 comma-join FROM-clause loop must not consume a
+    // COMMA that actually separates record-literal fields (e.g. `body: SELECT
+    // * FROM orders` followed by `materialization: 'incremental'` inside a
+    // `ModelDef { … }`). Before the fix, `orders, materialization` parsed as
+    // a two-table comma-join, silently dropping the `materialization` field
+    // (with NO parse error — evaluate_generator just saw two fields instead
+    // of three and defaulted materialization to "view").
+    //
+    // Uses the real generator-file entry point (`parse_meta_expression_from_offset`,
+    // as `smelt-db`'s `parse_file` query dispatches to for `generates: models`
+    // files) rather than the statement-oriented `parse()`, since a bare
+    // `[ModelDef { … }]` list literal is not a valid top-level SQL/define file.
+    let input = "[ModelDef { name: 'us_west', body: SELECT * FROM orders, materialization: 'incremental' }]";
+    let parse = parse_meta_expression_from_offset(input, 0);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let record_lit = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == RECORD_LITERAL)
+        .expect("must contain a RECORD_LITERAL node");
+    let fields: Vec<_> = record_lit
+        .children()
+        .filter(|n| n.kind() == RECORD_FIELD)
+        .collect();
+    assert_eq!(
+        fields.len(),
+        3,
+        "RECORD_LITERAL must have three RECORD_FIELD children (name, body, materialization)"
+    );
+
+    // The embedded SELECT's FROM clause must have exactly one table ref
+    // (`orders`) — no comma-join swallowing `materialization`.
+    let select = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectStmt::cast)
+        .expect("should have a SelectStmt");
+    let from = select.from_clause().expect("should have FROM");
+    assert_eq!(
+        from.joins().count(),
+        0,
+        "FROM orders must have no joins — materialization is a separate record field, not a comma-joined table"
+    );
+}
+
+#[test]
 fn test_using_clause() {
     let input = "SELECT * FROM users JOIN orders USING (user_id)";
     let (_, select) = parse_select(input);
@@ -988,6 +1091,61 @@ fn test_union_parenthesized_operand_in_from_subquery() {
 }
 
 #[test]
+fn union_paren_operand_trailing_order_by() {
+    // `A UNION (B) ORDER BY ...` — the trailing ORDER BY after a
+    // parenthesized set-op operand binds to the whole set operation
+    // (DuckDB semantics), not to the parenthesized operand. It must show
+    // up as the outer SELECT_STMT's own order_by_clause(), not the inner
+    // one's.
+    let input = "SELECT a FROM t UNION (SELECT a FROM t) ORDER BY a";
+    let (_, select) = parse_select(input);
+
+    assert!(select.has_union(), "should have UNION");
+    assert!(
+        select.order_by_clause().is_some(),
+        "trailing ORDER BY should attach to the outer set-op statement"
+    );
+    let right = select
+        .union_select()
+        .expect("should unwrap the parenthesized right operand");
+    assert!(
+        right.order_by_clause().is_none(),
+        "the parenthesized operand itself must not swallow the trailing ORDER BY"
+    );
+}
+
+#[test]
+fn union_paren_operand_trailing_limit() {
+    // Same as above but for a trailing LIMIT.
+    let input = "SELECT a FROM t UNION (SELECT a FROM t) LIMIT 5";
+    let (_, select) = parse_select(input);
+
+    assert!(select.has_union(), "should have UNION");
+    assert!(
+        select.limit_clause().is_some(),
+        "trailing LIMIT should attach to the outer set-op statement"
+    );
+    let right = select
+        .union_select()
+        .expect("should unwrap the parenthesized right operand");
+    assert!(
+        right.limit_clause().is_none(),
+        "the parenthesized operand itself must not swallow the trailing LIMIT"
+    );
+}
+
+#[test]
+fn union_scalar_subquery_paren_first_operand() {
+    // `((SELECT …) UNION SELECT …)` used as a scalar-subquery expression —
+    // the parenthesized query's *own* first operand is itself
+    // parenthesized. Corpus regression (external_ledger.toml
+    // `set_operation_nesting`, postgres.sql:618).
+    let input = "SELECT ((SELECT 2) UNION SELECT 2)";
+    let parse = parse(input);
+    assert!(parse.errors.is_empty(), "Parse errors: {:?}", parse.errors);
+}
+
+#[test]
 fn test_union_chain_still_parses_without_parens() {
     // Regression guard: a plain (unparenthesized) UNION ALL chain with a
     // trailing LIMIT must still parse exactly as before.
@@ -1141,23 +1299,20 @@ fn test_lateral_join() {
 }
 
 #[test]
-fn test_lateral_subquery_comma_form_is_a_registered_gap() {
-    // Comma-separated FROM lists (`FROM a, LATERAL (...)`) have never had a
-    // grammar production — `parse_from_clause` only recognises the first
-    // table ref plus JOIN-keyword chains (see `test_lateral_join` for the
-    // supported `LEFT JOIN LATERAL` form). Before fail-loud trailing-content
-    // detection, the leftover `, LATERAL (...) o` was silently absorbed at
-    // end-of-file, so this construct looked accepted; it now surfaces the
-    // parse error the grammar always implied. Comma-separated FROM lists are
-    // unimplemented grammar, not a fail-loud-parsing regression — tracked as
-    // follow-on grammar work.
+fn test_comma_join_with_lateral_subquery() {
+    // Comma-separated FROM lists (`FROM a, LATERAL (...)`) now parse via the
+    // ANSI-89 implicit comma-join grammar (quality-grind-t3 Phase 1) — the
+    // comma-join table ref goes through the same `parse_table_ref` as any
+    // other JOIN operand, so LATERAL is accepted there too (see
+    // `test_lateral_join` for the `LEFT JOIN LATERAL` form).
     let input = "SELECT * FROM users, LATERAL (SELECT * FROM orders WHERE user_id = users.id) o";
-    let parse = parse(input);
-    assert!(
-        !parse.errors.is_empty(),
-        "comma-separated FROM lists are not supported by the grammar; \
-         expected a parse error, got a clean parse"
-    );
+    let (_, select) = parse_select(input);
+
+    let from = select.from_clause().unwrap();
+    let join = from.joins().next().expect("should have a join");
+    assert!(join.is_comma_join(), "should be a comma-join");
+    let table_ref = join.table_ref().expect("should have table ref");
+    assert!(table_ref.is_lateral(), "should be LATERAL");
 }
 
 #[test]
@@ -1183,9 +1338,40 @@ fn test_tablesample_system_with_repeatable() {
 
 #[test]
 fn test_tablesample_with_alias() {
+    // Legacy alias-last order — accepted for lenience, but the printer must
+    // never re-emit this shape (see `tablesample_after_alias` below): real
+    // DuckDB v1.5.4 rejects `base TABLESAMPLE(...) AS alias`.
     let input = "SELECT * FROM events TABLESAMPLE BERNOULLI (1) AS sample_data";
     let parse = parse(input);
     assert_eq!(parse.errors.len(), 0);
+}
+
+#[test]
+fn tablesample_after_alias() {
+    // DuckDB v1.5.4 requires `base AS alias TABLESAMPLE(...)` — alias BEFORE
+    // TABLESAMPLE — and rejects the reverse order. `FROM t TABLESAMPLE(...)
+    // AS x` is a parse error on real DuckDB.
+    let input = "SELECT * FROM events AS x TABLESAMPLE BERNOULLI (10)";
+    let parse = parse(input);
+    assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+
+    let root = parse.syntax();
+    let tablesample = root.descendants().find(|n| n.kind() == TABLESAMPLE_CLAUSE);
+    assert!(
+        tablesample.is_some(),
+        "TABLESAMPLE clause should be present"
+    );
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let alias_pos = printed.find("AS x").expect("alias should be printed");
+    let tablesample_pos = printed
+        .find("TABLESAMPLE")
+        .expect("TABLESAMPLE should be printed");
+    assert!(
+        alias_pos < tablesample_pos,
+        "alias must print before TABLESAMPLE (DuckDB-valid order): {printed}"
+    );
 }
 
 // Phase 15: Aggregate function enhancements
@@ -1392,6 +1578,35 @@ fn test_not_equal_operator_sql() {
 }
 
 #[test]
+fn double_equals_parses_as_eq() {
+    // DuckDB accepts `==` as an alias for `=`. It must lex/parse as the same
+    // EQ token/operator as `=` — `BinaryExpr::operator()` (the semantic,
+    // canonical operator text consumed by type inference and downstream
+    // analyses) reports "=" regardless of which spelling was used in source.
+    let input = "SELECT 1 == 1";
+    let parsed = parse(input);
+    assert_eq!(parsed.errors.len(), 0, "parse errors: {:?}", parsed.errors);
+    let file = File::cast(parsed.syntax()).expect("FILE node");
+    let binary = file
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("should have a BinaryExpr");
+    assert_eq!(binary.operator().as_deref(), Some("="));
+
+    // Round-trip: the printed SQL (whichever spelling is preserved) must
+    // still parse cleanly.
+    let printed = file.to_string();
+    let reparsed = parse(&printed);
+    assert_eq!(
+        reparsed.errors.len(),
+        0,
+        "round-trip failed: printed={printed:?}, errors={:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
 fn test_string_concat_simple() {
     // Basic string concatenation
     let input = "SELECT 'a' || 'b' FROM t";
@@ -1585,6 +1800,52 @@ fn test_pivot_with_alias() {
         .descendants()
         .find_map(PivotClause::cast)
         .expect("should have a PivotClause");
+}
+
+#[test]
+fn pivot_after_alias_prints_alias_first() {
+    // DuckDB v1.5.4 accepts alias before PIVOT (`t AS x PIVOT(...)`) —
+    // oracle-verified. Assert both that this shape parses and that the
+    // printer emits alias-first (never re-derives the legacy alias-last
+    // order the parser also tolerates on input).
+    let input = "SELECT * FROM t AS x PIVOT (SUM(amount) FOR quarter IN ('Q1', 'Q2'))";
+    let parse = parse(input);
+    assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+
+    let root = parse.syntax();
+    let pivot = root.descendants().find(|n| n.kind() == PIVOT_CLAUSE);
+    assert!(pivot.is_some(), "PivotClause should be present");
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let alias_pos = printed.find("AS x").expect("alias should be printed");
+    let pivot_pos = printed.find("PIVOT").expect("PIVOT should be printed");
+    assert!(
+        alias_pos < pivot_pos,
+        "alias must print before PIVOT (DuckDB-valid order): {printed}"
+    );
+}
+
+#[test]
+fn unpivot_after_alias_prints_alias_first() {
+    // DuckDB v1.5.4 accepts alias before UNPIVOT (`t AS x UNPIVOT(...)`) —
+    // oracle-verified. Assert both parse success and alias-first print order.
+    let input = "SELECT * FROM t AS x UNPIVOT (val FOR name IN (col1, col2, col3))";
+    let parse = parse(input);
+    assert_eq!(parse.errors.len(), 0, "Parse errors: {:?}", parse.errors);
+
+    let root = parse.syntax();
+    let unpivot = root.descendants().find(|n| n.kind() == UNPIVOT_CLAUSE);
+    assert!(unpivot.is_some(), "UnpivotClause should be present");
+
+    let file = File::cast(parse.syntax()).unwrap();
+    let printed = file.to_string();
+    let alias_pos = printed.find("AS x").expect("alias should be printed");
+    let unpivot_pos = printed.find("UNPIVOT").expect("UNPIVOT should be printed");
+    assert!(
+        alias_pos < unpivot_pos,
+        "alias must print before UNPIVOT (DuckDB-valid order): {printed}"
+    );
 }
 
 // ===== Phase 4d: Array subscript/slice =====
@@ -8017,16 +8278,274 @@ fn glob_matches_ilike_identifier_precedent() {
 #[test]
 fn not_glob_not_supported() {
     // DuckDB itself rejects `NOT GLOB` (verified against a live DuckDB via the
-    // CLI oracle: `SELECT 'abc' NOT GLOB 'z*'` => Parser Error). This mirrors
-    // the pre-existing `NOT LIKE` limitation (also unsupported by this
-    // grammar), so smelt intentionally does not special-case NOT GLOB either.
+    // CLI oracle: `SELECT 'abc' NOT GLOB 'z*'` => Parser Error), so smelt
+    // intentionally does not special-case NOT GLOB — unlike NOT LIKE/NOT
+    // ILIKE/NOT IN/NOT BETWEEN/NOT SIMILAR TO, which DuckDB does accept (see
+    // the `not_*_parses` tests below).
     let sql = "SELECT a FROM t WHERE b NOT GLOB 'x*'";
     let parse = parse(sql);
     assert!(
         !parse.errors.is_empty(),
-        "NOT GLOB is expected to fail loud, matching DuckDB's own rejection \
-         and the pre-existing NOT LIKE limitation"
+        "NOT GLOB is expected to fail loud, matching DuckDB's own rejection"
     );
+}
+
+// ===== NOT-prefixed binary operators (Phase 1, `not_prefixed_binary_operator`
+// ledger category): `NOT IN`, `NOT LIKE`, `NOT ILIKE`, `NOT BETWEEN`,
+// `NOT SIMILAR TO`, and bare `expr NOT NULL` (sugar for `expr IS NOT NULL`).
+// All verified against a live DuckDB. =====
+
+#[test]
+fn not_in_parses() {
+    let sql = "SELECT 2 NOT IN (2, 3)";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let in_expr = parse1
+        .syntax()
+        .descendants()
+        .find_map(InExpr::cast)
+        .expect("must have an IN_EXPR node");
+    assert!(in_expr.is_negated(), "expected NOT IN to be negated");
+    // `values()` collects every EXPR child of the IN_EXPR node, which
+    // includes the left operand (`2`) alongside the value-list entries
+    // (`2, 3`) — pre-existing behavior, unrelated to the NOT prefix.
+    assert_eq!(in_expr.values().len(), 3);
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT IN"),
+        "printed SQL must retain NOT IN: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn not_like_parses() {
+    let sql = "SELECT a FROM t WHERE b NOT LIKE 'x%'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT LIKE");
+    assert_eq!(binary.operator().as_deref(), Some("NOT LIKE"));
+    assert!(!binary.is_unary(), "NOT LIKE has both operands");
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT LIKE"),
+        "printed SQL must retain NOT LIKE: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn not_between_parses() {
+    let sql = "SELECT 5 NOT BETWEEN 1 AND 3";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let between = parse1
+        .syntax()
+        .descendants()
+        .find_map(BetweenExpr::cast)
+        .expect("must have a BETWEEN_EXPR node");
+    assert!(between.is_negated(), "expected NOT BETWEEN to be negated");
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT BETWEEN"),
+        "printed SQL must retain NOT BETWEEN: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn not_ilike_glob_parse() {
+    // NOT ILIKE is accepted (like NOT LIKE); NOT GLOB is not (see
+    // `not_glob_not_supported` above) — this test pins both sides of that
+    // distinction in one place.
+    let ilike_sql = "SELECT a FROM t WHERE b NOT ILIKE 'X%'";
+    let ilike_parse = parse(ilike_sql);
+    assert!(
+        ilike_parse.errors.is_empty(),
+        "Parse errors: {:?}",
+        ilike_parse.errors
+    );
+    let binary = ilike_parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT ILIKE");
+    assert_eq!(binary.operator().as_deref(), Some("NOT ILIKE"));
+
+    let glob_sql = "SELECT a FROM t WHERE b NOT GLOB 'x*'";
+    assert!(
+        !parse(glob_sql).errors.is_empty(),
+        "NOT GLOB must still fail loud"
+    );
+}
+
+#[test]
+fn similar_to_parses() {
+    let sql = "SELECT a FROM t WHERE b SIMILAR TO 'x.*'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for SIMILAR TO");
+    assert_eq!(binary.operator().as_deref(), Some("SIMILAR TO"));
+}
+
+#[test]
+fn not_similar_to_parses() {
+    let sql = "SELECT a FROM t WHERE b NOT SIMILAR TO 'x.*'";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT SIMILAR TO");
+    assert_eq!(binary.operator().as_deref(), Some("NOT SIMILAR TO"));
+
+    let file = File::cast(parse1.syntax()).expect("should have FILE root");
+    let printed = file.to_string();
+    assert!(
+        printed.contains("NOT SIMILAR TO"),
+        "printed SQL must retain NOT SIMILAR TO: {printed}"
+    );
+    let parse2 = parse(&printed);
+    assert!(
+        parse2.errors.is_empty(),
+        "Re-parse errors: {:?}\nPrinted SQL: {}",
+        parse2.errors,
+        printed
+    );
+}
+
+#[test]
+fn similar_and_to_remain_usable_as_identifiers() {
+    // SIMILAR and TO are unreserved in DuckDB — the contextual lookahead
+    // must not swallow them as plain aliases/columns.
+    assert!(
+        parse("SELECT 1 AS similar").errors.is_empty(),
+        "`similar` must remain usable as an alias"
+    );
+    assert!(
+        parse("SELECT 1 AS to").errors.is_empty(),
+        "`to` must remain usable as an alias"
+    );
+}
+
+#[test]
+fn bare_not_null_parses() {
+    // `expr NOT NULL` — DuckDB sugar for `expr IS NOT NULL` (verified
+    // against a live DuckDB: `SELECT 1 WHERE 1 NOT NULL` executes
+    // identically to `... WHERE 1 IS NOT NULL`). Same ledger category as
+    // NOT IN/LIKE/BETWEEN.
+    let sql = "SELECT a FROM t WHERE b NOT NULL";
+    let parse1 = parse(sql);
+    assert!(
+        parse1.errors.is_empty(),
+        "Parse errors: {:?}",
+        parse1.errors
+    );
+
+    let binary = parse1
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for bare NOT NULL");
+    assert_eq!(binary.operator().as_deref(), Some("IS"));
+}
+
+#[test]
+fn prefix_not_on_non_operator_expression_unaffected() {
+    // Regression: prefix NOT applied to a general boolean expression (not
+    // one of IN/LIKE/ILIKE/BETWEEN/SIMILAR TO/NULL) must keep parsing as the
+    // unary boolean NOT, unaffected by the new NOT-prefixed-operator
+    // lookahead.
+    let paren_sql = "SELECT a FROM t WHERE NOT (a AND b)";
+    let paren_parse = parse(paren_sql);
+    assert!(
+        paren_parse.errors.is_empty(),
+        "Parse errors: {:?}",
+        paren_parse.errors
+    );
+    let binary = paren_parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT (a AND b)");
+    assert_eq!(binary.operator().as_deref(), Some("NOT"));
+    assert!(
+        binary.is_unary(),
+        "prefix NOT (a AND b) has no right operand"
+    );
+
+    let bare_sql = "SELECT a FROM t WHERE NOT x";
+    let bare_parse = parse(bare_sql);
+    assert!(
+        bare_parse.errors.is_empty(),
+        "Parse errors: {:?}",
+        bare_parse.errors
+    );
+    let bare_binary = bare_parse
+        .syntax()
+        .descendants()
+        .find_map(BinaryExpr::cast)
+        .expect("must have a BINARY_EXPR for NOT x");
+    assert_eq!(bare_binary.operator().as_deref(), Some("NOT"));
+    assert!(bare_binary.is_unary(), "prefix NOT x has no right operand");
 }
 
 #[test]
@@ -9732,6 +10251,44 @@ fn first_last_parse_as_aggregate_function_names() {
 }
 
 #[test]
+fn range_parses_as_function_name_and_bare_identifier() {
+    // RANGE is the window-frame unit keyword (`RANGE BETWEEN …`), but
+    // DuckDB also ships a range(...) table/scalar function and allows a
+    // bare `range` column reference outside frame-spec context.
+    // `at_keyword_as_function_name` in parser/expr.rs must accept RANGE_KW
+    // both as a call (followed by `(`) and as a plain identifier
+    // (external-corpus regression: `select my_agg(range) OVER () from
+    // range(2)` and `select range AS id, range % 5 AS part … from
+    // range(13)` previously failed with "Expected expression, found
+    // RANGE_KW").
+    for sql in [
+        "SELECT range(5)",
+        "SELECT range(1, 10) AS r",
+        "SELECT range FROM t",
+        "SELECT my_agg(range) FROM range(2)",
+        "SELECT range AS id, range % 5 AS part FROM range(13)",
+    ] {
+        let parse = crate::parse(sql);
+        assert!(
+            parse.errors.is_empty(),
+            "{sql:?} should parse cleanly, got: {:?}",
+            parse.errors
+        );
+    }
+
+    // Window-frame `RANGE BETWEEN …` must still parse (the keyword's
+    // pre-existing, structurally distinct role) — this fix must not
+    // regress it.
+    let sql = "SELECT a, SUM(a) OVER (ORDER BY a RANGE BETWEEN 1 PRECEDING AND CURRENT ROW) FROM t";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+}
+
+#[test]
 fn null_literal_supports_cast_and_subscript_postfix() {
     for sql in [
         "SELECT NULL::INTEGER",
@@ -9745,4 +10302,124 @@ fn null_literal_supports_cast_and_subscript_postfix() {
             parse.errors
         );
     }
+}
+
+#[test]
+fn null_double_colon_cast() {
+    // `SELECT NULL::VARCHAR` — regression coverage for the postfix-`::`
+    // cast on a NULL literal primary. Ledger category
+    // `smelt_fails_unclassified` previously flagged this as a gap, but by
+    // the time this test was written the fix had already landed as a side
+    // effect of other parser work; this test locks the behaviour in.
+    let sql = "SELECT NULL::VARCHAR";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn named_arg_value_with_cast() {
+    // `f(x => 1::BIGINT)` — a `::` cast in a named-argument value position
+    // must be reachable through the standard expression entry point, not a
+    // restricted sub-parser that stops before the postfix-cast loop.
+    let sql = "SELECT my_func(my_param => 1::BIGINT) FROM t";
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn quoted_table_name_in_from() {
+    // A double-quoted table name in FROM position (`FROM "flights"`) is
+    // lexed as a STRING token (smelt's lexer doesn't distinguish `"` from
+    // `'` at the token-kind level), but `parse_table_ref`'s primary path
+    // only accepted IDENT. External corpus ledger category
+    // `quoted_table_name_in_from`: `SELECT "dest" FROM "flights"` previously
+    // failed to parse. Printer must re-emit the quotes on round-trip.
+    let sql = r#"SELECT "dest" FROM "flights""#;
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    assert!(
+        printed.contains(r#"FROM "flights""#),
+        "printed SQL should preserve the quoted table name: got {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn quoted_schema_qualified_table() {
+    // Same fix, schema-qualified: `FROM "schema"."table"`.
+    let sql = r#"SELECT * FROM "myschema"."mytable""#;
+    let parse = crate::parse(sql);
+    assert!(
+        parse.errors.is_empty(),
+        "{sql:?} should parse cleanly, got: {:?}",
+        parse.errors
+    );
+    let (_, select) = parse_select(sql);
+    let printed = select.to_string();
+    assert!(
+        printed.contains(r#"FROM "myschema"."mytable""#),
+        "printed SQL should preserve both quoted segments: got {printed:?}"
+    );
+    let reparsed = crate::parse(&printed);
+    assert!(
+        reparsed.errors.is_empty(),
+        "printed SQL {printed:?} failed to reparse: {:?}",
+        reparsed.errors
+    );
+}
+
+#[test]
+fn single_quoted_glob_path_literal_in_from_unchanged() {
+    // Negative/regression guard: a single-quoted string in FROM position is
+    // a file-glob/path literal (`FROM 'x.parquet'`), a distinct token
+    // classification from the double-quoted-identifier fix above
+    // (`at_quoted_ident_alias` checks the leading quote character
+    // precisely). This is not yet accepted as a table reference at all —
+    // pin that it still produces a parse error, so the quoted-identifier
+    // fix is not accidentally widened to swallow single-quoted literals
+    // too (ledger category `file_glob_or_path_literal_from` stays separate
+    // from `quoted_table_name_in_from`).
+    let sql = "SELECT * FROM 'x.parquet'";
+    let parse = crate::parse(sql);
+    assert!(
+        !parse.errors.is_empty(),
+        "{sql:?} (single-quoted glob/path literal) should remain unparsed as a table ref; \
+         if this now parses cleanly, the quoted-identifier fix has incorrectly widened to \
+         accept single-quoted STRING tokens too"
+    );
 }

@@ -504,6 +504,10 @@ fn extract_interval_days_from_combined(text: &str, n: u32) -> Option<u32> {
         "YEAR"
     } else if upper.contains("HOUR") {
         "HOUR"
+    } else if upper.contains("MINUTE") {
+        "MINUTE"
+    } else if upper.contains("SECOND") {
+        "SECOND"
     } else {
         // Default: assume days.
         "DAY"
@@ -766,6 +770,29 @@ mod tests {
             &dep.sources[0],
             TemporalSource::WhereOffset { .. }
         ));
+    }
+
+    #[test]
+    fn interval_minutes_not_days() {
+        // INTERVAL '5 minutes' must round up to 1 day of advisory lookback,
+        // not be misread as 5 days.
+        let sql = "SELECT * FROM events WHERE event_time >= partition_date - INTERVAL '5 minutes'";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(1));
+    }
+
+    #[test]
+    fn interval_seconds_not_days() {
+        let sql = "SELECT * FROM events WHERE event_time >= partition_date - INTERVAL '30 seconds'";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(1));
+    }
+
+    #[test]
+    fn interval_days_unchanged() {
+        let sql = "SELECT * FROM events WHERE event_time >= partition_date - INTERVAL '3 days'";
+        let dep = analyze_temporal_dependencies(sql);
+        assert_eq!(dep.lookback, TemporalOffset::Days(3));
     }
 
     #[test]

@@ -135,6 +135,15 @@ impl<'a> Lexer<'a> {
                 self.advance();
                 ARROW
             }
+            '=' if self.peek_char() == Some('=') => {
+                // DuckDB accepts `==` as an alias for `=`; reuse the EQ token so
+                // downstream consumers of the operator (e.g. type inference) see
+                // one canonical kind. The CST is lossless, so printed SQL still
+                // preserves the source's `==` spelling verbatim.
+                self.advance();
+                self.advance();
+                EQ
+            }
             '=' => {
                 self.advance();
                 EQ
@@ -772,6 +781,13 @@ mod tests {
         // Test <> operator (PostgreSQL-style)
         let tokens = tokenize("a <> b");
         assert_eq!(tokens[2].kind, NE);
+    }
+
+    #[test]
+    fn test_double_equals_operator() {
+        // DuckDB accepts `==` as an alias for `=`; it must lex as the same EQ token.
+        let tokens = tokenize("a == b");
+        assert_eq!(tokens[2].kind, EQ);
     }
 
     #[test]
