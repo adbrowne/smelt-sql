@@ -31,6 +31,9 @@
 #      ROADMAP §10, decisions B1–B4 in the sub-plan; runs after W2)
 #   W8 composed-axes follow-ups         (20260719-prod-w8-composed-axes-followups.md —
 #      deferred-item sweep from the 20260715 plan)
+#   W9 Spark conformance twin           (20260720-prod-w9-spark-conformance-twin.md —
+#      dual-execution generative harness; D1 promotion criterion; phases 3–6 need
+#      live Spark, block without it)
 # Decisions D1–D5 (Spark evidence-based label, merge #163/#164 first,
 # smelt-native declarative tests, minimal per-target state, t2 P9 resolved)
 # are recorded in the master's Decisions table.
