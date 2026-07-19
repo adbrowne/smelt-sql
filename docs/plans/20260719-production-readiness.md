@@ -52,7 +52,8 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 - Registry order is dependency order: W1 (small, hardening) → W2 (operability substrate;
   env interpolation is a W4 dependency) → W4 (Spark) → W3 (adoption surface) → W5 (release
   engineering) → W6 (docs, documents W2/W3 surfaces — blocked-not-speculative if a surface
-  hasn't landed).
+  hasn't landed) → W7 (`smelt bakeoff`; builds on W2's `ExecuteRequest`/per-target state
+  rewrite, so it must not start before W2 is done — its execution prompt enforces this).
 - Standing gates every phase keeps green: `execute_parity`, `statement_parity`,
   `maintenance_conformance`, `walk_coverage`, the hardening/census/registry ratchets, and the
   parser/type conformance suites. Never lowered without a reviewer sign-off note.
@@ -69,6 +70,7 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 | [`docs/plans/20260719-prod-w3-adoption.md`](20260719-prod-w3-adoption.md) | **W3 Adoption surface** — `smelt init`, declarative column tests per D3 (proven-property short-circuit + SQL-scan lowering), `smelt list`/`smelt clean`, failure-summary UX. New spec `docs/specs/data_tests.md`. | pending |
 | [`docs/plans/20260719-prod-w5-release-eng.md`](20260719-prod-w5-release-eng.md) | **W5 Release engineering** — UI hardening (localhost-default bind, CORS), CHANGELOG + RELEASING checklist, SECURITY.md, macOS-Intel wheel claim fix, Docker image, Homebrew formula, crates-publishing decision brief + `publish = false` markers. | pending |
 | [`docs/plans/20260719-prod-w6-docs.md`](20260719-prod-w6-docs.md) | **W6 Production docs** — deployment guide, orchestration (cron/Airflow) guide, state & recovery reference, per-command CLI reference, getting-started refresh around `smelt init`. Documents W2/W3 surfaces; phases block rather than speculate. | pending |
+| [`docs/plans/20260719-prod-w7-bakeoff.md`](20260719-prod-w7-bakeoff.md) | **W7 `smelt bakeoff`** — un-defers ROADMAP §10: wire the choice ladder into the runtime (frontmatter `technique:` pins honoured at execution), `ExecuteRequest.technique_overrides` + scratch-as-synthetic-target seam, the measurement CLI over replayed real-data windows, emit-only `--pin`. Decisions B1–B4 recorded in the sub-plan. **Runs after W2** (builds on per-target state + the rewritten `execute.rs`); registered last so the loop reaches it post-W6. | pending |
 
 ## Scaffolding queue (human-gated — NOT registered until scaffolded)
 
@@ -89,11 +91,12 @@ PyO3 parity, metrics DSL, dbt migration guide.
 
 ## Verification (programme level)
 
-- All six sub-plans `done`; `bash .claude/scripts/verify-phase.sh` green on the tip.
+- All seven sub-plans `done`; `bash .claude/scripts/verify-phase.sh` green on the tip.
 - `cargo test -p smelt-cli --test maintenance_conformance` and the nightly 200-case soak
   stay green throughout.
 - W4's evidence brief exists and D1's label call is recorded here.
 - `/smelt:validate` drift reports clean for every spec a sub-plan touched
-  (`smelt_yml`, state/run-state, `multi_backend`, `data_tests`, CLI, `diagnostics`).
+  (`smelt_yml`, state/run-state, `multi_backend`, `data_tests`, CLI, `diagnostics`,
+  `maintenance_plan`).
 - A tagged `v0.5.0-rc` build passes the release workflow (wheels + VSIX + Docker) — the tag
   itself is human-gated.
