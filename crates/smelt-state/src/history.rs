@@ -89,6 +89,8 @@ mod tests {
                 batch_safety: Some("fully_batch_safe".to_string()),
                 outcome: crate::RunOutcomeKind::Success,
                 definition_hash: "sha256:abc".to_string(),
+                error: None,
+                retry_count: 0,
             },
         );
         RunManifest {

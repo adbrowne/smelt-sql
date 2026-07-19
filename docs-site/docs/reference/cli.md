@@ -23,6 +23,7 @@ The following flags appear on most subcommands:
 | `--database` | path | _(from smelt.yml)_ | Override the DuckDB database file path |
 | `--target` | string | `dev` | Target environment name as defined in `smelt.yml` |
 | `--scope` | string | _(cwd-derived)_ | Dot-path prefix for expanding bare model names. Pass `--scope ''` to disable auto-scoping. |
+| `--log-format` | `text` \| `json` | `text` | Log line format. `json` emits one parseable JSON object per tracing line, for orchestrator/log-aggregator consumption. Global — set at the root command, applies to every subcommand. |
 
 ---
 
@@ -219,6 +220,18 @@ A retry always re-runs the model's *entire* write step for the attempt that fail
 Only transient failures are retried. A deterministic failure — invalid SQL, a type mismatch, a constraint violation, a missing table, an unsupported dialect feature — fails the model on the first attempt, since retrying cannot change the outcome.
 
 By default, up to 3 attempts are made per write step before the model is reported as failed. To disable retry entirely (fail immediately on the first transient error, matching pre-retry behavior), set `retry_max: 0` on the run request. There is currently no dedicated CLI flag for this; it is available to programmatic consumers of the run engine (e.g. the UI) via the `retry_max`/`retry_backoff_ms` fields on the run request.
+
+### Run report and failure summary
+
+Every `smelt run`/`smelt build`/`smelt backbuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
+
+When independent models fail in the same run — even concurrently, in the same `--jobs`-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, `smelt` prints a failure summary naming every failed model with its first error line:
+
+```
+smelt: run 20260720-120001-a1b2c3 failed — 2 model(s) failed:
+  - bad_a: Conversion Error: Could not convert string 'not_a_number' to INT32
+  - bad_b: Conversion Error: Could not convert string 'also_not_a_number' to INT32
+```
 
 ### `--resume` — continue after a partial failure
 

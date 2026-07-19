@@ -21,8 +21,19 @@ struct Cli {
     #[arg(long, global = true, value_parser = parse_scope)]
     scope: Option<String>,
 
+    /// Log line format: human-readable text, or one parseable JSON object
+    /// per line (for orchestrator/log-aggregator consumption).
+    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
+
     #[command(subcommand)]
     command: Commands,
+}
+
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
 }
 
 #[derive(Subcommand)]
@@ -600,9 +611,19 @@ struct CleanArgs {
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    match cli.log_format {
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .init();
+        }
+    }
 
     let scope = cli.scope.as_deref();
 

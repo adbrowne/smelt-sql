@@ -916,6 +916,8 @@ async fn resume_picks_up_completed_run_with_non_success_outcome() {
             batch_safety: Some("skipped".to_string()),
             outcome: RunOutcomeKind::Skipped,
             definition_hash: String::new(),
+            error: None,
+            retry_count: 0,
         },
     );
     let constructed = smelt_state::RunManifest {

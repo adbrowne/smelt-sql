@@ -32,7 +32,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
 use smelt_state::reconciliation::{Processed, Region};
-use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
+use smelt_state::{ModelRunRecord, RunManifest, RunReport, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
 use crate::compile::build_source_bound_map;
@@ -171,6 +171,21 @@ impl EventSink {
             .lock()
             .expect("EventSink mutex poisoned")
             .push(event);
+    }
+
+    /// Number of `ModelRetrying` events buffered for this model — the final
+    /// per-model retry count threaded into its `ModelRunRecord` (`error`/
+    /// `retry_count` fields, `docs/plans/20260719-prod-w2-operability.md`
+    /// Phase 8). Every retry attempt calls `model_retrying` exactly once, so
+    /// this count is exact regardless of whether the model ultimately
+    /// succeeded or failed.
+    fn retry_count(&self) -> u32 {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .iter()
+            .filter(|e| matches!(e, ReporterEvent::ModelRetrying { .. }))
+            .count() as u32
     }
 
     /// Replay every buffered event onto `reporter`, in the order recorded.
@@ -1311,6 +1326,8 @@ pub async fn execute_project(
                     batch_safety: Some("skipped".to_string()),
                     outcome: smelt_state::RunOutcomeKind::Skipped,
                     definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1339,6 +1356,8 @@ pub async fn execute_project(
                     batch_safety: Some("skipped".to_string()),
                     outcome: smelt_state::RunOutcomeKind::Skipped,
                     definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1564,6 +1583,8 @@ pub async fn execute_project(
                     batch_safety: Some("cumulative".to_string()),
                     outcome: smelt_state::RunOutcomeKind::Success,
                     definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: sink.retry_count(),
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -2285,6 +2306,8 @@ pub async fn execute_project(
                         batch_safety: Some("incremental".to_string()),
                         outcome: smelt_state::RunOutcomeKind::Success,
                         definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: sink.retry_count(),
                     },
                 );
 
@@ -2529,6 +2552,8 @@ pub async fn execute_project(
                         batch_safety: None,
                         outcome: smelt_state::RunOutcomeKind::Success,
                         definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: sink.retry_count(),
                     },
                 );
 
@@ -2643,7 +2668,16 @@ pub async fn execute_project(
     let mut pending: HashMap<usize, (EventSink, Result<ModelOutcome>)> = HashMap::new();
     let mut next_flush: usize = 0;
     let mut cancelled = false;
-    let mut aborted: Option<(String, anyhow::Error)> = None;
+    // Every model whose execution raised an error, in flush order — not
+    // just the first. A wave dispatches its models concurrently, so more
+    // than one can fail before the scheduler notices; recording all of them
+    // (rather than first-wins) is what lets the abort path below give every
+    // failing model its own `Failed` manifest entry with its own error text
+    // instead of silently downgrading the rest to `skipped`
+    // (`docs/plans/20260719-prod-w2-operability.md` Phase 8 unblock
+    // decision: "let the in-flight wave finish, record every failure, then
+    // abort").
+    let mut aborted: Vec<(String, anyhow::Error)> = Vec::new();
 
     macro_rules! flush_ready {
         () => {
@@ -2661,9 +2695,7 @@ pub async fn execute_project(
                         cancelled = true;
                     }
                     Err(e) => {
-                        if aborted.is_none() {
-                            aborted = Some((model_name.clone(), e));
-                        }
+                        aborted.push((model_name.clone(), e));
                     }
                 }
                 next_flush += 1;
@@ -2672,7 +2704,7 @@ pub async fn execute_project(
     }
 
     'waves: for wave in &waves {
-        if cancelled || aborted.is_some() {
+        if cancelled || !aborted.is_empty() {
             break 'waves;
         }
         let mut in_flight = futures::stream::FuturesUnordered::new();
@@ -2716,9 +2748,7 @@ pub async fn execute_project(
                         cancelled = true;
                     }
                     Err(e) => {
-                        if aborted.is_none() {
-                            aborted = Some((model_name.clone(), e));
-                        }
+                        aborted.push((model_name.clone(), e));
                     }
                 }
             }
@@ -2748,12 +2778,17 @@ pub async fn execute_project(
                     batch_safety: Some("skipped".to_string()),
                     outcome: smelt_state::RunOutcomeKind::Skipped,
                     definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
         // `--resume` looks for.
         if let Err(e) = file_store.save_run(&manifest) {
             tracing::warn!("Failed to save run manifest for cancelled run: {}", e);
+        }
+        if let Err(e) = write_run_report(file_store, &manifest) {
+            tracing::warn!("Failed to write run report for cancelled run: {}", e);
         }
         reporter.run_cancelled(run_id);
         return Ok(build_outcome(
@@ -2765,33 +2800,39 @@ pub async fn execute_project(
             vec![],
         ));
     }
-    if let Some((model, error)) = aborted {
+    if !aborted.is_empty() {
         // Persist the manifest even on failure — a run that aborts partway
         // through must not silently drop the outcomes it DID observe,
         // since `--resume` depends on reading them back
         // (`docs/specs/run_state.md` §"Run manifest", §"`--resume`
-        // semantics"). The model whose execution raised the error is
-        // `failed`; every other selected model that never got a manifest
-        // entry (its wave never started, or it was mid-flight when the
-        // abort happened) is `skipped` — every model smelt considered this
-        // run gets an entry, never a silent omission.
-        manifest.models.entry(model.clone()).or_insert_with(|| {
-            let definition_hash = model_plans
-                .iter()
-                .find(|p| p.name == model)
-                .map(|p| compute_model_hash(&p.sql))
-                .unwrap_or_default();
-            ModelRunRecord {
-                strategy: "failed".to_string(),
-                time_range: None,
-                partitions_updated: vec![],
-                row_count: 0,
-                duration_ms: 0,
-                batch_safety: None,
-                outcome: smelt_state::RunOutcomeKind::Failed,
-                definition_hash,
-            }
-        });
+        // semantics"). Every model whose execution raised an error this run
+        // gets its own `failed` entry with its own error text (never just
+        // the first — the rest downgraded to `skipped` would silently
+        // discard real failures); every other selected model that never got
+        // a manifest entry (its wave never started, or it was mid-flight
+        // when the abort happened) is `skipped` — every model smelt
+        // considered this run gets an entry, never a silent omission.
+        for (model, error) in &aborted {
+            manifest.models.entry(model.clone()).or_insert_with(|| {
+                let definition_hash = model_plans
+                    .iter()
+                    .find(|p| &p.name == model)
+                    .map(|p| compute_model_hash(&p.sql))
+                    .unwrap_or_default();
+                ModelRunRecord {
+                    strategy: "failed".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: None,
+                    outcome: smelt_state::RunOutcomeKind::Failed,
+                    definition_hash,
+                    error: Some(error.to_string()),
+                    retry_count: 0,
+                }
+            });
+        }
         for plan in model_plans.iter() {
             manifest
                 .models
@@ -2805,6 +2846,8 @@ pub async fn execute_project(
                     batch_safety: Some("skipped".to_string()),
                     outcome: smelt_state::RunOutcomeKind::Skipped,
                     definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
                 });
         }
         // `completed_at` stays `None` — an incomplete run, exactly what
@@ -2812,13 +2855,22 @@ pub async fn execute_project(
         if let Err(e) = file_store.save_run(&manifest) {
             tracing::warn!("Failed to save run manifest for failed run: {}", e);
         }
-        reporter.run_failed(run_id, Some(&model), &error.to_string());
-        return Err(error);
+        for (model, error) in &aborted {
+            reporter.run_failed(run_id, Some(model), &error.to_string());
+        }
+        if let Err(e) = write_run_report(file_store, &manifest) {
+            tracing::warn!("Failed to write run report for failed run: {}", e);
+        }
+        let (_first_model, first_error) = aborted.into_iter().next().expect("checked non-empty");
+        return Err(first_error);
     }
 
     manifest.completed_at = Some(Utc::now());
     if let Err(e) = file_store.save_run(&manifest) {
         tracing::warn!("Failed to save run manifest: {}", e);
+    }
+    if let Err(e) = write_run_report(file_store, &manifest) {
+        tracing::warn!("Failed to write run report: {}", e);
     }
 
     // Stale schema cleanup: remove .smelt/schemas/<name>.json entries for models
@@ -3340,6 +3392,17 @@ pub fn derive_batch_filtered_sql(
         inject_source_filters(&filtered_sql, per_model_source_bounds, run_range)
     };
     Ok(pin_run_deterministic_clocks(&filtered_sql, run_start))
+}
+
+/// Derive a [`RunReport`] from `manifest` and persist it alongside the
+/// manifest at `.smelt/targets/<target>/reports/<run_id>.json`
+/// (`docs/specs/run_state.md` §"Run report"). Called at every one of
+/// `execute_project`'s manifest-save sites — success, cancelled, and
+/// aborted — since a report is due whenever a manifest is, and a report
+/// derived from an incomplete manifest (`completed_at: None`) is still a
+/// meaningful partial summary for `--resume`/tooling to read.
+fn write_run_report(file_store: &FileStore, manifest: &RunManifest) -> Result<()> {
+    file_store.save_report(&RunReport::from_manifest(manifest))
 }
 
 fn build_outcome(

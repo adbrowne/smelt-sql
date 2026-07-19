@@ -135,6 +135,35 @@ impl RunReporter for CliReporter {
     }
 }
 
+/// Print the end-of-run failure summary: one block naming every model that
+/// failed this run, each with its first error line
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 8 TDD test
+/// `failure_summary_lists_all_failed_models`). Reads the just-written run
+/// report back from `.smelt/` — the report is the derived, already-summarized
+/// view of the manifest (`docs/specs/run_state.md` §"Run report"), so this
+/// prints from it rather than re-deriving the same summary from the raw
+/// manifest. Silently does nothing if the report can't be read back (e.g. a
+/// stateless project, or a pre-execution failure with no run directory yet)
+/// — `run_failed`'s per-model lines above still ran either way.
+pub fn print_failure_summary(project_dir: &std::path::Path, target: &str, run_id: &str) {
+    let file_store = smelt_state::file_store::FileStore::new(project_dir, target);
+    let Ok(Some(report)) = file_store.load_report(run_id) else {
+        return;
+    };
+    if report.failures.is_empty() {
+        return;
+    }
+    eprintln!(
+        "smelt: run {} failed — {} model(s) failed:",
+        run_id,
+        report.failures.len()
+    );
+    for failure in &report.failures {
+        let first_line = failure.error.lines().next().unwrap_or(&failure.error);
+        eprintln!("  - {}: {}", failure.model, first_line);
+    }
+}
+
 /// Format a `ModelStrategy` as a short human-readable label for `--show-plan`.
 pub fn format_strategy(strategy: &ModelStrategy) -> String {
     match strategy {

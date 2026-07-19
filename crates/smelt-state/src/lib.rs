@@ -53,6 +53,16 @@ pub struct ModelRunRecord {
     /// safe (never skip incorrectly) direction.
     #[serde(default)]
     pub definition_hash: String,
+    /// Error text captured when `outcome` is `Failed`. `None` for
+    /// `Success`/`Skipped` entries and for pre-Phase-8 manifests, which
+    /// never recorded per-model error text.
+    #[serde(skip_serializing_if = "Option::is_none", default)]
+    pub error: Option<String>,
+    /// Number of retry attempts made for this model before its final
+    /// outcome (0 if it succeeded/failed on the first attempt, or for
+    /// pre-Phase-8 manifests that never recorded retries).
+    #[serde(default)]
+    pub retry_count: u32,
 }
 
 fn default_outcome() -> RunOutcomeKind {
@@ -71,6 +81,90 @@ pub enum RunOutcomeKind {
     /// Not attempted this run — upstream failure, selector exclusion, or a
     /// `--resume` short-circuit.
     Skipped,
+}
+
+/// Human/tooling-facing summary of one run, written alongside the run
+/// manifest at `.smelt/targets/<target>/reports/<run_id>.json`
+/// (`docs/specs/run_state.md` §"Run report"). Derived entirely from the
+/// manifest — carries no information the manifest lacks — so it is always
+/// reconstructible via [`RunReport::from_manifest`].
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct RunReport {
+    pub run_id: String,
+    pub started_at: DateTime<Utc>,
+    pub completed_at: Option<DateTime<Utc>>,
+    /// `0` for an incomplete run (`completed_at` is `None`) — a cancelled or
+    /// aborted run has no well-defined total duration to report.
+    pub duration_ms: u64,
+    pub outcome_counts: OutcomeCounts,
+    /// One entry per `failed` model, carrying its manifest-recorded error
+    /// text and retry count. Empty when nothing failed.
+    pub failures: Vec<ModelFailure>,
+}
+
+/// Count of models by outcome (`docs/specs/run_state.md` §"Run report").
+#[derive(Debug, Clone, Copy, Default, Serialize, Deserialize)]
+pub struct OutcomeCounts {
+    pub success: usize,
+    pub failed: usize,
+    pub skipped: usize,
+}
+
+/// One `failed` model's recorded error, surfaced in the report so an
+/// orchestrator or human doesn't need to reopen the manifest to see why a
+/// run failed.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct ModelFailure {
+    pub model: String,
+    /// The manifest entry's `error` text, or a fixed placeholder for a
+    /// `failed` entry recorded before `error` existed (pre-Phase-8
+    /// manifests) — never a missing/null field, since a report naming a
+    /// failed model with no explanation at all is worse than a placeholder
+    /// that says so.
+    pub error: String,
+    pub retry_count: u32,
+}
+
+impl RunReport {
+    /// Derive a report from a (typically just-finalized) manifest. Pure and
+    /// total — never fails, since every field is either copied or summed
+    /// from data the manifest already carries.
+    pub fn from_manifest(manifest: &RunManifest) -> Self {
+        let mut counts = OutcomeCounts::default();
+        let mut failures = Vec::new();
+        for (name, record) in &manifest.models {
+            match record.outcome {
+                RunOutcomeKind::Success => counts.success += 1,
+                RunOutcomeKind::Skipped => counts.skipped += 1,
+                RunOutcomeKind::Failed => {
+                    counts.failed += 1;
+                    failures.push(ModelFailure {
+                        model: name.clone(),
+                        error: record
+                            .error
+                            .clone()
+                            .unwrap_or_else(|| "(no error text recorded)".to_string()),
+                        retry_count: record.retry_count,
+                    });
+                }
+            }
+        }
+        failures.sort_by(|a, b| a.model.cmp(&b.model));
+        let duration_ms = match manifest.completed_at {
+            Some(completed_at) => (completed_at - manifest.started_at)
+                .num_milliseconds()
+                .max(0) as u64,
+            None => 0,
+        };
+        RunReport {
+            run_id: manifest.run_id.clone(),
+            started_at: manifest.started_at,
+            completed_at: manifest.completed_at,
+            duration_ms,
+            outcome_counts: counts,
+            failures,
+        }
+    }
 }
 
 /// A time range with start (inclusive) and end (exclusive) dates.

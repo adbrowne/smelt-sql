@@ -69,13 +69,17 @@ A run manifest is a JSON document recording what one execution did:
       "duration_ms": 812,
       "batch_safety": "BoundedSafe",        // omitted if absent
       "outcome": "success",                 // "success" | "failed" | "skipped"
-      "definition_hash": "a1b2c3d4"         // hash of the model's compiled definition at run time
+      "definition_hash": "a1b2c3d4",        // hash of the model's compiled definition at run time
+      "error": "Conversion Error: ...",     // omitted unless outcome is "failed"
+      "retry_count": 0                      // number of retry attempts made before the final outcome
     }
   }
 }
 ```
 
-Every model smelt attempted or considered in a run has an entry keyed by `outcome`: `success` (completed without error), `failed` (the model's execution raised an error), or `skipped` (not attempted — upstream failure, selector exclusion, or `--resume` short-circuit). `definition_hash` is recorded for every entry regardless of outcome; it is what `--resume` compares against to decide whether a `success` from a prior run still applies (see "`--resume` semantics" below).
+Every model smelt attempted or considered in a run has an entry keyed by `outcome`: `success` (completed without error), `failed` (the model's execution raised an error), or `skipped` (not attempted — upstream failure, selector exclusion, or `--resume` short-circuit). `definition_hash` is recorded for every entry regardless of outcome; it is what `--resume` compares against to decide whether a `success` from a prior run still applies (see "`--resume` semantics" below). `error` carries the failure's display text for every `failed` entry; `retry_count` records how many retry attempts (`docs/specs/architecture.md`, `RunReporter::model_retrying`) were made for that model before its final outcome, `0` if it succeeded or failed on the first attempt.
+
+**Abort semantics: the in-flight wave finishes, every failure is recorded, then the run aborts.** A run executes selected models in topologically-ordered waves (`docs/specs/architecture.md` §"Run Pipeline Parity"); models within one wave may run concurrently. When a model's execution raises an error, smelt does not abort the instant the first error is observed — it lets every model already dispatched in that wave finish, and every one that also errors gets its own `failed` entry with its own `error` text. Only once the wave has fully drained does the run stop dispatching further waves. This means a run where two independent models fail concurrently in the same wave never silently downgrades the second failure to `skipped` — both are `failed`, each with its own recorded error. Every other selected model that never got a manifest entry (a later wave that never started, or a model mid-flight when the abort happened) is recorded `skipped`.
 
 ### Run ID
 
@@ -88,6 +92,22 @@ Cumulative per-model interval coverage as string date keys (`"2026-01-01"`, half
 ### Run report (`reports/<run_id>.json`)
 
 A run report is a summary artifact written alongside the run manifest at `.smelt/targets/<target>/reports/<run_id>.json`, sharing the manifest's `run_id`. Where the manifest is the durable per-model record consumed by `--resume` and history queries, the report is the human/tooling-facing summary of one run: counts of models by outcome (`success`/`failed`/`skipped`), total duration, and per-model error messages for any `failed` entry. It is derived entirely from the manifest and carries no information the manifest lacks; a report can always be regenerated from its manifest.
+
+```jsonc
+{
+  "run_id": "20260604-141233-a1b2c3",
+  "started_at": "2026-06-04T14:12:33Z",
+  "completed_at": "2026-06-04T14:12:41Z",   // null for an incomplete (cancelled/aborted) run
+  "duration_ms": 8123,                      // 0 when completed_at is null
+  "outcome_counts": { "success": 5, "failed": 2, "skipped": 1 },
+  "failures": [                             // one entry per `failed` model, empty if none
+    { "model": "bad_a", "error": "Conversion Error: ...", "retry_count": 0 },
+    { "model": "bad_b", "error": "Conversion Error: ...", "retry_count": 1 }
+  ]
+}
+```
+
+A report is written at every point a manifest is persisted — successful completion, cancellation, and abort — so a partial report (derived from an incomplete manifest, `completed_at: null`) is available immediately after a failed or cancelled run, not only after a subsequent successful one. Per "Abort semantics" above, `failures` names every model that failed in the aborting wave, never just the first.
 
 ### `--resume` semantics
 
@@ -147,8 +167,7 @@ The run-state intervals this spec owns and the maintenance plan's **reconciliati
 - **Concurrency across processes is now specified, not just assumed.** Earlier revisions of this spec left concurrent-process behaviour unspecified; §"Locking" now specifies single-writer advisory locking as the answer — a second process fails loudly rather than interleaving writes. Parallel *model* execution within one run is a separate concern, owned by `smelt-runtime`, not by this layout.
 - **Manifest format completeness.** The fields above reflect `smelt-state` today; the full manifest contract (e.g. per-model error capture, retries) is still settling and may add optional fields.
 - **"No change to correctness" no longer holds unconditionally once forward propagation lands.** §"Relationship to the reconciliation ledger" describes run-state intervals as observability a project can forgo with no correctness impact; that was true while every run recomputed its own dirty set from scratch. Forward propagation (`smelt run --since-upstream`, `incremental_models.md` §"The graph layer") instead computes what must run from **recorded per-source landed deltas**, so a project that opts out of persisting them loses the input forward propagation needs and falls back to a full recompute rather than the derived dirty set. This is a known divergence until forward propagation and the reconciliation ledger land (`docs/plans/20260707-maintenance-plan-impl.md` phases MP14/MP15).
-- **The run report (`reports/<run_id>.json`) is specified here but not yet implemented.** Locking, atomic writes, versioned/per-target layout, and `--resume` are implemented (`docs/plans/20260719-prod-w2-operability.md` phases 3, 4, and 7); the run report is tracked separately (phase 8 of the same plan). Until it lands, `smelt-state` has no `reports/` writer — the manifest itself remains the durable record.
-- **Retry interaction with `outcome` is open.** Phase 6 of the same plan adds bounded retry for transient backend errors; whether a model that failed twice then succeeded on retry records one `success` entry (with retry count folded into `duration_ms`/a new field) or an entry per attempt is not decided by this spec increment — it is deferred to that phase's own spec touch-up.
+- **Retry interaction with `outcome` records one entry per model, not one per attempt.** A model that fails N times then succeeds on retry (or exhausts retries and fails) records a single manifest/report entry for that model, with `retry_count` set to the number of retries made before the final outcome — never one entry per attempt.
 
 ## References
 

@@ -142,6 +142,10 @@ impl FileStore {
         self.target_dir.join("runs")
     }
 
+    fn reports_dir(&self) -> PathBuf {
+        self.target_dir.join("reports")
+    }
+
     fn intervals_path(&self) -> PathBuf {
         self.target_dir.join("intervals.json")
     }
@@ -388,6 +392,34 @@ impl FileStore {
         Ok(Some(manifest))
     }
 
+    // --- Run Reports ---
+
+    /// Save a run report to disk, alongside its manifest
+    /// (`docs/specs/run_state.md` §"Run report").
+    pub fn save_report(&self, report: &crate::RunReport) -> Result<()> {
+        self.init()?;
+        let dir = self.reports_dir();
+        std::fs::create_dir_all(&dir)
+            .with_context(|| format!("Failed to create reports directory: {:?}", dir))?;
+        let path = dir.join(format!("{}.json", report.run_id));
+        write_json_atomic(&path, report)
+            .with_context(|| format!("Failed to write run report: {:?}", path))
+    }
+
+    /// Load a specific run report by ID.
+    pub fn load_report(&self, run_id: &str) -> Result<Option<crate::RunReport>> {
+        self.check_version()?;
+        let path = self.reports_dir().join(format!("{}.json", run_id));
+        if !path.exists() {
+            return Ok(None);
+        }
+        let content = std::fs::read_to_string(&path)
+            .with_context(|| format!("Failed to read run report: {:?}", path))?;
+        let report = serde_json::from_str(&content)
+            .with_context(|| format!("Failed to parse run report: {:?}", path))?;
+        Ok(Some(report))
+    }
+
     // --- Interval Store ---
 
     /// Load the interval store from disk. Returns default if file doesn't exist.
@@ -592,6 +624,8 @@ mod tests {
                 batch_safety: Some("fully_batch_safe".to_string()),
                 outcome: crate::RunOutcomeKind::Success,
                 definition_hash: "sha256:abc".to_string(),
+                error: None,
+                retry_count: 0,
             },
         );
         RunManifest {
@@ -1087,6 +1121,8 @@ mod tests {
                 batch_safety: None,
                 outcome: crate::RunOutcomeKind::Success,
                 definition_hash: "sha256:aaa".to_string(),
+                error: None,
+                retry_count: 0,
             },
         );
         models.insert(
@@ -1100,6 +1136,8 @@ mod tests {
                 batch_safety: None,
                 outcome: crate::RunOutcomeKind::Failed,
                 definition_hash: "sha256:bbb".to_string(),
+                error: None,
+                retry_count: 0,
             },
         );
         models.insert(
@@ -1113,6 +1151,8 @@ mod tests {
                 batch_safety: Some("skipped".to_string()),
                 outcome: crate::RunOutcomeKind::Skipped,
                 definition_hash: "sha256:ccc".to_string(),
+                error: None,
+                retry_count: 0,
             },
         );
 

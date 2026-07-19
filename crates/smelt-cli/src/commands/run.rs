@@ -3,7 +3,7 @@ use chrono::Utc;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_selector_args},
     backend_factory::CliBackendFactory,
-    reporter::{format_strategy, CliReporter},
+    reporter::{format_strategy, print_failure_summary, CliReporter},
     Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
@@ -238,7 +238,14 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         &reporter,
         CancellationToken::new(),
     )
-    .await?;
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            print_failure_summary(&project_dir, &args.target, &run_id);
+            return Err(e);
+        }
+    };
 
     // --show-plan works in both dry-run and live-run modes.
     if args.show_plan {
