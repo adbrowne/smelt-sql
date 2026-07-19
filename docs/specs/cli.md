@@ -19,6 +19,7 @@ owners: [andrew]
 
 | Command | Purpose |
 |---------|---------|
+| `smelt init [DIR]` | Non-interactively scaffold a minimal working project in `DIR` (default `.`) |
 | `smelt run` | Execute models in topological order |
 | `smelt build` | Seed then run (convenience wrapper) |
 | `smelt backbuild` | Rebuild a model and its upstreams over a time range |
@@ -30,6 +31,8 @@ owners: [andrew]
 | `smelt type [model]` | Show model function signature (offline) |
 | `smelt status [model]` | Show incremental interval coverage and gaps |
 | `smelt history [model]` | Show past run records |
+| `smelt list` | List discovered project entities (models, seeds, sources, tests, checks) with kind and materialization (offline) |
+| `smelt clean` | Remove build artifacts under `target/` (compiled docs, catalog output); never touches state (`.smelt/`) or the target database |
 | `smelt explain` | Output model graph as JSON for orchestrators |
 | `smelt ui` | Start a local web UI for the model graph |
 | `smelt docs generate` | Generate a data catalog (markdown or JSON) |
@@ -100,6 +103,12 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.
 
 **`smelt check` specifics:** exits `0` if every `error`-severity check passes (zero violating rows); exits `1` if any `error`-severity check has violations. `warn`-severity checks never affect the exit code — a check with `severity: warn` and violations reports `WARN` and the command still exits `0`. A check whose referenced model is not built in the target fails with `CheckTargetNotBuilt` (exit `1`), never a silent pass.
+
+**`smelt init` specifics:** exits `0` on a successful scaffold. Exits `2` if the target directory already contains a `smelt.yml` (usage error — the fix is a different/empty directory, not a retry of the same command).
+
+**`smelt list` specifics:** exits `0` if discovery and parsing succeed, including when the (possibly selector-narrowed) result set is empty. Exits `2` on a parse error or an unresolvable/ambiguous selector, per the general selector-resolution rule above.
+
+**`smelt clean` specifics:** exits `0` whether or not `target/` existed to remove (removing nothing is not a failure). Exits `1` if `target/` exists but cannot be removed (e.g. a permissions error) — the command ran but failed to do its job, not a malformed invocation.
 
 ### `smelt build` flags
 
@@ -362,6 +371,20 @@ The cwd-derived scope is informational at command start and does not change mid-
 
 `smelt check --select` is a **substring match on the check name** (repeatable; a check runs if any `--select` value is a substring of its name). It does not use the full selector syntax — no `tag:`/`generator_file:` methods, no `+` graph operators — and a selection that matches no check prints `No checks matched the selection.` and exits `0` rather than hard-erroring. Unlike the build-integrated check pass (`smelt build` step 7), standalone `smelt check` runs against whatever is currently materialized and applies no downstream skip-cascade — it is a pure validation pass.
 
+### `smelt init` — non-interactive scaffolder
+
+`smelt init [DIR]` writes a minimal, working smelt project to `DIR` (default `.`): a `smelt.yml`, a `models/` directory containing one example model, one seed CSV, and a `.gitignore` that excludes `.smelt/` and the database file. It takes no interactive prompts — every file it writes has a fixed, deterministic template; there is no wizard and no flag that changes what gets scaffolded beyond the target directory. The scaffolded project builds successfully against DuckDB with no further edits (`smelt build` inside the scaffold exits `0`).
+
+`smelt init` refuses to run against a directory that already contains a `smelt.yml`: it exits `2` (usage error) with a message naming the conflicting file, rather than overwriting or merging. There is no `--force` flag to override this — the guidance is to run `smelt init` in a fresh directory, or to remove the conflicting file first and re-run. `DIR` is created if it does not exist; an existing empty or non-project directory is populated in place.
+
+### `smelt list` — enumerate discovered entities
+
+`smelt list` prints every entity `smelt` discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical `smelt.<path>` form (§"Canonical-display rule"), alongside its kind and, for models, its materialization. `smelt list` is **offline**: it performs discovery and parsing only, the same project-wide scan `smelt explain` uses, and makes no database connection. It accepts the same `--select`/`--exclude` selector flags as `smelt run`/`smelt build` (`model_selection.md`) to narrow the listed set, and respects `--scope` for shorthand selector arguments exactly as every other command does.
+
+### `smelt clean` — remove build artifacts
+
+`smelt clean` removes `target/` — the directory `smelt docs generate` and other artifact-producing commands write to. `smelt clean` **never touches state**: it does not delete `.smelt/` (run manifests, deployed-schema snapshots consumed by `smelt diff`, or any other versioned state directory), and it does not connect to or modify the configured target database. Only regenerable build output is in scope for removal — the same distinction `incremental_models.md`'s maintenance state draws between *derived, disposable output* and *state a subsequent run depends on to behave correctly*. `smelt clean` is safe to run at any time without affecting incremental correctness or losing run history.
+
 ### `smelt docs generate` output
 
 With `--format markdown` (default):
@@ -418,6 +441,9 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 12. **Scoped shorthand has no fall-through.** With a scope active, a shorthand argument resolves only as `<scope>.<arg>`; it never silently retries the bare `<arg>`. Reaching an entity outside the scope requires a full path. Adding a new entity (at any level) never changes which entity a previously-passing command resolved to.
 13. **`paths:` is a strip-list, not a scan gate.** Discovery walks every non-excluded subdirectory under the project root; `paths:` only strips address prefixes (`architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The cwd-derived scope is computed by the same strip-prefix rule, and the CLI defines no separate per-kind scan paths.
 14. **`smelt check` runs against the configured target.** Checks assert on real built data; a check passes iff its failing-rows query returns zero rows. `error`-severity violations set exit `1` and block models downstream of the checked model during `smelt build`; `warn`-severity violations do neither. A check on an unbuilt model is `CheckTargetNotBuilt`, never a silent pass.
+15. **`smelt init` never overwrites an existing project.** A target directory already containing a `smelt.yml` is refused (exit `2`) rather than merged or overwritten; there is no `--force` escape hatch.
+16. **`smelt list` is offline.** Like `smelt diff`/`smelt table`/`smelt type`, `smelt list` performs discovery and parsing only and makes no database connection.
+17. **`smelt clean` never touches state.** It removes only `target/` build artifacts. It must never delete or modify `.smelt/` (run manifests, deployed-schema snapshots) or connect to the configured target database.
 
 ## Known Divergences / Open Questions
 

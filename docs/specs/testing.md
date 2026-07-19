@@ -303,3 +303,4 @@ A `smelt.check` runs against the project's **configured target** — the same co
   - `architecture.md` — the kind axis and `smelt.<path>` addressing
   - `seeds.md` — seeds as mock data sources in tests
   - `cli.md` — `smelt test` command behavior, exit codes
+  - `data_tests.md` — declarative `columns.<c>.tests` constraints, which lower into the same `smelt.check` failing-rows machinery this spec documents when they cannot be proven from derived properties
