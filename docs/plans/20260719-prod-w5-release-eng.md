@@ -61,7 +61,7 @@ The production-release review found the release plumbing genuinely strong (tag-t
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | (this commit) | 2026-07-20 |
-| 2     | pending  |        |      |
+| 2     | done     | (this commit) | 2026-07-20 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
