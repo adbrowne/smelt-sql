@@ -440,8 +440,30 @@ Keyed **plus** a validity interval. The stored table carries the projected colum
   intended default posture once trusted. Prints the dirty set before acting.
 - `smelt build <model> --period <start>..<end> --include-upstreams` — backward resolution: print
   the per-ancestor required slices and build order; optionally execute the bounded build.
-- `smelt bakeoff <model> [--cells ...]` — materialise each admissible technique for a cell over a
-  representative window and report measured cost; `--pin` writes the choice as a `cells[]` entry.
+- `smelt bakeoff <model> [--cells <col>@<source>,...] [--runs N] [--target <name>] [--keep]
+  [--pin]` — measures every admissible technique for a set of cells against a representative
+  window of real data and reports cost. `--cells` defaults to every cell with two or more
+  admissible techniques (a cell with only one admissible technique has nothing to bake off).
+  `--runs N` (default 3) splits the driving source's event-time extent into `N` sequential
+  windows and replays them in order per technique — each replay is a real `execute_project` run
+  against the project's actual data, not a synthetic sample. Each technique under measurement
+  runs against a scratch target: the chosen target is cloned in-memory under a synthetic name
+  with schema `smelt_bakeoff_<model>_<technique>` (no runtime schema seam — schema already flows
+  from `config.targets[target].schema`), dropped after measurement unless `--keep`. After each
+  window, the measured techniques' output rows are cross-checked against each other with
+  `EXCEPT ALL` in both directions — the equivalence invariant bakeoff exists to exploit, verified
+  rather than assumed. `--target` selects which declared target to clone (defaults to the
+  active target). `--pin` emits the winning `cells[]` entry (or a complete `maintenance:` block
+  when the model has none) as ready-to-paste YAML on stdout — it never rewrites the model's
+  `.sql` file; the user reviews and commits the pin themselves. A pin, once applied, is an
+  ordinary override re-validated through admission on every compile: an inadmissible pin fails
+  loud rather than silently running.
+
+`cells[].technique` pins and `defaults.prefer`/`cells[].prefer` preferences are honoured at
+execution — the same choice ladder (`resolve_cell_choice`/`effective_override`,
+§"Validator, not chooser") that governs `smelt bakeoff`'s measurement targets also resolves the
+technique a live run uses, and admission still binds: an override can never select an
+inadmissible technique.
 
 #### Partition-grain run flags
 
@@ -1333,7 +1355,13 @@ relationship (`10` §2).
 **Offline cost measurement is first-class.** Because per-cell technique choice is
 contract-preserving at fixed `S`, smelt may measure alternative physical plans over real data
 offline and pin the cheapest (`smelt bakeoff`) — a capability per-query optimisers structurally
-lack (01 §11).
+lack (01 §11). The measurement is real, not simulated: each candidate technique executes the
+project's actual `execute_project` pipeline against a representative window of the project's own
+data, redirected to a disposable scratch schema, so the reported cost reflects what the
+technique would actually do in production. Pinning is deliberately a human act, never an
+automatic one — `--pin` only emits the winning choice as YAML for review; applying it is a
+separate, explicit step, and the pin remains subject to the same admission proof as any other
+override once applied.
 
 **One invariant, not two; addressing is the real axis — and it is per-cell.** An earlier cut split
 the contract into "per-partition equivalence" (partition grain) and "end-state equivalence" (key
@@ -2122,7 +2150,8 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   doesn't have). Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The conditional variant now enters the override ladder; `smelt bakeoff` remains unwired.**
+- **The conditional variant now enters the override ladder; `smelt bakeoff` is specified but not
+  yet implemented.**
   `resolve_write_suppression`'s `Suppressed` verdict no longer means "always emit the
   change-suppressed matched arm whenever it's proven" — `maintenance::choice::resolve_write_variant`
   folds a structural preference rule alongside the already-proven verdict: a steady-state trigger
@@ -2161,10 +2190,11 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   obey. A `technique: unconditional` pin forces the plain matched arm off suppression even for a
   steady-state trigger, and never refuses (the plain matched arm is always safe). The soft
   `prefer: suppress`/`prefer: unconditional` values nudge the same default without ever refusing.
-  `smelt bakeoff`, the statistics-driven cost model the ladder's `prefer: auto`/no-override
-  default ultimately answers to, remains entirely unwired (tracked by
-  `docs/plans/20260707-maintenance-plan-impl.md` MP13), so absent an explicit pin/preference on
-  this dimension, today's default is still the structural rule above, not a measured one.
+  `smelt bakeoff`, the measured-cost surface the ladder's `prefer: auto`/no-override default
+  ultimately could answer to, does not yet feed this write-suppression dimension automatically —
+  it measures and emits a pin for a human to apply (tracked by
+  `docs/plans/20260719-prod-w7-bakeoff.md`), so absent an explicit pin/preference on this
+  dimension, today's default is still the structural rule above, not a measured one.
   Whether a future cost model needs region-level change-ratio statistics from prior observed
   deltas (rather than the structural steady-state/first-build rule alone) to refine this choice
   further is an open question, not scoped work.
