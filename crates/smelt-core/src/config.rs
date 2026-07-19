@@ -1614,6 +1614,58 @@ targets:
         );
     }
 
+    /// W4·P2: `connect_url`'s token/TLS parameters interpolate like any other
+    /// target field — no bespoke Spark-only interpolation path exists.
+    #[test]
+    fn spark_connect_url_interpolates_env_var() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://h:443/;token=${SMELT_TEST_TOKEN};use_ssl=true
+"#;
+        let lookup = |name: &str| -> Option<String> {
+            if name == "SMELT_TEST_TOKEN" {
+                Some("secret-token".to_string())
+            } else {
+                None
+            }
+        };
+        let resolved =
+            interpolate_env_vars(yaml, &lookup).expect("SMELT_TEST_TOKEN is set, must resolve");
+        let config: Config = serde_yaml::from_str(&resolved).expect("resolved YAML must parse");
+        assert_eq!(
+            config.targets["prod"].connect_url.as_deref(),
+            Some("sc://h:443/;token=secret-token;use_ssl=true")
+        );
+    }
+
+    /// W4·P2: an unset token variable in `connect_url` fails loud, naming the
+    /// variable and the key path — never a silently empty token.
+    #[test]
+    fn spark_connect_url_missing_token_is_error() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://h:443/;token=${SMELT_TEST_TOKEN};use_ssl=true
+"#;
+        let lookup = |_: &str| -> Option<String> { None };
+        let err = interpolate_env_vars(yaml, &lookup)
+            .expect_err("unset SMELT_TEST_TOKEN must be a hard error");
+        let message = err.to_string();
+        assert!(
+            message.contains("SMELT_TEST_TOKEN"),
+            "error must name the missing variable: {message}"
+        );
+        assert!(
+            message.contains("targets.prod.connect_url"),
+            "error must name the YAML key path: {message}"
+        );
+    }
+
     /// iter-4 issue #1: a smelt.yml without a `version` field must parse
     /// (defaulting to 1) so new users don't trip over a required field that
     /// is decorative today and only appears in run logs.

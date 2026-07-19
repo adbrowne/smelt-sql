@@ -293,6 +293,41 @@ mod integration {
             .await;
     }
 
+    /// W4·P2: token/TLS parameters appended to `connect_url` (e.g.
+    /// `;token=...;use_ssl=...`) reach the Python adapter — and the
+    /// Spark Connect client it builds — verbatim. Proven against the live
+    /// server rather than a mock: an unauthenticated Spark Connect server
+    /// accepts (but does not validate) a `token` parameter, so a real
+    /// connection both succeeds and lets us read back the exact string the
+    /// adapter stored before handing it to `builder.remote(...)`.
+    #[tokio::test]
+    async fn integration_connect_url_params_pass_through_verbatim() {
+        let Some(url) = spark_connect_url() else {
+            return;
+        };
+        let full_url = format!("{url}/;token=smelt-test-token;use_ssl=false");
+
+        let backend = crate::SparkBackend::new(&full_url, "spark_catalog", "default", None, true)
+            .await
+            .expect("SparkBackend::new must succeed with token/use_ssl params present");
+
+        let stored: String = pyo3::Python::attach(|py| {
+            use pyo3::types::PyAnyMethods;
+            backend
+                .adapter
+                .bind(py)
+                .getattr("connect_url")
+                .expect("adapter must expose connect_url")
+                .extract()
+                .expect("connect_url must be a str")
+        });
+
+        assert_eq!(
+            stored, full_url,
+            "connect_url must reach the adapter unmodified, including token/use_ssl params"
+        );
+    }
+
     #[tokio::test]
     async fn integration_dialect_and_capabilities() {
         let Some(backend) = create_test_backend().await else {

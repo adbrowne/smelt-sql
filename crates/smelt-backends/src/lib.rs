@@ -68,7 +68,7 @@ pub async fn create_backend(
                 let catalog = target_config.catalog.as_ref().unwrap_or(&default_catalog);
 
                 tracing::info!("Backend [{}]: Spark", target_name);
-                tracing::info!("Connect URL: {}", connect_url);
+                tracing::info!("Connect URL: {}", redact_connect_url(connect_url));
                 tracing::info!("Catalog: {}", catalog);
 
                 let use_delta = target_config
@@ -86,7 +86,11 @@ pub async fn create_backend(
                     )
                     .await
                     .map_err(|e| {
-                        anyhow::anyhow!("Failed to connect to Spark at {}: {}", connect_url, e)
+                        anyhow::anyhow!(
+                            "Failed to connect to Spark at {}: {}",
+                            redact_connect_url(connect_url),
+                            e
+                        )
                     })?,
                 ))
             }
@@ -97,5 +101,40 @@ pub async fn create_backend(
                 ))
             }
         }
+    }
+}
+
+/// Strip Spark Connect URL parameters (`;token=...;use_ssl=...`) before a
+/// `connect_url` reaches a log line or error message. Params start at the
+/// first `;` per the Spark Connect URI grammar (`sc://host:port/;k=v;...`) —
+/// this is where an interpolated `${DATABRICKS_TOKEN}` etc. lands (spec:
+/// `multi_backend.md` §"Connection security" — "smelt never...logs the
+/// resolved URL").
+#[cfg(feature = "spark")]
+fn redact_connect_url(connect_url: &str) -> &str {
+    connect_url
+        .split_once(';')
+        .map(|(host_part, _)| host_part)
+        .unwrap_or(connect_url)
+}
+
+#[cfg(all(test, feature = "spark"))]
+mod tests {
+    use super::redact_connect_url;
+
+    #[test]
+    fn redact_connect_url_strips_token_and_tls_params() {
+        assert_eq!(
+            redact_connect_url("sc://host:443/;token=secret;use_ssl=true"),
+            "sc://host:443/"
+        );
+    }
+
+    #[test]
+    fn redact_connect_url_passes_through_url_with_no_params() {
+        assert_eq!(
+            redact_connect_url("sc://localhost:15002"),
+            "sc://localhost:15002"
+        );
     }
 }
