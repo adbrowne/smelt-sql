@@ -69,6 +69,19 @@ explicitly parked. Decisions recorded inline as they are made.
 
 (Append-only. Items surfaced during the work that we chose not to handle in this programme.)
 
+- **2026-07-19 (T3 Phase 2 pre-flight):** `smelt-db` unit test
+  `queries::project::tests::emitted_incremental_model_inherits_frontmatter_incremental_block`
+  fails on this branch's HEAD (confirmed via `git stash`, reproduces with zero T3 changes
+  applied) — a generator-emitted model with `materialization: 'incremental'` in its body
+  comes out with `materialization: "view"` instead, i.e. the file-wide frontmatter
+  `incremental:` block isn't inherited by the emitted model as
+  `docs/plans/20260509-meta-language-E2.md` (line ~424) describes. Confirmed unrelated to
+  comma-joins (different subsystem: generator-emitted incremental frontmatter
+  inheritance) and confirmed pre-existing before the most recent `origin/main` merge
+  (the introducing commit `694df12e` was already an ancestor of this branch's prior tip).
+  Not fixed here — out of T3's scope. Needs a human to triage: either a fresh remediation
+  sub-plan or confirmation this is a known regression already tracked elsewhere.
+
 ## Verification
 
 - Both sub-plans' own Verification sections green.

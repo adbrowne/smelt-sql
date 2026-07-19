@@ -45,7 +45,7 @@ remains is stale-state close-out.
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
 | 1     | done    | `feat(parser): comma-separated FROM items parse as comma-joins` | 2026-07-19 |
-| 2     | pending |        |      |
+| 2     | done    | `feat(types): comma-joins classified as cross joins with oracle-verified schema expansion` | 2026-07-19 |
 | 3     | pending |        |      |
 
 ---

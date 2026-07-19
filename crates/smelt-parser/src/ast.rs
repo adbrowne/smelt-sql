@@ -1606,7 +1606,15 @@ impl JoinClause {
 
     /// Get the JOIN type (INNER, LEFT, RIGHT, FULL, CROSS)
     /// Returns None for bare JOIN (defaults to INNER)
+    ///
+    /// The ANSI-89 implicit comma-separated form (`FROM a, b`, see
+    /// [`Self::is_comma_join`]) is classified as `Cross` (ratified
+    /// 2026-07-18, master `docs/plans/20260718-quality-grind.md` D-QG-2):
+    /// DuckDB/PostgreSQL both treat a bare comma in FROM as a cross join.
     pub fn join_type(&self) -> Option<JoinType> {
+        if self.is_comma_join() {
+            return Some(JoinType::Cross);
+        }
         for token in self.0.children_with_tokens().filter_map(|e| e.into_token()) {
             match token.kind() {
                 INNER_KW => return Some(JoinType::Inner),

@@ -396,8 +396,8 @@ category = "information_schema_roundtrip"
 note = "smelt prints a qualified information_schema reference without its schema prefix (silent mis-parse)"
 
 ["98685dc6055e7793"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
+category = "table_valued_function_as_join_operand"
+note = "range(a) as the right-hand operand of a JOIN/comma-join is not parsed: parse_join_clause's table-ref guard only accepts IDENT/LATERAL_KW/LPAREN, excluding table-function keywords like RANGE_KW/GLOB_KW; this also reproduces for an explicit JOIN range(...), so it is a JOIN-operand-shape gap, not the comma marker itself, which now parses cleanly (docs/plans/20260718-quality-grind-t3.md Phase 1)"
 
 ["4444edd7851561d6"]
 category = "duckdb_typed_literal_prefix"
@@ -940,8 +940,8 @@ category = "with_ordinality"
 note = "WITH ORDINALITY table-function modifier is not parsed"
 
 ["a1e4b25c020f937c"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
+category = "table_valued_function_as_join_operand"
+note = "ROWS FROM(...) (SQL:2003 multi-table-function form) is not parsed as a table primary at all, and the leading VALUES-derived-table comma-join hits the same JOIN-operand-shape gap as hash 98685dc6055e7793; the comma marker itself now parses cleanly (docs/plans/20260718-quality-grind-t3.md Phase 1)"
 
 ["9480ec7e9fa51e51"]
 category = "with_ordinality"
@@ -1036,8 +1036,8 @@ category = "tablesample_custom_method_name"
 note = "TABLESAMPLE with a non-keyword (custom/extension) sampling-method name is not parsed; only the recognized keyword set (BERNOULLI, SYSTEM, ...) is"
 
 ["d63aa08ca702f3ab"]
-category = "implicit_cross_join_comma_syntax"
-note = "FROM t1, t2 (ANSI-89 implicit comma-separated cross join) is not parsed; parse_from_clause's join loop only recognizes explicit JOIN/CROSS JOIN keywords"
+category = "information_schema_roundtrip"
+note = "same root cause as the information_schema_roundtrip category: smelt prints a schema-qualified table reference (pg_catalog.pg_tablespace) without its middle segment (silent mis-parse); the comma-join marker itself now parses cleanly (docs/plans/20260718-quality-grind-t3.md Phase 1) — this entry's remaining failure is the qualified-name printer gap, unrelated to comma-join syntax"
 
 ["348bff3f69bc56c0"]
 category = "postgres_variadic_array_argument"

@@ -333,6 +333,119 @@ fn regression_left_join_declared_not_null() {
     );
 }
 
+/// Regression: a comma-join (`FROM a, b`, ANSI-89 implicit cross join,
+/// ratified 2026-07-18 master D-QG-2) must NOT introduce nullability —
+/// same as INNER/CROSS JOIN. A source column declared `nullable: false`
+/// that appears on either side of a comma-join must stay `nullable: false`
+/// in the output schema.
+///
+/// Two-part check, mirroring `regression_left_join_declared_not_null`:
+///   1. Inference check — `apply_outer_join_nullability` must leave both
+///      sides' declared-non-nullable columns untouched for a comma-join
+///      (`JoinClause::join_type()` classifies it as `Cross`, which hits the
+///      no-marking arm alongside `Inner`).
+///   2. DuckDB value check — a cross join of two non-empty tables with
+///      NOT NULL columns produces zero NULLs for those columns, confirming
+///      the semantic guarantee.
+#[test]
+fn regression_comma_join_no_nullability_change() {
+    // ── Part 1: inference check ──────────────────────────────────────────────
+    let sql = "SELECT u.user_id AS user_id, e.event_id AS event_id, e.event_type AS event_type \
+               FROM u, e WHERE u.user_id = e.user_id";
+
+    let parse = smelt_parser::parse(sql);
+    let root = parse.syntax();
+    let file = File::cast(root).expect("failed to cast to File");
+    let select_stmt = file.select_stmt().expect("no SelectStmt");
+
+    let mut ctx = TypeContext::new();
+
+    // Both sides declared non-nullable (as a source declaration would be).
+    ctx.add_model_column(
+        "u",
+        "user_id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+    ctx.add_alias("u", "u");
+    ctx.add_model_column(
+        "e",
+        "event_id",
+        TypedColumn {
+            data_type: DataType::Integer,
+            nullable: false,
+        },
+    );
+    ctx.add_model_column(
+        "e",
+        "event_type",
+        TypedColumn {
+            data_type: DataType::Text,
+            nullable: false,
+        },
+    );
+    ctx.add_alias("e", "e");
+
+    // Comma-join must not mark anything nullable (same as INNER/CROSS JOIN).
+    apply_outer_join_nullability(&select_stmt, &mut ctx);
+
+    let col_types = infer_select_column_types(&select_stmt, &ctx);
+    let select_list = select_stmt.select_list().expect("no select list");
+    let items: Vec<_> = select_list.items().collect();
+    let inferred: Vec<(String, TypedColumn)> = items
+        .iter()
+        .zip(col_types.iter())
+        .map(|(item, tc)| {
+            let alias = item.alias().unwrap_or_else(|| "?".to_string());
+            (alias, tc.clone())
+        })
+        .collect();
+
+    for name in ["user_id", "event_id", "event_type"] {
+        let col = inferred
+            .iter()
+            .find(|(a, _)| a == name)
+            .unwrap_or_else(|| panic!("{name} not found in inferred output"));
+        assert!(
+            !col.1.nullable,
+            "{name} is declared nullable: false and appears in a comma-join (cross join) — \
+             apply_outer_join_nullability must NOT mark it nullable. Got nullable: {}",
+            col.1.nullable
+        );
+    }
+
+    // ── Part 2: DuckDB value check ───────────────────────────────────────────
+    //
+    // A cross join of two non-empty NOT NULL-columned tables produces zero
+    // NULLs for those columns — the cross join itself introduces no NULLs
+    // (unlike an outer join, it has no null-supplying side).
+    let oracle = DuckDbOracle::new();
+    oracle
+        .execute_ddl(
+            "CREATE TABLE u (user_id INTEGER NOT NULL);\
+             INSERT INTO u VALUES (1), (2);\
+             CREATE TABLE e (user_id INTEGER, event_id INTEGER NOT NULL, event_type VARCHAR NOT NULL);\
+             INSERT INTO e VALUES (1, 100, 'click'), (2, 200, 'view')",
+        )
+        .expect("setup DDL should succeed");
+
+    let nulls = oracle
+        .count_nulls_per_column(
+            "SELECT u.user_id, e.event_id, e.event_type FROM u, e WHERE u.user_id = e.user_id",
+        )
+        .expect("query should succeed");
+
+    for (name, count) in &nulls {
+        assert_eq!(
+            *count, 0,
+            "DuckDB value check: {name} (declared NOT NULL) must contain zero NULLs after a \
+             comma-join (cross join) — a cross join has no null-supplying side. Got {count} NULLs.",
+        );
+    }
+}
+
 // ---- Smoke: set-operation nullability ----
 
 /// Smoke: `non_nullable UNION ALL nullable` infers nullable; DuckDB confirms NULLs present.

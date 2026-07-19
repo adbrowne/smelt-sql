@@ -7,6 +7,7 @@ mod as_struct_tests;
 mod backends_inference;
 mod bidirectional_generics;
 mod byte_offset_helpers;
+mod comma_join_semantics;
 mod common;
 mod context_binding;
 mod cross_function_cte_schema;

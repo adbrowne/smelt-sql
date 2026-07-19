@@ -376,3 +376,78 @@ FULL JOIN smelt.sources.raw.events AS e ON u.user_id = e.user_id\n";
         event_id.nullable
     );
 }
+
+// ---------------------------------------------------------------------------
+// Test 5: comma-join (ANSI-89 implicit cross join) — no nullability change
+// ---------------------------------------------------------------------------
+
+/// Real-fixture comma-join: `FROM a, b` is classified as a cross join
+/// (ratified 2026-07-18, master D-QG-2). Like `INNER JOIN` / `CROSS JOIN`,
+/// it must not introduce nullability — columns declared `nullable: false`
+/// in the source YAML on either side must stay `nullable: false`.
+#[test]
+fn comma_join_source_nullable_false_stays_non_nullable() {
+    let model_sql = "\
+SELECT \
+  u.user_id AS user_id, \
+  e.event_id AS event_id, \
+  e.event_type AS event_type \
+FROM smelt.sources.raw.users AS u, smelt.sources.raw.events AS e \
+WHERE u.user_id = e.user_id\n";
+
+    let tmp = stage_files(&[
+        ("smelt.yml", SMELT_YML),
+        ("models/comma_join_model.sql", model_sql),
+        ("models/sources/raw/events.yml", EVENTS_SOURCE_YAML),
+        ("models/sources/raw/users.yml", USERS_SOURCE_YAML),
+    ]);
+
+    let (db, ws, model_file) = ingest(
+        &tmp,
+        &[("models/comma_join_model.sql", model_sql)],
+        "models/comma_join_model.sql",
+    );
+
+    let schema = typed_model_schema(&db, ws, model_file);
+
+    let col_map: std::collections::HashMap<_, _> = schema
+        .columns
+        .iter()
+        .filter_map(|c| c.data_type.as_ref().map(|dt| (c.name.as_str(), dt.clone())))
+        .collect();
+
+    assert!(
+        !col_map.is_empty(),
+        "typed_model_schema returned no typed columns for comma-join model. \
+         Schema: {:#?}",
+        schema.columns
+    );
+
+    // Both sides of a comma-join (cross join) — should stay nullable: false
+    // (as declared in source), same as INNER JOIN.
+    let user_id = col_map.get("user_id").expect("user_id column not found");
+    assert!(
+        !user_id.nullable,
+        "user_id is declared nullable: false in the source YAML and appears in a \
+         comma-join (cross join) — nullability must NOT be forced. Got nullable: {}",
+        user_id.nullable
+    );
+
+    let event_id = col_map.get("event_id").expect("event_id column not found");
+    assert!(
+        !event_id.nullable,
+        "event_id is declared nullable: false in the source YAML and appears in a \
+         comma-join (cross join) — nullability must NOT be forced. Got nullable: {}",
+        event_id.nullable
+    );
+
+    let event_type = col_map
+        .get("event_type")
+        .expect("event_type column not found");
+    assert!(
+        !event_type.nullable,
+        "event_type is declared nullable: false in the source YAML and appears in a \
+         comma-join (cross join) — nullability must NOT be forced. Got nullable: {}",
+        event_type.nullable
+    );
+}

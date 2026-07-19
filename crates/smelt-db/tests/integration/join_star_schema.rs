@@ -20,6 +20,7 @@
 use std::path::PathBuf;
 
 use smelt_db::{resolved_model_schema, Database, SourceFile, Workspace};
+use smelt_types::DataType;
 
 fn build_db(
     project_root: PathBuf,
@@ -150,4 +151,94 @@ fn single_table_star_unchanged() {
     // star expansion.
     let cols = star_schema_columns("SELECT * FROM smelt.models.a", "single_table_star");
     assert_eq!(cols, vec!["x", "y"]);
+}
+
+#[test]
+fn comma_join_schema_both_sides() {
+    // Ratified 2026-07-18 (master D-QG-2): `FROM a, b` (ANSI-89 implicit
+    // comma-separated form) is a cross join. DuckDB-verified: `SELECT *
+    // FROM a, b` expands to [x, y, x, z] — every column from both sides,
+    // no dedupe (a cross join shares no columns structurally, so unlike
+    // NATURAL/USING there is nothing to dedupe; duplicate *names* across
+    // operands, e.g. the shared `x` here, both appear — same as the
+    // pinned ON-join behavior).
+    let cols = star_schema_columns(
+        "SELECT * FROM smelt.models.a, smelt.models.b",
+        "comma_join_star",
+    );
+    assert_eq!(
+        cols,
+        vec!["x", "y", "x", "z"],
+        "comma-join star expansion must cover both sides with no dedupe \
+         (DuckDB-verified cross join semantics), got {cols:?}"
+    );
+}
+
+#[test]
+fn comma_join_schema_both_sides_exact_types() {
+    // Strengthens `comma_join_schema_both_sides`: that test only checks
+    // column name/order, and its shared fixture happens to give `x` the
+    // same DataType (Integer) on both sides of the comma join — so it
+    // would not catch a cross-operand type mix-up (e.g. the right side's
+    // occurrence of a shared name silently taking the left side's type).
+    //
+    // Here `a2.id` and `b2.id` share a name but have genuinely different
+    // inferred types (SmallInt vs Text), so if the resolver ever conflated
+    // the two occurrences (either by deduping like NATURAL/USING does, or
+    // by copying one side's type onto the other), this test fails. Column
+    // order/types match smelt's own literal type inference for
+    // `SELECT * FROM a2, b2`: [id: SmallInt, label: Text, id: Text,
+    // amount: Decimal(2,1)].
+    let root = PathBuf::from("/fake/project/comma_join_star_types");
+    let a_path = root.join("models").join("a2.sql");
+    let b_path = root.join("models").join("b2.sql");
+    let m_path = root.join("models").join("m.sql");
+
+    let (db, ws, files) = build_db(
+        root,
+        &[
+            (a_path, "SELECT 1 AS id, 'p' AS label"),
+            (b_path, "SELECT 'q' AS id, 2.5 AS amount"),
+            (m_path, "SELECT * FROM smelt.models.a2, smelt.models.b2"),
+        ],
+    );
+    let schema = resolved_model_schema(&db, ws, files[2]);
+    assert!(
+        schema.is_fully_resolved,
+        "comma-join star schema should fully resolve"
+    );
+
+    let names: Vec<&str> = schema.columns.iter().map(|c| c.name.as_str()).collect();
+    assert_eq!(
+        names,
+        vec!["id", "label", "id", "amount"],
+        "comma-join star expansion must cover both sides with no dedupe, got {names:?}"
+    );
+
+    let types: Vec<DataType> = schema
+        .columns
+        .iter()
+        .map(|c| {
+            c.data_type
+                .as_ref()
+                .unwrap_or_else(|| panic!("column {} missing inferred type", c.name))
+                .data_type
+                .clone()
+        })
+        .collect();
+    assert_eq!(
+        types,
+        vec![
+            DataType::SmallInt,
+            DataType::Text,
+            DataType::Text,
+            DataType::Decimal {
+                precision: 2,
+                scale: 1
+            },
+        ],
+        "comma-join star expansion must keep each operand's own type for the \
+         shared `id` name (left: SmallInt from a2, right: Text from b2) \
+         rather than deduping or cross-contaminating types, got {types:?}"
+    );
 }

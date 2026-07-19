@@ -73,6 +73,13 @@ pub fn model_schema(db: &dyn salsa::Database, file: SourceFile) -> Arc<ModelSche
     // collected here — expanding them means introducing duplicate column
     // names into inferred schemas, a separate piece of work tracked in
     // docs/TODO.md.
+    //
+    // Comma-joined refs (`FROM a, b`, ratified 2026-07-18 master D-QG-2 as a
+    // cross join) DO expand: DuckDB-verified `SELECT * FROM a, b` covers
+    // both sides with no dedupe (a cross join shares no columns
+    // structurally, unlike NATURAL/USING; duplicate *names* across operands
+    // both appear, same as the still-deferred ON-join case above — that is
+    // existing behavior, not new duplicate-name semantics).
     let joined_refs: Vec<(String, schema::RowExtensionDedupe)> =
         if let Some(from_clause) = select_stmt.from_clause() {
             from_clause
@@ -84,6 +91,8 @@ pub fn model_schema(db: &dyn salsa::Database, file: SourceFile) -> Arc<ModelSche
                         .and_then(|pr| pr.segments().last().cloned())?;
                     if join.is_natural() {
                         Some((ref_name, schema::RowExtensionDedupe::SharedWithPrior))
+                    } else if join.is_comma_join() {
+                        Some((ref_name, schema::RowExtensionDedupe::None))
                     } else if let Some(cond) = join.condition() {
                         if cond.is_using() {
                             Some((
