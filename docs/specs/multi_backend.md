@@ -315,12 +315,15 @@ resolves nested widening to a table rewrite.
   performance gap, not a correctness one. Deferred.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
-- **The `spark_type` divergence ledger has not been re-verified.** The ledger in
-  `crates/smelt-db/tests/prop_helpers/divergences.rs` (21 entries) was written during earlier
-  soaks that later proved some entries stale, and has not been re-verified end to end against a
-  live Spark Connect server since. Per-PR gating on Spark-relevant paths (§"CI tiering" above)
-  is in place as of `.github/workflows/compat.yml`'s `changes` job; the ledger re-verification is
-  tracked in `docs/plans/20260719-prod-w4-spark.md`.
+- **The `spark_type` divergence ledger.** The ledger in
+  `crates/smelt-db/tests/prop_helpers/divergences.rs` (22 entries) has been re-verified entry by
+  entry against a live Spark Connect server: every recorded `spark_type` (both `Some` claims and
+  `None` "matches smelt" claims) was checked against `DESCRIBE QUERY` output for the entry's
+  representative expression, corrected where stale (e.g. `SIGN`'s Spark return type is always
+  `Double` regardless of argument type, not the argument's own type as previously recorded), and
+  confirmed by a 1000-case property soak with zero new unregistered divergences. Per-PR gating on
+  Spark-relevant paths (§"CI tiering" above) is in place as of `.github/workflows/compat.yml`'s
+  `changes` job.
 
 ## References
 
