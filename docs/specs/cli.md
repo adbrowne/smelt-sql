@@ -78,18 +78,22 @@ Three input shapes are accepted:
 **Disambiguation rules:**
 
 - **No scope-expansion fall-through.** When a scope is active, a shorthand argument resolves **only** as `<scope>.<arg>`. If that exact path does not resolve, the command errors; it never silently retries the bare `<arg>` or searches up the scope hierarchy. This is what keeps a passing command stable: adding a top-level entity later can never change which entity a scoped shorthand resolved to. To reach an entity outside the active scope, pass its full path (full-path arguments are honored regardless of scope — see below).
-- **Ambiguity at no-scope resolution.** When the user passes a bare leaf (e.g. `events_parsed`) with no scope and the leaf matches multiple entities (`silver.events_parsed`, `bronze.events_parsed`), the command exits non-zero with a diagnostic listing all matches and a hint to use `--scope` or the full path. The CLI does not silently pick one.
+- **Ambiguity at no-scope resolution.** When the user passes a bare leaf (e.g. `events_parsed`) with no scope and the leaf matches multiple entities (`silver.events_parsed`, `bronze.events_parsed`), the command exits `2` (usage error; see §"Exit codes") with a diagnostic listing all matches and a hint to use `--scope` or the full path. The CLI does not silently pick one.
 - **Cross-scope full paths.** A full-path argument (`bronze.raw_events`) is honored regardless of the active scope. Scope narrows input, never output or cross-references.
 
 **Canonical-display rule.** Every CLI command's output uses the full canonical `smelt.<path>` form for every entity it names — model lists, type signatures, diagnostics, JSON output keys, log lines. Scope changes how the user *types* an identifier; it never changes how the CLI *prints* one. Copy-pasting any printed identifier — including its leading `smelt.` prefix — back into a `--select`, into another command argument, or (minus the prefix) into a model `FROM` clause must produce the same resolution. Because entity arguments strip a leading `smelt.` (see above), the printed `smelt.<path>` form round-trips without edits.
 
 ### Exit codes
 
+This is the normative exit-code contract for every `smelt` subcommand. Every other mention of exit codes in this spec (the `smelt check` exit paragraph below, the no-op/unresolvable-selector table in §"No-op vs unresolvable selector", the `smelt build` lifecycle §"Check" step, and Constraints & Invariants item 6) refers back to this section rather than restating it.
+
 | Code | Meaning |
 |------|---------|
-| `0` | Success — all selected models built/tested/seeded without error |
-| `1` | Execution failure — at least one model failed, test failed, or schema diff detected changes |
-| Non-zero | Configuration error, missing smelt.yml, selector parse error, YAML parse error |
+| `0` | Success. Includes a `warn`-severity `smelt check` violation and an empty-but-valid selection (§"No-op rebuild output") — a build that ran nothing because there was nothing to do is not a failure. |
+| `1` | Detected failure. A failed model build, a failed `smelt test` case, an `error`-severity `smelt check` violation, `smelt diff` detecting a schema change, or `CheckTargetNotBuilt` (a check referencing a model not built in the target). |
+| `2` | Usage error. Malformed CLI arguments (clap-detected), an unresolvable or ambiguous selector/entity argument, a malformed or missing `smelt.yml`, or an unresolvable project/target. |
+
+Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly and *found* a problem in the data or models; `2` means the command could not run at all because its own inputs (flags, config, project structure) were invalid. An orchestrator should treat `1` as "investigate the pipeline" and `2` as "fix the invocation" — retrying a `2` without changing the command is never useful.
 
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
 
@@ -228,11 +232,11 @@ Both messages are emitted to **stderr** so they do not pollute stdout-parsed out
 
 ### No-op vs unresolvable selector
 
-The two empty-output cases are distinct and have different exit codes:
+The two empty-output cases are distinct and have different exit codes (per §"Exit codes"):
 
 | Case | Example | Behaviour | Exit code |
 |------|---------|-----------|-----------|
-| **Unresolvable selector** — an entity-name selector resolves to no entity of any kind | `--select typo_name` (no such model) | Hard "not found" diagnostic (§"Argument resolution algorithm" step 4) | non-zero |
+| **Unresolvable selector** — an entity-name selector resolves to no entity of any kind | `--select typo_name` (no such model) | Hard "not found" diagnostic (§"Argument resolution algorithm" step 4) | `2` (usage error) |
 | **Valid but empty selection** — every selector resolved, but the matched set is empty | `--select tag:nonexistent`, or a valid selector whose models are all up-to-date | `smelt: no models matched the selector(s)` / `smelt: nothing to rebuild` to stderr | `0` |
 
 A typo'd entity name fails loudly rather than silently building nothing; a `tag:`/`generator_file:` selector that legitimately matches no models (per `model_selection.md` §"Tag matching" and `model_selection.md` §"Selection methods") is a quiet no-op.
@@ -405,7 +409,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 3. **`smelt diff` requires no live connection.** It must work in offline environments (CI without DB credentials).
 4. **`smelt test` runs on in-memory DuckDB.** Tests never touch the project's configured target database.
 5. **`smelt explain --json` schema is append-stable.** Fields may be added; existing fields must not be renamed or removed without a major version bump.
-6. **Exit codes are meaningful.** `0` = success; `1` = detected failure or change; non-zero = error. Scripts should check exit codes, not stdout patterns.
+6. **Exit codes are meaningful.** See §"Exit codes" for the full contract. Scripts should check exit codes, not stdout patterns.
 7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt backbuild` only.
 8. **`--show-plan` requires a positional model-file argument.** Absence is a hard error, not a fallback to project-wide mode.
 9. **Multi-value flags are repetition-based.** `--select`, `--exclude`, and similar flags must not silently split internal whitespace into multiple values.
@@ -417,7 +421,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 
 ## Known Divergences / Open Questions
 
-- **Exit code standardization incomplete.** Configuration errors, YAML parse failures, and selector parse errors exit with non-zero codes but the exact code is not consistently `2` or any defined value distinct from `1`. Exit code meaning for "user/config error" is not defined.
+- **Exit code standardization incomplete.** §"Exit codes" defines `2` for usage/config errors (malformed `smelt.yml`, unresolvable project, unresolvable/ambiguous selector) as distinct from `1` (detected failure). Today the implementation exits `1` for these cases uniformly (`async fn main() -> Result<()>` via anyhow, plus scattered `std::process::exit(1)` calls in the `build`/`test`/`check`/`diff` commands) — the `2` path does not yet exist. Tracked in `docs/plans/20260719-prod-w1-fail-loud.md` (Phase 4).
 - **`smelt test --select` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (§"`smelt test` isolation"), consistent with every other command. Any remaining substring-match behaviour in the implementation is an unlanded gap, not the intended contract.
 - **`smelt explain` physical section gating.** The `physical` section of the explain output is documented as present, but the condition that triggers its inclusion (`--show-physical` flag?) is not clearly surfaced in the CLI help or user guide.
 - **`.smelt/schemas/` not documented.** The schema state directory that `smelt diff` reads from is not documented in user-facing docs. Its format, update timing, and lifecycle are not specified.
