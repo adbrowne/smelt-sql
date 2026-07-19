@@ -810,6 +810,62 @@ impl Backend for DuckDbBackend {
         .await
         .map_err(|e| BackendError::Other(e.into()))?
     }
+
+    /// Real transactional override (F3, `docs/plans/20260715-composed-axes-
+    /// conditional-maintenance.md` Phase F3; `docs/specs/sources.md`
+    /// §"The fingerprint sidecar" — "Transactionality"): every statement in
+    /// `write_group`, then `refresh_sql`, then `gc_sql` all run inside one
+    /// `duckdb::Transaction`, so either the write and the sidecar's
+    /// digest-refresh all commit, or none of them do. `ensure_sql` (the
+    /// idempotent `CREATE TABLE IF NOT EXISTS`) runs first, outside that
+    /// transaction — same precedent as `fold_ledger_delta`'s and
+    /// `execute_conditional_write_and_record_observed_delta`'s own
+    /// `ensure_sql` handling. `Transaction`'s default
+    /// `DropBehavior::Rollback` means a failure anywhere in `write_group`,
+    /// `refresh_sql`, or `gc_sql` rolls back every statement already
+    /// applied in this call — a failed write never leaves a refreshed
+    /// sidecar digest behind (the write and the refresh share one commit
+    /// point).
+    async fn execute_write_and_refresh_fingerprint_sidecar(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        refresh_sql: &str,
+        gc_sql: &str,
+    ) -> Result<(), BackendError> {
+        let ensure_sql = ensure_sql.to_string();
+        let mut statements: Vec<String> = write_group
+            .statements
+            .iter()
+            .map(|s| s.sql.clone())
+            .collect();
+        statements.push(refresh_sql.to_string());
+        statements.push(gc_sql.to_string());
+        let connection = Arc::clone(&self.connection);
+
+        tokio::task::spawn_blocking(move || {
+            let mut conn = connection.lock().expect("DuckDB connection mutex poisoned");
+
+            conn.execute(&ensure_sql, []).map_err(|e| {
+                BackendError::execution_failed("fingerprint_sidecar", e.to_string())
+            })?;
+
+            let tx = conn.transaction().map_err(|e| {
+                BackendError::execution_failed("fingerprint_sidecar", e.to_string())
+            })?;
+            for sql in &statements {
+                tx.execute(sql, []).map_err(|e| {
+                    BackendError::execution_failed("fingerprint_sidecar", e.to_string())
+                })?;
+            }
+            tx.commit().map_err(|e| {
+                BackendError::execution_failed("fingerprint_sidecar", e.to_string())
+            })?;
+            Ok(())
+        })
+        .await
+        .map_err(|e| BackendError::Other(e.into()))?
+    }
 }
 
 /// Whether a DuckDB error message reports a constraint violation (`PRIMARY
@@ -1461,6 +1517,116 @@ mod tests {
         assert_eq!(
             total_rows, 0,
             "a failed write must leave no observed-delta row behind"
+        );
+    }
+
+    // ── execute_write_and_refresh_fingerprint_sidecar (F3) ──────────────
+
+    #[tokio::test]
+    async fn test_fingerprint_sidecar_commits_write_and_refresh_together() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (id INTEGER)")
+            .await
+            .unwrap();
+
+        let ensure_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_table_ddl("main");
+        let write_group = StatementGroup {
+            statements: vec![smelt_backend::MaintenanceStatement {
+                sql: "INSERT INTO main.device_stats VALUES (1)".to_string(),
+            }],
+            transactional: false,
+        };
+        let digest_select = "SELECT '1' AS delta_key, 'digest-1' AS delta_digest";
+        let refresh_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name",
+            digest_select,
+        );
+        let gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name",
+            digest_select,
+        );
+
+        backend
+            .execute_write_and_refresh_fingerprint_sidecar(
+                &ensure_sql,
+                &write_group,
+                &refresh_sql,
+                &gc_sql,
+            )
+            .await
+            .expect("write + sidecar refresh commits together");
+
+        let count = backend.get_row_count("main", "device_stats").await.unwrap();
+        assert_eq!(count, 1, "the write ran and committed");
+
+        let rows = backend
+            .execute_sql("SELECT source_key, digest FROM main._smelt_fingerprint_sidecar")
+            .await
+            .unwrap();
+        let total_rows: usize = rows.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(total_rows, 1, "exactly one sidecar row refreshed");
+    }
+
+    #[tokio::test]
+    async fn test_fingerprint_sidecar_rolls_back_refresh_on_write_failure() {
+        let temp_dir = TempDir::new().unwrap();
+        let db_path = temp_dir.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
+
+        backend
+            .execute_sql("CREATE TABLE main.device_stats (id INTEGER)")
+            .await
+            .unwrap();
+
+        let ensure_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_table_ddl("main");
+        // A write statement that fails (references a nonexistent table) —
+        // the sidecar refresh must never land.
+        let write_group = StatementGroup {
+            statements: vec![smelt_backend::MaintenanceStatement {
+                sql: "INSERT INTO main.does_not_exist VALUES (1)".to_string(),
+            }],
+            transactional: false,
+        };
+        let digest_select = "SELECT '1' AS delta_key, 'digest-1' AS delta_digest";
+        let refresh_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name",
+            digest_select,
+        );
+        let gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name",
+            digest_select,
+        );
+
+        let result = backend
+            .execute_write_and_refresh_fingerprint_sidecar(
+                &ensure_sql,
+                &write_group,
+                &refresh_sql,
+                &gc_sql,
+            )
+            .await;
+        assert!(result.is_err(), "the failed write must surface an error");
+
+        let rows = backend
+            .execute_sql("SELECT * FROM main._smelt_fingerprint_sidecar")
+            .await
+            .unwrap();
+        let total_rows: usize = rows.iter().map(|b| b.num_rows()).sum();
+        assert_eq!(
+            total_rows, 0,
+            "a failed write must leave no sidecar digest behind"
         );
     }
 

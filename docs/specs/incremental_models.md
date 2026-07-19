@@ -801,10 +801,15 @@ construction.
 Three deliberate exclusions: the reconciliation ledger's DDL/DML (§"The reconciliation ledger") is
 state bookkeeping owned per dialect by `smelt-state` — it is *interleaved* transactionally with
 an emitted fold statement but is not itself a maintenance statement; the observed-output-delta
-record (§"The graph layer" — "Observed deltas on model edges") sits in the same excluded class,
-warehouse-resident and owned per dialect by `smelt-state` alongside the reconciliation ledger,
-interleaved transactionally with the conditional write whose changed-row set it captures but never
-itself a maintenance statement; and non-maintenance SQL (introspection, seed loading,
+record (§"The graph layer" — "Observed deltas on model edges") and the fingerprint sidecar's own
+storage (table DDL, digest-refresh upsert, GC delete — `sources.md` §"The fingerprint sidecar")
+sit in the same excluded class, warehouse-resident and owned per dialect by `smelt-state` alongside
+the reconciliation ledger, each interleaved transactionally with the write whose changed-row
+set or digest it captures but never itself a maintenance statement — the fingerprint sidecar's diff
+query is the one exception inside that same feature: unlike its own table's storage DDL/DML, the
+diff is a derived maintenance-relevant comparison (which source keys count as "changed"), so it IS
+emitter-authored (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`), not part of
+this exclusion; and non-maintenance SQL (introspection, seed loading,
 schema-evolution DDL) is outside this rule.
 
 Single ownership is what makes maintenance SQL *observable*: the same emitters serve execution,
@@ -2078,8 +2083,10 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   breadth when P1 closes and an exact delta exists, not only a direct call of the executor. This
   restriction is licensed independently of write suppression (Group C) — it narrows recompute
   *breadth*, never what is scanned into `S` — and today only reaches a maintained-model-edge
-  driving source (an external `mutable_snapshot` source's own synthesized delta, M3's
-  input-fingerprint sidecar, is unbuilt — see the sidecar paragraph above); a non-DuckDB target
+  driving source: an external `mutable_snapshot` source's own synthesized delta now has an exact
+  form available (M3's input-fingerprint sidecar is built for DuckDB — see the sidecar paragraph
+  above), but `execute_delete_insert_with_delta_restriction`'s own admission does not yet consume
+  it as a driving-source delta; a non-DuckDB target
   keeps the ordinary widened-scan region recompute unchanged (the observed-delta read is
   DuckDB-only, so the live dispatch falls back rather than reaching for a capability that target
   doesn't have). Mechanisms and sequencing:
@@ -2236,8 +2243,9 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     enrichment join), and the `referential_integrity` world-fact (`sources.md`) the proof's
     row-preservation conjunct consumes for an inner-join enrichment are all built and reach a
     maintained-model edge's own driving-source recompute (see the maintained-model-edge paragraph
-    above); an external `mutable_snapshot` source's own delta (requiring M3's fingerprint sidecar
-    first) is unbuilt.
+    above); an external `mutable_snapshot` source's own delta now has an exact form available (M3's
+    fingerprint sidecar), but M2's compute-restriction licence is not yet extended to consume it —
+    that extension is separate follow-on work.
   - **M3 — derived change feeds**: snapshot-diff made real on both boundaries — a fingerprint
     sidecar (lifecycle: `sources.md` §"The fingerprint sidecar") synthesizes a change feed for an
     external `mutable_snapshot` source, and the
@@ -2247,14 +2255,20 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     (§"What the composed shape uniquely enables"), which is what makes M3 propagatable through
     the interval-based graph without keyed dirt-sets. The output-delta half (recording +
     key→partition projection) is built for the change-suppressed column-scoped MERGE family
-    (§Known Divergences "Observed-delta recording is built…"); the fingerprint-sidecar half, for
-    an external `mutable_snapshot` source, remains unbuilt.
+    (§Known Divergences "Observed-delta recording is built…"); the fingerprint-sidecar half is
+    built for DuckDB (table DDL, digest-refresh upsert, and the emitter-authored diff query —
+    `sources.md` §"Known Divergences" — "The fingerprint sidecar is built for DuckDB"), as a
+    standalone, independently-tested capability — a non-DuckDB target fails loudly. Wiring the
+    sidecar's synthesized changed-key set into a live run's own trigger/technique selection (so a
+    maintained model actually consumes it instead of the whole-table fallback) is separate
+    follow-on work.
   Each mechanism needs its own spec diff before it is surface: P1–P4 proofs in
-  `model_properties.md` (P1–P3 landed; P4 — fingerprint projection, §"Fingerprint projection" —
-  is now defined but unbuilt), T1–T5 transform variants in
+  `model_properties.md` (P1–P4 landed — P4, fingerprint projection, §"Fingerprint projection"),
+  T1–T5 transform variants in
   `model_transforms.md` (T1/T2/T3 landed as catalogue rows; the observed-output-delta recording
   (T5) is specified in this spec's own graph-layer section above rather than as a catalogue row;
-  T4 remains), the referential-integrity world-fact (landed) and landed-delta refinement (landed) in
+  T4 — the fingerprint sidecar build + diff query — is built for DuckDB, matching the M3 status
+  above), the referential-integrity world-fact (landed) and landed-delta refinement (landed) in
   `sources.md`, capability flags in `multi_backend.md`, and a persistence-fingerprint stance
   reconciled with `output_fingerprint.md`.
 

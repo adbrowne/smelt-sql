@@ -2471,6 +2471,212 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
     );
 }
 
+/// Phase F3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the fingerprint-sidecar diff query is emitter-authored (unlike the T5
+/// observed-delta recording query above, which D1 ruled smelt-state
+/// bookkeeping): `smelt_runtime::maintenance_driver::
+/// diff_fingerprint_sidecar_changed_keys`/`refresh_fingerprint_sidecar` must
+/// execute SQL text byte-identical to a direct call of
+/// `smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`/
+/// `emit_fingerprint_digest_select` and
+/// `smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql`/
+/// `_gc_sql` over the same resolved inputs — this is a direct-dispatch leg
+/// (no `execute_project` model pipeline involved, matching the precedent
+/// `suppressed_keyed_fold_statements_come_from_the_emitter` documents: the
+/// sidecar is not yet wired into the live trigger/technique-selection
+/// pipeline, that wiring is a later phase's scope).
+#[tokio::test]
+async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.dim_users (id INTEGER, name VARCHAR, tier VARCHAR, notes VARCHAR)",
+        )
+        .await
+        .expect("create source table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_users VALUES \
+             (1, 'Alice', 'gold', 'n1'), (2, 'Bob', 'silver', 'n2'), (3, 'Cara', 'gold', 'n3')",
+        )
+        .await
+        .expect("seed source table");
+
+    let projection = smelt_logical::analysis::fingerprint::Projection::Columns(
+        ["name".to_string(), "tier".to_string()]
+            .into_iter()
+            .collect(),
+    );
+    let source_key = vec!["id".to_string()];
+    let all_source_columns = vec![
+        "id".to_string(),
+        "name".to_string(),
+        "tier".to_string(),
+        "notes".to_string(),
+    ];
+
+    // Run 1: absent sidecar — every source row is "changed" (whole-table
+    // delta), and this diff also creates the sidecar table.
+    let changed = smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        "smelt.sources.dim_users",
+        "main.dim_users",
+        &source_key,
+        &projection,
+        &all_source_columns,
+    )
+    .await
+    .expect("first diff against an absent sidecar");
+    let mut changed_sorted = changed.clone();
+    changed_sorted.sort();
+    assert_eq!(
+        changed_sorted,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "an absent sidecar must report every current source row as changed"
+    );
+
+    // The executed diff SQL must be byte-identical to a direct emitter call
+    // over the same resolved inputs.
+    let identity = smelt_logical::analysis::fingerprint::projection_identity(&projection);
+    let expected_diff_sql = smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff(
+        "main.dim_users",
+        &source_key,
+        &["name".to_string(), "tier".to_string()],
+        "main._smelt_fingerprint_sidecar",
+        "smelt.sources.dim_users",
+        &identity,
+        MaintenanceDialect::DuckDb,
+    );
+    let recorded_sql = backend.recorded_sql();
+    assert!(
+        recorded_sql.contains(&expected_diff_sql),
+        "executed diff SQL must be byte-identical to a direct emitter call: {recorded_sql:?}"
+    );
+
+    // Refresh: populate the sidecar (a trivial, empty write_group — this
+    // leg tests statement byte-identity, not the write/refresh
+    // transactionality already covered by
+    // `smelt-backend-duckdb`'s own unit tests).
+    let empty_write_group = StatementGroup {
+        statements: vec![],
+        transactional: false,
+    };
+    smelt_runtime::maintenance_driver::refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        "smelt.sources.dim_users",
+        "main.dim_users",
+        &source_key,
+        &projection,
+        &all_source_columns,
+        &empty_write_group,
+    )
+    .await
+    .expect("sidecar refresh");
+
+    let expected_digest_select = smelt_logical::maintenance::emit::emit_fingerprint_digest_select(
+        "main.dim_users",
+        &source_key,
+        &["name".to_string(), "tier".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    let expected_refresh_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+        "main",
+        "smelt.sources.dim_users",
+        &identity,
+        &expected_digest_select,
+    );
+    let expected_gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+        "main",
+        "smelt.sources.dim_users",
+        &identity,
+        &expected_digest_select,
+    );
+    let recorded_sql = backend.recorded_sql();
+    assert!(
+        recorded_sql.contains(&expected_refresh_sql),
+        "executed refresh SQL must be byte-identical to a direct emitter/ddl call: {recorded_sql:?}"
+    );
+    assert!(
+        recorded_sql.contains(&expected_gc_sql),
+        "executed GC SQL must be byte-identical to a direct emitter/ddl call: {recorded_sql:?}"
+    );
+
+    // Run 2: mutate exactly 2 of the 3 rows' projected columns — the diff
+    // must report exactly those 2 keys, never the untouched third.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'platinum' WHERE id = 1")
+        .await
+        .expect("mutate row 1");
+    backend
+        .execute_sql("UPDATE main.dim_users SET name = 'Roberta' WHERE id = 2")
+        .await
+        .expect("mutate row 2");
+
+    let changed_after_edit =
+        smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys(
+            &backend,
+            "main",
+            "smelt.sources.dim_users",
+            "main.dim_users",
+            &source_key,
+            &projection,
+            &all_source_columns,
+        )
+        .await
+        .expect("second diff after a targeted edit");
+    let mut changed_after_edit_sorted = changed_after_edit;
+    changed_after_edit_sorted.sort();
+    assert_eq!(
+        changed_after_edit_sorted,
+        vec!["1".to_string(), "2".to_string()],
+        "the diff must report exactly the 2 edited keys, never the untouched third"
+    );
+
+    // An edit to a column OUTSIDE the P4 projection (`notes`) must yield an
+    // EMPTY changed set once the sidecar reflects that edit's siblings.
+    smelt_runtime::maintenance_driver::refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        "smelt.sources.dim_users",
+        "main.dim_users",
+        &source_key,
+        &projection,
+        &all_source_columns,
+        &empty_write_group,
+    )
+    .await
+    .expect("second sidecar refresh");
+    backend
+        .execute_sql("UPDATE main.dim_users SET notes = 'edited' WHERE id = 3")
+        .await
+        .expect("mutate row 3's out-of-projection column");
+    let changed_out_of_projection =
+        smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys(
+            &backend,
+            "main",
+            "smelt.sources.dim_users",
+            "main.dim_users",
+            &source_key,
+            &projection,
+            &all_source_columns,
+        )
+        .await
+        .expect("third diff after an out-of-projection edit");
+    assert!(
+        changed_out_of_projection.is_empty(),
+        "an edit outside the P4 projection must never dirty the changed-key set: \
+         {changed_out_of_projection:?}"
+    );
+}
+
 // =============================================================================
 // Structural gate: no maintenance-statement authoring outside the emitter
 // (`docs/specs/incremental_models.md` §"Statement emission (single owner)";

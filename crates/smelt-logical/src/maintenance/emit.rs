@@ -791,6 +791,570 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
     }
 }
 
+// ── Fingerprint sidecar diff (F3, `docs/plans/20260715-composed-axes-
+// conditional-maintenance.md` Phase F3; `docs/specs/sources.md` §"The
+// fingerprint sidecar") ────────────────────────────────────────────────
+//
+// The sidecar's own storage DDL/DML (table creation, the upsert-refresh,
+// the GC delete) is warehouse-resident bookkeeping, in the same excluded
+// class as the reconciliation ledger and the observed-output-delta record
+// (`docs/specs/incremental_models.md` §"Statement emission (single
+// owner)"'s third exclusion) — it lives in `smelt_state::ddl_duckdb`, not
+// here. The DIFF query below is different: unlike the ledger/observed-delta
+// bookkeeping, it is not a record of smelt's own run history — it is the
+// derived comparison that decides which source keys count as "changed", the
+// same kind of maintenance-relevant computation `emit_column_scoped_merge_
+// suppressed`'s `IS DISTINCT FROM` guard is. F3 rules it emitter-authored.
+
+/// Tag prefixed onto a NULL column's pre-image before hashing — see
+/// [`column_fingerprint_expr`]. A single-character tag with no column
+/// content appended, so its pre-image (`'N'`) can never be reproduced by a
+/// real column value's own tagged pre-image (which always starts with
+/// [`VALUE_TAG`] instead).
+const NULL_TAG: &str = "N";
+
+/// Tag prefixed onto a real (non-NULL) column value's pre-image before
+/// hashing — see [`column_fingerprint_expr`]. Distinct from [`NULL_TAG`] so
+/// no column value, however it stringifies, can ever collide with the NULL
+/// pre-image.
+const VALUE_TAG: &str = "V";
+
+/// A single column's fingerprint: `sha256` of a tagged pre-image,
+/// `'N'` when the column is NULL, `'V' || CAST(col AS VARCHAR)` otherwise.
+/// This is the collision-free replacement for the old
+/// `COALESCE(CAST(col AS VARCHAR), sentinel)` scheme: that scheme conflated
+/// a real value literally equal to the sentinel string with a true NULL
+/// (both coalesced to the identical sentinel text). Here NULL and every
+/// real value start from structurally disjoint pre-images — `'N'` alone
+/// vs. `'V'` followed by (possibly empty, possibly arbitrary) content — so
+/// no column content, whatever it contains, can ever produce the NULL
+/// pre-image.
+///
+/// The output is always a fixed-length 64-character hex string (DuckDB's
+/// `sha256()` return shape), which is what lets [`concat_varchar_expr`]
+/// join multiple columns' fingerprints with no separator at all — see its
+/// own doc comment for why fixed-length concatenation removes the
+/// separator-collision hazard structurally rather than by convention.
+fn column_fingerprint_expr(column: &str) -> String {
+    format!(
+        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS VARCHAR)) END)"
+    )
+}
+
+/// A row-content fingerprint over one or more DIGEST columns: always the
+/// full collision-free construction, single- or multi-column alike. This is
+/// a digest-of-digests: each column is hashed independently first via
+/// [`column_fingerprint_expr`] into a FIXED-length (64 hex character)
+/// output, and only those fixed-length outputs are concatenated — with no
+/// separator, because none is needed. The old scheme joined raw
+/// (variable-length) `CAST(... AS VARCHAR)` text with a `\u{1}` separator
+/// character; since that separator was not escaped within column content, a
+/// column value that itself contained a literal `\u{1}` byte could make two
+/// genuinely different multi-column tuples reassemble into the identical
+/// joined string (e.g. columns `('John\u{1}Smith', 'X')` and `('John',
+/// 'Smith\u{1}X')` joined to the same text). Fixed-length concatenation
+/// removes this class of bug structurally: every joined component is
+/// exactly 64 characters, so there is no byte position at which one
+/// column's content could be misread as spanning into an adjacent column's
+/// slot, regardless of what that content is.
+///
+/// This is safe to use unconditionally for a digest because `delta_digest`
+/// is never surfaced to a caller as a literal value — it is only ever
+/// compared for equality against another digest computed the same way
+/// (`IS DISTINCT FROM`). Contrast [`key_expr_for_columns`], which builds
+/// the sidecar's KEY expression and — for a single column — must stay a
+/// literal, un-hashed value instead; see that function's own doc comment
+/// for why.
+fn concat_varchar_expr(columns: &[String]) -> String {
+    let per_column = columns
+        .iter()
+        .map(|c| column_fingerprint_expr(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if columns.len() == 1 {
+        // Already a single fixed-length sha256 digest — nothing to join.
+        per_column
+    } else {
+        format!("CONCAT({per_column})")
+    }
+}
+
+/// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to
+/// this fixed marker purely so `delta_key` never violates the sidecar's
+/// `source_key VARCHAR NOT NULL` column. Unlike [`NULL_TAG`]/[`VALUE_TAG`],
+/// this is NOT collision-free against an adversarial real value — a real
+/// source-key column whose content happened to literally equal this marker
+/// would be indistinguishable from a true NULL key. That gap is deliberate
+/// and narrower in scope than the digest fix: see [`key_expr_for_columns`].
+const KEY_NULL_SENTINEL: &str = "\u{2}NULL\u{2}";
+
+/// Builds the sidecar's KEY expression (`delta_key`) over `columns` — the
+/// row's identifying key.
+///
+/// **Single column: stays a literal, un-hashed value.** Unlike the digest
+/// expression, `delta_key` is not an opaque comparison-only token: it is
+/// surfaced to callers (`smelt_runtime::maintenance_driver::
+/// diff_fingerprint_sidecar_changed_keys`'s returned `Vec<String>`) and
+/// consumed downstream as a literal predicate value spliced back against
+/// the source's own real key column
+/// (`emit_delete_insert_delta_restricted`'s `restrict_column IN
+/// (delta_keys)`) — the same literal-value contract
+/// `smelt_runtime::maintenance_driver::changed_keys_select`'s own
+/// `key_expr` upholds (see that function's doc comment for the parallel
+/// case). Hashing a single-column key would silently break every consumer
+/// that expects `delta_key` to equal the real key's own text. A NULL key
+/// column is coalesced to [`KEY_NULL_SENTINEL`] purely to satisfy the
+/// sidecar's `NOT NULL` column — narrower than the digest's fix (source
+/// identity keys are not expected to be NULL in practice, and the
+/// literal-value contract above forecloses hashing NULL away the way the
+/// digest does).
+///
+/// **Multi-column: gets the full collision-free construction.** A
+/// composite key has no literal consumer today — no downstream restriction
+/// wiring exists for a composite key (`emit_delete_insert_delta_restricted`'s
+/// `restrict_column` is always a single physical column) — so there is no
+/// contract to preserve, and the composite-key collision the review flagged
+/// (two distinct real composite keys silently overwriting the same sidecar
+/// row because their old-scheme joined text collided) is worth closing.
+fn key_expr_for_columns(columns: &[String]) -> String {
+    if columns.len() == 1 {
+        format!(
+            "COALESCE(CAST({} AS VARCHAR), '{KEY_NULL_SENTINEL}')",
+            columns[0]
+        )
+    } else {
+        concat_varchar_expr(columns)
+    }
+}
+
+/// The row-content digest `SELECT` over an external `mutable_snapshot`
+/// source (`docs/specs/sources.md` §"The fingerprint sidecar" — "Digest"):
+/// `sha256(...)` over `digest_columns` — the caller's already-resolved P4
+/// fingerprint projection (`model_properties.md` §"Fingerprint
+/// projection"; the source's FULL column list when the projection failed
+/// closed to `FullRow`) — keyed by `source_key`. Pure string construction,
+/// matching this module's whole-file convention: the caller resolves which
+/// columns to digest and which key columns identify a row; this emitter
+/// only builds the SQL.
+///
+/// `dialect` is accepted for signature symmetry with every other emitter in
+/// this module; only the DuckDB shape is built today (`sha256()` is a
+/// DuckDB built-in scalar function) — a Spark digest-select variant is
+/// unbuilt, matching this phase's DuckDB-only sidecar scope. The runtime
+/// caller (`smelt_runtime::maintenance_driver`) gates on the backend's
+/// dialect before ever reaching this function, so a Spark target fails
+/// loud at that call site rather than being handed DuckDB-flavored SQL.
+///
+/// # Panics
+/// Panics if `source_key` or `digest_columns` is empty — a caller with no
+/// key to identify rows by, or nothing to digest, has no business building
+/// a sidecar digest select at all.
+pub fn emit_fingerprint_digest_select(
+    source_table: &str,
+    source_key: &[String],
+    digest_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !source_key.is_empty(),
+        "emit_fingerprint_digest_select requires a non-empty source key for {source_table}"
+    );
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_fingerprint_digest_select requires a non-empty digest column set for {source_table}"
+    );
+    let key_expr = key_expr_for_columns(source_key);
+    let digest_expr = concat_varchar_expr(digest_columns);
+    format!(
+        "SELECT {key_expr} AS delta_key, sha256({digest_expr}) AS delta_digest FROM {source_table}"
+    )
+}
+
+/// The synthesized external change-feed diff (`docs/specs/sources.md`
+/// §"The fingerprint sidecar"): compares `source_table`'s CURRENT
+/// `(key, digest)` pairs (via [`emit_fingerprint_digest_select`]) against
+/// the sidecar's own stored partition for `(source_address,
+/// projection_identity)`, producing the changed-key set a `mutable_snapshot`
+/// source's otherwise whole-table delta collapses to.
+///
+/// A `FULL OUTER JOIN` so three shapes all surface as a changed
+/// `delta_key`: a source key with no sidecar row (new — or, on a first run
+/// against an unpopulated sidecar, EVERY row, which is exactly the
+/// whole-table delta the widen-never-narrow default already produces, with
+/// no special-casing needed here); a sidecar row with no source key (the
+/// source row was deleted — GC's own trigger, reported via
+/// `COALESCE(..., sidecar.source_key)`); and a matched pair whose digests
+/// differ (`IS DISTINCT FROM`, the same exact-compare shape every other
+/// change-suppression guard in this module uses). A matched pair with equal
+/// digests is excluded — never surfaced as a false "changed" result, the
+/// digest-soundness oracle's negative leg
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// F1's ruling; `docs/specs/sources.md` §"The fingerprint sidecar" —
+/// "Digest" — "the collision-soundness invariant").
+///
+/// `sidecar_table` is already fully qualified (`schema.table`);
+/// `source_address`/`projection_identity` are plain string values, escaped
+/// here (this emitter, like every other, does its own literal quoting —
+/// see `emit_delete_insert_delta_restricted`'s `delta_keys` handling for
+/// the same pattern).
+pub fn emit_fingerprint_sidecar_diff(
+    source_table: &str,
+    source_key: &[String],
+    digest_columns: &[String],
+    sidecar_table: &str,
+    source_address: &str,
+    projection_identity: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    let digest_select =
+        emit_fingerprint_digest_select(source_table, source_key, digest_columns, dialect);
+    let source_address_lit = source_address.replace('\'', "''");
+    let projection_identity_lit = projection_identity.replace('\'', "''");
+    format!(
+        "SELECT COALESCE(__smelt_src.delta_key, __smelt_sidecar.source_key) AS delta_key \
+         FROM ({digest_select}) AS __smelt_src \
+         FULL OUTER JOIN (SELECT source_key, digest FROM {sidecar_table} \
+         WHERE source_address = '{source_address_lit}' AND projection_identity = '{projection_identity_lit}') \
+         AS __smelt_sidecar ON __smelt_src.delta_key = __smelt_sidecar.source_key \
+         WHERE __smelt_sidecar.source_key IS NULL \
+         OR __smelt_src.delta_key IS NULL \
+         OR __smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"
+    )
+}
+
+#[cfg(test)]
+mod fingerprint_sidecar_tests {
+    use super::*;
+
+    /// Run `emit_fingerprint_digest_select` for a single-row `source_table`
+    /// (a derived-table expression, e.g. `(SELECT 1 AS id, 'x' AS val)")
+    /// against a real DuckDB and return the resulting `delta_digest` value
+    /// — used by the two collision-regression tests below to prove the
+    /// FIX's actual SQL output against real DuckDB semantics (NULL
+    /// handling, `chr()`, `CONCAT`), not merely against string-literal
+    /// expectations of what DuckDB is assumed to do.
+    fn digest_for_source(
+        conn: &duckdb::Connection,
+        source_table: &str,
+        source_key: &[String],
+        digest_columns: &[String],
+    ) -> String {
+        let sql = emit_fingerprint_digest_select(
+            source_table,
+            source_key,
+            digest_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        conn.query_row(&sql, [], |row| row.get::<_, String>(1))
+            .expect("digest select query")
+    }
+
+    /// Same as [`digest_for_source`] but returns the `delta_key` column
+    /// instead — used by the composite-source-key collision regression
+    /// test below.
+    fn key_for_source(
+        conn: &duckdb::Connection,
+        source_table: &str,
+        source_key: &[String],
+        digest_columns: &[String],
+    ) -> String {
+        let sql = emit_fingerprint_digest_select(
+            source_table,
+            source_key,
+            digest_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        conn.query_row(&sql, [], |row| row.get::<_, String>(0))
+            .expect("key select query")
+    }
+
+    #[test]
+    fn digest_select_single_column_key_and_digest() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // The single-column KEY stays literal (`COALESCE(CAST(... AS
+        // VARCHAR), sentinel)`) — it is surfaced downstream as a real
+        // predicate value, unlike the digest, which is always the full
+        // tagged-hash construction (see `key_expr_for_columns`'s doc
+        // comment for why the two differ).
+        assert_eq!(
+            sql,
+            "SELECT COALESCE(CAST(user_id AS VARCHAR), '\u{2}NULL\u{2}') AS delta_key, \
+             sha256(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+             VARCHAR)) END)) AS delta_digest FROM raw.dim_users"
+        );
+    }
+
+    #[test]
+    fn digest_select_multi_column_key_and_digest_concatenates() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["tenant_id".to_string(), "user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // Each column is hashed to a fixed-length digest FIRST, and only
+        // those fixed-length digests are concatenated — no separator, since
+        // fixed-length components have no boundary to confuse.
+        assert!(sql.contains(
+            "CONCAT(sha256(CASE WHEN tenant_id IS NULL THEN 'N' ELSE CONCAT('V', CAST(tenant_id \
+             AS VARCHAR)) END), sha256(CASE WHEN user_id IS NULL THEN 'N' ELSE CONCAT('V', CAST(\
+             user_id AS VARCHAR)) END)) AS delta_key"
+        ));
+        assert!(sql.contains(
+            "sha256(CONCAT(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+             VARCHAR)) END), sha256(CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier \
+             AS VARCHAR)) END))) AS delta_digest"
+        ));
+    }
+
+    /// Regression for the NULL-vs-empty-string digest collision (the first
+    /// bug this fingerprint scheme had): DuckDB's `CONCAT` silently drops
+    /// NULL arguments, so before any fix at all, `CONCAT(NULL, sep, 'x')`
+    /// and `CONCAT('', sep, 'x')` produced the identical string (and
+    /// therefore the identical digest) — a false-negative "unchanged"
+    /// verdict for a row whose projected value went from empty string to
+    /// NULL (or vice versa). The tagged pre-image construction rules this
+    /// out structurally: a NULL column's pre-image is the bare tag `'N'`,
+    /// disjoint from EVERY real value's pre-image (`'V' || content`,
+    /// including the empty string, `'V'`), so the two can never coincide.
+    #[test]
+    fn digest_select_distinguishes_null_from_empty_string_in_multi_column_projection() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // Each column branches on its own NULL-ness independently, so a
+        // NULL `name` renders as the `'N'` tag branch, structurally
+        // distinct from the `'V'`-tagged empty-string branch — not simply
+        // vanishing from a CONCAT the way a dropped NULL argument would.
+        assert!(sql.contains(
+            "CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS VARCHAR)) END"
+        ));
+        assert!(sql.contains(
+            "CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier AS VARCHAR)) END"
+        ));
+    }
+
+    /// Regression for the NULL-digest crash (the second bug this
+    /// fingerprint scheme had): before any fix, a single-column projection
+    /// built `sha256(CAST(col AS VARCHAR))` directly, so a NULL projected
+    /// value produced `sha256(NULL) = NULL` in DuckDB — which then violated
+    /// the sidecar's `NOT NULL digest` column constraint on upsert. The
+    /// emitted digest expression must never let a NULL value reach
+    /// `sha256` un-tagged, for both the single- and multi-column shapes.
+    #[test]
+    fn digest_select_single_column_never_feeds_sha256_a_bare_null() {
+        let single = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(single.contains(
+            "sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS VARCHAR)) END)"
+        ));
+        assert!(!single.contains("sha256(CAST(name AS VARCHAR))"));
+
+        let multi = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // Every column reaching the hash must be wrapped in the tagged
+        // CASE — none of the bare `CAST(... AS VARCHAR)` forms may appear
+        // unwrapped, and no raw `CONCAT(CAST(` (the old un-hashed
+        // multi-column join shape) may appear either.
+        assert!(!multi.contains("sha256(CAST("));
+        assert!(!multi.contains("CONCAT(CAST("));
+    }
+
+    /// Regression for the separator-collision bug found in a follow-up
+    /// review: the earlier fix joined raw (unescaped) column text with a
+    /// `\u{1}` separator, so a column value that itself contained a literal
+    /// `\u{1}` byte could make two DISTINCT multi-column tuples reassemble
+    /// into the identical joined string before hashing —
+    /// `('John\u{1}Smith', 'X')` and `('John', 'Smith\u{1}X')` both joined
+    /// to `John\u{1}Smith\u{1}X`. Confirmed empirically against a real
+    /// DuckDB: this computes the ACTUAL digest SQL's result for both
+    /// tuples and asserts they differ, proving the fixed-length
+    /// digest-of-digests construction never lets one column's content
+    /// bleed across a boundary into another, regardless of what that
+    /// content contains.
+    #[test]
+    fn digest_distinguishes_tuples_that_collided_under_the_old_separator_scheme() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_key = vec!["id".to_string()];
+        let digest_columns = vec!["name".to_string(), "tier".to_string()];
+
+        // Tuple A: `name` contains a literal SOH (`\u{1}`) byte before
+        // "Smith".
+        let digest_a = digest_for_source(
+            &conn,
+            "(SELECT 1 AS id, 'John' || chr(1) || 'Smith' AS name, 'X' AS tier)",
+            &source_key,
+            &digest_columns,
+        );
+        // Tuple B: a DIFFERENT (name, tier) pair whose old-scheme joined
+        // text was byte-identical to tuple A's:
+        // `'John' + SEP + 'Smith' + SEP + 'X'`.
+        let digest_b = digest_for_source(
+            &conn,
+            "(SELECT 2 AS id, 'John' AS name, 'Smith' || chr(1) || 'X' AS tier)",
+            &source_key,
+            &digest_columns,
+        );
+
+        assert_ne!(
+            digest_a, digest_b,
+            "two genuinely different (name, tier) tuples must never hash identically, even when \
+             a column's own content contains the old separator byte"
+        );
+    }
+
+    /// Regression for the sentinel-collision bug found in the same
+    /// follow-up review: the earlier fix coalesced a NULL column to the
+    /// fixed sentinel string `\u{2}NULL\u{2}`, so a REAL column value that
+    /// happened to literally equal that sentinel text was indistinguishable
+    /// from a true NULL of the same row shape. Confirmed empirically
+    /// against a real DuckDB: computes the actual digest for a true-NULL
+    /// row and for a row whose value is literally the old sentinel text,
+    /// and asserts they differ.
+    #[test]
+    fn digest_distinguishes_a_real_value_equal_to_the_old_sentinel_from_a_true_null() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_key = vec!["id".to_string()];
+        let digest_columns = vec!["val".to_string()];
+
+        let digest_null = digest_for_source(
+            &conn,
+            "(SELECT 1 AS id, CAST(NULL AS VARCHAR) AS val)",
+            &source_key,
+            &digest_columns,
+        );
+        let digest_sentinel_lookalike = digest_for_source(
+            &conn,
+            "(SELECT 2 AS id, (chr(2) || 'NULL' || chr(2)) AS val)",
+            &source_key,
+            &digest_columns,
+        );
+
+        assert_ne!(
+            digest_null, digest_sentinel_lookalike,
+            "a real column value equal to the old NULL sentinel must never hash identically to a \
+             true NULL"
+        );
+    }
+
+    /// Regression for the composite `source_key` half of the
+    /// separator-collision bug: [`key_expr_for_columns`] reuses
+    /// [`concat_varchar_expr`] for a MULTI-column key (only a single-column
+    /// key stays literal — see that function's doc comment), so a composite
+    /// key is exposed to the exact same old-scheme collision the digest
+    /// was. This is a real correctness hazard beyond a false "unchanged"
+    /// verdict: two distinct real composite source keys reassembling to the
+    /// SAME `delta_key` string would conflate onto the SAME sidecar row
+    /// (`source_key` is part of the sidecar's own primary key), silently
+    /// overwriting one key's stored digest with the other's. Confirmed
+    /// empirically against a real DuckDB: computes the actual `delta_key`
+    /// for two engineered-to-collide composite keys and asserts they
+    /// differ.
+    #[test]
+    fn composite_source_key_distinguishes_tuples_that_collided_under_the_old_separator_scheme() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_key = vec!["tenant".to_string(), "user".to_string()];
+        let digest_columns = vec!["val".to_string()];
+
+        let key_a = key_for_source(
+            &conn,
+            "(SELECT 'John' || chr(1) || 'Smith' AS tenant, 'X' AS user, 'v' AS val)",
+            &source_key,
+            &digest_columns,
+        );
+        let key_b = key_for_source(
+            &conn,
+            "(SELECT 'John' AS tenant, 'Smith' || chr(1) || 'X' AS user, 'v' AS val)",
+            &source_key,
+            &digest_columns,
+        );
+
+        assert_ne!(
+            key_a, key_b,
+            "two genuinely different composite source keys must never produce the same \
+             delta_key, even when a key column's own content contains the old separator byte"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty source key")]
+    fn digest_select_panics_on_empty_source_key() {
+        emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &[],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty digest column set")]
+    fn digest_select_panics_on_empty_digest_columns() {
+        emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    fn sidecar_diff_full_outer_joins_source_against_sidecar_partition() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            "main._smelt_fingerprint_sidecar",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(sql.contains("FULL OUTER JOIN"));
+        assert!(sql.contains("FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("__smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"));
+        assert!(sql.contains("__smelt_sidecar.source_key IS NULL"));
+        assert!(sql.contains("__smelt_src.delta_key IS NULL"));
+        assert!(sql.contains(
+            "SELECT COALESCE(CAST(user_id AS VARCHAR), '\u{2}NULL\u{2}') AS delta_key, \
+             sha256(CONCAT(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+             VARCHAR)) END), sha256(CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier \
+             AS VARCHAR)) END))) AS delta_digest FROM raw.dim_users"
+        ));
+    }
+
+    #[test]
+    fn sidecar_diff_escapes_single_quotes_in_literals() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            "main._smelt_fingerprint_sidecar",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+    }
+}
+
 #[cfg(test)]
 mod column_scoped_merge_tests {
     use super::*;

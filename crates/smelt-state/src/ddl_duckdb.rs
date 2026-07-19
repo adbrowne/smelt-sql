@@ -543,6 +543,112 @@ impl ObservedDelta {
     }
 }
 
+// ── Warehouse-resident row-content fingerprint sidecar (F3,
+// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase F3;
+// `docs/specs/sources.md` §"The fingerprint sidecar") ───────────────────
+//
+// Synthesizes a change feed for a `mutable_snapshot` external source with
+// no native change feed: a row-content digest last observed for each
+// source key, that a consuming run diffs the source's CURRENT content
+// against to derive an exact changed-key set instead of treating every
+// re-scan as a whole-table delta. This table's own DDL/DML is warehouse-
+// resident bookkeeping, in the SAME excluded class as the reconciliation
+// ledger and the observed-output-delta table above (`incremental_models.md`
+// §"Statement emission (single owner)"'s third exclusion) — DuckDB-scoped
+// today, matching both those precedents; no Spark DDL exists here, and a
+// non-DuckDB target fails loud at the call site
+// (`crates/smelt-runtime/src/maintenance_driver.rs`) rather than being
+// handed this DuckDB-flavored SQL.
+//
+// A row is namespaced by `(source_address, projection_identity,
+// source_key)` — projection identity, not consumer identity: a canonical
+// identifier of the P4 fingerprint projection's column set
+// (`smelt_logical::analysis::fingerprint::projection_identity`). The
+// synthesized DIFF query that compares current source content against this
+// table is emitter-authored
+// (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`) —
+// unlike this table's own storage DDL/DML, the diff is a maintenance-
+// relevant derived comparison, not a record of smelt's own run history.
+
+/// Table name for the warehouse-resident row-content fingerprint sidecar.
+pub const FINGERPRINT_SIDECAR_TABLE_NAME: &str = "_smelt_fingerprint_sidecar";
+
+/// DDL creating the fingerprint sidecar table if it does not already
+/// exist. Idempotent — safe to run before every diff/refresh.
+pub fn generate_fingerprint_sidecar_table_ddl(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\
+         source_address VARCHAR NOT NULL, \
+         projection_identity VARCHAR NOT NULL, \
+         source_key VARCHAR NOT NULL, \
+         digest VARCHAR NOT NULL, \
+         PRIMARY KEY (source_address, projection_identity, source_key))",
+        quote_identifier(schema),
+        FINGERPRINT_SIDECAR_TABLE_NAME,
+    )
+}
+
+/// Upsert every currently-observed `(key, digest)` pair
+/// `digest_select_sql` projects
+/// (`smelt_logical::maintenance::emit::emit_fingerprint_digest_select`'s
+/// output — `delta_key`/`delta_digest` columns) into the sidecar partition
+/// named by `(source_address, projection_identity)`. Idempotent: an
+/// unchanged key's digest is overwritten with the identical value it
+/// already held (`ON CONFLICT ... DO UPDATE`), never duplicated — the same
+/// "re-running a window is a REPLACE, never a duplicate" shape
+/// [`generate_observed_delta_upsert_sql`] uses above.
+///
+/// A source key absent from the sidecar before this call is, by
+/// construction, new — this upsert is what "populates the sidecar as a
+/// byproduct" of a first run against an unpopulated one
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "First run and
+/// `--full-refresh`").
+pub fn generate_fingerprint_sidecar_refresh_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+    digest_select_sql: &str,
+) -> String {
+    format!(
+        "INSERT INTO {schema}.{table} (source_address, projection_identity, source_key, digest) \
+         SELECT '{source_address}', '{projection_identity}', __smelt_digest.delta_key, \
+         __smelt_digest.delta_digest FROM ({digest_select_sql}) AS __smelt_digest \
+         ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET \
+         digest = excluded.digest",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+        digest_select_sql = digest_select_sql,
+    )
+}
+
+/// GC a sidecar partition's keys that no longer appear in the source
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "GC": "A key's
+/// disappearance from the source is itself a change ... and drops its
+/// sidecar row"). Must run against the SAME `digest_select_sql` the paired
+/// diff query read, in the same transaction as that diff's consuming write
+/// (`Backend::execute_write_and_refresh_fingerprint_sidecar`), so a key
+/// deleted between the diff and this refresh cannot be silently left
+/// behind or double-counted next run.
+pub fn generate_fingerprint_sidecar_gc_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+    digest_select_sql: &str,
+) -> String {
+    format!(
+        "DELETE FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
+         projection_identity = '{projection_identity}' AND source_key NOT IN \
+         (SELECT __smelt_digest.delta_key FROM ({digest_select_sql}) AS __smelt_digest)",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+        digest_select_sql = digest_select_sql,
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1143,5 +1249,72 @@ mod tests {
             partitions: vec!["2026-01-01".to_string()],
         }
         .is_empty());
+    }
+
+    // ── warehouse-resident row-content fingerprint sidecar (F3) ─────────
+
+    #[test]
+    fn fingerprint_sidecar_table_ddl_is_idempotent_and_keyed_by_source_key() {
+        let ddl = generate_fingerprint_sidecar_table_ddl("main");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_fingerprint_sidecar"));
+        assert!(ddl.contains("source_address VARCHAR NOT NULL"));
+        assert!(ddl.contains("projection_identity VARCHAR NOT NULL"));
+        assert!(ddl.contains("source_key VARCHAR NOT NULL"));
+        assert!(ddl.contains("digest VARCHAR NOT NULL"));
+        assert!(ddl.contains("PRIMARY KEY (source_address, projection_identity, source_key)"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_refresh_sql_upserts_on_conflict() {
+        let sql = generate_fingerprint_sidecar_refresh_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("INSERT INTO main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("'smelt.sources.dim_users'"));
+        assert!(sql.contains("'cols:name,tier'"));
+        assert!(sql.contains(
+            "ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET"
+        ));
+        assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_refresh_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_refresh_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("'smelt.sources.dim''s_users'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_gc_sql_deletes_orphaned_keys() {
+        let sql = generate_fingerprint_sidecar_gc_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("DELETE FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("source_key NOT IN"));
+        assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_gc_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_gc_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
     }
 }

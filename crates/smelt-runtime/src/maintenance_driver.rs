@@ -21,6 +21,8 @@ use smelt_backend::{
 };
 use smelt_core::config::{CellTechnique, Granularity};
 use smelt_dialect::SqlDialect;
+use smelt_logical::analysis::fingerprint;
+use smelt_logical::analysis::fingerprint::Projection as FingerprintProjection;
 use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
@@ -30,8 +32,9 @@ use smelt_logical::maintenance::choice::{
 };
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
-    emit_delete_insert, emit_delete_insert_delta_restricted, MaintenanceDialect,
-    MaintenanceStatement, Region, StatementGroup, TargetSlicePredicate,
+    emit_delete_insert, emit_delete_insert_delta_restricted, emit_fingerprint_digest_select,
+    emit_fingerprint_sidecar_diff, MaintenanceDialect, MaintenanceStatement, Region,
+    StatementGroup, TargetSlicePredicate,
 };
 use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{
@@ -906,6 +909,25 @@ pub fn changed_row_predicate(left: &str, right: &str, compared_columns: &[String
 /// `None` records every row's partition as `NULL` (folded to an empty
 /// `partitions` array by the upsert) — a bare keyed model with no
 /// partition axis.
+///
+/// **Known limitation, deliberately not fixed here.** For a multi-column
+/// `unique_key`, `key_expr` joins each `CAST(... AS VARCHAR)` column with an
+/// unescaped `\u{1}` separator — the same collision shape
+/// `smelt_logical::maintenance::emit::concat_varchar_expr` had before its
+/// own fix (a column value containing a literal `\u{1}` byte can make two
+/// distinct composite keys reassemble into the same joined string). Unlike
+/// that sidecar helper, this function's output is NOT an opaque
+/// equality-only token: the recorded `delta_key` is later spliced back in
+/// as a literal predicate value against a REAL column
+/// (`emit_delete_insert_delta_restricted`'s `restrict_column IN
+/// (delta_keys)`), so switching this to a hashed/tagged construction (the
+/// sidecar's fix) would break that literal-match contract wherever
+/// `restrict_column` is a single physical column being compared against a
+/// composite hash — a materially different, coordinated change to the
+/// restriction/consumption path, not a same-shape substitution. Tracked as
+/// an open item rather than silently left alone; revisit alongside whatever
+/// work gives composite-key restriction its own literal-decomposable
+/// representation.
 pub fn changed_keys_select(
     table: &str,
     unique_key: &[String],
@@ -1083,6 +1105,172 @@ pub async fn read_observed_delta_changed_keys(
         }
     }
     Ok(Some(keys))
+}
+
+// ── F3: fingerprint sidecar — synthesized external change feed ─────────
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase F3;
+// `docs/specs/sources.md` §"The fingerprint sidecar")
+//
+// Builds and consumes the row-content fingerprint sidecar for a
+// `mutable_snapshot` external source with no native change feed: the diff
+// (`diff_fingerprint_sidecar_changed_keys`) synthesizes an exact changed-key
+// set from a full re-scan of the source compared against the sidecar's
+// stored digests; the refresh (`refresh_fingerprint_sidecar`) then brings
+// the sidecar's stored digests up to date with the source's current
+// content, riding in the same backend transaction as the write that
+// consumed the diff. Wiring this changed-key set into the maintenance
+// plan's own trigger/technique selection (deciding WHEN a live run uses the
+// sidecar-derived delta instead of the whole-table one) is a licence change
+// scoped to a later phase (T3 over external sources) — these functions are
+// a standalone, independently-tested capability today, matching P4's own
+// "no consumer reads it yet" framing (`model_properties.md` §"Fingerprint
+// projection").
+
+/// Resolve which columns a fingerprint sidecar digests for one `(model,
+/// external source)` pair: the P4 verdict's own column set, or — fail-
+/// closed — `all_source_columns` when the verdict is `FullRow`
+/// (`model_properties.md` §"Fingerprint projection": "an unprojectable
+/// consumption ... yields `FullRow`, never a guessed subset"). Pure data —
+/// no sidecar/digest machinery, matching
+/// `smelt_logical::maintenance::derive`'s own "pure data, no
+/// sidecar/digest machinery here" framing for the P4 derivation itself.
+pub fn resolve_fingerprint_digest_columns(
+    projection: &FingerprintProjection,
+    all_source_columns: &[String],
+) -> Vec<String> {
+    match projection {
+        FingerprintProjection::Columns(cols) => cols.iter().cloned().collect(),
+        FingerprintProjection::FullRow { .. } => all_source_columns.to_vec(),
+    }
+}
+
+/// Read-side: the synthesized changed-key set the fingerprint sidecar
+/// derives for `(source_address, source_table)` under `projection` (the
+/// caller's already-resolved P4 fingerprint projection;
+/// `all_source_columns` resolves the fail-closed `FullRow` case). Ensures
+/// the sidecar table exists, then runs the emitter-authored diff query
+/// (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`).
+///
+/// An absent sidecar makes every current source row "changed" by
+/// construction (`docs/specs/sources.md` §"The fingerprint sidecar" —
+/// "First run and `--full-refresh`") — no special-casing needed here, the
+/// diff query's own `FULL OUTER JOIN` produces that result against an
+/// empty (or not-yet-created) sidecar partition.
+///
+/// DuckDB-only, matching every other `_smelt_fingerprint_sidecar`/
+/// `_smelt_observed_delta` consumer in this module. Unlike
+/// `read_observed_delta_changed_keys`'s read-side fallback (a missing
+/// delta is always a legal widen-never-narrow trigger, so it reads back
+/// `None` on a non-DuckDB backend), a caller asking for a sidecar diff at
+/// all has already chosen the sidecar-backed path — a non-DuckDB backend
+/// here fails loudly (`docs/specs/sources.md` §"The fingerprint sidecar" —
+/// "DuckDB-scoped today ... a non-DuckDB target fails loud rather than
+/// silently skipping the sidecar").
+pub async fn diff_fingerprint_sidecar_changed_keys(
+    backend: &dyn Backend,
+    schema: &str,
+    source_address: &str,
+    source_table: &str,
+    source_key: &[String],
+    projection: &FingerprintProjection,
+    all_source_columns: &[String],
+) -> std::result::Result<Vec<String>, BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(BackendError::unsupported(
+            backend.dialect().name(),
+            "fingerprint-sidecar diff for a mutable_snapshot external source (F3)",
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
+    backend.execute_sql(&ensure_sql).await?;
+
+    let digest_columns = resolve_fingerprint_digest_columns(projection, all_source_columns);
+    let identity = fingerprint::projection_identity(projection);
+    let sidecar_table = format!("{schema}.{}", ddl_duckdb::FINGERPRINT_SIDECAR_TABLE_NAME);
+    let dialect = maintenance_dialect(backend.dialect());
+    let diff_sql = emit_fingerprint_sidecar_diff(
+        source_table,
+        source_key,
+        &digest_columns,
+        &sidecar_table,
+        source_address,
+        &identity,
+        dialect,
+    );
+    let batches = backend.execute_sql(&diff_sql).await?;
+    let mut keys = Vec::new();
+    for batch in &batches {
+        let Some(col) = batch.column_by_name("delta_key") else {
+            continue;
+        };
+        let Some(arr) = col.as_any().downcast_ref::<arrow::array::StringArray>() else {
+            continue;
+        };
+        for i in 0..arr.len() {
+            if !arr.is_null(i) {
+                keys.push(arr.value(i).to_string());
+            }
+        }
+    }
+    Ok(keys)
+}
+
+/// Write-side: refresh the fingerprint sidecar to match `source_table`'s
+/// CURRENT content for `(source_address, projection)`, riding in the SAME
+/// backend transaction as `write_group` — the consuming write this refresh
+/// is paired with (`docs/specs/sources.md` §"The fingerprint sidecar" —
+/// "Transactionality"). Call this AFTER
+/// [`diff_fingerprint_sidecar_changed_keys`] has already read the
+/// changed-key set the write is about to consume — refreshing first would
+/// make a subsequent diff compare the source against itself and observe no
+/// changes.
+///
+/// DuckDB-only, matching [`diff_fingerprint_sidecar_changed_keys`]'s own
+/// posture; a non-DuckDB backend fails loudly rather than being handed
+/// DuckDB-flavored SQL it cannot run.
+#[allow(clippy::too_many_arguments)]
+pub async fn refresh_fingerprint_sidecar(
+    backend: &dyn Backend,
+    schema: &str,
+    source_address: &str,
+    source_table: &str,
+    source_key: &[String],
+    projection: &FingerprintProjection,
+    all_source_columns: &[String],
+    write_group: &StatementGroup,
+) -> std::result::Result<(), BackendError> {
+    if backend.dialect() != SqlDialect::DuckDB {
+        return Err(BackendError::unsupported(
+            backend.dialect().name(),
+            "fingerprint-sidecar refresh for a mutable_snapshot external source (F3)",
+        ));
+    }
+    let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
+    let digest_columns = resolve_fingerprint_digest_columns(projection, all_source_columns);
+    let identity = fingerprint::projection_identity(projection);
+    let dialect = maintenance_dialect(backend.dialect());
+    let digest_select =
+        emit_fingerprint_digest_select(source_table, source_key, &digest_columns, dialect);
+    let refresh_sql = ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+        schema,
+        source_address,
+        &identity,
+        &digest_select,
+    );
+    let gc_sql = ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+        schema,
+        source_address,
+        &identity,
+        &digest_select,
+    );
+    backend
+        .execute_write_and_refresh_fingerprint_sidecar(
+            &ensure_sql,
+            write_group,
+            &refresh_sql,
+            &gc_sql,
+        )
+        .await
 }
 
 /// Pure: decide the [`RecomputeRestriction`] verdict and build the

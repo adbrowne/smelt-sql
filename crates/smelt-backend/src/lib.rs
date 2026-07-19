@@ -498,6 +498,58 @@ pub trait Backend: Send + Sync {
         Ok(())
     }
 
+    /// Refresh the row-content fingerprint sidecar (F3,
+    /// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+    /// F3; `docs/specs/sources.md` §"The fingerprint sidecar" —
+    /// "Transactionality") in the SAME backend transaction as `write_group`
+    /// — the consuming write this refresh rides with: "a failed write
+    /// leaves no digest update, so a re-run recomputes the same delta
+    /// rather than silently treating a half-committed key as already
+    /// seen." Call this AFTER the diff that read the changed-key set
+    /// `write_group` is about to consume — refreshing first would make a
+    /// subsequent diff compare the source against itself and observe no
+    /// changes, the same before/after ordering constraint
+    /// `execute_conditional_write_and_record_observed_delta`'s own
+    /// `record_sql` documents (there, reversed, because that record reads
+    /// PRE-write target state; here the source being digested is external
+    /// and unaffected by `write_group`, so only the diff-then-refresh
+    /// ordering matters, not this call's own internal ordering).
+    ///
+    /// `ensure_sql` creates the sidecar table if absent (idempotent DDL,
+    /// safe standalone); `refresh_sql`/`gc_sql` come from
+    /// `smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql`/
+    /// `_gc_sql` — the upsert of every currently-observed key's digest and
+    /// the GC delete of keys no longer present, both built over the SAME
+    /// digest-select query the diff read (so a key that disappeared
+    /// between the diff and this refresh cannot be silently left
+    /// un-GC'd). All strings/groups come from a caller with the
+    /// `smelt-state`/`smelt-logical` dependency — this trait does not
+    /// depend on either, only executes the SQL text a caller built, same
+    /// precedent as [`Backend::fold_ledger_delta`].
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `write_group`, then `refresh_sql`, then
+    /// `gc_sql`, as separate statements) for any backend that does not
+    /// override it — the same precedent as
+    /// [`Backend::execute_conditional_write_and_record_observed_delta`]'s
+    /// default. A backend that can wrap the write and the sidecar refresh
+    /// in a native transaction (DuckDB) should override this so a failed
+    /// write never leaves a stale sidecar digest behind, and a failed
+    /// refresh never lets the write proceed with an un-refreshed sidecar.
+    async fn execute_write_and_refresh_fingerprint_sidecar(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        refresh_sql: &str,
+        gc_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        self.execute_statement_group(write_group).await?;
+        self.execute_sql(refresh_sql).await?;
+        self.execute_sql(gc_sql).await?;
+        Ok(())
+    }
+
     /// Create a materialized view from a SQL query.
     ///
     /// Default implementation falls back to `create_table_as` with a warning.

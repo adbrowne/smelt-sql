@@ -63,6 +63,34 @@ impl Projection {
     }
 }
 
+/// Canonical identity string for a P4 projection verdict — the namespace
+/// key a fingerprint sidecar partitions by
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "Naming and
+/// namespace": "A row is namespaced by `(source address, projection
+/// identity, source key)` — projection identity, not consumer identity").
+/// Two consumers whose derived [`Projection::Columns`] sets are
+/// byte-identical incidentally land on the same identity (a storage
+/// optimisation, never a correctness dependency, per that same section);
+/// a [`Projection::FullRow`] fail-closed verdict always gets its own
+/// distinct identity, disjoint from every `Columns` identity even one that
+/// happens to enumerate the exact same column names — "it is never
+/// silently widened onto, or narrowed from, another consumer's own
+/// projection". The `reason` a `FullRow` verdict carries is deliberately
+/// NOT part of the identity: every fail-closed cause shares one full-row
+/// sidecar partition, since they all mean the same thing operationally
+/// (digest the whole row).
+pub fn projection_identity(projection: &Projection) -> String {
+    match projection {
+        Projection::Columns(cols) => {
+            format!(
+                "cols:{}",
+                cols.iter().cloned().collect::<Vec<_>>().join(",")
+            )
+        }
+        Projection::FullRow { .. } => "full_row".to_string(),
+    }
+}
+
 /// Derive the fingerprint projection (P4) of `model_sql` over `source_ref`
 /// — a `smelt.<path>` source name, `sources.`-prefix optional, matching
 /// [`super::source_bounds::resolve_table_ref_source_name`]'s output
@@ -488,5 +516,69 @@ mod tests {
                     SELECT d2.name FROM smelt.sources.dim d2";
         let verdict = fingerprint_projection(sql, "dim");
         assert!(verdict.is_full_row(), "{verdict:?}");
+    }
+
+    // ── projection_identity (F3 sidecar namespace key) ──────────────────
+
+    #[test]
+    fn identical_column_projections_share_one_identity() {
+        let a = Projection::Columns(
+            ["name".to_string(), "tier".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        let b = Projection::Columns(
+            ["tier".to_string(), "name".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_eq!(
+            projection_identity(&a),
+            projection_identity(&b),
+            "column order must not matter — BTreeSet already canonicalizes it"
+        );
+    }
+
+    #[test]
+    fn distinct_column_projections_get_distinct_identities() {
+        let a = Projection::Columns(["name".to_string()].into_iter().collect());
+        let b = Projection::Columns(["tier".to_string()].into_iter().collect());
+        assert_ne!(projection_identity(&a), projection_identity(&b));
+    }
+
+    #[test]
+    fn full_row_never_shares_an_identity_with_a_columns_projection_of_the_same_names() {
+        // A FullRow verdict must get its own distinct identity even when
+        // its (hypothetical) column enumeration would coincide with some
+        // other consumer's genuinely narrower `Columns` projection — the
+        // sidecar section's "never silently widened onto, or narrowed
+        // from" rule.
+        let full_row = Projection::FullRow {
+            reason: "SELECT * over the source".to_string(),
+        };
+        let columns = Projection::Columns(
+            ["name".to_string(), "tier".to_string()]
+                .into_iter()
+                .collect(),
+        );
+        assert_ne!(
+            projection_identity(&full_row),
+            projection_identity(&columns)
+        );
+    }
+
+    #[test]
+    fn full_row_identity_is_stable_regardless_of_reason() {
+        let a = Projection::FullRow {
+            reason: "SELECT * over the source".to_string(),
+        };
+        let b = Projection::FullRow {
+            reason: "an opaque function call over the source".to_string(),
+        };
+        assert_eq!(
+            projection_identity(&a),
+            projection_identity(&b),
+            "every fail-closed reason shares one full-row sidecar partition"
+        );
     }
 }
