@@ -2329,6 +2329,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#interaction-with-grain-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interaction with grain: key
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#diagnostic-codes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2638,6 +2649,17 @@
 </li>
       
         <li class="md-nav__item">
+  <a href="#interaction-with-grain-key" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Interaction with grain: key
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
   <a href="#diagnostic-codes" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -2785,7 +2807,7 @@
 </tr>
 <tr>
 <td><code>table</code>, <code>refresh: incremental</code>, <code>grain: key</code></td>
-<td><strong>Forbidden</strong> — the keyed output has no partition column; the rule reads partition shape from the driving source (<code>KeyedForbidsTimeseries</code>)</td>
+<td><strong>Optional</strong> — the <a href="#interaction-with-grain-key">composed shape</a>: admitted iff <a href="../../guide/incremental-models/#the-composed-shape-key-time">key temporal locality</a> is established, refused otherwise (<code>KeyedForbidsTimeseries</code>, naming the missing route)</td>
 </tr>
 <tr>
 <td><code>table</code>, <code>refresh: incremental</code>, <code>grain: key_per_partition</code></td>
@@ -2812,6 +2834,14 @@
 <li><code>refresh: incremental</code> + <code>grain:</code> opts the model into the derived maintenance plan; the <code>batched:</code> block carries per-model preference keys (<code>unique_key</code>, <code>safety_overrides</code>) layered on top.</li>
 </ul>
 <p>Declaring <code>refresh: incremental</code> + <code>grain: partition</code> without <code>timeseries:</code> is a validation error. See the <a href="../../guide/incremental-models/">incremental models guide</a>.</p>
+<h2 id="interaction-with-grain-key">Interaction with <code>grain: key</code><a class="headerlink" href="#interaction-with-grain-key" title="Permanent link">&para;</a></h2>
+<p>The key axis (identity, via <code>unique_key:</code>) and the time axis (clock, via <code>timeseries:</code>) are independent — a model can declare either, both, or neither. Declaring both is the <strong>composed shape</strong>: a keyed output (one merged row per key) that is also time-partitioned. It is not the default for a <code>grain: key</code> model — by default a keyed output has no partition column at all — and it is not automatic: admitting a <code>timeseries:</code> block on a keyed output additionally requires <strong>key temporal locality</strong>, a proof or a checked declaration that every duplicate delivery of one key stays within a bounded window of itself on the event axis. Three routes establish it:</p>
+<ol>
+<li><strong>Key-embedded</strong> — <code>partition_column</code> is itself a <code>unique_key</code> column.</li>
+<li><strong>Key-determined</strong> — <code>partition_column</code> is proven a per-key constant by a declared <code>functional_dependencies:</code> entry naming it.</li>
+<li><strong>Recurrence-bounded</strong> — a <code>key_recurrence</code> window declared on the driving source's <code>mutation_profile:</code> (see <a href="../../guide/sources/#declaring-how-a-source-mutates">Declaring how a source mutates</a> and the <a href="../sources-yml/#mutation-profile">source YAML reference</a>), checked transactionally at merge time rather than trusted.</li>
+</ol>
+<p>A <code>grain: key</code> model whose <code>timeseries:</code> block satisfies none of the three routes is refused (<code>KeyedForbidsTimeseries</code>, naming all three routes and the nearest missing fact) rather than silently falling back to a bare keyed output. See <a href="../../guide/incremental-models/#the-composed-shape-key-time">the composed shape</a> for the full walkthrough, and the <a href="../../examples/web-analytics/deduplication/">deduplication tutorial</a> for a worked example using the recurrence-bounded route.</p>
 <h2 id="diagnostic-codes">Diagnostic codes<a class="headerlink" href="#diagnostic-codes" title="Permanent link">&para;</a></h2>
 <table>
 <thead>
