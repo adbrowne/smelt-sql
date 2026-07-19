@@ -92,7 +92,7 @@ Reordering merges across source partitions does not change the final state (for 
 | `KeyedForbidsWindowFunctions` | Outer-body `OVER (...)` clause |
 | `KeyedForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
 | `KeyedMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
-| `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block |
+| `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block but none of the three [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) routes admits it |
 | `KeyedForbidsBatched` | Model declares both `grain: key` and a `batched:` block |
 | `KeyedSnapshotPostureUnsupported` | Interim: no clocked driving source is found and the snapshot-reconcile executor is not yet built — a not-yet-supported refusal, not a model error |
 
@@ -109,6 +109,7 @@ A `grain: key` model's output has:
 - One row per `unique_key` value (the `GROUP BY` column list).
 - Per-key columns whose values reflect the combined state across every processed source window.
 - By default: **no** `partition_column`, **no** `event_time_column`, and **no** `timeseries:` declaration on the model itself.
+- A model **may** additionally declare `timeseries:` to time-partition its keyed output — the composed (key + time) shape — when key temporal locality can be established; see [Timeseries reference](timeseries.md#interaction-with-grain-key) and the [composed-shape guide](../guide/incremental-models.md#the-composed-shape-key-time).
 
 Downstream consumers see the key-grain output as a lookup — there is no partition information to push down. Joins to the table read it in full each run, identical to the treatment of any non-`timeseries:` source.
 

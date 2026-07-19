@@ -161,7 +161,7 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. `grain: key` models must **not** declare `timeseries:` — the keyed output has no partition column, and the rule reads partition shape from the driving source instead (declaring both is a hard error, `KeyedForbidsTimeseries`). The `timeseries:` and `batched:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. A `grain: key` model *may also* declare `timeseries:` to time-partition its keyed output — the key and clock axes are independent, not alternatives — but only when key temporal locality is established (a proof, or a checked declaration, that every duplicate delivery of one key stays within a bounded window of itself on the event axis; see the [composed shape](../guide/incremental-models.md#the-composed-shape-key-time)). A `grain: key` model whose `timeseries:` block satisfies none of the three locality routes is refused (`KeyedForbidsTimeseries`, naming the missing route). The `timeseries:` and `batched:` keys are siblings, not nested.
 
 ```yaml
 models:
@@ -268,7 +268,7 @@ The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, 
 
 A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
 
-`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns) — they never reach inside whichever technique is chosen to force or forbid a [conditional (write-suppressed) matched arm](../guide/incremental-models.md#conditional-writes). Whether a `ColumnScopedMerge`/`KeyedFold` cell's write is suppressed for unchanged rows is decided automatically, the same way for every occurrence of that technique, and is not a `prefer`/`technique` setting.
+`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` primarily choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). The same keys also carry a `suppress`/`unconditional` value that steers the orthogonal [conditional-write](../guide/incremental-models.md#conditional-writes) dimension: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — `prefer: suppress`/`prefer: unconditional` nudge the default without ever refusing, and `technique: suppress`/`technique: unconditional` force it, refusing loudly if the proof itself never admitted suppression. This ladder only drives the live run path for `ColumnScopedMerge` cells today; a `KeyedFold` cell's `refresh: keyed` executor still always honours a proven `Suppressed` verdict unconditionally, regardless of trigger or override — `smelt explain` resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.
 
 #### `cells[].write` — the physical addressing pin
 

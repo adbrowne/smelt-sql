@@ -945,6 +945,16 @@ static facts about the derived plan, not about a specific past run: `smelt expla
 a backend connection, so it reports what a cell's technique *would* record and how its route
 *would* project.
 
+Every cell also prints an `admissible write patterns:` line — the physical addressing patterns
+(`region`, `keyed`, `column`, `update`, `full_rebuild`, and any backend-contributed pattern) the
+cell's own declared facts and target backend admit — and a `write pin:` line showing the
+[`maintenance.cells[].write` pin](smelt-yml.md#cellswrite--the-physical-addressing-pin), if one is
+set (`(none)` otherwise). A `ColumnScopedMerge`/`KeyedFold` cell additionally prints a
+`write variant:` line naming whether that cell's matched arm resolves suppressed or unconditional
+and why — `preference` (the structural steady-state-vs-first-build default), `first-build posture`,
+or a `technique:`/`prefer:` pin's own name — see [Steering: prefer /
+technique](../guide/incremental-models.md#steering-prefer--technique).
+
 An inbound edge is either a declared source (`sources.*`) or an upstream maintained model —
 both render through the identical `clock:` / `identity:` / `derived grain:` rows, labelled
 `(source)` or `(model)` so it's clear which provider filled them. A row prints `(none)` when

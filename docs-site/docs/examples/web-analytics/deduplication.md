@@ -337,9 +337,14 @@ of the whole table.
 A third capability — skipping the merge's write entirely when a key's
 folded state didn't actually change — needs to read the stored rows to
 compare against, and only a bounded target scan makes that comparison
-cheap enough to be worth doing. That machinery isn't wired up yet; the
-locality this page establishes is what will make it affordable when it
-lands.
+cheap enough to be worth doing. That's exactly the `write variant:
+suppressed` line in the `smelt explain` output above: on a steady-state
+run like this one, the merge's matched arm gains an `IS DISTINCT FROM`
+guard, and a re-run whose delta reproduces the stored state writes zero
+rows. The locality this page establishes is what keeps that comparison
+proportional to the touched slice instead of a scan of every stored key —
+see [Conditional writes](../../guide/incremental-models.md#conditional-writes)
+for the full mechanism.
 
 If you've built this in other tools: dbt and SQLMesh both treat "dedup a
 key" and "partition a table" as separate concerns you reach for

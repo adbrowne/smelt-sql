@@ -193,7 +193,9 @@ Best for:
 - Tables consumed downstream as a lookup (no `partition_column` on the output — the output has no partition column at all)
 
 !!! warning "Forbidden combinations"
-    `grain: key` models cannot declare a `timeseries:` block (the output has no partition column — the partition shape comes from the source) and cannot declare a `batched:` block (`grain: key` and `grain: partition` are sibling refresh strategies with different equivalence contracts). Combining them produces a `KeyedForbidsTimeseries` or `KeyedForbidsBatched` error. `refresh: incremental` on an `ephemeral` model is also a hard error.
+    `grain: key` models cannot declare a `batched:` block (`grain: key` and `grain: partition` are sibling refresh strategies with different equivalence contracts) — combining them produces `KeyedForbidsBatched`. `refresh: incremental` on an `ephemeral` model is also a hard error.
+
+`grain: key` and `timeseries:` are **not** a forbidden combination — the key axis (identity) and the time axis (clock) are independent, and declaring both is a first-class shape of its own: the [composed shape](incremental-models.md#the-composed-shape-key-time), a keyed output that is also time-partitioned. It requires one more fact beyond a bare `grain: key` declaration: proof, or a checked declaration, that key temporal locality holds (every duplicate delivery of one key stays within a bounded window of itself on the event axis). A `timeseries:` block on a `grain: key` model that satisfies none of the three locality routes is refused (`KeyedForbidsTimeseries`, naming the missing route) — the composed shape is opt-in on the declared facts, not automatic.
 
 !!! note "Reprocessing"
     Reprocessing an already-merged window is refused when detected. If a past window's data changes, run with `--full-refresh` to truncate and rebuild from scratch.
@@ -238,7 +240,7 @@ Both shapes are time-aware, but they uphold different contracts:
 |---|---|---|
 | Frontmatter | `materialization: table` + `refresh: incremental` + `grain: partition` + `timeseries:` | `materialization: table` + `refresh: incremental` + `grain: key` |
 | Output shape | One row per `(partition_column, …)` — partitioned | One row per `GROUP BY` key — collapsed (by default) |
-| Declares `timeseries:`? | Yes (the model's output is a timeseries) | Never — forbidden (`KeyedForbidsTimeseries`); reads partition shape from the source |
+| Declares `timeseries:`? | Yes (the model's output is a timeseries) | By default, no (reads partition shape from the source) — **may** also declare `timeseries:` to become the [composed shape](incremental-models.md#the-composed-shape-key-time) once key temporal locality is established; refused (`KeyedForbidsTimeseries`) otherwise |
 | Equivalence contract | Per-partition equivalence with full refresh | End-state equivalence under any admitted window ordering |
 | Re-running a past window | Idempotent (DELETE+INSERT) | Refused when detected; use `--full-refresh` |
 | Backend primitive | `DELETE` + `INSERT` per partition | `MERGE INTO` with per-column combiners |
