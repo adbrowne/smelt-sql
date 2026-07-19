@@ -33,6 +33,26 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 | D4 | Environments in v0.5? | **Minimal per-target state partitioning only** (W2): state keyed by target so switching targets cannot cross-contaminate, layout covered by the versioned state schema. Promotion/diffing/virtual environments stay post-0.5 (1.0 scope). |
 | D5 | quality-grind-t2 Phase 9 | **Resolved by events** — decided and executed on `worktree-roadmap_todo` (Phase 9 done 2026-07-19, 9(b) dropped per human decision). Merge PR #164. |
 
+### D1 evidence brief (W4 closing, for Andrew's supported-vs-beta call)
+
+- **CI.** `spark-parity` + `type-property-spark` now run per-PR, gated on Spark-relevant changed
+  paths (`.github/workflows/compat.yml`'s `changes` job); full Spark job set (incl.
+  `spark-integration`) still runs nightly and on the `run-docker-tests` label.
+- **Secrets.** `connect_url` supports `${ENV_VAR}` interpolation (fail-loud on unset), closing
+  the plaintext-token gap.
+- **Divergence ledger.** All 24 `spark_type` entries in `divergences.rs` re-verified against a
+  live Spark Connect server; stale entries corrected (e.g. `SIGN` is always `Double` on Spark,
+  not argument-typed); confirmed by a 1000-case property soak with zero new unregistered
+  divergences.
+- **Dual-target parity sweep.** Full-refresh/view/ephemeral models and the
+  `batched`/`keyed`/`versioned` maintenance legs green on both backends, zero skipped
+  assertions.
+- **Gap.** The generative `maintenance_conformance` harness (recipe pool + `s_tracker` oracle)
+  has no Spark twin — Spark's per-technique coverage is fixed-recipe smoke tests only, not the
+  generative sweep. Full gap table in `docs/plans/20260719-prod-w4-spark.md` Phase 5. Building
+  the twin is the largest remaining Spark gap, seeded as post-v0.5 backlog.
+- **Open question for Andrew: supported or beta for v0.5?**
+
 ## Pre-flight (human-gated — NOT loop work)
 
 1. Let the PR #163 loop finish G2, then merge PR #163 (`spec-incremental-models-consolidation`).
@@ -68,7 +88,7 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 |----------|------------------|--------|
 | [`docs/plans/20260719-prod-w1-fail-loud.md`](20260719-prod-w1-fail-loud.md) | **W1 Fail-loud closure + exit codes** — materialized-view fallback audit/hard-error pin, the 2 `error`-classified Unknown census sites emit real diagnostics, exit-code contract (0/1/2) standardized + documented. | done (2026-07-19) |
 | [`docs/plans/20260719-prod-w2-operability.md`](20260719-prod-w2-operability.md) | **W2 Operability** — `${ENV_VAR}` interpolation in `smelt.yml` (fail-loud), state locking + versioned state schema + atomic writes, per-target state partitioning (D4), DAG-parallel execution (`--jobs`), bounded retry for transient errors, `--resume`, run-report artifact + structured logs. | pending |
-| [`docs/plans/20260719-prod-w4-spark.md`](20260719-prod-w4-spark.md) | **W4 Spark first-class push** (D1) — connect_url secrets/TLS via W2 interpolation, per-PR paths-gated Spark CI, divergence-ledger re-verification against live Spark, dual-target parity sweep with catalogued gaps, docs + supported-vs-beta evidence brief. **Needs live Spark Connect server in loop env.** | pending |
+| [`docs/plans/20260719-prod-w4-spark.md`](20260719-prod-w4-spark.md) | **W4 Spark first-class push** (D1) — connect_url secrets/TLS via W2 interpolation, per-PR paths-gated Spark CI, divergence-ledger re-verification against live Spark, dual-target parity sweep with catalogued gaps, docs + supported-vs-beta evidence brief. **Needs live Spark Connect server in loop env.** | done (2026-07-20) |
 | [`docs/plans/20260719-prod-w3-adoption.md`](20260719-prod-w3-adoption.md) | **W3 Adoption surface** — `smelt init`, declarative column tests per D3 (proven-property short-circuit + SQL-scan lowering), `smelt list`/`smelt clean`, failure-summary UX. New spec `docs/specs/data_tests.md`. | pending |
 | [`docs/plans/20260719-prod-w5-release-eng.md`](20260719-prod-w5-release-eng.md) | **W5 Release engineering** — UI hardening (localhost-default bind, CORS), CHANGELOG + RELEASING checklist, SECURITY.md, macOS-Intel wheel claim fix, Docker image, Homebrew formula, crates-publishing decision brief + `publish = false` markers. | pending |
 | [`docs/plans/20260719-prod-w6-docs.md`](20260719-prod-w6-docs.md) | **W6 Production docs** — deployment guide, orchestration (cron/Airflow) guide, state & recovery reference, per-command CLI reference, getting-started refresh around `smelt init`. Documents W2/W3 surfaces; phases block rather than speculate. | pending |

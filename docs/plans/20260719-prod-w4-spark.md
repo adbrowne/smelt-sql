@@ -66,7 +66,7 @@ The v0.5 release review positions Spark as beta unless promoted (decision D1). T
 | 3     | done    | (this commit) | 2026-07-20 |
 | 4     | done    | (this commit) | 2026-07-20 |
 | 5     | done    | (this commit) | 2026-07-20 |
-| 6     | pending |        |      |
+| 6     | done    | (this commit) | 2026-07-20 |
 
 ## Phase detail
 

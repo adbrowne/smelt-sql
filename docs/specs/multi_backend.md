@@ -316,7 +316,7 @@ resolves nested widening to a table rewrite.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
 - **The `spark_type` divergence ledger.** The ledger in
-  `crates/smelt-db/tests/prop_helpers/divergences.rs` (22 entries) has been re-verified entry by
+  `crates/smelt-db/tests/prop_helpers/divergences.rs` (24 entries) has been re-verified entry by
   entry against a live Spark Connect server: every recorded `spark_type` (both `Some` claims and
   `None` "matches smelt" claims) was checked against `DESCRIBE QUERY` output for the entry's
   representative expression, corrected where stale (e.g. `SIGN`'s Spark return type is always
