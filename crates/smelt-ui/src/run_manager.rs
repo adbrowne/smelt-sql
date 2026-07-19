@@ -182,6 +182,7 @@ fn to_runtime_request(request: RunExecuteRequest) -> smelt_runtime::ExecuteReque
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     }
 }
 

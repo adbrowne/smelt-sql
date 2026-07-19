@@ -182,6 +182,14 @@ struct RunArgs {
     /// regardless of this value.
     #[arg(long = "jobs", short = 'j')]
     jobs: Option<usize>,
+
+    /// Resume a previously partially-failed run: skip any model that
+    /// succeeded last time with an unchanged definition, rerun everything
+    /// else (plus its downstream dependents). Errors if the most recent run
+    /// completed successfully or no run manifest exists — there is nothing
+    /// to resume from (`docs/specs/run_state.md` §"`--resume` semantics").
+    #[arg(long = "resume")]
+    resume: bool,
 }
 
 #[derive(Parser)]

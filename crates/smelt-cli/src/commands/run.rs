@@ -215,6 +215,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         jobs: args.jobs,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: args.resume,
     };
 
     let run_id = generate_run_id();
@@ -406,6 +407,7 @@ async fn run_since_upstream(
             jobs: args.jobs,
             retry_max: None,
             retry_backoff_ms: None,
+            resume: false,
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

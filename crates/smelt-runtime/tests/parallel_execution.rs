@@ -82,6 +82,7 @@ fn base_request(target: &str, jobs: Option<usize>) -> ExecuteRequest {
         jobs,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     }
 }
 

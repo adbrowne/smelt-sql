@@ -15,7 +15,17 @@ use tracing::warn;
 /// version it can read (`docs/specs/run_state.md` §"`meta.json` and layout
 /// versioning"). Bump this — and add an explicit migration rule, never a
 /// generic version-diff engine — the next time the layout changes.
-pub const CURRENT_STATE_VERSION: u32 = 1;
+///
+/// v2 (`docs/plans/20260719-prod-w2-operability.md` Phase 7): run manifests
+/// (`runs/<run_id>.json`) gained `outcome` and `definition_hash` per model,
+/// needed for `--resume`. No migration is required on read: both fields are
+/// `#[serde(default)]` on [`crate::ModelRunRecord`], so a v1-written
+/// manifest still parses — `outcome` defaults to `Success` (accurate, since
+/// a pre-v2 writer only ever persisted completed successes or explicit
+/// check-skips) and `definition_hash` defaults to an empty string (which
+/// never matches a real hash, so `--resume` always re-runs a model whose
+/// only history predates this field — the safe direction).
+pub const CURRENT_STATE_VERSION: u32 = 2;
 
 /// `.smelt/meta.json` — the layout-version marker. A missing file denotes
 /// the legacy pre-versioning root-level layout; a version greater than
@@ -580,6 +590,8 @@ mod tests {
                 row_count: 1542,
                 duration_ms: 230,
                 batch_safety: Some("fully_batch_safe".to_string()),
+                outcome: crate::RunOutcomeKind::Success,
+                definition_hash: "sha256:abc".to_string(),
             },
         );
         RunManifest {
@@ -1044,5 +1056,101 @@ mod tests {
         // nothing left to migrate, nothing errors.
         let _guard2 = store.lock().unwrap();
         assert!(target_dir.join("intervals.json").exists());
+    }
+
+    // --- Phase 7: --resume — manifest persists every outcome, including failures ---
+
+    /// `docs/specs/run_state.md` §"Run manifest": every model smelt
+    /// attempted or considered in a run has an entry keyed by outcome, and
+    /// `--resume` (`docs/plans/20260719-prod-w2-operability.md` Phase 7)
+    /// depends on a *failed* run's manifest actually reaching disk — not
+    /// just a successful one. `FileStore::save_run` itself has no notion of
+    /// "did the run succeed"; it must faithfully persist a manifest with
+    /// `completed_at: None` and a mix of `success`/`failed`/`skipped`
+    /// entries exactly as given, and every entry's `definition_hash` must
+    /// round-trip too, since that is what `--resume` compares to detect an
+    /// edited model.
+    #[test]
+    fn failed_run_manifest_persists_all_outcomes() {
+        let dir = TempDir::new().unwrap();
+        let store = FileStore::new(dir.path(), "dev");
+
+        let mut models = HashMap::new();
+        models.insert(
+            "upstream".to_string(),
+            ModelRunRecord {
+                strategy: "full_refresh".to_string(),
+                time_range: None,
+                partitions_updated: vec![],
+                row_count: 10,
+                duration_ms: 5,
+                batch_safety: None,
+                outcome: crate::RunOutcomeKind::Success,
+                definition_hash: "sha256:aaa".to_string(),
+            },
+        );
+        models.insert(
+            "middle".to_string(),
+            ModelRunRecord {
+                strategy: "full_refresh".to_string(),
+                time_range: None,
+                partitions_updated: vec![],
+                row_count: 0,
+                duration_ms: 0,
+                batch_safety: None,
+                outcome: crate::RunOutcomeKind::Failed,
+                definition_hash: "sha256:bbb".to_string(),
+            },
+        );
+        models.insert(
+            "downstream".to_string(),
+            ModelRunRecord {
+                strategy: "skipped".to_string(),
+                time_range: None,
+                partitions_updated: vec![],
+                row_count: 0,
+                duration_ms: 0,
+                batch_safety: Some("skipped".to_string()),
+                outcome: crate::RunOutcomeKind::Skipped,
+                definition_hash: "sha256:ccc".to_string(),
+            },
+        );
+
+        // A failed run never sets completed_at — it denotes an incomplete
+        // run, which is exactly what `--resume` looks for.
+        let manifest = RunManifest {
+            run_id: "20260720-100000-fa17ed".to_string(),
+            started_at: Utc::now(),
+            completed_at: None,
+            models,
+        };
+
+        store.save_run(&manifest).unwrap();
+
+        let loaded = store
+            .load_run(&manifest.run_id)
+            .unwrap()
+            .expect("failed run's manifest must still be on disk");
+        assert!(loaded.completed_at.is_none());
+        assert_eq!(loaded.models.len(), 3);
+        assert_eq!(
+            loaded.models["upstream"].outcome,
+            crate::RunOutcomeKind::Success
+        );
+        assert_eq!(loaded.models["upstream"].definition_hash, "sha256:aaa");
+        assert_eq!(
+            loaded.models["middle"].outcome,
+            crate::RunOutcomeKind::Failed
+        );
+        assert_eq!(
+            loaded.models["downstream"].outcome,
+            crate::RunOutcomeKind::Skipped
+        );
+
+        // And it shows up via load_runs (the whole-history read used to
+        // find the "latest incomplete run" for --resume).
+        let all_runs = store.load_runs(None).unwrap();
+        assert_eq!(all_runs.len(), 1);
+        assert!(all_runs[0].completed_at.is_none());
     }
 }

@@ -234,6 +234,7 @@ async fn batched_write_clamp_does_not_widen_to_scan_margin() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
 
     let outcome = execute_project(

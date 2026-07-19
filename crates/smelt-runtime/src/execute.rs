@@ -1061,9 +1061,11 @@ pub async fn execute_project(
     };
 
     // Build model → all_upstream map for the selected set (needed for
-    // downstream closure computation). Captured here to avoid holding the
-    // graph lock across awaits in the model loop.
-    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks {
+    // downstream closure computation — both the check-skip downstream
+    // closure and, when `request.resume` is set, the `--resume` downstream
+    // closure below). Captured here to avoid holding the graph lock across
+    // awaits in the model loop.
+    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks || request.resume {
         // graph_lock was already dropped above; we need to re-lock briefly to
         // read all_upstream for each selected model.
         // Actually, graph was dropped before backends were created.
@@ -1098,6 +1100,93 @@ pub async fn execute_project(
     );
 
     let file_store = FileStore::new(project_dir, &request.target);
+
+    // ── `--resume`: locate the run to resume from, fail loud if there is
+    // none ────────────────────────────────────────────────────────────────
+    // `docs/specs/run_state.md` §"`--resume` semantics": the candidate is
+    // the latest manifest for this target with `completed_at: null` (an
+    // incomplete run), OR — since `load_runs` is newest-first — the latest
+    // manifest overall whose model selection overlaps the current one and
+    // that recorded at least one non-`success` outcome (a run that
+    // completed the wavefront scheduler but left some models `skipped`,
+    // e.g. because a check failure skipped their downstream dependents
+    // without aborting the whole run). `--resume` with no such run (the
+    // latest run succeeded cleanly, or no manifest exists at all) is a hard
+    // error, never a silent full run, so a typo'd `--resume` on a clean
+    // project can't be mistaken for "nothing needed doing".
+    let current_selection: HashSet<&str> = model_plans.iter().map(|p| p.name.as_str()).collect();
+    let resume_manifest: Option<RunManifest> = if request.resume {
+        let latest_candidate = file_store
+            .load_runs(None)
+            .context("--resume: failed to load run history")?
+            .into_iter()
+            .find(|m| {
+                m.completed_at.is_none()
+                    || (m
+                        .models
+                        .keys()
+                        .any(|name| current_selection.contains(name.as_str()))
+                        && m.models
+                            .values()
+                            .any(|rec| rec.outcome != smelt_state::RunOutcomeKind::Success))
+            });
+        Some(latest_candidate.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--resume: no partially-failed run found for target '{}' — the most recent \
+                 run (if any) completed successfully, so there is nothing to resume. Run \
+                 without --resume, or remove .smelt/ to start fresh.",
+                request.target
+            )
+        })?)
+    } else {
+        None
+    };
+
+    // Models this run skips because `--resume` found them already
+    // `success` last time with an unchanged `definition_hash`. A model
+    // whose prior outcome was `failed`/`skipped`, whose definition changed,
+    // or that is downstream of any such model always re-runs — computed as
+    // a fixpoint over `upstream_map` (built above whenever `request.resume`
+    // is set) so a re-run never leaves a stale downstream table in place
+    // (`docs/specs/run_state.md` §"`--resume` semantics").
+    let resume_skip_set: HashSet<String> = if let Some(ref prior) = resume_manifest {
+        let mut rerun: HashSet<String> = HashSet::new();
+        for plan in model_plans.iter() {
+            let cur_hash = compute_model_hash(&plan.sql);
+            let stays_skipped = prior.models.get(&plan.name).is_some_and(|rec| {
+                rec.outcome == smelt_state::RunOutcomeKind::Success
+                    && rec.definition_hash == cur_hash
+            });
+            if !stays_skipped {
+                rerun.insert(plan.name.clone());
+            }
+        }
+        loop {
+            let mut added = false;
+            for plan in model_plans.iter() {
+                if rerun.contains(&plan.name) {
+                    continue;
+                }
+                if let Some(ups) = upstream_map.get(&plan.name) {
+                    if ups.iter().any(|u| rerun.contains(u)) {
+                        rerun.insert(plan.name.clone());
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        model_plans
+            .iter()
+            .map(|p| p.name.clone())
+            .filter(|n| !rerun.contains(n))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
     // Hold the exclusive advisory lock on `.smelt/lock` for the remainder of
     // this run — every state write below (manifest, intervals,
     // reconciliation ledger, landed deltas, schema snapshots) happens while
@@ -1157,6 +1246,7 @@ pub async fn execute_project(
     let db = &db;
     let state_io_lock = &state_io_lock;
     let model_plans = &model_plans;
+    let resume_skip_set = &resume_skip_set;
 
     // ── Per-model execution unit ──────────────────────────────────────────
     // Runs one model to completion (or cancellation, or failure) and returns
@@ -1199,6 +1289,39 @@ pub async fn execute_project(
             return Ok(ModelOutcome::Cancelled);
         }
 
+        // ── `--resume`: skip a model that already succeeded last time with
+        // an unchanged definition ─────────────────────────────────────────
+        // No compilation, no backend call, no interval/reconciliation/
+        // landed-delta write — a resumed-away model's materialized state
+        // (and its interval-ledger bookkeeping) is left byte-for-byte
+        // untouched (`docs/specs/run_state.md` §"`--resume` semantics").
+        if resume_skip_set.contains(&plan.name) {
+            tracing::info!(
+                "Skipping model '{}' — succeeded in the run being resumed, definition unchanged",
+                plan.name
+            );
+            manifest_entries.insert(
+                plan.name.clone(),
+                smelt_state::ModelRunRecord {
+                    strategy: "skipped_resume".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                },
+            );
+            reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: 0,
+            }));
+        }
+
         // ── Skip set: skip models downstream of a failed error check ─────
         if request.run_checks && already_skip {
             tracing::info!(
@@ -1214,6 +1337,8 @@ pub async fn execute_project(
                     row_count: 0,
                     duration_ms: 0,
                     batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
                 },
             );
             reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
@@ -1437,6 +1562,8 @@ pub async fn execute_project(
                     row_count: exec_result.row_count,
                     duration_ms: model_start.elapsed().as_millis() as u64,
                     batch_safety: Some("cumulative".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Success,
+                    definition_hash: compute_model_hash(&plan.sql),
                 },
             );
             reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
@@ -2156,6 +2283,8 @@ pub async fn execute_project(
                         row_count: total_rows,
                         duration_ms: model_start.elapsed().as_millis() as u64,
                         batch_safety: Some("incremental".to_string()),
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
                     },
                 );
 
@@ -2398,6 +2527,8 @@ pub async fn execute_project(
                         row_count: exec_result.row_count,
                         duration_ms: model_start.elapsed().as_millis() as u64,
                         batch_safety: None,
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
                     },
                 );
 
@@ -2595,6 +2726,35 @@ pub async fn execute_project(
     }
 
     if cancelled {
+        // Persist the manifest even on cancellation — a cancelled run (e.g.
+        // via `smelt-ui`'s stop button, `CancellationToken`) must leave a
+        // resumable manifest exactly like a hard-error abort does, since
+        // `--resume` depends on reading it back
+        // (`docs/specs/run_state.md` §"Run manifest", §"`--resume`
+        // semantics"). Every selected model that never got a manifest entry
+        // (its wave never started, or it was mid-flight when the
+        // cancellation happened) is recorded `skipped` — never a silent
+        // omission.
+        for plan in model_plans.iter() {
+            manifest
+                .models
+                .entry(plan.name.clone())
+                .or_insert_with(|| ModelRunRecord {
+                    strategy: "skipped".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                });
+        }
+        // `completed_at` stays `None` — an incomplete run, exactly what
+        // `--resume` looks for.
+        if let Err(e) = file_store.save_run(&manifest) {
+            tracing::warn!("Failed to save run manifest for cancelled run: {}", e);
+        }
         reporter.run_cancelled(run_id);
         return Ok(build_outcome(
             run_id,
@@ -2606,6 +2766,52 @@ pub async fn execute_project(
         ));
     }
     if let Some((model, error)) = aborted {
+        // Persist the manifest even on failure — a run that aborts partway
+        // through must not silently drop the outcomes it DID observe,
+        // since `--resume` depends on reading them back
+        // (`docs/specs/run_state.md` §"Run manifest", §"`--resume`
+        // semantics"). The model whose execution raised the error is
+        // `failed`; every other selected model that never got a manifest
+        // entry (its wave never started, or it was mid-flight when the
+        // abort happened) is `skipped` — every model smelt considered this
+        // run gets an entry, never a silent omission.
+        manifest.models.entry(model.clone()).or_insert_with(|| {
+            let definition_hash = model_plans
+                .iter()
+                .find(|p| p.name == model)
+                .map(|p| compute_model_hash(&p.sql))
+                .unwrap_or_default();
+            ModelRunRecord {
+                strategy: "failed".to_string(),
+                time_range: None,
+                partitions_updated: vec![],
+                row_count: 0,
+                duration_ms: 0,
+                batch_safety: None,
+                outcome: smelt_state::RunOutcomeKind::Failed,
+                definition_hash,
+            }
+        });
+        for plan in model_plans.iter() {
+            manifest
+                .models
+                .entry(plan.name.clone())
+                .or_insert_with(|| ModelRunRecord {
+                    strategy: "skipped".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                });
+        }
+        // `completed_at` stays `None` — an incomplete run, exactly what
+        // `--resume` looks for.
+        if let Err(e) = file_store.save_run(&manifest) {
+            tracing::warn!("Failed to save run manifest for failed run: {}", e);
+        }
         reporter.run_failed(run_id, Some(&model), &error.to_string());
         return Err(error);
     }

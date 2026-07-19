@@ -165,6 +165,7 @@ smelt run [OPTIONS]
 | `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
 | `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with---jobs). |
+| `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#--resume--continue-after-a-partial-failure). |
 
 ### Parallel execution with `--jobs`
 
@@ -187,6 +188,28 @@ A retry always re-runs the model's *entire* write step for the attempt that fail
 Only transient failures are retried. A deterministic failure — invalid SQL, a type mismatch, a constraint violation, a missing table, an unsupported dialect feature — fails the model on the first attempt, since retrying cannot change the outcome.
 
 By default, up to 3 attempts are made per write step before the model is reported as failed. To disable retry entirely (fail immediately on the first transient error, matching pre-retry behavior), set `retry_max: 0` on the run request. There is currently no dedicated CLI flag for this; it is available to programmatic consumers of the run engine (e.g. the UI) via the `retry_max`/`retry_backoff_ms` fields on the run request.
+
+### `--resume` — continue after a partial failure
+
+`smelt run --resume` re-runs a selection that previously failed partway through, skipping models that already succeeded and don't need to run again. A model is skipped when **both** hold: it succeeded in the most recent partially-failed run, and its definition hasn't changed since (same compiled SQL). A model that failed, was skipped, or whose SQL was edited always re-runs — and so does every model downstream of it, since a downstream model's own prior success said nothing about inputs that have since been rebuilt.
+
+```bash
+# A run fails partway through — some models succeeded, one failed, the rest
+# never started.
+smelt run
+# ... "silver.sessions" fails ...
+
+# Fix the underlying issue (bad data, a transient outage, a bug in the
+# model), then resume: already-succeeded upstream models are skipped;
+# "silver.sessions" and everything downstream of it re-run.
+smelt run --resume
+```
+
+The run resumed from is the latest one that either never finished (interrupted by an error or a cancellation) or that did finish but still recorded at least one non-success outcome for a model overlapping the current selection — for example a check failure that skipped that model's downstream dependents without aborting the whole run.
+
+`--resume` refuses — a hard error, not a warning — when there is nothing to resume from: the most recent run for the target completed with every model successful, or no run manifest exists yet at all. This is deliberate: a stale or mistaken `--resume` must never be silently reinterpreted as a full run. Run `smelt run` without `--resume` (or remove `.smelt/`) to start fresh.
+
+A resumed-away model's materialized table and interval-ledger bookkeeping are left completely untouched — `--resume` only decides which models to skip *executing*, it never rewrites or re-derives state for a model it isn't running.
 
 **Selector syntax:**
 

@@ -575,6 +575,7 @@ fn live_request(start: &str, end: &str) -> ExecuteRequest {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     }
 }
 

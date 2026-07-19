@@ -161,6 +161,7 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
 
     let run_id = generate_run_id();

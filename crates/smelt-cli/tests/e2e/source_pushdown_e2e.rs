@@ -209,6 +209,7 @@ async fn incremental_run_pushes_source_filter() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
 
     let outcome = execute_project(
@@ -332,6 +333,7 @@ async fn source_pushdown_preserves_correctness() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
 
     let outcome = execute_project(
@@ -463,6 +465,7 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
     let incremental_outcome = execute_project(
         "cte-pushdown-test".to_string(),
@@ -516,6 +519,7 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
     let full_outcome = execute_project(
         "cte-pushdown-full-refresh-test".to_string(),
@@ -675,6 +679,7 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
     let incremental_outcome = execute_project(
         "union-pushdown-test".to_string(),
@@ -734,6 +739,7 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     };
     let full_outcome = execute_project(
         "union-pushdown-full-refresh-test".to_string(),

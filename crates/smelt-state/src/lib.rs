@@ -33,6 +33,44 @@ pub struct ModelRunRecord {
     pub duration_ms: u64,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub batch_safety: Option<String>,
+    /// Whether this model completed, errored, or was never attempted this
+    /// run (`docs/specs/run_state.md` §"Run manifest"). Defaults to
+    /// `Success` when reading a manifest written before this field existed —
+    /// every entry the pre-Phase-7 writer ever produced really was a
+    /// completed success or an explicit check-skip (never a silently
+    /// dropped failure, since a failed run never reached `save_run` at all),
+    /// so this default is exact, not a guess.
+    #[serde(default = "default_outcome")]
+    pub outcome: RunOutcomeKind,
+    /// Hash of the model's compiled definition at run time
+    /// (`smelt_state::intervals::compute_model_hash`), recorded for every
+    /// entry regardless of outcome. `--resume` compares this against the
+    /// model's current hash to decide whether a prior `success` still
+    /// applies (`docs/specs/run_state.md` §"`--resume` semantics"). Defaults
+    /// to empty when reading a pre-Phase-7 manifest that never recorded
+    /// one — an empty hash never matches a real hash, so `--resume` always
+    /// re-runs a model whose only history predates this field, which is the
+    /// safe (never skip incorrectly) direction.
+    #[serde(default)]
+    pub definition_hash: String,
+}
+
+fn default_outcome() -> RunOutcomeKind {
+    RunOutcomeKind::Success
+}
+
+/// Outcome of one model's attempted execution within a run
+/// (`docs/specs/run_state.md` §"Run manifest").
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RunOutcomeKind {
+    /// Completed without error.
+    Success,
+    /// The model's execution raised an error.
+    Failed,
+    /// Not attempted this run — upstream failure, selector exclusion, or a
+    /// `--resume` short-circuit.
+    Skipped,
 }
 
 /// A time range with start (inclusive) and end (exclusive) dates.

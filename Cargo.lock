@@ -4137,6 +4137,7 @@ version = "0.3.2"
 dependencies = [
  "anyhow",
  "arrow",
+ "async-trait",
  "chrono",
  "clap",
  "duckdb",

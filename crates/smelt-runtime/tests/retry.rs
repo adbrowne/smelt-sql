@@ -124,6 +124,7 @@ fn base_request(target: &str, retry_max: Option<u32>) -> ExecuteRequest {
         // the delay is still deterministic (`retry_backoff_delay`), not
         // wall-clock-derived, so this does not make the test flaky.
         retry_backoff_ms: Some(1),
+        resume: false,
     }
 }
 

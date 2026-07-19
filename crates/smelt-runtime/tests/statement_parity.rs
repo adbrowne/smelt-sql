@@ -430,6 +430,7 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     }
 }
 
@@ -1424,6 +1425,7 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
         jobs: None,
         retry_max: None,
         retry_backoff_ms: None,
+        resume: false,
     }
 }
 

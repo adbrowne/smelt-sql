@@ -141,6 +141,18 @@ pub struct ExecuteRequest {
     /// resolves to 200ms.
     #[serde(default)]
     pub retry_backoff_ms: Option<u64>,
+
+    /// Resume a previously partially-failed run for this target: a selected
+    /// model is skipped when it succeeded in the most recent incomplete run
+    /// (the latest manifest with `completed_at: null`) with an unchanged
+    /// `definition_hash`; everything else — a model that was `failed` or
+    /// `skipped`, whose definition changed, or that is downstream of any
+    /// such model — re-runs. `false` (the default) is a plain full run.
+    /// Refuses (`execute_project` returns `Err`) when there is no
+    /// incomplete run to resume from, rather than silently running
+    /// everything (`docs/specs/run_state.md` §"`--resume` semantics").
+    #[serde(default)]
+    pub resume: bool,
 }
 
 fn default_true() -> bool {

@@ -1408,6 +1408,7 @@ mod column_scoped_merge_e2e {
             jobs: None,
             retry_max: None,
             retry_backoff_ms: None,
+            resume: false,
         }
     }
 
