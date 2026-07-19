@@ -60,7 +60,7 @@ Research basis: `docs/research/20260719-production-release-review.md` (blocker #
 | 1     | done    | (this commit) | 2026-07-19 |
 | 2     | done    | (this commit) | 2026-07-19 |
 | 3     | done    | (this commit) | 2026-07-19 |
-| 4     | pending |        |      |
+| 4     | done    | (this commit) | 2026-07-19 |
 
 ### Phase 1: Spec diff — normative exit-code contract in `cli.md`
 
@@ -175,6 +175,8 @@ Research basis: `docs/research/20260719-production-release-review.md` (blocker #
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **2026-07-19 (Phase 4).** Phase 4's own critical-files list (`main.rs`, `commands/{build,test,check,diff}.rs`, `errors.rs`) scoped the classification layer to `smelt.yml`/project-root errors, which now correctly exit `2` via `anyhow::Error` chain downcasting to `smelt_core::{project::ProjectError, config::ConfigError}`. It does **not** cover unresolvable/ambiguous selector arguments (`argument_resolution::ResolutionError`, erased to an untyped `anyhow!("{}", e)` string at every one of its ~10 call sites across `commands/*.rs`) or an unresolvable `--target` (raw `anyhow::anyhow!` strings in `run.rs`/`build.rs`/`backbuild.rs`/`seed.rs`/`check.rs`) — both still exit `1`, not the spec's `2`. Fixing this needs a typed error to survive to `main` from files outside this phase's scope. Left as an open item in `docs/specs/cli.md` §Known Divergences rather than silently closed.
 
 ## Verification
 

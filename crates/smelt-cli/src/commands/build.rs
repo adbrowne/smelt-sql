@@ -264,7 +264,9 @@ fn report_check_results(results: &[CheckOutcome]) -> Result<()> {
     );
 
     if fail_count > 0 {
-        std::process::exit(1);
+        return Err(
+            smelt_cli::CliError::DetectedFailure(format!("{fail_count} check(s) failed")).into(),
+        );
     }
 
     Ok(())

@@ -223,7 +223,9 @@ pub async fn diff(args: DiffArgs, scope: Option<&str>) -> Result<()> {
         .iter()
         .any(|e| !matches!(e.status, ModelDiffStatus::Unchanged));
     if has_changes {
-        std::process::exit(1);
+        return Err(
+            smelt_cli::CliError::DetectedFailure("schema changes detected".to_string()).into(),
+        );
     }
 
     Ok(())

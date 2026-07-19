@@ -234,7 +234,9 @@ async fn run_checks_inner(args: CheckArgs) -> Result<()> {
 
     // Exit nonzero iff any error-severity check has violations.
     if fail_count > 0 {
-        std::process::exit(1);
+        return Err(
+            smelt_cli::CliError::DetectedFailure(format!("{fail_count} check(s) failed")).into(),
+        );
     }
 
     Ok(())

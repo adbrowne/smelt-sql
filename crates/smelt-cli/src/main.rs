@@ -526,7 +526,7 @@ struct CheckArgs {
 }
 
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
     tracing_subscriber::fmt()
@@ -535,7 +535,7 @@ async fn main() -> Result<()> {
 
     let scope = cli.scope.as_deref();
 
-    match cli.command {
+    let result: Result<()> = match cli.command {
         Commands::Run(args) => commands::run::run(args, scope).await,
         Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
         Commands::Table(args) => commands::table::table(args, scope).await,
@@ -555,5 +555,13 @@ async fn main() -> Result<()> {
             DocsCommands::Show { topic } => commands::docs::show(&topic),
             DocsCommands::Path => commands::docs::path(),
         },
+    };
+
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            std::process::ExitCode::from(smelt_cli::exit_code_for(&err))
+        }
     }
 }

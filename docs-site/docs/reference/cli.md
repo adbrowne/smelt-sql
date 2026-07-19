@@ -26,6 +26,20 @@ The following flags appear on most subcommands:
 
 ---
 
+## Exit codes
+
+Every `smelt` subcommand follows the same exit-code contract, so orchestrators (cron, Airflow, CI) can branch on it without parsing stdout:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. Includes a `warn`-severity `smelt check` violation and an empty-but-valid selection — a build that ran nothing because there was nothing to do is not a failure. |
+| `1` | Detected failure. A failed model build, a failed `smelt test` case, an `error`-severity `smelt check` violation, `smelt diff` detecting a schema change, or a check referencing a model not built in the target. |
+| `2` | Usage error. Malformed CLI arguments, a malformed or missing `smelt.yml`, or an unresolvable project root. |
+
+`1` means the command ran correctly and found a problem in the data or models — investigate the pipeline. `2` means the command could not run at all because its own inputs were invalid — fix the invocation. Retrying a `2` without changing the command is never useful.
+
+---
+
 ## Argument resolution and `--scope`
 
 Every command that takes an entity identifier — a model name in `--select`, a positional model argument to `smelt type`, `smelt table`, `smelt status`, etc. — resolves it using a three-shape input rule.

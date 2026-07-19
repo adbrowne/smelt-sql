@@ -549,7 +549,9 @@ pub async fn run_tests(args: TestArgs) -> Result<()> {
     );
 
     if failed > 0 {
-        std::process::exit(1);
+        return Err(
+            smelt_cli::CliError::DetectedFailure(format!("{failed} test(s) failed")).into(),
+        );
     }
 
     Ok(())
