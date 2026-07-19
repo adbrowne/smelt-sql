@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784460974745,
+  "lastUpdate": 1784460976936,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 10.129408,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "0be59d08d2d33e751b91e9a8e97813d2081aa240",
+          "message": "Merge pull request #164 from adbrowne/worktree-roadmap_todo\n\nQuality grind: parser ledger fixes, comma-joins, generator coverage, planner/logical consolidation",
+          "timestamp": "2026-07-19T21:33:26+10:00",
+          "tree_id": "7f58f8898b057ce24193b443463bef8d7d3e0828",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/0be59d08d2d33e751b91e9a8e97813d2081aa240"
+        },
+        "date": 1784460976338,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 34.032196155984636,
+            "unit": "MB/s"
           }
         ]
       }
