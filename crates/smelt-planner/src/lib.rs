@@ -1,13 +1,14 @@
-pub mod analysis;
+pub use smelt_logical::analysis;
+pub use smelt_logical::logical;
+pub use smelt_logical::types;
+
 pub mod graph;
-pub mod logical;
 pub mod logical_plan_rules;
 pub mod lowering;
 pub mod plan_printer;
 #[cfg(feature = "python")]
 pub mod python_bridge;
 pub mod rules;
-pub mod types;
 
 pub use analysis::source_bounds::{BoundContext, BoundResult, InjectionPoint, Seconds};
 pub use analysis::temporal::{

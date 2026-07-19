@@ -62,7 +62,7 @@ since 2026-07-09.
 | 3     | done    | test(props): generate two-column aggregates (CORR/COVAR/REGR_SLOPE) | 2026-07-19 |
 | 4     | done    | test(props): generate ARRAY literals, ARRAY_AGG, subscript and slice | 2026-07-19 |
 | 5     | done    | test(props): generate ROW/STRUCT constructors with field-exact comparison | 2026-07-19 |
-| 6     | pending |        |      |
+| 6     | done    | refactor(planner): consume smelt-logical analysis modules, delete duplicated copies (part 1) | 2026-07-19 |
 | 7     | pending |        |      |
 | 8     | pending |        |      |
 | 9     | pending |        |      |
