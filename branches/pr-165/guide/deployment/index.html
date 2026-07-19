@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/editor-setup/">
+        <link rel="canonical" href="https://smeltsql.com/guide/deployment/">
       
       
-        <link rel="prev" href="../web-ui/">
+        <link rel="prev" href="../targets/">
       
       
-        <link rel="next" href="../editor-features/">
+        <link rel="next" href="../web-ui/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Editor Setup - smelt</title>
+        <title>Production Deployment - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#editor-setup" class="md-skip">
+        <a href="#production-deployment" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Editor Setup
+              Production Deployment
             
           </span>
         </div>
@@ -1579,10 +1579,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../deployment/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Deployment
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1598,6 +1625,131 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#installing-for-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installing for servers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-layout-in-ci" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project layout in CI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuring-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuring targets
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuring targets">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#resource-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Secrets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smelt-state-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        .smelt/ state layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backup-and-restore" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup and restore
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrades
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -1635,37 +1787,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Editor Setup
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../editor-setup/" class="md-nav__link">
         
   
   
@@ -1681,98 +1806,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#vscode" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        VSCode
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="VSCode">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#features" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Features
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#settings" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Settings
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#go-to-definition" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Go-to-definition
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#diagnostics" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Diagnostics
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#other-editors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Other editors
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -2561,33 +2594,44 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#vscode" class="md-nav__link">
+  <a href="#installing-for-servers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        VSCode
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="VSCode">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#features" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Features
+        Installing for servers
       
     </span>
   </a>
   
 </li>
-        
-          <li class="md-nav__item">
-  <a href="#settings" class="md-nav__link">
+      
+        <li class="md-nav__item">
+  <a href="#project-layout-in-ci" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Settings
+        Project layout in CI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuring-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuring targets
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuring targets">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#resource-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource limits
       
     </span>
   </a>
@@ -2600,10 +2644,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#go-to-definition" class="md-nav__link">
+  <a href="#secrets" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Go-to-definition
+        Secrets
       
     </span>
   </a>
@@ -2611,10 +2655,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#diagnostics" class="md-nav__link">
+  <a href="#smelt-state-layout" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Diagnostics
+        .smelt/ state layout
       
     </span>
   </a>
@@ -2622,10 +2666,32 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#other-editors" class="md-nav__link">
+  <a href="#locking" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Other editors
+        Locking
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backup-and-restore" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup and restore
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrades
       
     </span>
   </a>
@@ -2649,7 +2715,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/editor-setup.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/deployment.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -2657,102 +2723,75 @@
   
 
 
-<h1 id="editor-setup">Editor Setup<a class="headerlink" href="#editor-setup" title="Permanent link">&para;</a></h1>
-<p>smelt provides a Language Server Protocol (LSP) implementation for real-time feedback in your editor.</p>
-<div class="admonition info">
-<p class="admonition-title">See it in action</p>
-<p>For visual demos of every LSP feature -- diagnostics, go-to-definition, hover, completions, references, rename, and code actions -- see <a href="../editor-features/">Editor Features</a>.</p>
-</div>
-<h2 id="vscode">VSCode<a class="headerlink" href="#vscode" title="Permanent link">&para;</a></h2>
-<p>Install the <strong>smelt</strong> extension from the <a href="https://marketplace.visualstudio.com/items?itemName=smelt.smelt">VS Marketplace</a>.</p>
-<p>The extension automatically discovers the <code>smelt-lsp</code> binary using this priority chain:</p>
-<ol>
-<li><strong>User config</strong> — <code>smelt.serverPath</code> setting in VSCode</li>
-<li><strong>Python environment</strong> — if you installed via <code>pip install smelt-sql</code></li>
-<li><strong>PATH lookup</strong> — if <code>smelt-lsp</code> is on your system PATH</li>
-<li><strong>Cargo fallback</strong> — <code>cargo run -p smelt-lsp</code> (development only, requires Cargo.toml)</li>
-</ol>
-<h3 id="features">Features<a class="headerlink" href="#features" title="Permanent link">&para;</a></h3>
-<ul>
-<li>Syntax highlighting for SQL + smelt extensions</li>
-<li>Real-time diagnostics (see <a href="#diagnostics">Diagnostics</a> below)</li>
-<li>Go-to-definition (see <a href="#go-to-definition">Go-to-definition</a> below)</li>
-<li>Hover information with type details</li>
-<li>Column completions with table alias support</li>
-</ul>
-<h3 id="settings">Settings<a class="headerlink" href="#settings" title="Permanent link">&para;</a></h3>
-<table>
-<thead>
-<tr>
-<th>Setting</th>
-<th>Description</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>smelt.serverPath</code></td>
-<td>Explicit path to <code>smelt-lsp</code> binary</td>
-</tr>
-<tr>
-<td><code>smelt.trace.server</code></td>
-<td>LSP trace level (<code>off</code>, <code>messages</code>, <code>verbose</code>)</td>
-</tr>
-</tbody>
-</table>
-<h2 id="go-to-definition">Go-to-definition<a class="headerlink" href="#go-to-definition" title="Permanent link">&para;</a></h2>
-<p>The LSP supports go-to-definition for multiple targets:</p>
-<table>
-<thead>
-<tr>
-<th>Cursor position</th>
-<th>Jumps to</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>smelt.model_name</code></td>
-<td>The referenced model's SQL file</td>
-</tr>
-<tr>
-<td><code>smelt.sources.schema.table</code></td>
-<td>The per-entity source <code>.yml</code> file</td>
-</tr>
-<tr>
-<td>CTE name in FROM/JOIN</td>
-<td>The CTE definition in the WITH clause</td>
-</tr>
-<tr>
-<td>Table alias (e.g., <code>t</code> in <code>t.column</code>)</td>
-<td>Where the alias is defined</td>
-</tr>
-<tr>
-<td>Column reference</td>
-<td>The column's definition in the upstream SELECT, CTE, or source <code>.yml</code></td>
-</tr>
-</tbody>
-</table>
-<p>Column go-to-definition traces through <code>SELECT *</code> wildcards to find the original definition. If a column name is ambiguous (unqualified with multiple possible sources), multiple locations are returned.</p>
-<h2 id="diagnostics">Diagnostics<a class="headerlink" href="#diagnostics" title="Permanent link">&para;</a></h2>
-<p>The LSP reports errors and warnings in real time as you edit:</p>
-<ul>
-<li><strong>Parse errors</strong> -- Syntax mistakes in SQL</li>
-<li><strong>Undefined refs</strong> -- <code>smelt.model</code> where <code>model</code> does not exist</li>
-<li><strong>Undeclared columns</strong> -- References to columns not present in upstream model schemas or source <code>.yml</code> declarations</li>
-<li><strong>Unsupported syntax</strong> -- Features like PIVOT/UNPIVOT that smelt does not support</li>
-</ul>
-<p>Undeclared column diagnostics catch typos and schema drift at edit time, before you run anything. For example:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">visitor_id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">sessions</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="c1">-- Error: Column &#39;visitor_id&#39; not found in source &#39;raw.sessions&#39;</span>
+<h1 id="production-deployment">Production Deployment<a class="headerlink" href="#production-deployment" title="Permanent link">&para;</a></h1>
+<p>This page walks through taking a smelt project from a laptop to a scheduled production run: installing the binary, configuring targets and secrets, understanding what <code>.smelt/</code> stores, and how to back it up and upgrade it safely.</p>
+<h2 id="installing-for-servers">Installing for servers<a class="headerlink" href="#installing-for-servers" title="Permanent link">&para;</a></h2>
+<p>Install the <code>smelt</code> CLI the same way you would locally -- see <a href="../../getting-started/installation/">Installation</a> for the available methods (pip wheel, Homebrew, Docker image). For a CI or production host, pin an exact version rather than tracking latest, so a run behaves identically across deploys:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;smelt-sql==&lt;version&gt;&quot;</span>
 </code></pre></div>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>Column diagnostics require that your per-entity source <code>.yml</code> files declare column names (types are optional). Without column declarations, the LSP cannot validate column references against external sources.</p>
-</div>
-<h2 id="other-editors">Other editors<a class="headerlink" href="#other-editors" title="Permanent link">&para;</a></h2>
-<p>Any editor with LSP support can use <code>smelt-lsp</code>. Start the server and configure your editor's LSP client to connect to it:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>smelt-lsp
+<p>Rebuilding the pin is a deliberate upgrade step (see <a href="#upgrades">Upgrades</a> below), not something that happens implicitly on every deploy.</p>
+<h2 id="project-layout-in-ci">Project layout in CI<a class="headerlink" href="#project-layout-in-ci" title="Permanent link">&para;</a></h2>
+<p>A typical production setup checks out the project repository and runs <code>smelt build</code> (seed + run) or <code>smelt run</code> against a named target:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>git<span class="w"> </span>clone<span class="w"> </span>&lt;your-repo&gt;<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>&lt;your-repo&gt;
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>prod
 </code></pre></div>
-<p>The server communicates over stdin/stdout using the standard LSP protocol.</p>
+<p><code>smelt.yml</code> is checked into version control alongside your models. Nothing about a production run requires a different project layout than local development -- the only difference is which <code>--target</code> you point at and where its <code>.smelt/</code> state lives (normally the checkout's working directory, so state persists across invocations only if the working directory itself persists between runs).</p>
+<h2 id="configuring-targets">Configuring targets<a class="headerlink" href="#configuring-targets" title="Permanent link">&para;</a></h2>
+<p>Targets are named execution environments under the <code>targets:</code> key in <code>smelt.yml</code> -- see <a href="../targets/">Targets and Backends</a> for the full field reference. A production deploy typically adds a <code>prod</code> target alongside the <code>dev</code> target used locally:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">targets</span><span class="p">:</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">dev</span><span class="p">:</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">duckdb</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">target/dev.duckdb</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span><span class="nt">prod</span><span class="p">:</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">duckdb</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">    </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/lib/smelt/prod.duckdb</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="nt">settings</span><span class="p">:</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">      </span><span class="nt">memory_limit</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;16GB&quot;</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">      </span><span class="nt">threads</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;8&quot;</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="w">      </span><span class="nt">temp_directory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/lib/smelt/spill</span>
+</code></pre></div>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>prod
+</code></pre></div>
+<h3 id="resource-limits">Resource limits<a class="headerlink" href="#resource-limits" title="Permanent link">&para;</a></h3>
+<p>DuckDB targets accept a <code>settings:</code> map applied as <code>SET key = value</code> on connection open (unknown keys are rejected at startup). The keys that matter most for a production host are <code>memory_limit</code>, <code>threads</code>, and <code>temp_directory</code> -- see <a href="../targets/#duckdb-settings">Targets and Backends</a> for the full table. If <code>settings:</code> omits <code>memory_limit</code> or <code>temp_directory</code>, smelt applies host-aware defaults (roughly <code>min(50% of RAM, RAM - 20GB)</code> for memory, <code>.smelt-duckdb-tmp</code> next to the database file for spill) rather than DuckDB's own unbounded default -- see <a href="../../reference/smelt-yml/#memory-limits-and-spilling">Project Configuration</a> for the exact defaulting rule. On a shared or memory-constrained host, set both explicitly instead of relying on the default.</p>
+<h2 id="secrets">Secrets<a class="headerlink" href="#secrets" title="Permanent link">&para;</a></h2>
+<p>Never write a <code>connect_url</code>, credential, or other secret directly into <code>smelt.yml</code> -- the file is normally committed to version control. Reference an environment variable instead with <code>${VAR}</code> interpolation, resolved once against the process environment when the config loads, before any other validation runs:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">targets</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">prod</span><span class="p">:</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">    </span><span class="nt">connect_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${SMELT_PROD_CONNECT_URL}</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">catalog</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark_catalog</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+</code></pre></div>
+<p>A missing environment variable is a fail-loud configuration error naming the variable and the YAML key path -- smelt never silently substitutes an empty string and lets a blank credential fail later inside a connection attempt. A literal <code>$</code> that is not the start of a <code>${VAR}</code> reference is written <code>$$</code> to escape it. Set the referenced variable through your CI secrets store or the host's environment (e.g. a systemd unit's <code>Environment=</code> / <code>EnvironmentFile=</code>, or an orchestrator's secret injection) -- never in a <code>.env</code> file checked into the repository.</p>
+<h2 id="smelt-state-layout"><code>.smelt/</code> state layout<a class="headerlink" href="#smelt-state-layout" title="Permanent link">&para;</a></h2>
+<p>Any target with <code>state.mode</code> other than the default <code>stateless</code> persists run state under a project-local <code>.smelt/</code> directory (gitignore this directory -- it is regenerable host-local state, not something to commit):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>.smelt/
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>  meta.json                       # { &quot;state_version&quot;: 1 } -- layout version marker
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>  lock                             # advisory single-writer lock, held for a run&#39;s duration
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>  targets/&lt;target&gt;/
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    runs/&lt;run_id&gt;.json              # one run manifest per execution
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    intervals.json                  # cumulative interval coverage across runs
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    reconciliation.json             # reconciliation ledger for grain: key models
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    landed_deltas.json              # per-source landed-delta intervals
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    snapshots.json                  # fingerprint snapshots (state.mode: environments)
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    schemas/&lt;model&gt;.json            # deployed schema snapshot per model
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    reports/&lt;run_id&gt;.json           # run-report artifact for the run
+</code></pre></div>
+<p>Every run-scoped artifact is nested under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the target the run executed against -- a <code>dev</code> run's interval ledger or reconciliation state never answers a question about <code>prod</code>, and vice versa. Only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target.</p>
+<p>Set <code>state.mode</code> in <code>smelt.yml</code> to opt into persistence -- <code>stateless</code> (the default) writes nothing and requires no <code>.smelt/</code> directory at all:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">state</span><span class="p">:</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">intervals</span><span class="w">   </span><span class="c1"># stateless | intervals | environments</span>
+</code></pre></div>
+<h2 id="locking">Locking<a class="headerlink" href="#locking" title="Permanent link">&para;</a></h2>
+<p>A run acquires an exclusive advisory lock on <code>.smelt/lock</code> for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly, naming the PID recorded in the lock file, rather than interleaving writes with the first process. This means a production scheduler must never fire overlapping invocations against the same target's state directory.</p>
+<h2 id="backup-and-restore">Backup and restore<a class="headerlink" href="#backup-and-restore" title="Permanent link">&para;</a></h2>
+<p><code>.smelt/</code> is plain JSON files, safe to copy with any file-level backup tool while no run is in progress (or, for a live backup, after acquiring the same advisory lock your ops tooling uses for other maintenance). Every write under <code>.smelt/</code> is atomic (temp file + rename), so a snapshot taken between runs is always internally consistent -- there is no "flush" step to coordinate. Restoring is copying the backed-up <code>.smelt/</code> directory back into place; because state is opt-in and regenerable (a <code>stateless</code> project needs none, and an <code>intervals</code>/<code>environments</code> project can rebuild its ledgers from a full re-run), a lost <code>.smelt/</code> is a correctness/performance regression to full recomputation, never data loss of your warehouse tables.</p>
+<h2 id="upgrades">Upgrades<a class="headerlink" href="#upgrades" title="Permanent link">&para;</a></h2>
+<p><code>.smelt/meta.json</code> records the on-disk layout's <code>state_version</code>. Upgrading the smelt binary is safe to do in place -- a newer binary understands older layout versions and migrates a legacy (pre-versioning) store automatically, under the lock, on first open. A <code>state_version</code> newer than the binary understands is a hard error naming both versions, so a downgrade of the smelt binary against state written by a newer version fails loudly instead of misreading it. Roll out a binary upgrade the same way as any other deploy: update the pin, redeploy, let the next scheduled run perform any needed migration.</p>
 
 
 
