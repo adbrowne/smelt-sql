@@ -14,14 +14,14 @@ This approach is idempotent -- running the same time range twice produces the sa
 
 ## Configuration
 
-Incremental behavior is configured by selecting `refresh: incremental` + `grain: partition`, plus one required frontmatter block:
+`refresh: incremental` is admitted by the **shape-defining facts** you declare, not by a separate mode selector: a `timeseries:` block (the **clock**) and/or a top-level `unique_key:` (the **identity**). Declaring the clock alone gives you the partition-addressed shape this guide covers — one row per `(partition_column, …)`; declaring the identity instead gives you the key-grain shape (see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md)). Declaring **both** together is a shape of its own — a key-addressed table that is also time-partitioned — covered under [The composed shape](#the-composed-shape-key-time) below. `refresh: incremental` with neither fact declared is a hard error naming what's missing.
 
 - **`refresh: incremental`** opts the model into the derived maintenance plan. It implies a stored `table` — you do not also declare `materialization: table`.
-- **`grain: partition`** declares that a stored row is one row of a complete, partition-addressed table — the shape this guide covers. (`grain: key` is a different shape; see [Materializations](materializations.md#refresh-axis) and the [key-grain patterns reference](../reference/cumulative-aggregate.md).)
-- **`timeseries:`** declares the time dimension — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
-- **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`).
+- **`timeseries:`** declares the clock — which column is the event time, which column partitions the output, and at what granularity. See the [timeseries reference](../reference/timeseries.md) for the full key table.
+- **`grain: partition`** is the friendly name for this shape — an *optional* check-only assertion, not what admits the model. Write it if you want it in frontmatter; it errors if it disagrees with what the declared facts derive.
+- **`batched:`** (optional) carries strategy-specific keys (`unique_key`, `safety_overrides`) — a dedup aid layered on top of the partition-addressed shape, distinct from the top-level `unique_key:` identity fact that opts a model into the key-grain shape instead.
 
-`timeseries:` is required when `refresh: incremental` + `grain: partition` is set. Declaring `refresh: incremental` + `grain: partition` without `timeseries:` is a validation error (`TimeseriesRequiredForBatched`). A `batched:` block without `refresh: incremental` is also a validation error.
+`timeseries:` is required for the shape this guide covers (a model with no declared identity). Declaring `refresh: incremental` without any shape-defining fact is a validation error (`GrainRequiredForIncremental`). A `batched:` block without a declared clock is also a validation error.
 
 ### Frontmatter example
 
@@ -738,6 +738,10 @@ maintenance:
 
 Once the cell is admitted (and the target table already exists), a plain `smelt run` dispatches through the column-scoped `MERGE` on every run over the fact table's own event-time window — no separate "a dimension changed" signal is required, so it re-derives the `MERGE` every time rather than skipping one where nothing upstream moved. To skip runs where the dimension didn't change, declare the landed delta explicitly with [forward propagation](../reference/cli.md#forward-propagation-with---since-upstream) (`smelt run --since-upstream --source raw.users --landed <a>..<b>`), which composes the maintenance plan's per-source scan clamps into a propagation graph and runs only the `(model, region)` pairs that delta can actually affect. If the plan hasn't admitted a cell for your model yet (an unbounded scan, a missing `mutation_profile` declaration, or a backend without column-scoped `MERGE` support), the run falls back to the region-recompute technique (`DELETE`+`INSERT`), which re-reads the dimension's current contents and is always correct, just not column-scoped. `smelt explain` is the way to see today which of your models already have a targeted-write cell derived and ready.
 
+Declaring the dimension's [referential integrity](sources.md#declaring-referential-integrity) narrows the enrichment `MERGE`'s recompute further, down to a point lookup: renaming exactly one user out of a million-row dimension only ever needs to touch the fact rows for that one user, not the fact table's whole event-time window. smelt derives this from two facts together — the enrichment join provably preserves every driving row (licensed by a `LEFT JOIN`, or by a declared `referential_integrity:` on an inner join), and the dimension's own current-vs-previously-seen content diff names exactly which key(s) changed. `smelt explain` reports the row-preservation verdict for the join; the count-preservation check the declaration is paired with re-verifies it against every touched region on each run, and fails the run loudly rather than silently trusting a declaration a data change has since made false.
+
+That content diff is the **fingerprint sidecar**: for a `mutation_profile: mutable_snapshot` source with no native change feed, smelt maintains a per-row content digest alongside the table it reads, and diffs each run's current digests against the previous run's to synthesize exactly which keys changed — the same "which key(s) changed" a real change-data-capture feed would hand you, derived instead of declared. You never configure it directly; it's a byproduct of the mutable-dimension declaration above, refreshed transactionally alongside the write it rides with. If its stored identity stamp ever mismatches what a fresh computation expects — the enrichment projection changed, or the model that consumes it was redefined — that partition's diff degrades to the same whole-table delta an absent sidecar would produce, logged loudly rather than silently trusted.
+
 ### The reconciliation ledger
 
 Some maintenance cells — the column-scoped `MERGE` above is one — are **additive keyed folds**: each run applies a source delta on top of the target's existing state rather than recomputing a region from scratch. To make that safe across retries, backfills, and out-of-order runs, smelt records, per output region × column group, which source deltas are already reflected in that region. An already-reflected delta is refused rather than folded a second time (it would double-count), and recomputing a region — a full `DELETE`+`INSERT` of that region, whether from `--full-refresh`, a fallback to region-recompute, or an explicit rebuild — resets the region's ledger entry, since the recompute already incorporates everything up to that point.
@@ -753,6 +757,91 @@ The ledger is backend-resident: it lives alongside the target table for the tran
 
 See the [materializations guide](materializations.md#grain-partition-vs-grain-key) for a side-by-side comparison.
 
+## The composed shape (key + time)
+
+"Partitioned" and "keyed" aren't alternatives you pick between — they're independent facts, and a model may declare both. A `grain: key` model may add a `timeseries:` block to time-partition its output: still one row per key, but that row now lives in a fixed time partition too.
+
+```sql
+---
+materialization: table
+refresh: incremental
+unique_key: [event_id]
+grain: key
+timeseries:
+  event_time_column: first_seen_date
+  partition_column: first_seen_date
+  granularity: day
+---
+SELECT
+    event_id,
+    MIN(payload) AS payload,
+    MIN(event_date) AS first_seen_date
+FROM smelt.sources.raw.events
+GROUP BY event_id
+```
+
+Adding the clock isn't free — it requires **key temporal locality**: a guarantee that every duplicate delivery of one key stays within a bounded window of itself on the event axis. smelt establishes this one of three ways, in order:
+
+1. **Key-embedded** — the partition column is itself a key column.
+2. **Key-determined** — the partition value is a per-key constant, provable from the SQL.
+3. **Recurrence-bounded** — a `key_recurrence` window declared on the driving source (`sources.md` §"Source YAML shape"), checked transactionally at merge time rather than trusted.
+
+When none of the three applies, the `timeseries:` block is refused (`KeyedForbidsTimeseries`), naming the missing route.
+
+Establishing locality is worth it: a bare keyed table is a dead end for the rest of the pipeline — nothing downstream can window over it. A composed table is a clocked source in its own right, so a keyed stage can sit inside a propagation chain instead of terminating it, and a key-level change projects downstream instead of an unbounded lookup scan — **exactly**, to the keys' own partitions, under routes 1–2; under route 3 (recurrence-bounded) the projection widens backward by the recurrence bound plus any derived margins, per widen-never-narrow. `smelt explain` reports the established route, the pruned merge target slice, and the derived **settle bound** — how long a written slice can still change.
+
+The [deduplication tutorial page](../examples/web-analytics/deduplication.md) walks this shape end to end: a redelivery-prone event feed deduplicated by a keyed `MIN` fold instead of a `QUALIFY` window, with the recurrence bound doing the work a `safety_overrides` comment would otherwise have to.
+
+## Conditional writes
+
+Some maintenance cells write nothing when a re-run's inputs haven't actually changed. This is an automatic, fail-closed refinement of whichever technique the plan already derived — a column-scoped `MERGE`, a keyed fold `MERGE` (`grain: key`), or their `MERGE`-less staged-candidate equivalents — not a separate strategy you opt into.
+
+### What gets suppressed
+
+- A column-scoped `MERGE`'s matched arm normally does `WHEN MATCHED THEN UPDATE SET *` — every matched row is rewritten, even one whose incoming value is identical to what's already stored. The suppressed form guards the matched arm with an `IS DISTINCT FROM` predicate over the group's own columns instead: `WHEN MATCHED AND (target.c1 IS DISTINCT FROM source.c1 OR …) THEN UPDATE SET *`. A re-run whose delta reproduces the stored state writes zero rows.
+- A [keyed fold](#the-composed-shape-key-time) (`grain: key`) compares the stored value against what the fold's own combine expression *would* write, rather than a plain source column, since a keyed fold's matched arm never copies a delta column verbatim. This is how a redelivery-prone feed deduplicated with a `MIN`/`MAX` fold settles to zero writes once a key has seen every duplicate: the combiner is idempotent, so re-merging an already-seen duplicate reproduces the stored value exactly.
+- On a backend without `MERGE`, the same no-op elimination is realized as a staged-candidate conditional `DELETE`+`INSERT` inside one transaction: candidates are staged, only the rows whose effect isn't the identity are deleted and re-inserted, and the staging relation is dropped.
+
+On a [composed (key + time)](#the-composed-shape-key-time) output, the suppression compare's target read carries the same locality slice the merge itself uses, so compare cost stays proportional to the slice rather than the whole key space, even at high key cardinality.
+
+### What it costs and what it saves
+
+The saving is write volume: a retried batch, a redelivery storm, or any other idempotent replay writes nothing instead of rewriting every matched row. The cost is one extra `IS DISTINCT FROM` comparison per compared column, evaluated during the merge itself rather than as a separate pass.
+
+### When it's refused
+
+Write suppression is fail-closed over two independent proofs; either one refusing falls back to the plain, always-write matched arm:
+
+- **No proven row identity.** A cell whose row identity is `WholeRow` — no declared `unique_key`, no proven grain key — has no way to address an individual row, so there's no safe way to compare "this row" across runs. `smelt explain <model>` prints this as the cell's `region key:` line (`WholeRow` vs. a named key).
+- **An incomparable column.** A column whose value isn't a pure function of the processed inputs — a `columns.<c>.contract: plausible` payload, or a run-pinned clock like `NOW()`/`CURRENT_*` — can legitimately differ from last run's value even though nothing about the inputs changed, so diffing it would either manufacture a false change or mask a real one. One incomparable column in the group refuses suppression for the *whole* cell, not just that column — a partial guard would silently drop that column's real changes.
+
+Refusal never errors — the cell keeps working, falling back to the unconditional matched arm.
+
+### Steering: `prefer` / `technique`
+
+By default, whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed follows a structural rule on top of the two proofs above: a **steady-state** trigger (prior committed state exists to diff against) prefers suppression, while a trigger with nothing to diff against yet — a first build, or a backfill — prefers the plain matched arm, since the compare would be pure overhead there. `maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` (see [Maintenance Configuration](../reference/smelt-yml.md#maintenance-configuration)) — the same keys that choose among the techniques a cell's plan admits (fold vs. region recompute vs. rederiving columns) — also carry `suppress`/`unconditional` values that steer this orthogonal dimension directly: `prefer: suppress` / `prefer: unconditional` nudge the default without ever refusing, and `technique: suppress` / `technique: unconditional` force it — a hard pin never bypasses the row-identity/column-comparability proof above, so pinning `suppress` over a cell that proof itself refuses is a fail-loud error, not a silent downgrade. `smelt explain` prints the resolved variant and why (`preference`, `first-build posture`, or `default` when the proof itself never admitted suppression) alongside each cell.
+
+This preference/pin ladder only reaches the `ColumnScopedMerge` live run path today. A `KeyedFold` cell under `refresh: keyed` still always honours a `Suppressed` verdict unconditionally at run time, regardless of trigger or any `prefer`/`technique` override — `smelt explain` resolves and prints the ladder's answer for a `KeyedFold` cell too, but that printed answer doesn't yet drive the live keyed-fold executor.
+
+### Known limitation: `smelt explain` doesn't show which cells suppress
+
+`smelt explain <model> --show-sql` renders every `ColumnScopedMerge`/`KeyedFold` cell's unconditional matched arm today, even for a cell that resolves to suppressed at run time — the reporting path hasn't been wired to the same check the live run already applies. The `region key:` line is still a reliable signal for the row-identity half of the rule (`WholeRow` means that cell never suppresses); there is no equivalent surface yet for the column-comparability half.
+
+## Observed deltas and no-op cascades
+
+A suppressed write (above) still has to decide, *downstream*, which regions actually need recomputing — a re-run that wrote nothing changed nothing for its own consumers either. smelt records this directly: when a column-scoped `MERGE` cell runs, it records the changed-row set — restricted to the columns whose flutter is actually comparable, the same proof write suppression itself relies on — in the same backend transaction as the write. A run that suppressed every row records a **present-but-empty** delta, distinct from no record at all; a run that never went through a recording cell (or predates this feature) leaves the delta **absent**. This asymmetry matters to every consumer: an empty delta means "ran, changed nothing"; an absent delta means "assume the worst" and falls back to the full written window (widen-never-narrow — a missing record never narrows what a downstream run treats as dirty).
+
+On a [composed (key + time)](#the-composed-shape-key-time) output, a recorded delta is more than a yes/no — smelt projects it onto the model's own partition axis so forward propagation (`smelt run --since-upstream`) can dirty exactly the touched partitions instead of the whole written window:
+
+- **Routes 1–2 (key-embedded, key-determined)** project **exactly**: under these routes a stored row's partition value is a per-key constant, so the changed keys' own partitions are the whole story.
+- **Route 3 (recurrence-bounded)** widens the projection backward by the recurrence bound plus the route's own margins, since a key's partition value can move under this route (a later, out-of-order row can supersede an earlier partition assignment).
+
+Chain a few of these stages together and the payoff compounds: a stable upstream that keeps suppressing its own writes hands its consumers an empty delta, which the graph turns into zero scheduled work, run after run — a **no-op cascade** with a provable horizon behind it, not a heuristic short-circuit. This composes with each composed output's derived **settle bound** ([above](#the-composed-shape-key-time)): a downstream consumer can skip a settled slice unconditionally (it provably can't change again) and skip an unsettled slice whose recorded delta happens to be empty (nothing changed *this* run, even though it still could next run). Together, a quiet upstream degenerates the whole chain to no-op propagation, and the settle bound bounds how long that quiet has to hold before it's provably permanent.
+
+`smelt explain <model>` surfaces both halves directly. Each `ColumnScopedMerge` cell — the only technique family recording is wired for today; `KeyedFold` and the staged-candidate write family do not record yet, so their cells print no such line at all — prints an `observed-delta recording:` line. That line reads `yes` only when the cell's matched arm actually suppresses (the same two proofs above: a proven per-row identity, `region key: Key(...)`, over columns all proven comparable across runs); a `WholeRow`-identity cell, or one with an incomparable compared column, prints `no` — there's nothing to record when the write always rewrites every matched row unconditionally. A composed model's `Key temporal locality:` block prints an `observed-delta projection:` line alongside its route and settle bound: `exact (key-embedded)` / `exact (key-determined)` for routes 1–2, `` widened by `r` + margins `` for route 3. A bare keyed model (no established locality) prints no projection line at all — there's no partition axis to project onto.
+
+Recording and projection are both static facts about the derived plan — `smelt explain` never opens a backend connection, so it reports what a cell's technique *would* record and how its route *would* project, not what a specific past run actually recorded. Reading the live recorded delta for a specific run is `smelt run --since-upstream`'s job, not `explain`'s.
+
 ## Schema evolution
 
 When an incremental model's output schema changes (columns added, types widened, struct fields modified), smelt can automatically migrate the existing table instead of rebuilding it from scratch. See [Schema Evolution](schema-evolution.md) for full details on:
@@ -766,5 +855,6 @@ When an incremental model's output schema changes (columns added, types widened,
 
 - [Materializations](materializations.md) for an overview of all materialization types
 - [grain: key](../reference/cumulative-aggregate.md) for key-grain running state (one row per key)
+- [Deduplication without the workaround](../examples/web-analytics/deduplication.md) for the composed key + time shape, worked end to end
 - [Model Selection](model-selection.md) for running specific models with `--select`
 - [Schema Evolution](schema-evolution.md) for automatic schema migration during incremental runs

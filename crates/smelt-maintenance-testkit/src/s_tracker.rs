@@ -210,6 +210,7 @@ mod tests {
             payload_column: "val".to_string(),
             key_shape: KeyShape::Single,
             posture: SourcePosture::AppendOnly,
+            key_recurrence: None,
         }
     }
 

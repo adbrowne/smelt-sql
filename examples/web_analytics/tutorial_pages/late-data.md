@@ -131,3 +131,7 @@ If you've built this in other tools, the contrast is the point:
 
 smelt's version is one clause that is simultaneously the policy, its
 enforcement, and the source the windows are derived from.
+
+The dedup override above is a debt this series doesn't have to carry: the
+[next page](deduplication.md) builds the same dedup as a declared,
+checked fact instead of a trusted comment.

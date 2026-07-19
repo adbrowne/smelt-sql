@@ -42,7 +42,7 @@ pub fn maintenance_dialect(dialect: SqlDialect) -> MaintenanceDialect {
 /// an incremental batch — the single call site every `Backend` impl's
 /// `delete_and_insert_transactional` routes through, so the emitted text is
 /// the only text a backend ever executes for this family
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn build_delete_insert_group(
     schema: &str,
     name: &str,
@@ -67,7 +67,7 @@ fn build_delete_insert_group(
 /// Build the column-scoped `MERGE` [`StatementGroup`] for `Backend::
 /// merge_into`'s default implementation — the single call site every
 /// `Backend` impl routes through unless it overrides `merge_into` itself
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn build_column_scoped_merge_group(
     schema: &str,
     table: &str,
@@ -306,25 +306,6 @@ pub trait Backend: Send + Sync {
         IncrementalStrategy::DeleteInsert
     }
 
-    /// Whether this backend can execute a column-scoped `MERGE` — the
-    /// physical primitive behind `smelt_logical::maintenance::Technique::
-    /// ColumnScopedMerge` (`docs/specs/model_transforms.md` §"Dimension-
-    /// driven horizon-bounded MERGE").
-    ///
-    /// Default: refuses. This is a genuine backend-capability gate, not a
-    /// policy choice — a backend that cannot run a targeted `MERGE` must
-    /// drop the technique from admission **at plan time**
-    /// (`smelt-runtime`'s `maintenance_driver::resolve_cell_technique`
-    /// consults this before treating a `ColumnScopedMerge` cell as live),
-    /// never surface a runtime surprise after the plan already chose it. A
-    /// backend that can execute `merge_into` against a source projection
-    /// that carries the full target row (recomputing only the cell's
-    /// column group, passing every other column through unchanged from the
-    /// existing state) should override this to `true`.
-    fn supports_column_scoped_merge(&self) -> bool {
-        false
-    }
-
     /// Delete rows in a half-open partition range `[start, end)`.
     ///
     /// Emits `DELETE FROM table WHERE column >= start AND column < end`.
@@ -347,13 +328,13 @@ pub trait Backend: Send + Sync {
     ) -> Result<(), BackendError>;
 
     /// Delete a partition range and insert the replacement rows as **one**
-    /// backend transaction (`docs/specs/batched_models.md` §"First-run and
+    /// backend transaction (`docs/specs/incremental_models.md` §"First-run and
     /// backfill" — "Each chunk's DELETE+INSERT is one backend transaction.
     /// INSERT failure rolls back the chunk's DELETE; earlier committed
     /// chunks do not roll back.").
     ///
     /// The statement text comes from `smelt_logical::maintenance::emit`
-    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
     /// owner)") — this method builds the [`StatementGroup`] and hands it to
     /// [`Backend::execute_statement_group`], never authoring `DELETE`/
     /// `INSERT` text itself. Override `execute_statement_group`, not this
@@ -372,7 +353,7 @@ pub trait Backend: Send + Sync {
 
     /// Execute an emitted [`StatementGroup`] — the single point every
     /// `smelt_logical::maintenance::emit` consumer routes through
-    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
     /// owner)"). Backends execute; they never author the statement text.
     ///
     /// Default implementation runs each statement sequentially via
@@ -393,7 +374,7 @@ pub trait Backend: Send + Sync {
     ///
     /// Matched rows are updated, unmatched rows are inserted. The statement
     /// text comes from `smelt_logical::maintenance::emit::
-    /// emit_column_scoped_merge` (`docs/specs/maintenance_plan.md`
+    /// emit_column_scoped_merge` (`docs/specs/incremental_models.md`
     /// §"Statement emission (single owner)") — this method builds the
     /// [`StatementGroup`] and hands it to [`Backend::execute_statement_group`],
     /// never authoring `MERGE` text itself. `source_sql` must project the
@@ -403,7 +384,11 @@ pub trait Backend: Send + Sync {
     /// Default implementation routes through the shared emitter and
     /// `execute_statement_group`; a backend only needs to override this if
     /// it cannot express the emitted `MERGE` text at all (see
-    /// [`Backend::supports_column_scoped_merge`]).
+    /// [`BackendCapabilities::supports_column_scoped_merge`], read via
+    /// [`Backend::capabilities`] — a genuine backend-capability gate, not a
+    /// policy choice: a backend that cannot run a targeted `MERGE` must
+    /// drop the technique from admission **at plan time**, never surface a
+    /// runtime surprise after the plan already chose it).
     async fn merge_into(
         &self,
         schema: &str,
@@ -432,7 +417,7 @@ pub trait Backend: Send + Sync {
     /// reconciliation ledger and run `action_sql` (a `CREATE TABLE ... AS`
     /// or `MERGE INTO` statement), refusing — without running `action_sql`
     /// — if the delta is already reflected
-    /// (`docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    /// (`docs/specs/incremental_models.md` §Constraints "Never fold a delta
     /// already reflected in the state").
     ///
     /// `ensure_sql` creates the ledger table if it does not already exist
@@ -470,6 +455,98 @@ pub trait Backend: Send + Sync {
         }
         self.execute_sql(insert_sql).await?;
         self.execute_sql(action_sql).await?;
+        Ok(())
+    }
+
+    /// Record a conditional write's observed output delta, THEN execute the
+    /// write itself, both in the same backend transaction (T5,
+    /// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+    /// deltas on model edges"): a delta visible without its write, or a
+    /// write without its delta, breaks propagation soundness. `record_sql`
+    /// must run **before** `write_group` — it reads the target table's
+    /// pre-write state to compute the changed-row set (`target` vs.
+    /// `source` in the same `IS DISTINCT FROM` shape the write's own
+    /// suppression guard uses); running it after the write would compare
+    /// the target against itself and record nothing. `ensure_sql` creates
+    /// the observed-delta table if absent (idempotent DDL, safe
+    /// standalone); `write_group` is the conditional write's own
+    /// already-emitted [`StatementGroup`] (unchanged — this method does not
+    /// alter what gets written); `record_sql` is the warehouse-resident
+    /// upsert of the changed-key/partition set this write is about to touch
+    /// (`smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql`). All
+    /// three strings/groups come from a caller with the `smelt-state`
+    /// dependency — this trait does not depend on it, only executes the SQL
+    /// text a caller built, same precedent as [`Backend::fold_ledger_delta`].
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `record_sql`, then each of `write_group`'s
+    /// statements) for any backend that does not override it — the same
+    /// precedent as [`Backend::fold_ledger_delta`]'s default. A backend that
+    /// can wrap the record and the write in a native transaction (DuckDB)
+    /// should override this so a failed write never leaves a stale delta
+    /// record behind, and a failed record never lets the write proceed
+    /// unrecorded.
+    async fn execute_conditional_write_and_record_observed_delta(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        record_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        self.execute_sql(record_sql).await?;
+        self.execute_statement_group(write_group).await?;
+        Ok(())
+    }
+
+    /// Refresh the row-content fingerprint sidecar (F3,
+    /// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+    /// F3; `docs/specs/sources.md` §"The fingerprint sidecar" —
+    /// "Transactionality") in the SAME backend transaction as `write_group`
+    /// — the consuming write this refresh rides with: "a failed write
+    /// leaves no digest update, so a re-run recomputes the same delta
+    /// rather than silently treating a half-committed key as already
+    /// seen." Call this AFTER the diff that read the changed-key set
+    /// `write_group` is about to consume — refreshing first would make a
+    /// subsequent diff compare the source against itself and observe no
+    /// changes, the same before/after ordering constraint
+    /// `execute_conditional_write_and_record_observed_delta`'s own
+    /// `record_sql` documents (there, reversed, because that record reads
+    /// PRE-write target state; here the source being digested is external
+    /// and unaffected by `write_group`, so only the diff-then-refresh
+    /// ordering matters, not this call's own internal ordering).
+    ///
+    /// `ensure_sql` creates the sidecar table if absent (idempotent DDL,
+    /// safe standalone); `refresh_sql`/`gc_sql` come from
+    /// `smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql`/
+    /// `_gc_sql` — the upsert of every currently-observed key's digest and
+    /// the GC delete of keys no longer present, both built over the SAME
+    /// digest-select query the diff read (so a key that disappeared
+    /// between the diff and this refresh cannot be silently left
+    /// un-GC'd). All strings/groups come from a caller with the
+    /// `smelt-state`/`smelt-logical` dependency — this trait does not
+    /// depend on either, only executes the SQL text a caller built, same
+    /// precedent as [`Backend::fold_ledger_delta`].
+    ///
+    /// Default implementation is a best-effort, **non-atomic** fallback
+    /// (`ensure_sql`, then `write_group`, then `refresh_sql`, then
+    /// `gc_sql`, as separate statements) for any backend that does not
+    /// override it — the same precedent as
+    /// [`Backend::execute_conditional_write_and_record_observed_delta`]'s
+    /// default. A backend that can wrap the write and the sidecar refresh
+    /// in a native transaction (DuckDB) should override this so a failed
+    /// write never leaves a stale sidecar digest behind, and a failed
+    /// refresh never lets the write proceed with an un-refreshed sidecar.
+    async fn execute_write_and_refresh_fingerprint_sidecar(
+        &self,
+        ensure_sql: &str,
+        write_group: &StatementGroup,
+        refresh_sql: &str,
+        gc_sql: &str,
+    ) -> Result<(), BackendError> {
+        self.execute_sql(ensure_sql).await?;
+        self.execute_statement_group(write_group).await?;
+        self.execute_sql(refresh_sql).await?;
+        self.execute_sql(gc_sql).await?;
         Ok(())
     }
 

@@ -695,7 +695,7 @@ pub struct EmittedModelDef {
     /// when `materialization == "incremental"`.  `None` for non-incremental
     /// emissions or when the generator's frontmatter has no `incremental:` block.
     ///
-    /// Per `incremental_models.md` §"Generator-emitted incremental models":
+    /// Per `meta_language.md` §Design "Why the closed five-field set":
     /// the file-wide `incremental:` frontmatter is shared by all incremental
     /// emissions from that generator; per-`ModelDef` overrides are not supported
     /// in v1.
@@ -947,7 +947,7 @@ fn materialise_emitted_model_def(
         .unwrap_or_default();
 
     // Inherit the `incremental:` and `timeseries:` blocks only when materialization == "incremental".
-    // Per `incremental_models.md` §"Generator-emitted incremental models", non-incremental
+    // Per `meta_language.md` §Design "Why the closed five-field set", non-incremental
     // emissions silently ignore the generator's frontmatter `incremental:` block.
     let incremental_config = if materialization == "incremental" {
         frontmatter_incremental.cloned()

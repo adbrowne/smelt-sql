@@ -122,6 +122,14 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::MalformedBoundedDomain { .. } => None,
         MetadataError::GrainRequiredForIncremental => None,
         MetadataError::GrainRequiresIncremental => None,
+        MetadataError::GrainAssertionMismatch { .. } => None,
+        // Never returned by extract_file_metadata/validate_timeseries — made
+        // by `maintenance_plan_diagnostics` (needs the write-pattern
+        // registry + backend capabilities) and folded into
+        // `Maintenance*` diagnostics in `check_file_diagnostics` below,
+        // exactly like `KeyedForbidsTimeseries` above.
+        MetadataError::MaintenanceWritePatternUnavailable { .. } => None,
+        MetadataError::MaintenanceWriteAddressingRefused { .. } => None,
     }
 }
 
@@ -1210,8 +1218,83 @@ fn ref_source_info(
         .cloned()
 }
 
+/// Resolve `ref_str` to a locality-admitted composed model's own output as
+/// a [`smelt_logical::maintenance::SourceFacts`] candidate driving source
+/// (`incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)" — "The output as a clocked source": "a downstream keyed model
+/// may take it as its clocked driving source"). `None` when the ref does
+/// not resolve to a maintained `grain: key` model whose own `timeseries:`
+/// block cleared the locality gate — a declared source, a `full`/view
+/// model, a `grain: partition` model (already visible to downstream
+/// pushdown via `smelt-logical`'s own model-graph registry, not this
+/// path), or a keyed model whose own locality gate refused all resolve to
+/// `None` here, so the caller's driving-source resolution falls back to
+/// whatever declared sources it has.
+///
+/// Recurses one level into [`maintenance_plan_report`] over the upstream's
+/// own file to read its already-derived
+/// [`smelt_logical::maintenance::KeyLocality`] verdict — this never
+/// re-implements the locality gate itself (`CLAUDE.md` §"Maintenance-plan
+/// purity"): it calls the same pure entry point
+/// ([`smelt_logical::maintenance::locality::establish_locality`], reached
+/// via [`crate::queries::maintenance::derive_model_maintenance_plan`]) the
+/// upstream's own plan derivation already calls, and reads its result
+/// rather than deriving a second one. Terminates because the model graph
+/// is acyclic (a `smelt.ref()` cycle is rejected elsewhere in workspace
+/// loading); a long composed chain recurses one frame per hop, which is
+/// how the clock is meant to propagate through the DAG.
+/// Returns the candidate [`SourceFacts`](smelt_logical::maintenance::SourceFacts)
+/// alongside the upstream's own declared `timeseries.granularity` — a
+/// downstream keyed model's locality gate needs both: the source-shape
+/// candidate for [`smelt_logical::maintenance::locality::
+/// resolve_driving_source`], and the granularity for the gate's
+/// granularity-equality structural precondition (mirroring
+/// [`crate::queries::maintenance::single_clocked_source_granularity`]'s
+/// role for declared sources).
+fn ref_model_source_facts(
+    db: &dyn salsa::Database,
+    workspace: Workspace,
+    ref_str: &str,
+) -> Option<(
+    smelt_logical::maintenance::SourceFacts,
+    smelt_core::config::Granularity,
+)> {
+    let stripped = ref_str.strip_prefix("smelt.")?;
+    let segments: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+    let resolved = resolve_ref_path(db, workspace, segments.clone())?;
+    if resolved.kind != RefKind::Model {
+        return None;
+    }
+    let file = resolved.source_file?;
+    let result = maintenance_plan_report(db, workspace, file)?;
+    let locality = result.plan.key_locality.as_ref()?;
+    let granularity = ref_timeseries_config(
+        db,
+        workspace,
+        find_project(db, workspace, file.project_root(db)),
+        ref_str,
+    )?
+    .granularity;
+    Some((
+        smelt_logical::maintenance::SourceFacts {
+            name: stripped.to_string(),
+            // A composed maintained output's rows, once written by a run,
+            // are not retroactively mutated by a *later* run touching a
+            // different slice — the same append-only posture a declared
+            // `timeseries:` source with no explicit
+            // `mutation_profile: mutable` gets by default
+            // (`crate::queries::maintenance::source_facts`).
+            mutation: smelt_logical::maintenance::MutationProfile::AppendOnly,
+            partition_col: Some(locality.slice.partition_column().to_string()),
+            unique_key: Vec::new(),
+            allow_full_scan: false,
+        },
+        granularity,
+    ))
+}
+
 /// Resolve `ref_str` to an upstream **maintained-model edge**
-/// (`maintenance_plan.md` §"Upstream model edges") when it addresses another
+/// (`incremental_models.md` §"Upstream model edges") when it addresses another
 /// maintained (non-`full`, non-view) model in this project — `None` when the
 /// ref doesn't resolve, resolves to a source/seed/function, or resolves to a
 /// `full`-mode or view model (which delivers no incremental delta and so
@@ -1256,15 +1339,22 @@ fn ref_model_edge(
         return None;
     }
     let clock_col = meta.timeseries.as_ref().map(|t| t.partition_column.clone());
+    // The upstream's own declared top-level `unique_key:` (`models.md`
+    // §"The Relation Contract"), threaded through so a downstream's P1
+    // skeleton-source-closure proof over this edge can prove the join
+    // one-to-one (T3, `docs/plans/20260715-composed-axes-conditional-
+    // maintenance.md` Phase E3) — `ModelEdge::unique_key`'s doc comment.
+    let unique_key = meta.unique_key.clone().unwrap_or_default();
     Some(smelt_logical::maintenance::derive::ModelEdge {
         name: stripped.to_string(),
         clock_col,
+        unique_key,
     })
 }
 
 /// Thin Salsa wrapper around
 /// `smelt_logical::maintenance::derive::derive_maintenance_plan`
-/// (`maintenance_plan.md` §Surface "The plan (derived, reported)"): gathers
+/// (`incremental_models.md` §Surface "The plan (derived, reported)"): gathers
 /// `file`'s referenced sources and declared `maintenance:`/`grain:`
 /// frontmatter, then calls
 /// [`crate::queries::maintenance::maintenance_plan_diagnostics`] (pure) to
@@ -1326,19 +1416,45 @@ pub fn maintenance_plan(
         .unwrap_or("")
         .to_string();
 
+    // Mirrors `maintenance_plan_report`'s own composed-driving-source
+    // wiring below: a `grain: key` model's driving source may be another
+    // maintained model's locality-admitted composed output, not just a
+    // declared `sources:` entry.
+    let extra_model_sources: Vec<(
+        smelt_logical::maintenance::SourceFacts,
+        smelt_core::config::Granularity,
+    )> = if metadata.grain == Some(smelt_core::config::Grain::Key) {
+        refs.iter()
+            .filter_map(|r| ref_model_source_facts(db, workspace, r))
+            .collect()
+    } else {
+        Vec::new()
+    };
+
+    // `maintenance.cells[].write` pins are validated against every one of
+    // the project's declared target backends (`write_pin_diagnostics`'s own
+    // doc comment) — reuses the same `project_active_backends` query the
+    // `smelt.as_struct()` backend check already threads through
+    // `file_diagnostics` (`as_struct_backend_diagnostics_for_file`).
+    let active_backends = project
+        .and_then(|p| project_active_backends(db, p))
+        .unwrap_or_default();
+
     Arc::new(crate::queries::maintenance::maintenance_plan_diagnostics(
         sql_body,
         &table,
         &metadata,
         &source_refs,
         project_scan_bounds.as_ref(),
+        &extra_model_sources,
+        &active_backends,
     ))
 }
 
 /// Plain (non-Salsa-tracked) counterpart of [`maintenance_plan`] that returns
 /// the *full* derived plan — cells, clamps, locality verdicts — rather than
 /// the Salsa-safe refusals-only projection. Used by `smelt explain <model>`
-/// (`maintenance_plan.md` §Surface "CLI"), a one-shot CLI report that has no
+/// (`incremental_models.md` §Surface "CLI"), a one-shot CLI report that has no
 /// need for Salsa's incremental caching and cannot use the tracked query
 /// because [`smelt_logical::maintenance::MaintenancePlan`] does not implement
 /// `PartialEq`/`Eq` (the Salsa tracked-return-value requirement the
@@ -1386,7 +1502,7 @@ pub fn maintenance_plan_report(
         })
         .collect();
 
-    // Upstream maintained-model edges (`maintenance_plan.md` §"Upstream model
+    // Upstream maintained-model edges (`incremental_models.md` §"Upstream model
     // edges"): the model refs that resolve to another maintained model in
     // this project, each carrying that upstream's own validated clock.
     let model_edges: Vec<smelt_logical::maintenance::derive::ModelEdge> = refs
@@ -1408,11 +1524,34 @@ pub fn maintenance_plan_report(
         .maintenance
         .as_ref()
         .and_then(|m| m.scan_bounds.as_ref());
-    let sources = crate::queries::maintenance::build_source_facts(
+    let mut sources = crate::queries::maintenance::build_source_facts(
         &source_refs,
         model_scan_bounds,
         project_scan_bounds.as_ref(),
     );
+    // A `grain: key` model's driving source may itself be another
+    // maintained model's locality-admitted composed output, not just a
+    // declared `sources:` entry — `resolve_driving_source` (consulted
+    // below via `derive_model_maintenance_plan`) is already agnostic to
+    // provenance, so publish every referenced upstream model that clears
+    // the locality gate into the same `SourceFacts` candidate list a
+    // declared source populates (`incremental_models.md` §"Key temporal
+    // locality (the time-partitioned output)" — "The output as a clocked
+    // source"). Scoped to `grain: key` models only — a `grain: partition`
+    // downstream's pushdown against a composed upstream is already derived
+    // through `smelt-logical`'s own model-graph registry, not this path.
+    let mut model_source_granularities: Vec<smelt_core::config::Granularity> = Vec::new();
+    if metadata.grain == Some(smelt_core::config::Grain::Key) {
+        for r in &refs {
+            if let Some((facts, granularity)) = ref_model_source_facts(db, workspace, r) {
+                if !sources.iter().any(|s| s.name == facts.name) {
+                    sources.push(facts);
+                    model_source_granularities.push(granularity);
+                }
+            }
+        }
+    }
+    let key_recurrences = crate::queries::maintenance::build_key_recurrences(&source_refs);
     let explicitly_mutable: std::collections::HashSet<String> = source_refs
         .iter()
         .filter(|(_, info)| {
@@ -1425,6 +1564,22 @@ pub fn maintenance_plan_report(
         .map(|(name, _)| name.clone())
         .collect();
 
+    // The locality gate's granularity-equality structural precondition
+    // needs the driving source's granularity regardless of whether it is a
+    // declared source or a composed upstream model's own output — combine
+    // both candidate pools and pass the union through the single shared
+    // "exactly one clocked candidate, else undecided" rule
+    // (`smelt_logical::maintenance::locality::single_clocked_granularity`),
+    // the same rule `single_clocked_source_granularity` applies over
+    // declared sources alone.
+    let mut clocked_granularities: Vec<smelt_core::config::Granularity> = source_refs
+        .iter()
+        .filter_map(|(_, info)| info.as_ref().and_then(|i| i.timeseries.as_ref()))
+        .map(|t| t.granularity)
+        .collect();
+    clocked_granularities.extend(model_source_granularities);
+    let driving_source_granularity =
+        smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities);
     crate::queries::maintenance::derive_model_maintenance_plan_with_edges(
         sql_body,
         &table,
@@ -1432,6 +1587,8 @@ pub fn maintenance_plan_report(
         &sources,
         &explicitly_mutable,
         &model_edges,
+        driving_source_granularity,
+        &key_recurrences,
     )
 }
 
@@ -1731,9 +1888,16 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
                 }
-                smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => {
-                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsTimeseries))
-                }
+                // `validate_timeseries` no longer raises this — whether
+                // keyed+timeseries: is admitted is decided by the locality
+                // gate in plan derivation
+                // (`smelt_logical::maintenance::locality::establish_locality`),
+                // which surfaces its own `KeyedForbidsTimeseries` diagnostic
+                // from the maintenance-plan fold-in below. The arm is kept
+                // (rather than folded into the `_ => None` wildcard) so the
+                // `MetadataError` variant's diagnostic mapping stays
+                // documented at its point of historical use.
+                smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => None,
                 smelt_core::metadata::MetadataError::KeyedForbidsBatched => {
                     Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsBatched))
                 }
@@ -1756,6 +1920,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 )),
                 smelt_core::metadata::MetadataError::GrainRequiresIncremental => {
                     Some((ts_err.to_string(), DiagnosticCode::GrainRequiresIncremental))
+                }
+                smelt_core::metadata::MetadataError::GrainAssertionMismatch { .. } => {
+                    Some((ts_err.to_string(), DiagnosticCode::GrainAssertionMismatch))
                 }
                 // Other MetadataError variants are already handled by the generates-key
                 // block above or by serde_yaml at parse time; skip them here.
@@ -1911,7 +2078,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             }
         }
 
-        // Maintenance-plan diagnostics (`maintenance_plan.md` §Diagnostics):
+        // Maintenance-plan diagnostics (`incremental_models.md` §Diagnostics):
         // fold the derived plan's admission refusals and the
         // `maintenance.cells[]` column-group-span check onto the
         // `Maintenance*` codes. `maintenance_plan` is the thin Salsa query —
@@ -1932,6 +2099,20 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                     DiagnosticCode::MaintenanceNoAdmissibleTechnique,
                     format!("no maintenance technique admits trigger {trigger}: {why}"),
                 ),
+                crate::queries::maintenance::MaintenanceRefusal::LocalityNotEstablished {
+                    message,
+                } => (DiagnosticCode::KeyedForbidsTimeseries, message.clone()),
+                crate::queries::maintenance::MaintenanceRefusal::UnsupportedGrain {
+                    grain,
+                    tracking_plan,
+                } => (
+                    DiagnosticCode::MaintenanceUnsupportedGrain,
+                    format!(
+                        "grain: {grain} is not yet supported by maintenance-plan derivation \
+                         (tracked in {tracking_plan}); declare a supported grain \
+                         (partition or key) or use refresh: full",
+                    ),
+                ),
             };
             DiagnosticAcc(Diagnostic {
                 severity: DiagnosticSeverity::Error,
@@ -1948,6 +2129,39 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 message: violation.clone(),
                 range: rowan::TextRange::empty(body_start),
                 code: Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique),
+                data: None,
+            })
+            .accumulate(db);
+        }
+        for write_refusal in &plan_diags.write_pin_refusals {
+            let (code, message) = match write_refusal {
+                crate::queries::maintenance::WritePinDiagnostic::PatternUnavailable {
+                    pattern,
+                    backend,
+                } => (
+                    DiagnosticCode::MaintenanceWritePatternUnavailable,
+                    format!(
+                        "MaintenanceWritePatternUnavailable: write pattern '{pattern}' is \
+                         unrecognised, or backend '{backend}' cannot provide it"
+                    ),
+                ),
+                crate::queries::maintenance::WritePinDiagnostic::AddressingRefused {
+                    cell,
+                    pattern,
+                    why,
+                } => (
+                    DiagnosticCode::MaintenanceWriteAddressingRefused,
+                    format!(
+                        "MaintenanceWriteAddressingRefused: write pattern '{pattern}' cannot \
+                         uphold the equivalence invariant for cell {cell} — {why}"
+                    ),
+                ),
+            };
+            DiagnosticAcc(Diagnostic {
+                severity: DiagnosticSeverity::Error,
+                message,
+                range: rowan::TextRange::empty(body_start),
+                code: Some(code),
                 data: None,
             })
             .accumulate(db);

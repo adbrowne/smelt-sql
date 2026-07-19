@@ -1,0 +1,40 @@
+description: Raw web analytics events with a JSON-encoded payload.
+name: raw.events
+# At-least-once delivery: ~2% of events arrive twice, identical except for
+# `arrival_time`. `key_recurrence` states the delivery contract silver.
+# events_deduped consumes below: every pair of rows sharing `event_id` lies
+# within `window` of each other on the event-time axis. A redelivered
+# duplicate carries the same `event_time`/`event_date` as the original, so
+# the true recurrence is zero; the window declared here is a generous,
+# conservative bound. Any violation fails the run transactionally
+# (`KeyedRecurrenceBoundViolated`) — it can never silently drop data.
+timeseries:
+  event_time_column: event_date
+  partition_column: event_date
+  granularity: day
+mutation_profile:
+  kind: append_only
+  lateness: '3 days'
+  redelivery: at_least_once
+  key_recurrence:
+    key: [event_id]
+    window: '3 days'
+columns:
+  - name: event_id
+    type: BIGINT
+  - name: device_id
+    type: INTEGER
+  - name: user_id
+    type: INTEGER
+  - name: seconds_in_day
+    type: INTEGER
+  - name: event_time
+    type: VARCHAR  # ISO 8601 string
+  - name: arrival_time
+    type: VARCHAR  # ISO 8601 string; ingestion clock
+  - name: utm_campaign
+    type: VARCHAR  # nullable
+  - name: payload
+    type: VARCHAR
+  - name: event_date
+    type: VARCHAR  # hive partition value

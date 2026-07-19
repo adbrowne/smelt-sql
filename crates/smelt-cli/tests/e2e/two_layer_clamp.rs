@@ -74,7 +74,7 @@ impl BackendFactory for DuckDbBackendFactory {
 /// - `models/user_activity.sql`: a `refresh: batched` model that joins the
 ///   source to itself, offset by `INTERVAL '1 day'`, to look up each row's
 ///   prior-day transaction — the Form B interval-join lookback pattern from
-///   `docs/specs/batched_models.md`.
+///   `docs/specs/incremental_models.md`.
 fn stage_project(project_dir: &Path, db_path: &Path) {
     std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
 

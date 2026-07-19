@@ -43,6 +43,7 @@ fn source_info(segments: &[&str], columns: &[(&str, DataType)]) -> SourceInfo {
         watermark: None,
         unique_key: None,
         retention: None,
+        referential_integrity: None,
     }
 }
 

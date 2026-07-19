@@ -46,7 +46,7 @@ use smelt_maintenance_testkit::verdict::{classify_adversarial, stage_adversarial
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DivergenceStatus {
     /// A generated case exercising a documented fail-closed corner
-    /// (`model_properties.md`/`maintenance_plan.md` §Known Divergences).
+    /// (`model_properties.md`/`incremental_models.md` §Known Divergences).
     Documented,
     /// A confirmed production gap, deliberately not fixed by this plan
     /// (this plan's "Deferred during implementation" section).
@@ -80,7 +80,7 @@ fn registry() -> Vec<DivergenceEntry> {
         DivergenceEntry {
             id: adversarial_leaf_id(AdversarialLeaf::IntersectBody),
             description: "INTERSECT/EXCEPT collapse every payload column into one group \
-                sensitive to every declared source (maintenance_plan.md §Known Divergences).",
+                sensitive to every declared source (incremental_models.md §Known Divergences).",
             status: DivergenceStatus::Documented,
         },
         DivergenceEntry {

@@ -157,10 +157,11 @@ fn test_pushdown_reduces_scan() {
 
     let result = inject_source_filters(&sql, &bound_map, &range);
 
-    // The result must contain a subquery wrapper for events_parsed.
+    // The result must contain a subquery wrapper for events_deduped (the
+    // composed keyed+timeseries dedupe stage sessions.sql now reads).
     assert!(
-        result.contains("(SELECT * FROM smelt.silver.events_parsed"),
-        "Source pushdown subquery must be present for events_parsed; SQL:\n{result}"
+        result.contains("(SELECT * FROM smelt.silver.events_deduped"),
+        "Source pushdown subquery must be present for events_deduped; SQL:\n{result}"
     );
 
     // The WHERE clause must reference the partition column (event_date).

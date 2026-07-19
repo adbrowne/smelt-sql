@@ -917,7 +917,7 @@ fn identity_model_windows_unchanged() {
 // would risk silently drifting from what actually ships.
 
 /// The real model file, read byte-for-byte — never a hand-copied analogue.
-/// Its own external dependency address (`smelt.silver.events_parsed`) is
+/// Its own external dependency address (`smelt.silver.events_deduped`) is
 /// reused unchanged by staging a plain source at that same path, so no text
 /// substitution is needed.
 fn chained_model_sql() -> String {
@@ -932,7 +932,7 @@ fn chained_model_sql() -> String {
 }
 
 /// Stage a project with:
-/// - `models/silver/events_parsed.yml`: a plain source carrying exactly the
+/// - `models/silver/events_deduped.yml`: a plain source carrying exactly the
 ///   columns `silver.sessions_chained` reads (`device_id`, `event_ts`,
 ///   `event_date`, `platform`, `utm_campaign`).
 /// - `models/silver/sessions_chained.sql`: the real model file, unmodified.
@@ -957,7 +957,7 @@ timeseries:
   granularity: day
 "#;
     std::fs::write(
-        project_dir.join("models/silver/events_parsed.yml"),
+        project_dir.join("models/silver/events_deduped.yml"),
         source_yml,
     )
     .unwrap();
@@ -980,7 +980,7 @@ fn create_chained_events_table(db_path: &Path) -> anyhow::Result<()> {
     let conn = duckdb::Connection::open(db_path)?;
     conn.execute_batch(
         "CREATE SCHEMA IF NOT EXISTS main; \
-         CREATE TABLE main.silver_events_parsed ( \
+         CREATE TABLE main.silver_events_deduped ( \
              device_id INTEGER, event_ts TIMESTAMP, event_date DATE, \
              platform VARCHAR, utm_campaign VARCHAR \
          );",
@@ -1018,7 +1018,7 @@ fn seed_chained_events_batch(db_path: &Path, rows: &[(String, String)]) -> anyho
         .map(|(ts, date)| format!("(1, TIMESTAMP '{ts}', DATE '{date}', 'web', NULL)"))
         .collect();
     conn.execute_batch(&format!(
-        "INSERT INTO main.silver_events_parsed VALUES {};",
+        "INSERT INTO main.silver_events_deduped VALUES {};",
         values.join(", ")
     ))?;
     Ok(())
@@ -1308,7 +1308,7 @@ async fn chained_run_is_refused_or_ordered_never_parallel() {
     let model_sql = chained_model_sql();
     let clean = smelt_parser::strip_frontmatter(&model_sql);
     let refs = vec![
-        "silver.events_parsed".to_string(),
+        "silver.events_deduped".to_string(),
         "silver.sessions_chained".to_string(),
     ];
     let verdict = window_independence(

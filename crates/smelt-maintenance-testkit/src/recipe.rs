@@ -85,7 +85,7 @@ pub enum BodyConstruct {
     /// `payloads_are_integer_valued_and_bounded` checks.
     Filter { threshold: i64 },
     /// `SUM(val) GROUP BY d` — a commutative-group combiner (maintenance
-    /// ladder rung 1/3, `maintenance_plan.md` §"The algebraic maintenance
+    /// ladder rung 1/3, `incremental_models.md` §"The algebraic maintenance
     /// ladder").
     AdditiveAgg,
     /// `MAX(val) GROUP BY d` — an idempotent, non-invertible monoid combiner
@@ -194,6 +194,25 @@ pub struct SourceRecipe {
     /// [`SourcePosture::AppendOnly`]; only [`SourceRecipe::mutable_dimension`]
     /// produces [`SourcePosture::MutableSnapshot`].
     pub posture: SourcePosture,
+    /// A declared `key_recurrence` bound on this source
+    /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase A6; `sources.md` §"`mutation_profile` — the structured
+    /// block"), rendered under the structured `mutation_profile:` block
+    /// rather than the bare-string shorthand. `None` for every source
+    /// built before Phase A6 (route 3's own declared-recurrence composed
+    /// pool is the only consumer).
+    pub key_recurrence: Option<KeyRecurrenceDecl>,
+}
+
+/// A declared `key_recurrence` bound (`sources.md` §"`mutation_profile` —
+/// the structured block"): every pair of rows sharing `key` lies within
+/// `window` of each other on the event-time axis. `window` is the raw
+/// interval literal text (e.g. `"3 days"`), rendered verbatim into the
+/// YAML.
+#[derive(Debug, Clone)]
+pub struct KeyRecurrenceDecl {
+    pub key: Vec<String>,
+    pub window: String,
 }
 
 impl SourceRecipe {
@@ -211,7 +230,22 @@ impl SourceRecipe {
             payload_column: "val".to_string(),
             key_shape,
             posture: SourcePosture::AppendOnly,
+            key_recurrence: None,
         }
+    }
+
+    /// The append-only, clocked `events(d, id, val)` source ([`Self::events`]),
+    /// additionally declaring a `key_recurrence` bound
+    /// (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase A6) — route 3's declared fallback
+    /// (`incremental_models.md` §"Key temporal locality", route 3).
+    pub(crate) fn events_with_key_recurrence(key: Vec<String>, window: &str) -> Self {
+        let mut source = Self::events(KeyShape::Single);
+        source.key_recurrence = Some(KeyRecurrenceDecl {
+            key,
+            window: window.to_string(),
+        });
+        source
     }
 
     /// An unclocked `mutable_snapshot` dimension source, keyed on `id` and
@@ -234,6 +268,7 @@ impl SourceRecipe {
             payload_column: "attr".to_string(),
             key_shape: KeyShape::Single,
             posture: SourcePosture::MutableSnapshot,
+            key_recurrence: None,
         }
     }
 
@@ -267,7 +302,7 @@ pub struct GrainDecl {
 /// (`crate::schedule_gen::ConformanceStep::RewriteModel`) can apply to an
 /// already-staged recipe's model body
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-/// `maintenance_plan.md` §"The definition-change trigger"). Both variants
+/// `incremental_models.md` §"The definition-change trigger"). Both variants
 /// are deliberately narrow, hand-picked shapes — not a generated construct
 /// pool — since Phase 9's scope is asserting TODAY's contract (model-hash
 /// change invalidates the interval store; the run pipeline always compiles
@@ -286,7 +321,7 @@ pub enum ModelEdit {
     AddPayloadColumn,
     /// Adds the source's row-key column into the aggregate's `GROUP BY` (a
     /// skeleton/identity position) — a grain change:
-    /// `maintenance_plan.md`'s `SkeletonAdd` territory. Only meaningful for
+    /// `incremental_models.md`'s `SkeletonAdd` territory. Only meaningful for
     /// the aggregate constructs (`AdditiveAgg`/`IdempotentAgg`/
     /// `DecomposedAgg`/`HolisticAgg`), which have a `GROUP BY` skeleton to
     /// widen; the row-shaped constructs (`PassThrough`/`Filter`) already
@@ -390,7 +425,7 @@ pub enum AdversarialLeaf {
     /// `model_properties.md` §Known Divergences: set-operation distribution
     /// covers `UNION ALL` only; `derive_column_groups` fails closed on any
     /// other set operation, collapsing every payload column into one group
-    /// sensitive to every declared source (`maintenance_plan.md` §Known
+    /// sensitive to every declared source (`incremental_models.md` §Known
     /// Divergences' `INTERSECT`/`EXCEPT` entry).
     IntersectBody,
     /// `RANDOM()` occupies a skeleton (identity/dedup-key) position — a
@@ -655,19 +690,32 @@ impl MutableEnrichedRecipe {
 
 /// A source's declared `batched.unique_key`/source-YAML rendering, factored
 /// out of [`SourceRecipe`] so [`KeyedRecipe`] (which has no `GrainDecl` —
-/// keyed output declares no `timeseries:`/`unique_key`, `keyed_models.md`
-/// Known Divergences) can render its driving source's YAML the same way
+/// keyed output declares no `timeseries:`/`unique_key`, `incremental_models.md`
+/// §Known Divergences "The key grain") can render its driving source's YAML the same way
 /// [`crate::render::render_source_yaml`] does for a [`ModelRecipe`], without
 /// requiring a `GrainDecl` to exist.
 impl SourceRecipe {
     pub fn source_yaml(&self) -> String {
         match self.posture {
-            SourcePosture::AppendOnly => format!(
-                "description: generative-conformance keyed driving source.\nmutation_profile: append_only\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
-                d = self.clock_column,
-                id = self.key_column,
-                val = self.payload_column,
-            ),
+            SourcePosture::AppendOnly => {
+                let mutation_profile = match &self.key_recurrence {
+                    // Structured block (`sources.md` §"`mutation_profile` —
+                    // the structured block"): the bare-string shorthand has
+                    // no room for a nested `key_recurrence:` sub-fact.
+                    Some(kr) => format!(
+                        "mutation_profile:\n  kind: append_only\n  key_recurrence:\n    key: [{}]\n    window: '{}'\n",
+                        kr.key.join(", "),
+                        kr.window,
+                    ),
+                    None => "mutation_profile: append_only\n".to_string(),
+                };
+                format!(
+                    "description: generative-conformance keyed driving source.\n{mutation_profile}timeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\ncolumns:\n  - name: {d}\n    type: DATE\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
+                    d = self.clock_column,
+                    id = self.key_column,
+                    val = self.payload_column,
+                )
+            }
             SourcePosture::MutableSnapshot => format!(
                 "description: generative-conformance keyed unclocked source.\nmutation_profile: mutable_snapshot\ncolumns:\n  - name: {id}\n    type: INTEGER\n  - name: {val}\n    type: INTEGER\n",
                 id = self.key_column,
@@ -679,17 +727,17 @@ impl SourceRecipe {
 
 /// The `grain: key` pool's combiner family
 /// (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 5;
-/// `maintenance_plan.md` §"The algebraic maintenance ladder"): both are
+/// `incremental_models.md` §"The algebraic maintenance ladder"): both are
 /// direct-monoid, admitted by the built classifier seed
 /// (`crates/smelt-logical/src/rules/cumulative.rs`'s aggregator allowlist —
-/// `keyed_models.md` Known Divergences "the classifier covers only the
+/// `incremental_models.md` §Known Divergences "The key grain": "the classifier covers only the
 /// direct-monoid families").
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeyedCombiner {
     /// `SUM(val)` — an invertible commutative group (ladder rung 3). The
     /// `Grade::Additive` reconciliation-ledger family: entries record delta
     /// identities and a repeat fold of an already-processed window is
-    /// refused (`KeyedReprocessedWindow`, `keyed_models.md` §"Reprocessing").
+    /// refused (`KeyedReprocessedWindow`, `incremental_models.md` §"Reprocessing").
     Additive,
     /// `MAX(val)` — an idempotent, non-invertible monoid (ladder rung 1,
     /// not a group). The `Grade::Idempotent` family: entries record only a
@@ -726,10 +774,10 @@ pub fn arb_keyed_combiner() -> impl Strategy<Value = KeyedCombiner> {
 /// FROM smelt.sources.<name> GROUP BY <key>` over one [`SourceRecipe`].
 /// [`Self::new_window_forward`] uses the clocked append-only `events` shape
 /// (the run-shape derivation's window-forward posture,
-/// `keyed_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
+/// `incremental_models.md` §"The two run shapes"); [`Self::new_snapshot_reconcile`]
 /// uses the unclocked `mutable_snapshot` dimension shape (selecting the
-/// snapshot-reconcile posture, refused today — `keyed_models.md` Known
-/// Divergences "the snapshot-reconcile executor is unbuilt").
+/// snapshot-reconcile posture, refused today — `incremental_models.md` §Known
+/// Divergences "The key grain": "the snapshot-reconcile executor is unbuilt").
 #[derive(Debug, Clone)]
 pub struct KeyedRecipe {
     pub model_name: String,
@@ -826,9 +874,9 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction (design §5 "Key-recurrence control": "where ordering-
 /// sensitive combiners (`MAX_BY`-family) are generated, ordering keys are
 /// made unique by construction so the documented ties carve-out cannot fire
-/// spuriously" — `keyed_models.md` §"Ordering ties"). The order-monotone
+/// spuriously" — `incremental_models.md` §"Ordering ties"). The order-monotone
 /// overwrite combiner family this discipline targets is not yet an admitted
-/// technique (`keyed_models.md` Known Divergences: "the classifier union
+/// technique (`incremental_models.md` §Known Divergences "The key grain": "the classifier union
 /// (overwrite, once-write, and plain-overwrite families) ... are unbuilt"),
 /// so this generator is not wired into [`KeyedCombiner`] today — but the
 /// discipline it must uphold once that family lands is independently
@@ -836,6 +884,363 @@ fn build_keyed_schedule(base: chrono::NaiveDate, extra_vals: &[Vec<i64>]) -> Key
 /// construction rather than by (unprovable) statistical luck.
 pub fn arb_unique_ordering_keys(n: usize) -> impl Strategy<Value = Vec<i64>> {
     (0..1_000_000_i64).prop_map(move |base| (0..n as i64).map(|i| base + i).collect())
+}
+
+// ---------------------------------------------------------------------
+// Phase A6: the composed (`grain: key` + `timeseries:`) recipe family,
+// covering all three key-temporal-locality routes
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6;
+// `incremental_models.md` §"Key temporal locality").
+// ---------------------------------------------------------------------
+
+/// The three key-temporal-locality routes (`incremental_models.md` §"Key
+/// temporal locality") a composed recipe may establish.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ComposedRoute {
+    /// Route 1 (key-embedded): `partition_column` is itself a `unique_key`
+    /// column.
+    KeyEmbedded,
+    /// Route 2 (key-determined): the partition projection is a per-key
+    /// constant under a declared `functional_dependencies:` entry.
+    KeyDetermined,
+    /// Route 3 (recurrence-bounded, declared): a declared `key_recurrence`
+    /// bound `r` on the driving source, admitted checked.
+    RecurrenceBounded,
+}
+
+/// Stable, human-readable identifier for a [`ComposedRoute`] — mirrors
+/// [`construct_kind_name`]'s role for [`BodyConstruct`].
+pub fn composed_route_name(route: ComposedRoute) -> &'static str {
+    match route {
+        ComposedRoute::KeyEmbedded => "key_embedded",
+        ComposedRoute::KeyDetermined => "key_determined",
+        ComposedRoute::RecurrenceBounded => "recurrence_bounded",
+    }
+}
+
+/// A `Strategy` drawing uniformly from the three [`ComposedRoute`]s.
+pub fn arb_composed_route() -> impl Strategy<Value = ComposedRoute> {
+    prop_oneof![
+        Just(ComposedRoute::KeyEmbedded),
+        Just(ComposedRoute::KeyDetermined),
+        Just(ComposedRoute::RecurrenceBounded),
+    ]
+}
+
+/// The declared recurrence-bound window route 3's recipes use — matches
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`'s own
+/// flagship shape (`r = 3 days`).
+pub const ROUTE3_RECURRENCE_WINDOW: &str = "3 days";
+
+/// The shared "storm" key every generated route-3 schedule redelivers
+/// across every window (`arb_composed_route3_schedule`) — the redelivery-
+/// storm hazard the recipe family is scoped to cover.
+pub const ROUTE3_STORM_KEY_ID: i64 = 900;
+
+/// A composed (`grain: key` + `timeseries:`) recipe covering one of the
+/// three key-temporal-locality routes. Every route uses the same clocked,
+/// append-only `events(d, id, val)` source; only the body shape, declared
+/// `unique_key`, and partition-column provenance differ:
+///
+/// - [`ComposedRoute::KeyEmbedded`]: `SELECT id, d, SUM(val) AS total FROM
+///   events GROUP BY id, d` — `partition_column` (`d`) is itself a
+///   `unique_key` column (route 1). Fully executable through the real
+///   `execute_project` pipeline — no extremal aggregate involved, so it
+///   does not hit the nullability blocker described below.
+/// - [`ComposedRoute::KeyDetermined`]: `SELECT id, CAST(d AS DATE) AS
+///   pdate, SUM(val) AS total FROM events GROUP BY id`, with a declared
+///   `functional_dependencies: [{key: [id], determines: pdate}]` — `pdate`
+///   is a direct scalar wrapper of the driving source's own clock column,
+///   the one NOT-NULL-provable, non-extremal shape route 2 admits
+///   (`smelt_logical::analysis::not_null::partition_column_provably_not_null`'s
+///   doc comment).
+/// - [`ComposedRoute::RecurrenceBounded`]: `SELECT id, MAX(d) AS last_seen
+///   FROM events GROUP BY id`, with the driving source declaring
+///   `key_recurrence: {key: [id], window: '3 days'}` — the flagship
+///   extremal-fold shape route 3 exists for.
+///
+/// `KeyDetermined`'s and `RecurrenceBounded`'s rendered model+source files
+/// are admitted by the real key-temporal-locality gate
+/// (`establish_locality`, exercised through `smelt-db`'s real
+/// `maintenance_plan_report` Salsa query over the real staged
+/// frontmatter/YAML) but are **not** executable through the real
+/// `execute_project` pipeline today — a documented, pre-existing gap
+/// independent of this pool (`incremental_models.md` §Known Divergences:
+/// every extremal `MIN`/`MAX`-derived `timeseries.partition_column` trips
+/// the unrelated NOT-NULL diagnostic `execute_project`'s pre-execution gate
+/// enforces, regardless of locality admission; `KeyDetermined`'s own
+/// `pdate` scalar-wrapper projection is likewise not a real GROUP BY key
+/// nor an allowlisted aggregate, so `classify_cumulative`'s runtime
+/// grammar refuses it independently of locality admission). The
+/// conformance gate therefore drives these two routes' actual merge
+/// mechanics through
+/// `smelt_runtime::maintenance_driver::run_windowed_keyed_maintenance`
+/// directly against a real `DuckDbBackend` — the same workaround
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`
+/// already uses for route 3 — rather than through `execute_project`.
+#[derive(Debug, Clone)]
+pub struct ComposedKeyedRecipe {
+    pub model_name: String,
+    pub source: SourceRecipe,
+    pub route: ComposedRoute,
+}
+
+impl ComposedKeyedRecipe {
+    pub fn new(route: ComposedRoute) -> Self {
+        let source = match route {
+            ComposedRoute::KeyEmbedded | ComposedRoute::KeyDetermined => {
+                SourceRecipe::events(KeyShape::Single)
+            }
+            ComposedRoute::RecurrenceBounded => SourceRecipe::events_with_key_recurrence(
+                vec!["id".to_string()],
+                ROUTE3_RECURRENCE_WINDOW,
+            ),
+        };
+        Self {
+            model_name: format!("recipe_composed_{}", composed_route_name(route)),
+            source,
+            route,
+        }
+    }
+
+    /// The model's declared `unique_key` (the GROUP BY columns of its own
+    /// outermost SELECT — matches `derive_group_by_unique_key`'s
+    /// derivation).
+    pub fn unique_key(&self) -> Vec<String> {
+        match self.route {
+            ComposedRoute::KeyEmbedded => vec![
+                self.source.key_column.clone(),
+                self.source.clock_column.clone(),
+            ],
+            ComposedRoute::KeyDetermined | ComposedRoute::RecurrenceBounded => {
+                vec![self.source.key_column.clone()]
+            }
+        }
+    }
+
+    /// The model's declared `timeseries.partition_column`.
+    pub fn partition_column(&self) -> String {
+        match self.route {
+            ComposedRoute::KeyEmbedded => self.source.clock_column.clone(),
+            ComposedRoute::KeyDetermined => "pdate".to_string(),
+            ComposedRoute::RecurrenceBounded => "last_seen".to_string(),
+        }
+    }
+
+    /// The declared `functional_dependencies:` entry (`key`, `determines`)
+    /// route 2 needs to admit — `None` for the other two routes.
+    pub fn functional_dependency(&self) -> Option<(Vec<String>, String)> {
+        match self.route {
+            ComposedRoute::KeyDetermined => Some((
+                vec![self.source.key_column.clone()],
+                self.partition_column(),
+            )),
+            _ => None,
+        }
+    }
+
+    /// The coverage-matrix cell id this recipe inhabits (mirrors
+    /// [`BodyConstruct::matrix_cell_ids`]'s convention).
+    pub fn matrix_cell_id(&self) -> String {
+        format!(
+            "composed_keyed_{}×append_only",
+            composed_route_name(self.route)
+        )
+    }
+}
+
+/// One window of a generated route-3 schedule: `run_date` is the single-day
+/// window being driven (always processed in ascending order — the
+/// windowed-keyed-maintenance driver's own contract), `rows` are the source
+/// rows inserted before that window runs. A storm-key row's own `d` need
+/// not equal `run_date` — that mismatch is exactly the "out-of-order
+/// redelivery" hazard this generator is scoped to cover (`incremental_models.md`
+/// §"Key temporal locality", route 3 "Row movement").
+#[derive(Debug, Clone)]
+pub struct ComposedRoute3Window {
+    pub run_date: chrono::NaiveDate,
+    pub rows: Vec<crate::schedule_gen::GenRow>,
+}
+
+/// A generated sequence of [`ComposedRoute3Window`]s.
+#[derive(Debug, Clone)]
+pub struct ComposedRoute3Schedule(pub Vec<ComposedRoute3Window>);
+
+/// Route-3 schedule generator: a fixed 3 disjoint one-day windows, run in
+/// ascending order (`run_date = base, base+1, base+2`); every window
+/// redelivers [`ROUTE3_STORM_KEY_ID`] with an event-time offset drawn
+/// independently per window from `{0, 1}` days off the fixed base date —
+/// decoupled from `run_date` (the driver's per-window delta is built
+/// directly from each window's own row list — `gate.rs`'s
+/// `composed_delta_values_sql` — never filtered off a physical table by
+/// `d`, so a window may legitimately redeliver an event-time value
+/// *earlier* than a prior window's own event-time: the "out-of-order
+/// redelivery, order-independent" adversarial case). The maximum pairwise
+/// spread between any two offsets (≤1) and the maximum run-date span
+/// (`run_date_max - offset_min` ≤ `2 - 0 = 2`) both stay strictly inside
+/// the declared `r = 3` days (`ROUTE3_RECURRENCE_WINDOW`), so every
+/// generated case stays **in-bound** by construction. Each window
+/// additionally contributes one fresh, never-repeated key — variety
+/// alongside the storm. Out-of-bound violation coverage is the dedicated
+/// hand-built probe in
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`, not
+/// this pool's job.
+pub fn arb_composed_route3_schedule() -> impl Strategy<Value = ComposedRoute3Schedule> {
+    const N_WINDOWS: usize = 3;
+    let base = chrono::NaiveDate::from_ymd_opt(2024, 3, 1).expect("valid base date");
+    proptest::collection::vec(0..=1_i64, N_WINDOWS).prop_map(move |storm_offsets| {
+        let mut windows = Vec::new();
+        for (i, offset) in storm_offsets.iter().enumerate() {
+            let run_date = base + chrono::Duration::days(i as i64);
+            let fresh_id = 5_000_i64 + i as i64;
+            let rows = vec![
+                crate::schedule_gen::GenRow {
+                    d: base + chrono::Duration::days(*offset),
+                    id: ROUTE3_STORM_KEY_ID,
+                    val: 10 + i as i64,
+                },
+                crate::schedule_gen::GenRow {
+                    d: run_date,
+                    id: fresh_id,
+                    val: 1 + i as i64,
+                },
+            ];
+            windows.push(ComposedRoute3Window { run_date, rows });
+        }
+        ComposedRoute3Schedule(windows)
+    })
+}
+
+// =============================================================================
+// `EnrichmentEdgeRecipe` (`docs/plans/20260715-composed-axes-conditional-
+// maintenance.md` Phase E4): a model-edge enrichment shape for the
+// delta-restricted-vs-widened-scan equivalence gate. Styled after the real
+// `examples/web_analytics` shape `crates/smelt-runtime/tests/
+// web_analytics_session_delta_restriction.rs` already exercises
+// (`silver.events_deduped` -> `silver.sessions`, event-grain enrichment):
+// column/table names match that fixture so the recipe's own P1 closure
+// verdict is derived through the SAME real production entry point
+// (`smelt_logical::maintenance::derive::append_model_edge_cells`), not a
+// hand-typed classification.
+// =============================================================================
+
+/// How the enrichment scope's own join is shaped — exactly one of the four
+/// is closure-admissible for a MODEL EDGE (unlike a source edge, a model
+/// edge's row-preservation conjunct never has a `referential_integrity`
+/// declaration to consult — `derive::model_edge_enrichment_closure` always
+/// passes `None` — so only [`EnrichmentJoinKind::LeftJoin`] proves P1
+/// `Closed`; both `InnerJoin` and `MembershipPredicate` are closure-failing
+/// siblings for two different conjuncts (row preservation, membership
+/// predicate)).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum EnrichmentJoinKind {
+    /// `LEFT JOIN`, payload-only, no membership predicate — all five
+    /// conjuncts prove; P1 is `Closed`.
+    LeftJoin,
+    /// Bare inner `JOIN` — row preservation (conjunct 4) cannot be proven
+    /// for a model edge (no `referential_integrity` world-fact applies);
+    /// `Open`.
+    InnerJoin,
+    /// `LEFT JOIN` plus a `WHERE` predicate testing an enrichment-side
+    /// column — membership predicate (conjunct 5) fails; `Open`.
+    MembershipPredicate,
+}
+
+/// A model-edge enrichment recipe: `silver.events_deduped` (driving,
+/// clocked) enriched by a `LEFT JOIN`/`JOIN` against `silver.sessions`
+/// (the joined model edge), varied only by [`EnrichmentJoinKind`] — the
+/// pool's generative surface for this phase is the SCHEDULE (which keys
+/// change and how), not the body shape, mirroring [`crate::dag`]'s own
+/// documented convention.
+#[derive(Debug, Clone, Copy)]
+pub struct EnrichmentEdgeRecipe {
+    pub join_kind: EnrichmentJoinKind,
+}
+
+impl EnrichmentEdgeRecipe {
+    pub fn new(join_kind: EnrichmentJoinKind) -> Self {
+        Self { join_kind }
+    }
+
+    /// Whether this shape is expected to prove P1 `Closed` — recorded on
+    /// the recipe itself (not re-derived by the gate) so the pool's
+    /// admission-rate floor can assert against a known expectation.
+    pub fn expects_closed(self) -> bool {
+        matches!(self.join_kind, EnrichmentJoinKind::LeftJoin)
+    }
+
+    /// The driving model edge's bare address — the `Trigger::NewData`
+    /// source name this recipe's creation cell keys off of.
+    pub fn driving_source(self) -> &'static str {
+        "silver.events_deduped"
+    }
+
+    /// The joined (enrichment) model edge's bare address.
+    pub fn joined_source(self) -> &'static str {
+        "silver.sessions"
+    }
+
+    /// The two model edges this recipe's scope reads, in the shape
+    /// `smelt_logical::maintenance::derive::append_model_edge_cells` expects.
+    pub fn model_edges(self) -> Vec<smelt_logical::maintenance::derive::ModelEdge> {
+        vec![
+            smelt_logical::maintenance::derive::ModelEdge {
+                name: self.driving_source().to_string(),
+                clock_col: Some("event_date".to_string()),
+                unique_key: vec!["event_id".to_string()],
+            },
+            smelt_logical::maintenance::derive::ModelEdge {
+                name: self.joined_source().to_string(),
+                clock_col: Some("event_date".to_string()),
+                unique_key: vec!["device_id".to_string()],
+            },
+        ]
+    }
+
+    /// The model's own `SELECT` body — column names match
+    /// `web_analytics_session_delta_restriction.rs`'s
+    /// `EVENTS_ENRICHED_SQL` fixture.
+    pub fn model_body(self) -> String {
+        let join = match self.join_kind {
+            EnrichmentJoinKind::LeftJoin | EnrichmentJoinKind::MembershipPredicate => "LEFT JOIN",
+            EnrichmentJoinKind::InnerJoin => "JOIN",
+        };
+        let where_clause = match self.join_kind {
+            EnrichmentJoinKind::MembershipPredicate => " WHERE s.session_utm_campaign IS NOT NULL",
+            _ => "",
+        };
+        format!(
+            "SELECT e.event_id, e.device_id, e.event_date, e.utm_campaign AS event_utm_campaign, \
+             s.session_id, s.utm_campaign AS session_utm_campaign \
+             FROM smelt.silver.events_deduped e {join} smelt.silver.sessions s \
+             ON e.device_id = s.device_id{where_clause}"
+        )
+    }
+}
+
+/// A generated schedule for `delta_restricted_equals_widened_scan_at_fixed_s`:
+/// [`EnrichmentEdgeRecipe`]'s pool is fixed-shape (three [`EnrichmentJoinKind`]
+/// variants); the generative surface is which of `total` fixed baseline keys
+/// this run's upstream delta touched (a non-empty, proper subset — at least
+/// one key changes, at least one stays untouched so the equivalence claim is
+/// non-vacuous).
+#[derive(Debug, Clone)]
+pub struct EnrichmentEdgeSchedule {
+    pub touched_indices: Vec<usize>,
+}
+
+pub fn arb_enrichment_edge_recipe() -> impl Strategy<Value = EnrichmentEdgeRecipe> {
+    prop_oneof![
+        Just(EnrichmentJoinKind::LeftJoin),
+        Just(EnrichmentJoinKind::InnerJoin),
+        Just(EnrichmentJoinKind::MembershipPredicate),
+    ]
+    .prop_map(EnrichmentEdgeRecipe::new)
+}
+
+pub fn arb_enrichment_edge_schedule(total: usize) -> impl Strategy<Value = EnrichmentEdgeSchedule> {
+    proptest::sample::subsequence((0..total).collect::<Vec<usize>>(), 1..total)
+        .prop_map(|touched_indices| EnrichmentEdgeSchedule { touched_indices })
 }
 
 #[cfg(test)]
@@ -997,7 +1402,7 @@ mod tests {
     /// generator discipline for order-monotone combiners — a sample of
     /// generated ordering-key vectors of every sampled length is always
     /// pairwise distinct, so the documented ties carve-out
-    /// (`keyed_models.md` §"Ordering ties") can never fire spuriously
+    /// (`incremental_models.md` §"Ordering ties") can never fire spuriously
     /// against generated data.
     #[test]
     fn ordering_keys_are_unique_by_construction() {

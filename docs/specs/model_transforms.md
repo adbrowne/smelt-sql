@@ -12,13 +12,13 @@ owners: [andrew]
 > maintenance (backfills, schema evolution, general execution). Each transform
 > names the property or world-fact that licenses it, the mechanism it emits, and
 > the invariant it preserves. It defines *mechanisms*, not *modes*: it does not
-> decide when a mode selects a transform (that composition is `maintenance_plan.md`),
+> decide when a mode selects a transform (that composition is `incremental_models.md`),
 > nor prove the properties that license one (`model_properties.md`), nor own the
 > **processed-input equivalence invariant** the transforms serve (defined once in
-> `maintenance_plan.md` §"The equivalence invariant" — referenced here, never
+> `incremental_models.md` §"The equivalence invariant" — referenced here, never
 > redefined). Out of scope, with their own homes: mode-only transforms that are
-> meaningless outside a single `refresh:` mode (`batched_models.md`,
-> `keyed_models.md`, `versioned_models.md`); the backend capability flags a transform's lowering
+> meaningless outside a single `refresh:` mode (the shape-profile
+> sections of `incremental_models.md`); the backend capability flags a transform's lowering
 > checks (`multi_backend.md`); the `refresh:` enum and the three-state declaration
 > law (`models.md`).
 >
@@ -46,6 +46,8 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Partition DELETE+INSERT | trace + partition alignment | delete the touched half-open partition range `[start, end)`, then insert the rebuilt rows | **built** |
 | Outer output-clamp | event-time projection (needs no proof) | wrap the model in a projection over its output schema (`SELECT * FROM (<model>) AS _smelt_output_clamp WHERE <col> …`), filtering rows to the write window on the projected `event_time` | **built** |
 | Generic column-scoped merge (targeted write) | bounded footprint + well-defined mutation-sensitivity group | `MERGE`/`UPDATE ... FROM` restricted to one mutation-sensitivity column-group's columns, keyed where the source is keyed; the dimension-driven horizon MERGE and the upstream-re-deriving half of field-backfill are named instances | **built** |
+| Change-suppressed MERGE (keyed `merge_into` / column-scoped merge variant) | region row identity + change comparability on every compared column | matched-arm gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the cell's comparable mutation-sensitive columns, so a row whose applied effect is the identity is never written; the unmatched side is dialect-keyed (`WHEN NOT MATCHED BY SOURCE` where the dialect has it, else a separate scoped `DELETE` in the same statement group) | **built** (column-scoped and keyed-fold) |
+| Staged-candidate conditional DELETE+INSERT (merge-less realisation) | region row identity + change comparability on every compared column | stage the candidate region once into a temp relation, derive changed/new/departed row sets by diff joins (keyed identity) or `EXCEPT ALL` both ways (whole-row identity), then `DELETE` the changed-or-departed rows and `INSERT` the changed-or-new rows in one transaction — the keyed-shaped conditional write for backends without `MERGE` | *partial* (keyed identity only) |
 | Two-layer widened-scan + exact output clamp | finite frame reach `k` | scan `[out_start − k − offset, out_end)`, clamp output to the derived output window `[out_start, out_end)`: read the margin, never re-write it | **built** |
 | Output-window derivation (partition-column skew inversion) | derived partition-column skew bound (Form B relation between the driving date column and a derived `partition_column`) | invert the declared relation to map the run window `[start, end)` to the output window `[start − after, end + before)`; identity (no skew) yields `output window = run window` | **built** |
 | UNION-branch wrap-and-filter | set-operation distribution + per-branch trace | inject the source filter independently into each `UNION`/`INTERSECT`/`EXCEPT` branch | unbuilt |
@@ -60,6 +62,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 | Reconciliation-ledger fold | additive column-group algebra | consult the `(output-region × column-group)` ledger entry before merging: refuse (never fold) a delta already in its processed set, otherwise combine and extend it; required by any non-idempotent (additive-fold) combiner, which must refuse a re-run of a ledgered window exactly, not best-effort | unbuilt |
 | Reconciliation-ledger recompute-reset | a region recompute | reset every ledger entry the recompute's footprint intersects to exactly the input the recompute read, so a later fold cannot double-count against stale bookkeeping | unbuilt |
 | Idempotent window re-scan vs delta-driven probe | idempotent monoid + source mutation profile | unconditional CDF-free re-scan when the fold is idempotent; a per-run changed-set probe when a change feed is available | *partial* |
+| Delta-restricted enrichment join | skeleton-source closure (`model_properties.md`) + an exact upstream delta on the driving-side model edge | restrict the enrichment recompute's driving scan to the delta's key set via a semi-join, replacing the widened scan for that cell; restricts recompute *breadth* under an exact delta, never what is scanned into `S` — composes with, but is licensed independently of, write suppression | *partial* (maintained-model edges only) |
 | Delegate-to-native-IVM | `supports_native_ivm` + engine gate | emit the backend's own maintained object; hard error if the engine rejects the query | *partial* |
 | DAG composition | litmus rule (`models.md`) | express a mode combination as two composed models at two grains, not a new mode | mechanism exists |
 | Full refresh | — (universal fallback) | drop and rebuild the whole output; the honest verdict for an unmaintainable declared mode | **built** |
@@ -68,7 +71,7 @@ stays in that mode's spec (see §Semantics → *Transforms that stay in a mode s
 ## Semantics
 
 Every transform preserves the **processed-input equivalence invariant**
-(`maintenance_plan.md`): the physical result equals what a full refresh over the
+(`incremental_models.md`): the physical result equals what a full refresh over the
 same processed inputs would produce. A transform that **cannot** preserve it for a
 given model is **refused with a diagnostic, never applied approximately** (see
 §Constraints). The load-bearing mechanics:
@@ -76,13 +79,14 @@ given model is **refused with a diagnostic, never applied approximately** (see
 **Keyed `merge_into` (target-as-replica).** The stored table *is* the keyed state
 (one row per key). A run computes the delta over new inputs and folds it into the
 target — matched keys update, unmatched insert — without re-reading history. Sound
-only on the monoid rungs of the ladder (`maintenance_plan.md`); an invertible
+only on the monoid rungs of the ladder (`incremental_models.md`); an invertible
 combiner is required to *un-see* a contribution under reprocessing (handled by
 retraction-via-delta-history, not by `merge_into` alone). The step loop that
 sequences `merge_into` across driving partitions (classify → step → per-partition
 pushdown → create-or-merge) is the *windowed-keyed-maintenance driver* — a mode-agnostic
 mechanism, so it is catalogued here in its own right. Its reference *implementation*
-lives today in `keyed_models.md`'s built seed (the direct-monoid classifier, the only
+lives today in the key-grain profile's built seed (`incremental_models.md`
+§"The key grain"; the direct-monoid classifier, the only
 keyed mode built so far) and generalises across `keyed`'s own column families as they
 land, with `versioned` a prospective future consumer of the same driver; the normative
 *description* of the driver mechanism is this catalogue entry, not the mode spec.
@@ -176,8 +180,50 @@ contribution plus a **derived** bounded horizon `H`, merging a dimension batch
 directly into the target slice `[conv_ts − H, conv_ts]` without re-reading the
 fact.
 
+**Change-suppressed MERGE and the staged-candidate conditional DELETE+INSERT** are *variants* of
+the write transforms above — a licensing property admits each variant into a cell's plan space,
+it never chooses between a variant and its unconditional sibling (§Design "A property licenses;
+it never chooses"). Both realise the same no-op write elimination
+(`incremental_models.md` §"Windowed maintenance and the horizon" category 2): a maintenance write
+is skipped exactly where the row's applied effect is proven, per row by evaluation, to be the
+identity. Two obligations license either variant, both discharged fail-closed:
+
+- **Region row identity** — the rows the compare joins stored state to candidate rows on: a
+  declared `unique_key`, else a proven grain key, else whole-row multiset identity (`EXCEPT ALL`
+  both ways) where no key is available. A cell whose identity cannot be established this way is
+  never conditionally written.
+- **Change comparability on every compared column** — each column in the predicate must be a pure
+  function of the processed inputs, so re-evaluating it at a fixed processed-input set reproduces
+  the same bits. A column that legitimately varies run to run (a declared `contract: plausible`,
+  or a run-pinned `NOW()`) is incomparable; a cell whose compared column-group contains even one
+  incomparable column refuses the conditional variant entirely and keeps the unconditional one —
+  comparing only the mutation-sensitive group is sound because the other groups are proven
+  insensitive to the trigger.
+
+Both variants carry the same **fixed-`S` bit-equality obligation**: at a fixed processed-input set
+`S`, the conditional variant and its unconditional sibling must produce identical stored state —
+this is what makes them *interchangeable* techniques for a cell (§"The plan matrix"
+"Interchangeability and choice") rather than a separate mode. Choosing between them is therefore a
+cost-model/`prefer`/`technique` matter, never a correctness one; the variant only changes *whether*
+an unchanged row is physically rewritten, never which bits a rewrite would produce.
+
+**Change-suppressed MERGE** is the matched-arm suppression: the existing `merge_into`/generic
+column-scoped merge emitter gains `AND (t.c1 IS DISTINCT FROM s.c1 OR …)` over the compared
+column group on its matched arm, so an unmatched-effect row is skipped rather than rewritten. The
+unmatched-by-source side (a row present in stored state but absent from the candidate set, for a
+region-scoped variant) is dialect-keyed: `WHEN NOT MATCHED BY SOURCE` where the dialect exposes
+it, else a separately emitted scoped `DELETE` inside the same statement group.
+
+**The staged-candidate conditional DELETE+INSERT** is the merge-less realisation of the same
+licence — the keyed-shaped conditional write for a backend that cannot run `MERGE` at all (a
+documented gap: Spark-over-Parquet). One transaction: stage the candidate region into a temp
+relation; derive the changed/new/departed row sets against stored state by diff joins (keyed
+identity) or `EXCEPT ALL` both ways (whole-row identity); `DELETE` the changed-or-departed rows;
+`INSERT` the changed-or-new rows. Byte-equivalent to today's region DELETE+INSERT at fixed `S`,
+with the write physically restricted to the rows whose effect is not the identity.
+
 **Definition-change field-backfill** is the pair of techniques a model gaining
-output fields backfills with (`maintenance_plan.md` §"The definition-change
+output fields backfills with (`incremental_models.md` §"The definition-change
 trigger"), chosen by what the added field reads: a payload field that is a
 *pure function of stored columns* backfills as an **in-place `UPDATE`** (no
 upstream read), admitted only under the additive-only model-diff proof; a
@@ -194,7 +240,7 @@ fold onto.
 
 **The reconciliation-ledger fold/recompute-reset pair** is the bookkeeping every
 additive column-group technique consults before it merges, per
-`maintenance_plan.md` §"The reconciliation ledger": each `(output-region ×
+`incremental_models.md` §"The reconciliation ledger": each `(output-region ×
 column-group)` ledger entry records the processed-input vector the region has
 already folded. **Fold** refuses (never merges) a delta already reflected in
 the entry's processed set, otherwise combines and extends it — the real
@@ -228,12 +274,13 @@ These are meaningful only *inside* one refresh mode and are **not** catalogued
 here; the mode spec owns them in full:
 
 - **Backfill chunking** (one-shot / auto-sized / per-partition) and **auto-coarsen
-  run window** — `batched_models.md`.
-- **Close-old / open-new interval maintenance** (SCD2) — `versioned_models.md`.
+  run window** — `incremental_models.md` §"First-run and backfill".
+- **Close-old / open-new interval maintenance** (SCD2) — `incremental_models.md`
+  §"Close-old / open-new interval maintenance (the combiner)".
 
 **Deferred, not catalogued as built or unbuilt: eviction / settled-key GC.** Retiring
 keyed state older than `current_window − H` is **not** licensed by any transform today —
-`keyed_models.md` §"No write-eligibility clamp" removed the write-eligibility clamp that
+`incremental_models.md` §"No write-eligibility clamp" removed the write-eligibility clamp that
 would have motivated it (`docs/research/20260705-keyed-collapse-application.md` D6). It
 is deliberately deferred rather than catalogued as a mode-local transform: if it is ever
 introduced it must ship together with late-fact accounting (a package, not a standalone
@@ -252,21 +299,21 @@ drift.
 lives here iff its mechanism is stateable without naming a mode. This is why
 pushdown, DELETE+INSERT and the clamps live here even though only `batched` drives
 them today, while backfill chunking — which has no meaning outside batched
-execution — stays in `batched_models.md`. Building a transform before a second
+execution — stays in `incremental_models.md`'s partition-grain profile. Building a transform before a second
 consumer exists is fine (they are broadly useful); the criterion governs *where the
 text lives*, never *when it is built*.
 
 **A property licenses; it never chooses.** Each row names exactly the property or
 world-fact that makes the transform sound. The transform is applied only when that
 licence holds and is otherwise refused — the machinery is a validator, never a
-chooser (`maintenance_plan.md` §"Validator, not chooser"). This keeps the mapping
+chooser (`incremental_models.md` §"Validator, not chooser"). This keeps the mapping
 property → transform auditable and forbids an approximate application when the
 licence is absent.
 
 **The ladder is the maintainable/delegated boundary.** `merge_into`,
 decomposed-state-plus-view, retraction, and the multiset are the mechanisms of
 rungs 1–4 of the algebraic ladder; delegate-to-native-IVM is what lies beyond it.
-The ladder itself (its ordering and cutoff) is owned by `maintenance_plan.md`;
+The ladder itself (its ordering and cutoff) is owned by `incremental_models.md`;
 this spec only realises each rung as a physical transform.
 
 **Rejected: auto-widening the write window to the scan margin.** An earlier
@@ -287,7 +334,7 @@ write.** Controlling per-query write size is a first-class production concern:
 a job with a multi-day skew or lookback is routinely run as several sequential
 bounded updates rather than one large one. The derived output window is a
 *range to be covered*, not a mandate for a single statement — backfill
-chunking (`batched_models.md` §"First-run and backfill") splits it into
+chunking (`incremental_models.md` §"First-run and backfill") splits it into
 sequential DELETE+INSERT pairs exactly as it splits a wide run window, each
 chunk's scan sized from that chunk's own reach. *Scheduling a separate re-run
 of the earlier calendar window* was rejected as the primitive: a calendar-window
@@ -299,7 +346,7 @@ the output window applies it exactly where it holds and nowhere else.
 
 - **Equivalence or refusal.** A transform is applied only when its licensing
   property is proven or declared. A transform that cannot preserve the
-  processed-input equivalence invariant (`maintenance_plan.md`) for a given model
+  processed-input equivalence invariant (`incremental_models.md`) for a given model
   is **refused with a diagnostic** — never applied approximately, and never with a
   silent fallback to a default.
 - **Write window = output window; scan window ⊇ output window.** Any widened-scan
@@ -366,7 +413,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   (`PartitionLocal::No`, `execute_column_scoped_merge_full`) already uses in
   production. A plan cell the derivation did not admit, a backend that does
   not advertise `Backend::supports_column_scoped_merge`, or an unproven
-  join contribution never reaches either executor. `maintenance_plan.md`
+  join contribution never reaches either executor. `incremental_models.md`
   §Known Divergences has the caller-side detail, including which corner is
   reachable from a real workspace fixture today.
 - ~~The output clamp is injected at the model's own SELECT level.~~ Resolved:
@@ -395,7 +442,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   `docs/plans/20260711-derived-output-window.md`.
 - **Ordered (convergent self-edge) execution skips output-window derivation.**
   A self-referential model proven to converge partition-by-partition
-  (`batched_models.md` §"Window independence and self-referential models")
+  (`incremental_models.md` §"Window independence and self-referential models")
   builds strictly sequential single-partition batches over the run window
   verbatim — its self-edge's own bounding relation (e.g. `bal.d >= t.d −
   INTERVAL '1 day'`) is the windowed-driver mechanism's convergence bound,
@@ -408,6 +455,47 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
   falls back to a plain table with a warning on backends without native support,
   rather than hard-erroring per §Constraints.
+- **Change-suppressed MERGE is built for the column-scoped and keyed-fold families; the region
+  DELETE+INSERT family stays unconditional.** The column-scoped `MERGE` emitter
+  (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) and the keyed-fold
+  `MERGE` emitter (`emit_keyed_fold_suppressed`) both gain a matched-arm `IS DISTINCT FROM`
+  predicate over the cell's comparable columns — the keyed-fold variant compares the stored
+  value against the fold's own combine expression, since a keyed fold's matched arm never copies
+  a delta column verbatim — admitted fail-closed by `maintenance::choice::resolve_write_suppression`
+  over the region row identity (P2) and per-column change comparability (P3) proofs. The region
+  DELETE+INSERT family still rewrites its whole window unconditionally.
+- **The staged-candidate conditional DELETE+INSERT is built for the keyed-identity realisation
+  only; the whole-row `EXCEPT ALL` realisation remains unbuilt.** `smelt_logical::maintenance::
+  emit::emit_staged_candidate_conditional` emits the merge-less keyed-shaped write — stage the
+  candidate region into a temp relation, `DELETE` the rows a declared/proven key identifies as
+  changed, `INSERT` the changed-or-new rows read back from the staged relation, `DROP` the temp
+  relation — as one transaction, so a mid-group failure leaves both the target and the temp-
+  relation namespace untouched. `maintenance::choice::resolve_keyed_write_mechanism` chooses
+  between the keyed `MERGE` and this mechanism from a backend-capability flag alone (never a
+  silent substitution on a `MERGE`-capable backend); a `write:` pin over this choice, the
+  whole-row (`EXCEPT ALL`-both-ways) realisation for a keyless region, and wiring this choice
+  into the live `refresh: keyed` per-partition execution loop (`smelt-runtime::cumulative`) all
+  remain open, tracked by `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Delta-restricted enrichment join is built for a maintained-model edge's own driving-source
+  recompute.** `maintenance::derive::append_model_edge_cells` derives the skeleton-source-closure
+  verdict (P1, `model_properties.md`) shared by every model edge of a downstream model;
+  `maintenance::choice::resolve_recompute_restriction` admits the restriction only when that
+  verdict is `Closed` *and* the driving edge's own recorded observed delta (T5) is present and
+  non-empty; `maintenance::emit::emit_delete_insert_delta_restricted` emits the semi-joined
+  `DELETE`+`INSERT`. The transform is per-cell: an absent closure proof, an `Open` verdict, or an
+  absent/empty upstream delta all fall back to the ordinary widened scan
+  (`maintenance::emit::emit_delete_insert`), byte-identical to the unrestricted statement — the
+  restriction never changes what is scanned into `S`, only which rows the enrichment recompute
+  re-derives. `smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction`
+  reads the recorded delta and dispatches between the two forms against a real backend, and the
+  runtime's own per-batch execution loop (`crates/smelt-runtime/src/execute.rs`) now calls it for
+  every model-edge-sourced, `DeleteInsert`-strategy creation cell over an already-materialized
+  target on a DuckDB run — the same dispatch decision (`resolve_live_delta_restriction_facts` +
+  `build_delete_insert_group_dispatched`) also backs the `--dry-run`/`smelt explain` reporting
+  branch, so the reported statement can never structurally diverge from what a live run with the
+  same inputs executes. Extending the licence to an external `mutable_snapshot` source's own
+  synthesized delta (the fingerprint sidecar, M3) remains unbuilt. Tracked by `docs/plans/
+  20260715-composed-axes-conditional-maintenance.md`.
 - **Unbuilt:** UNION-branch wrap-and-filter, retraction via delta history,
   bounded-domain multiset, compile-time pinning; the reconciliation-ledger
   fold/recompute-reset pair (no `(output-region × column-group)` ledger
@@ -416,7 +504,7 @@ by `docs/plans/20260704-model-updates.md` (design:
   field-backfill and its `MaintenanceSkeletonColumnAdded` refusal. Generic
   column-scoped merge has a standalone, admission-gated entry point today
   (`maintenance_driver::resolve_cell_technique`/`decide_column_merge_dispatch`
-  + `maintenance_driver::execute_column_scoped_merge`, `maintenance_plan.md`
+  + `maintenance_driver::execute_column_scoped_merge`, `incremental_models.md`
   §Known Divergences), but only one producer of the `dimension_batch_sql`
   it executes — the dimension-driven horizon MERGE's clamped `SELECT`; a
   second named instance (e.g. the keyed column-scoped-`MERGE` half of
@@ -439,14 +527,14 @@ by `docs/plans/20260704-model-updates.md` (design:
   bound-derivation orchestration entry point (`derive_and_classify_bounds`), so a
   transform reads the derived bound from exactly one code path.
 - **Horizon settled-delay / tail-rewrite is now catalogued (unbuilt).** Because the
-  derived horizon is a core part of the maintenance contract (`maintenance_plan.md`
+  derived horizon is a core part of the maintenance contract (`incremental_models.md`
   §"Windowed maintenance and the horizon"), the forward-reach settle/tail-rewrite
   mechanism is catalogued above rather than deferred; only its implementation is
   outstanding, tracked by the same plan.
 - The **windowed-keyed-maintenance driver** is a standalone mechanism (mode-agnostic
   classify → step over driving partitions in temporal order → per-partition pushdown →
   create-or-merge loop, fail-closed on a non-monoid combiner) with the built `cumulative`
-  seed (now `keyed_models.md`) as its first named consumer. `versioned` composes the
+  seed (now `incremental_models.md`'s key grain) as its first named consumer. `versioned` composes the
   same driver as it lands; the mechanism's normative home is this spec, not the mode
   that first implements it.
 
@@ -455,5 +543,6 @@ by `docs/plans/20260704-model-updates.md` (design:
 - **Code**: `crates/smelt-backend/src/lib.rs` (`merge_into`, `delete_partitions`, `insert_into_from_query`, `insert_overwrite`, `create_materialized_view_as` trait methods); impls in `crates/smelt-backend-duckdb`, `crates/smelt-backend-spark`; `crates/smelt-runtime/src/transformer.rs` (`inject_source_filters`, `inject_time_filter`, `is_transparent_single_source`); `crates/smelt-runtime/src/compile.rs`.
 - **Tests**: the batched per-partition full-refresh-equivalence harness; the cumulative end-state-equivalence harness; the pushdown/clamp unit tests in `smelt-runtime/src/transformer.rs`; the generative soundness oracle.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
-- **Plans (history)**: `docs/plans/20260704-model-updates.md`.
-- **Related specs**: `maintenance_plan.md`, `model_properties.md`, `models.md`, `batched_models.md`, `keyed_models.md`, `versioned_models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.
+- **Plans (history)**: `docs/plans/20260704-model-updates.md`,
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **Related specs**: `incremental_models.md`, `model_properties.md`, `models.md`, `materialized_view.md`, `multi_backend.md`, `timeseries.md`, `sources.md`, `schema_evolution.md`.

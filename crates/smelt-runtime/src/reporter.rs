@@ -75,7 +75,7 @@ pub trait RunReporter: Send + Sync {
 
     /// The maintenance statements a batch/chunk is about to execute (or, under
     /// `--dry-run`, would execute), as produced by the single-owner emitters in
-    /// `smelt_logical::maintenance::emit` (`docs/specs/maintenance_plan.md`
+    /// `smelt_logical::maintenance::emit` (`docs/specs/incremental_models.md`
     /// §"Statement emission (single owner)"). Called after `model_compiled` and
     /// before the batch's backend call (a real run) or in place of it (a
     /// dry-run), for every maintained (non-`full`) technique this runtime lowers

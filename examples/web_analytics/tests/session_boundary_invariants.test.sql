@@ -3,7 +3,7 @@
 -- §"silver.sessions — clock-anchored cut"). Exercises the real
 -- silver/sessions model (which sessionizes via the smelt.functions.sessionize
 -- transparent function): the assertion query selects from smelt.silver.sessions
--- and PASSING mocks its single external dep (silver.events_parsed). The model
+-- and PASSING mocks its single external dep (silver.events_deduped). The model
 -- runs as written against the mocked events.
 --
 -- Six cases:
@@ -27,7 +27,7 @@ smelt.test test_session_boundary_invariants AS (
     SELECT device_id, session_start, event_count, platform
     FROM smelt.silver.sessions
 )
-PASSING silver.events_parsed AS (
+PASSING silver.events_deduped AS (
     -- device 1: gap boundary (35 minutes) → 2 sessions
     {device_id: 1, event_ts: '2026-04-01 10:00:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
     {device_id: 1, event_ts: '2026-04-01 10:35:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},

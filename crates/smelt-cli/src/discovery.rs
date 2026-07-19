@@ -61,6 +61,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
         } else {
             None
         },
+        unique_key: None,
         batched: emitted.incremental_config.clone(),
         target: None,
         tags: emitted.tags.clone(),

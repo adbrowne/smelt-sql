@@ -107,6 +107,23 @@ mutation_profile:
 
 The structured form additionally accepts sub-facts scoped to a particular `kind:` — `lateness` and `redelivery` for `append_only`, `retractions`, `ordered`, and `delta_identity` for `change_feed`, and `key_recurrence` under any `kind`. See [`mutation_profile` in incremental models](incremental-models.md#enrichment-joins-and-dimension-updates) for an example that uses the structured form to admit a column-scoped `MERGE` cell.
 
+## Declaring referential integrity
+
+A dimension source read through an ordinary (inner) `JOIN` — rather than a `LEFT JOIN` — only produces one output row per driving-side row if every foreign key the join reads is guaranteed to exist in the dimension. `referential_integrity:` states that guarantee explicitly:
+
+```yaml
+# models/sources/raw/users.yml
+description: Raw user data
+mutation_profile:
+  kind: mutable_snapshot
+unique_key: [user_id]
+referential_integrity: [user_id]
+```
+
+`referential_integrity:` names the column(s) a consuming model's equi-join reads that are guaranteed present — every value a fact table joins on this dimension by is guaranteed to have a matching row here. When declared (as a subset of `unique_key:`, which must also be declared), a model that enriches through a bare inner join on that column no longer needs to be rewritten as a `LEFT JOIN` to prove it preserves every driving row.
+
+This is a narrowing declaration, not a hint: every consuming run re-checks it over the region it touched (the row count out of the join must equal the row count into it), and a violation — a fact row whose key has no match in the dimension, disproving the declaration — fails the run loudly rather than silently trusting stale metadata. Declare it only when you can back the guarantee (e.g. the dimension is populated ahead of the fact table, or a foreign-key constraint enforces it upstream).
+
 ## Loading source data
 
 smelt does not load source data. You are responsible for ensuring the source tables exist in your target database before running models that depend on them.

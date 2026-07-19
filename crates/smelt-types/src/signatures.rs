@@ -2756,6 +2756,34 @@ pub struct Signature {
     /// and [`BuiltinRegistry::canonical_name`] check this table (via the
     /// derived alias index) after a direct canonical-name match fails.
     pub aliases: &'static [&'static str],
+    /// Nullability-propagation policy for this signature's result, layered
+    /// on top of the generic "always nullable" default a registry-resolved
+    /// call otherwise gets. See [`NullabilityPropagation`].
+    pub nullability: NullabilityPropagation,
+}
+
+/// Nullability-propagation policy for a registry-resolved call's result,
+/// consulted by the type-inference layer (`smelt-db`'s
+/// `registry_result_nullable`) alongside the generic per-function default.
+///
+/// Registry data, not a hand-matched special case — per the function-registry
+/// single-ownership rule (architecture.md §Constraints #14), a function's
+/// nullability behaviour is declared once here rather than duplicated as a
+/// name-matched arm in `smelt-db`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum NullabilityPropagation {
+    /// No propagation tag — the result is nullable regardless of argument
+    /// nullability or query shape. The default for every signature that
+    /// doesn't opt into a more precise rule.
+    #[default]
+    None,
+    /// Extremal-aggregate rule (`MIN`/`MAX`): a NOT NULL argument produces a
+    /// NOT NULL result, but **only** under a `GROUP BY` — every group is
+    /// guaranteed at least one row, so the fold can't collapse to NULL. An
+    /// aggregate over possibly-empty ungrouped input stays nullable; that's
+    /// a soundness boundary (an empty `SELECT MIN(x) FROM t` yields one NULL
+    /// row), not a limitation the tag can lift.
+    GroupedExtremal,
 }
 
 impl Signature {
@@ -2818,6 +2846,7 @@ impl Signature {
             engine_native: HashMap::new(),
             kind: ExprKind::Scalar,
             aliases: &[],
+            nullability: NullabilityPropagation::None,
         })
     }
 
@@ -2858,6 +2887,16 @@ impl Signature {
     pub fn with_engine_native(mut self, engine: &str, dt: DataType) -> Self {
         self.engine_native
             .insert(engine.trim().to_ascii_lowercase(), dt);
+        self
+    }
+
+    /// Attach a [`NullabilityPropagation`] tag to this signature.
+    ///
+    /// Builder-style — used by the registry seed to opt a function into a
+    /// precise nullability rule (e.g. `MIN`/`MAX`'s grouped-extremal rule)
+    /// instead of the generic "always nullable" default.
+    pub fn with_nullability(mut self, rule: NullabilityPropagation) -> Self {
+        self.nullability = rule;
         self
     }
 
@@ -3809,7 +3848,8 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T")],
             TypeExpr::Var("T".into()),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_nullability(NullabilityPropagation::GroupedExtremal),
     );
     insert(
         Signature::new(
@@ -3818,7 +3858,8 @@ static REGISTRY: LazyLock<HashMap<String, Signature>> = LazyLock::new(|| {
             vec![var("T")],
             TypeExpr::Var("T".into()),
         )
-        .with_kind(ExprKind::Agg),
+        .with_kind(ExprKind::Agg)
+        .with_nullability(NullabilityPropagation::GroupedExtremal),
     );
     insert(
         Signature::new(

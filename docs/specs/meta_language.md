@@ -619,7 +619,7 @@ Field rules:
 
 - `name` is a meta-`Text` whose value becomes the emitted model's final path segment. The value must be a non-empty `Text` containing only path-safe characters (ASCII alphanumerics and underscore; no dots, slashes, or whitespace); an invalid value emits `ModelDefInvalidName` at the field's value expression.
 - `body` is a `TableExpr`-typed expression — typically a `SELECT … FROM …` SQL statement, optionally referencing meta-language values via the standard meta/Data-World splice rules. `ModelDef.body` is the single carve-out admitting `TableExpr` in a record field; user-defined `smelt.record` declarations remain forbidden from declaring `TableExpr` fields.
-- `materialization` is one of the closed set `{'view', 'table', 'incremental'}` per `batched_models.md`'s materialization vocabulary; any other value emits `ModelDefInvalidMaterialization`.
+- `materialization` is one of the closed set `{'view', 'table', 'incremental'}` per `incremental_models.md`'s materialization vocabulary; any other value emits `ModelDefInvalidMaterialization`.
 - `tags` is a `List<Text>`; each entry is a string-valued tag attached to the emitted model. Tags merge with any workspace-level `smelt.yml` `models.<emitted_name>.tags` overlays per the existing `Config::get_tags` rule.
 - `description` is a `Text`; consumed by `data_catalog.md` and other documentation surfaces.
 
@@ -1348,7 +1348,7 @@ Adding more fields (a `materialization`, a `backends:` list, a `description`) re
   - `docs/specs/architecture.md` — `smelt.<path>` resolution, project layout — multi-model production amends the "1 file = 1+ models" invariant
   - `docs/specs/gradual_typing.md` — `Unknown` widening — `List<Unknown>` rules
   - `docs/specs/meta_config_loading.md` — file-loader family for `smelt.config.load_yaml` etc.
-  - `docs/specs/model_selection.md`, `batched_models.md`, `python_models.md`, `data_catalog.md`, `schema_evolution.md`, `cli.md`, `datagen.md` — multi-model production cross-feature touches
+  - `docs/specs/model_selection.md`, `incremental_models.md`, `python_models.md`, `data_catalog.md`, `schema_evolution.md`, `cli.md`, `datagen.md` — multi-model production cross-feature touches
   - `docs/specs/lsp.md` — LSP support obligations
 - **Research**:
   - `docs/research/20260507-typed-meta-programming.md` — design oracle: framing, alternatives at every choice point, sequencing, worked examples, open questions

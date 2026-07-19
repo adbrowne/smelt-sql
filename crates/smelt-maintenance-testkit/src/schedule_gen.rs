@@ -73,7 +73,7 @@ pub enum ConformanceStep {
     /// Re-deliver an ALREADY-PROCESSED window with no new rows (Phase 6):
     /// the partition-grain DELETE+INSERT full-replace technique must stay
     /// idempotent under redelivery — never double-count
-    /// (`maintenance_plan.md` §"The reconciliation ledger": "never fold a
+    /// (`incremental_models.md` §"The reconciliation ledger": "never fold a
     /// delta already reflected in the state").
     RerunWindow { start: NaiveDate, end: NaiveDate },
     /// Run with no time window at all — `execute_project`'s unwindowed
@@ -103,7 +103,7 @@ pub enum ConformanceStep {
     /// later step names always reflects the rewritten body. This is
     /// deliberately NOT the spec's `SkeletonAdd`/`PureBackfill`/
     /// `UpstreamRederive` definition-change classification
-    /// (`maintenance_plan.md` §"The definition-change trigger") — that
+    /// (`incremental_models.md` §"The definition-change trigger") — that
     /// classification is unbuilt (no `derive_model_maintenance_plan` caller
     /// reads a prior definition to classify an added column against it).
     RewriteModel { edit: ModelEdit },
@@ -111,7 +111,7 @@ pub enum ConformanceStep {
 
 /// Whether every window in `schedule` is mutually independent under
 /// reordering (Phase 6; design §5 "window order permutations" — the
-/// order/set-determinacy corollary, `maintenance_plan.md` §"The equivalence
+/// order/set-determinacy corollary, `incremental_models.md` §"The equivalence
 /// invariant": "the right-hand side depends only on the SET S, never the
 /// order it was processed"). A schedule containing an [`ConformanceStep::AppendLateRow`]
 /// step is NOT eligible: a late row's catch-up rerun has a genuine ordering

@@ -16,7 +16,7 @@ smelt-core = { path = "../smelt-core" }
 
 # Maintenance-statement data model (`MaintenanceStatement`/`StatementGroup`) —
 # the single-owner emitters live in smelt-logical; smelt-backend only needs
-# the plain-data type the emitters produce (`docs/specs/maintenance_plan.md`
+# the plain-data type the emitters produce (`docs/specs/incremental_models.md`
 # §"Statement emission (single owner)").
 smelt-logical = { path = "../smelt-logical" }
 

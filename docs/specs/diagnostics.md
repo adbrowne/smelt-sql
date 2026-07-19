@@ -1,7 +1,7 @@
 ---
 feature: diagnostics
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-17
 owners: [andrew]
 ---
 
@@ -89,6 +89,7 @@ Owned by `docs/specs/sources.md`.
 |------|----------|---------|
 | `SourceTypeError` | Error | A source YAML declares a type that smelt does not recognise. |
 | `MalformedSource` | Error | A source YAML block violates a structural rule. |
+| `SourceCountPreservationViolated` | Error (fails the consuming run, transactionally) | A declared `referential_integrity` was disproved: an enrichment join licensed by it returned fewer rows than the driving side over the touched region. |
 
 ---
 
@@ -112,14 +113,15 @@ Owned by `docs/specs/timeseries.md`.
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
 | `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
 | `MalformedBoundedDomain` | Error | A `bounded_domain:` declaration is structurally invalid: a non-positive `max_cardinality` (an absent cap is already a YAML parse error, since the field is required), an empty `column`, or a `column` absent from the model's SQL body. |
-| `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` without a sibling `grain:` declaration. |
+| `GrainRequiredForIncremental` | Error | A model declares `refresh: incremental` but declares neither shape-defining fact (`timeseries:` nor `unique_key:`) and writes no `grain:` assertion to fall back on. |
 | `GrainRequiresIncremental` | Error | A model declares `grain:` without `refresh: incremental`. |
+| `GrainAssertionMismatch` | Error | A written `grain:` check-only assertion disagrees with the label derived from the declared shape-defining facts (`timeseries:` / `unique_key:`). |
 
 ---
 
 ### Batched
 
-Owned by `docs/specs/batched_models.md`.
+Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
@@ -130,17 +132,17 @@ Owned by `docs/specs/batched_models.md`.
 
 ### Keyed refresh mode
 
-Owned by `docs/specs/keyed_models.md`. This family replaces the retired `Cumulative*` and
+Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
 unchanged; `CumulativeNoDrivingSource` and `AccumulatingSnapshotUnboundedHorizon` are
 **retired outright, not renamed** (an unclocked model is a legitimate snapshot-reconcile
 posture under `keyed`, not an error, and there is no write-eligibility horizon to bound —
-`keyed_models.md` §Known Divergences).
+`incremental_models.md` §Known Divergences "The key grain").
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
-| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`keyed_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
+| `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
 | `KeyedForbidsBatched` | Error | A `grain: key` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
@@ -153,7 +155,7 @@ posture under `keyed`, not an error, and there is no write-eligibility horizon t
 | `KeyedSnapshotSourceUnsupportedColumn` | Error | A column family inadmissible under snapshot-reconcile (the admission matrix) appears in a model with no clocked driving source. Names the column, the family, and why the current-snapshot oracle cannot hold for it. |
 | `KeyedReprocessedWindow` | Error | A run window covers a ledgered window of a non-re-run-tolerant model, or `--auto` detects changed input under an already-merged window. Points at `--full-refresh`. |
 | `KeyedRecurrenceBoundViolated` | Error | Runtime, window-forward, declared-recurrence route only: a merged delta row matched (or would duplicate) a stored key outside the run's derived slice — the driving source's declared `key_recurrence` is violated. The run's transaction rolls back; reports the violation count and sample keys. Derived locality routes cannot fire it. |
-| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`keyed_models.md` §Known Divergences). Retired once snapshot-reconcile ships. |
+| `KeyedSnapshotPostureUnsupported` | Error | Interim, not owned by the permanent table above: a `grain: key` model has no clocked driving source (zero timeseries-tagged sources in FROM) and the snapshot-reconcile executor is unbuilt — a fail-loud "not yet" refusal, not a model error (`incremental_models.md` §Known Divergences "The key grain"). Retired once snapshot-reconcile ships. |
 
 ---
 
@@ -451,7 +453,7 @@ Owned by `docs/specs/virtual_environments.md`.
 
 ### Maintenance plan
 
-Owned by `docs/specs/maintenance_plan.md`.
+Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
@@ -462,12 +464,17 @@ Owned by `docs/specs/maintenance_plan.md`.
 | `MaintenanceSkeletonColumnAdded` | Error | A field was added in a skeleton position (a grain change); refused as a column backfill. |
 | `MaintenanceGraphUnsupportedNode` | Error | A keyed-grain or self-referential node in the propagation graph; refused fail-loud rather than silently under-running. |
 | `MaintenanceGranularityMismatch` | Error | A declared `timeseries.granularity` narrows past what the model's own `partition_column` projection actually derives (a `date_trunc`-style grouping check) — a safe widen (declared coarser than or equal to the derived unit) is never flagged. |
+| `MaintenanceWriteAddressingRefused` | Error | A `maintenance.cells[].write` pin names a physical addressing that cannot uphold the cell's equivalence invariant (e.g. keyed on an output with no identity, or a region write on a cell whose footprint escapes any partition set); names the cell and the refused pattern. |
+| `MaintenanceWritePatternUnavailable` | Error | A `write:` pin names an unrecognised write pattern, or one the target backend's write-pattern capability registry does not provide; names the pattern and the backend, never a silent downgrade. |
+| `MaintenanceUnsupportedGrain` | Error | A `refresh: incremental` model declares a `grain:` maintenance-plan derivation does not yet support (currently `key_per_partition`); names the grain and the plan tracking the missing support. |
 
 ---
 
 ## Known divergences
 
-- **Four of the seven `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, and `MaintenanceGranularityMismatch` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`) and the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **Four of the ten plan/graph `Maintenance*` codes are specified and unimplemented.** `MaintenanceNoAdmissibleTechnique`, `MaintenanceScanUnbounded`, `MaintenanceGranularityMismatch`, `MaintenanceWriteAddressingRefused`, and `MaintenanceWritePatternUnavailable` have `DiagnosticCode` variants, folded into `file_diagnostics()` by the thin `maintenance_plan` Salsa query (`crates/smelt-db/src/queries/maintenance.rs`), which assembles inputs and calls the pure `derive_maintenance_plan` (`crates/smelt-logical/src/maintenance/derive.rs`), the pure `check_declared_granularity` leaf classifier (`crates/smelt-logical/src/maintenance/granularity.rs`), and the open write-pattern registry's `resolve_write_pin` (`crates/smelt-logical/src/maintenance/mod.rs`). `MaintenanceReachNotDerivable`, `MaintenanceUnboundedFootprint`, `MaintenanceSkeletonColumnAdded`, and `MaintenanceGraphUnsupportedNode` have no `DiagnosticCode` variant yet — their derivation paths (the definition-change trigger, footprint-bounded targeted writes, the graph layer) are not yet wired into the Salsa query. The coverage gate (`crates/smelt-db/tests/integration/diagnostics_catalogue.rs`) only asserts enum → catalogue coverage, so a catalogue row may precede its variant; these four rows exist ahead of the variants they document. Landing: `docs/plans/20260707-maintenance-plan-impl.md`.
+- **`SourceCountPreservationViolated` is specified and unimplemented.** No `DiagnosticCode` variant exists yet; it depends on the unbuilt `referential_integrity` declaration parse and the unbuilt skeleton-source-closure proof (`sources.md`, `model_properties.md`). Landing: `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **The write-addressing pin's equivalence-invariant factor is structural-facts-only.** `resolve_write_pin` implements the available-addressings rule's declared-facts, trigger, and backend-capability factors; the third factor (a per-cell equivalence proof beyond a pattern's declared required facts) is a caller-supplied hook that always accepts today (`incremental_models.md` §Known Divergences). Deepening it — e.g. threading P3 column-comparability into a `column`/`keyed_conditional` pin's own check — is later work.
 
 ## Open questions
 

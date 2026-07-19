@@ -1,5 +1,5 @@
 //! MP7 (`docs/plans/20260707-maintenance-plan-impl.md`): `smelt explain
-//! <model>` — the maintenance-plan report (`maintenance_plan.md` §Surface
+//! <model>` — the maintenance-plan report (`incremental_models.md` §Surface
 //! "CLI"). Covers the pure report-string builder directly (fast) plus one
 //! full CLI-argument-parsing path (spawns the real `smelt` binary) so the
 //! wiring itself is exercised.
@@ -68,9 +68,29 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
     let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
     let upstream = graph.get_upstream(&canonical);
 
-    Some(build_maintenance_plan_report(
-        &canonical, &result, &upstream,
-    ))
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let (own_contract, edges) =
+        smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+
+    let maintenance_cfg = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.maintenance.as_ref());
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
+        maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
+    let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+
+    Some(
+        build_maintenance_plan_report(
+            &canonical,
+            &result,
+            &own_contract,
+            &edges,
+            cells_cfg,
+            defaults_cfg,
+        )
+        .expect("build_maintenance_plan_report"),
+    )
 }
 
 /// `daily_events` in `examples/timeseries` is `refresh: incremental` +

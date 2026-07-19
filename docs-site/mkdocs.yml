@@ -108,6 +108,7 @@ nav:
       - Overview: examples/web-analytics/index.md
       - A First Incremental Model: examples/web-analytics/first-model.md
       - Duplicates & Late Data: examples/web-analytics/late-data.md
+      - Deduplication Without the Workaround: examples/web-analytics/deduplication.md
       - Sessions & Cross-Midnight Backfills: examples/web-analytics/sessions.md
       - "Deep Dive: The Ordered Sessionizer": examples/web-analytics/ordered-sessions.md
       - Backfills, New Columns, Late Updates: examples/web-analytics/changing-things.md

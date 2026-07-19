@@ -146,9 +146,9 @@ fn cumulative_group_by_all_derives_same_unique_key_no_spurious_combiner() {
         FROM smelt.silver.events_parsed WHERE user_id IS NOT NULL \
         GROUP BY ALL";
 
-    let explicit = classify_cumulative(explicit_sql, &refs, &events_source_map())
+    let explicit = classify_cumulative(explicit_sql, &refs, &events_source_map(), false)
         .expect("explicit GROUP BY twin must classify");
-    let all = classify_cumulative(all_sql, &refs, &events_source_map())
+    let all = classify_cumulative(all_sql, &refs, &events_source_map(), false)
         .expect("GROUP BY ALL twin must classify identically — no phantom ALL key");
 
     assert_eq!(
@@ -176,7 +176,7 @@ fn cumulative_group_by_all_no_spurious_unknown_combiner() {
     let sql = "SELECT device_id, user_id, COUNT(*) AS event_count \
         FROM smelt.silver.events_parsed WHERE user_id IS NOT NULL \
         GROUP BY ALL";
-    match classify_cumulative(sql, &refs, &events_source_map()) {
+    match classify_cumulative(sql, &refs, &events_source_map(), false) {
         Ok(_) => {}
         Err(diags) => {
             assert!(

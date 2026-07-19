@@ -132,7 +132,7 @@ pub struct ColumnMetadata {
     /// admits non-determinism in a payload column; barred from every
     /// skeleton position, with cross-model fail-loud propagation. See
     /// `docs/specs/models.md` §"`columns:` — column metadata" and
-    /// `docs/specs/maintenance_plan.md` §Surface "The plan (derived,
+    /// `docs/specs/incremental_models.md` §Surface "The plan (derived,
     /// reported)" (the guarantee ledger's equivalence-contract axis).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub contract: Option<Contract>,
@@ -269,17 +269,34 @@ pub struct ModelMetadata {
     /// `grain: key` (the former `refresh: keyed`).
     ///
     /// See `docs/specs/models.md` §"Refresh axis" and
-    /// `docs/specs/keyed_models.md` §Surface.
+    /// `docs/specs/incremental_models.md` §Surface.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub refresh: Option<RefreshStrategy>,
 
-    /// Declared grain (`partition` | `key` | `key_per_partition`) — the
-    /// output shape and row identity for a `refresh: incremental` model.
-    /// Required whenever `refresh: incremental` is set; rejected (hard
-    /// error, see [`validate_timeseries`]) otherwise. See
-    /// `docs/specs/models.md` §"Refresh axis".
+    /// Declared grain (`partition` | `key` | `key_per_partition`) — an
+    /// optional **check-only assertion** over the derived output shape
+    /// (`docs/specs/models.md` §"Refresh axis"). When written it is checked
+    /// against the label derived from the two shape-defining facts
+    /// (`timeseries:` / `unique_key:`) and errors on mismatch
+    /// (`MetadataError::GrainAssertionMismatch`, see [`validate_timeseries`]);
+    /// it never drives the plan. See [`ModelMetadata::resolved_grain`] for
+    /// the declared-or-derived value downstream consumers should read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub grain: Option<crate::config::Grain>,
+
+    /// The identity fact — top-level `unique_key:` (`docs/specs/models.md`
+    /// §"Refresh axis", §"The Relation Contract"). A single string is sugar
+    /// for a one-element list. Together with `timeseries:` (the clock),
+    /// this is the declared surface that determines `grain` — `grain:`
+    /// itself is only a check-only assertion (see [`ModelMetadata::grain`]).
+    /// Distinct from the `batched:` sub-block's `unique_key` (a
+    /// partition-grain dedup aid, never key-addressing).
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "crate::sources::opt_string_or_vec"
+    )]
+    pub unique_key: Option<Vec<String>>,
 
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
@@ -303,7 +320,7 @@ pub struct ModelMetadata {
     /// contribution); this declaration never relaxes or narrows the derived
     /// clamp. It only licenses a compile-time warning when the derived
     /// horizon would exceed the declared ceiling. See
-    /// `docs/specs/maintenance_plan.md` §"Windowed maintenance and the
+    /// `docs/specs/incremental_models.md` §"Windowed maintenance and the
     /// horizon". Reuses `crate::config::DataLatency`'s existing fail-loud
     /// interval parser — no new interval grammar.
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -311,7 +328,7 @@ pub struct ModelMetadata {
 
     /// Per-cell technique preferences/pins and the scan-locality guardrail
     /// (`defaults.prefer`, `cells[]`, `scan_bounds`). See
-    /// `docs/specs/maintenance_plan.md` §Surface "Frontmatter".
+    /// `docs/specs/incremental_models.md` §Surface "Frontmatter".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub maintenance: Option<crate::config::MaintenanceConfig>,
 }
@@ -345,6 +362,30 @@ impl ModelMetadata {
     /// Every materialized-view detection site must route through this predicate.
     pub fn is_materialized_view(&self) -> bool {
         self.refresh == Some(RefreshStrategy::MaterializedView)
+    }
+
+    /// The effective grain: the declared `grain:` check-only assertion when
+    /// present (already validated against the derived facts by
+    /// [`validate_timeseries`]), otherwise the label derived from the two
+    /// shape-defining facts (`timeseries:` presence, `unique_key:` presence
+    /// and membership) — `docs/specs/models.md` §"Refresh axis".
+    ///
+    /// `None` when neither fact is present and no `grain:` is written — the
+    /// "no shape-defining fact declared" case `validate_timeseries` refuses
+    /// for `refresh: incremental` models. Downstream consumers of the
+    /// derived label (e.g. `smelt-db::queries::maintenance`) should read
+    /// this instead of the raw `grain` field.
+    pub fn resolved_grain(&self) -> Option<crate::config::Grain> {
+        if let Some(g) = self.grain {
+            return Some(g);
+        }
+        crate::config::derive_grain(
+            self.timeseries.is_some(),
+            self.unique_key.as_deref(),
+            self.timeseries
+                .as_ref()
+                .map(|t| t.partition_column.as_str()),
+        )
     }
 }
 
@@ -443,17 +484,24 @@ pub enum MetadataError {
     #[error("MalformedTimeseries: {message}")]
     MalformedTimeseries { message: String },
 
-    /// A model declares `refresh: keyed` and a `timeseries:` block without
-    /// key temporal locality being established. Keyed outputs are not
-    /// themselves timeseries by default — the rule reads the partition
-    /// shape from the driving source instead (see
-    /// `docs/specs/keyed_models.md` §"Output shape").
-    #[error("KeyedForbidsTimeseries: keyed models must not declare a `timeseries:` block — the keyed output has no partition column; the rule reads the partition shape from the driving source")]
+    /// A model declares `refresh: incremental` + `grain: key` and a
+    /// `timeseries:` block, and key temporal locality cannot be
+    /// established for it. Not raised by [`validate_timeseries`] — the
+    /// admissibility decision needs derived facts (`unique_key`, partition
+    /// provenance) this pure frontmatter validator doesn't have, so it is
+    /// made by the locality gate in plan derivation
+    /// (`smelt_logical::maintenance::locality::establish_locality`) and
+    /// surfaced from there instead (see
+    /// `docs/specs/incremental_models.md` §"Key temporal locality (the
+    /// time-partitioned output)"). The variant is kept here so the
+    /// `MetadataError` type remains the shared vocabulary every consumer's
+    /// exhaustive match already handles.
+    #[error("KeyedForbidsTimeseries: key temporal locality could not be established for this `timeseries:` block")]
     KeyedForbidsTimeseries,
 
     /// A model declares `refresh: incremental` + `grain: key` (or another
     /// keyed-output mode) and a `batched:` block.
-    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/keyed_models.md)")]
+    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/incremental_models.md)")]
     KeyedForbidsBatched,
 
     /// A model declares a `batched:` block without `refresh: incremental` +
@@ -488,11 +536,13 @@ pub enum MetadataError {
     #[error("MalformedBoundedDomain: {message}")]
     MalformedBoundedDomain { message: String },
 
-    /// A model declares `refresh: incremental` without a sibling `grain:`
-    /// declaration. `grain:` is required whenever `refresh: incremental` is
-    /// set — it declares the output's row identity/shape
-    /// (`docs/specs/models.md` §"Refresh axis").
-    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but has no `grain:` — add `grain: partition`, `grain: key`, or `grain: key_per_partition`")]
+    /// A model declares `refresh: incremental` but declares **neither**
+    /// shape-defining fact — no `timeseries:` (clock) and no top-level
+    /// `unique_key:` (identity) — and no `grain:` assertion to fall back on.
+    /// `refresh: incremental` is admitted on the facts alone
+    /// (`docs/specs/models.md` §"Refresh axis"); with neither declared there
+    /// is nothing maintainable (`models.md` §"Constraint violations").
+    #[error("GrainRequiredForIncremental: model declares `refresh: incremental` but declares neither `timeseries:` nor `unique_key:` — add at least one shape-defining fact (or the check-only `grain: partition | key | key_per_partition` assertion)")]
     GrainRequiredForIncremental,
 
     /// A model declares `grain:` without `refresh: incremental`. `grain:` is
@@ -500,6 +550,49 @@ pub enum MetadataError {
     /// (`docs/specs/models.md` §"Refresh axis").
     #[error("GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key")]
     GrainRequiresIncremental,
+
+    /// A written `grain:` check-only assertion disagrees with the label
+    /// derived from the declared shape-defining facts (`timeseries:` /
+    /// `unique_key:`, including whether `partition_column` is a member of
+    /// the key) — `docs/specs/models.md` §"Refresh axis", §"Constraint
+    /// violations" ("Declared `grain:` assertion contradicted by the derived
+    /// facts"). `grain:` never drives the shape; a mismatch is always a hard
+    /// error naming both labels.
+    #[error("GrainAssertionMismatch: declared `grain: {asserted}` disagrees with the grain derived from the declared shape facts (`grain: {derived}`) — fix the `grain:` assertion or the facts it derives from")]
+    GrainAssertionMismatch {
+        asserted: crate::config::Grain,
+        derived: crate::config::Grain,
+    },
+
+    /// A `maintenance.cells[].write` pin names a write pattern the open
+    /// registry (`smelt_logical::maintenance::lookup_write_pattern`) does
+    /// not recognise, or one the target backend's write-pattern capability
+    /// registry does not provide. Not raised by a pure frontmatter
+    /// validator — like `KeyedForbidsTimeseries`, the admissibility
+    /// decision needs derived facts (the registry, the backend's declared
+    /// capabilities) this crate doesn't have, so it is made by the
+    /// maintenance-plan diagnostics layer
+    /// (`smelt_db::queries::maintenance::maintenance_plan_diagnostics`) and
+    /// surfaced from there. The variant is kept here so `MetadataError`
+    /// stays the shared vocabulary every consumer's exhaustive match already
+    /// handles (`docs/specs/incremental_models.md` §"Per-cell write
+    /// addressing" → "User pins").
+    #[error("MaintenanceWritePatternUnavailable: write pattern '{pattern}' is unrecognised, or backend '{backend}' cannot provide it")]
+    MaintenanceWritePatternUnavailable { pattern: String, backend: String },
+
+    /// A `maintenance.cells[].write` pin names a write pattern the registry
+    /// recognises and the target backend can execute, but this cell's own
+    /// facts cannot uphold the pattern's equivalence obligation (e.g.
+    /// `write: keyed` on an output that declares no `unique_key`). Kept
+    /// here for the same reason as `MaintenanceWritePatternUnavailable`
+    /// above — surfaced by the maintenance-plan diagnostics layer, never
+    /// raised by a pure frontmatter validator.
+    #[error("MaintenanceWriteAddressingRefused: write pattern '{pattern}' cannot uphold the equivalence invariant for cell {cell} — {why}")]
+    MaintenanceWriteAddressingRefused {
+        cell: String,
+        pattern: String,
+        why: String,
+    },
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -542,16 +635,61 @@ fn frontmatter_has_generates(source: &str) -> bool {
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
     use crate::config::Materialization;
 
-    // Rule: grain: requires refresh: incremental, and vice versa — the two
-    // keys are declared together (`docs/specs/models.md` §"Refresh axis").
+    // Rule: `grain:` (declared or derived) requires `refresh: incremental`,
+    // and vice versa (`docs/specs/models.md` §"Refresh axis").
+    //
+    // `refresh: incremental` is admitted on the two shape-defining facts
+    // alone — a `timeseries:` (clock) and/or a top-level `unique_key:`
+    // (identity) — without requiring a written `grain:`; a written `grain:`
+    // is only ever a check-only assertion, validated below against the label
+    // those facts derive. Neither fact declared (and no `grain:` to fall
+    // back on) is the "no shape-defining fact declared" hard error.
+    let has_clock = metadata.timeseries.is_some();
+    let has_identity = metadata.unique_key.is_some();
     match (&metadata.refresh, &metadata.grain) {
-        (Some(RefreshStrategy::Incremental), None) => {
+        (Some(RefreshStrategy::Incremental), None) if !has_clock && !has_identity => {
             return Err(MetadataError::GrainRequiredForIncremental);
         }
         (refresh, Some(_)) if *refresh != Some(RefreshStrategy::Incremental) => {
             return Err(MetadataError::GrainRequiresIncremental);
         }
         _ => {}
+    }
+
+    // Rule: a written `grain:` is a check-only assertion — when a top-level
+    // `unique_key:` (identity) is declared, the assertion must agree with
+    // the label the declared facts derive (`models.md` §"Constraint
+    // violations": "Declared `grain:` assertion contradicted by the derived
+    // facts"). The check is gated on `has_identity` specifically (not
+    // `has_clock`, which alone is ambiguous): a `grain: key` model that
+    // declares a `timeseries:` clock but no top-level `unique_key:` derives
+    // its identity from the model's own GROUP BY (a SQL-level derivation
+    // this pure frontmatter validator cannot see — it runs in
+    // `smelt-db::queries::maintenance`, `docs/specs/incremental_models.md`
+    // §"Key temporal locality") rather than from a declared fact; without a
+    // declared identity there is nothing here to check the assertion
+    // against, so the declared `grain:` is trusted as before. This is the
+    // pre-existing surface the `batched:` sub-block's implicit `unique_key`
+    // migration leaves untouched
+    // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // "Deferred during implementation").
+    if metadata.refresh == Some(RefreshStrategy::Incremental) {
+        if let Some(asserted) = metadata.grain {
+            if has_identity {
+                if let Some(derived) = crate::config::derive_grain(
+                    has_clock,
+                    metadata.unique_key.as_deref(),
+                    metadata
+                        .timeseries
+                        .as_ref()
+                        .map(|t| t.partition_column.as_str()),
+                ) {
+                    if derived != asserted {
+                        return Err(MetadataError::GrainAssertionMismatch { asserted, derived });
+                    }
+                }
+            }
+        }
     }
 
     // Rule: keyed forbids batched: — enforced here so the diagnostic
@@ -561,12 +699,17 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         return Err(MetadataError::KeyedForbidsBatched);
     }
 
-    // Rule: keyed forbids timeseries: — the keyed output has no
-    // partition column by default (key temporal locality establishment
-    // is not yet built; see docs/specs/keyed_models.md §Known Divergences).
-    if metadata.is_keyed() && metadata.timeseries.is_some() {
-        return Err(MetadataError::KeyedForbidsTimeseries);
-    }
+    // Keyed + timeseries: is NOT rejected here. Admission depends on
+    // whether key temporal locality can be established (three routes:
+    // key-embedded, key-determined, recurrence-bounded —
+    // `docs/specs/incremental_models.md` §"Key temporal locality (the
+    // time-partitioned output)"), a decision that needs the model's derived
+    // `unique_key`/partition-column provenance, not just the frontmatter
+    // shape. That decision is made by the single locality-gate entry point
+    // in plan derivation (`smelt_logical::maintenance::locality::establish_locality`,
+    // consumed by `smelt-db`'s `maintenance_plan` query), which still
+    // surfaces as `KeyedForbidsTimeseries` when no route applies — just not
+    // from this frontmatter validator.
 
     // Rule: materialized_view forbids batched: — the engine owns freshness
     // for this mode; there is no smelt-driven batch loop to configure.
@@ -675,8 +818,9 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
 
     // Rule: `batched.nondeterministic_columns` must not name a column that
     // governs windowing, partition placement, or dedup identity — those
-    // roles must stay deterministic regardless of any opt-in (Constraint 13;
-    // `batched_models.md` §"Non-determinism and the equivalence contract").
+    // roles must stay deterministic regardless of any opt-in
+    // (`incremental_models.md` §"Partition-grain constraints" #12;
+    // §"Non-determinism and the payload rule").
     if let Some(batched) = &metadata.batched {
         for col in &batched.nondeterministic_columns {
             if col == &ts.event_time_column {
@@ -1110,7 +1254,7 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                     "the `incremental:` block has been removed — use `refresh: incremental` + \
                      `grain: partition` + an optional `batched:` block instead (see \
-                     docs/specs/batched_models.md)",
+                     docs/specs/incremental_models.md)",
                 )));
             // `refresh: cumulative` is a hard error pointing at the renamed
             // value, not a silently-stripped unknown value — the resilient
@@ -1234,7 +1378,7 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                     return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                         "the `incremental:` block has been removed — use `refresh: incremental` + \
                          `grain: partition` + an optional `batched:` block instead (see \
-                         docs/specs/batched_models.md)",
+                         docs/specs/incremental_models.md)",
                     )));
                 }
             }
@@ -1956,7 +2100,7 @@ FROM smelt.orders_raw"#;
     }
 
     /// Listing `event_time_column` in `batched.nondeterministic_columns` is a
-    /// configuration error (Constraint 13; `batched_models.md` §Surface) — that
+    /// configuration error (`incremental_models.md` §"Partition-grain constraints" #12) — that
     /// column governs windowing and can never tolerate non-determinism.
     #[test]
     fn test_nondeterministic_columns_rejects_event_time_column() {
@@ -2403,10 +2547,14 @@ GROUP BY device_id, user_id"#;
         }
     }
 
-    /// A model with `refresh: keyed` + a `timeseries:` block
-    /// emits `KeyedForbidsTimeseries`.
+    /// A model with `refresh: keyed` + a `timeseries:` block passes
+    /// frontmatter validation — whether key temporal locality can be
+    /// established is a plan-derivation decision (the locality gate in
+    /// `smelt_logical::maintenance::locality`), not a frontmatter shape
+    /// check (`docs/specs/incremental_models.md` §"Key temporal locality
+    /// (the time-partitioned output)").
     #[test]
-    fn test_keyed_forbids_timeseries() {
+    fn test_keyed_with_timeseries_reaches_plan_derivation() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::Incremental),
@@ -2420,12 +2568,10 @@ GROUP BY device_id, user_id"#;
             }),
             ..Default::default()
         };
-        let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
-            .expect_err("refresh: keyed + timeseries must error");
         assert!(
-            matches!(err, MetadataError::KeyedForbidsTimeseries),
-            "Expected KeyedForbidsTimeseries, got: {}",
-            err
+            validate_timeseries(&metadata, "SELECT dt FROM foo").is_ok(),
+            "refresh: incremental + grain: key + timeseries: must reach plan derivation, \
+             not fail frontmatter validation"
         );
     }
 

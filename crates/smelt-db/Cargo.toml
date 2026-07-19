@@ -18,6 +18,10 @@ smelt-core = { path = "../smelt-core" }
 smelt-logical = { path = "../smelt-logical" }
 smelt-parser = { path = "../smelt-parser" }
 smelt-types = { path = "../smelt-types" }
+# Backend-name → BackendCapabilities lookup for `maintenance.cells[].write`
+# pin validation (`queries/maintenance.rs::backend_write_capabilities_for`) —
+# a real (non-dev) dependency now, not just for test fixtures.
+smelt-dialect = { path = "../smelt-dialect" }
 walkdir = "2"
 line-index.workspace = true
 tracing.workspace = true
@@ -26,7 +30,6 @@ tracing.workspace = true
 duckdb = { workspace = true }
 arrow = { workspace = true }
 proptest = { workspace = true }
-smelt-dialect = { path = "../smelt-dialect" }
 smelt-runtime = { path = "../smelt-runtime" }
 tempfile = "3"
 

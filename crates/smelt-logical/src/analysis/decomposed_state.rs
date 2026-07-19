@@ -9,7 +9,7 @@
 //!
 //! This module states the *mechanism* only: `merge_into` maintaining the
 //! state columns and which mode drives it (cumulative rung-2) are decided at
-//! the mode-composition layer (`maintenance_plan.md`), not here.
+//! the mode-composition layer (`incremental_models.md`), not here.
 
 use crate::analysis::discriminants::combiner_discriminants;
 use crate::analysis::presentation::{presentation_map_purity, Purity};

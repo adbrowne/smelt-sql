@@ -85,7 +85,7 @@ pub fn insert_into(table_name: &str, query: &str) -> String {
 
 // MERGE INTO text is no longer authored here — `Backend::merge_into`'s
 // default implementation builds it from `smelt_logical::maintenance::emit::
-// emit_column_scoped_merge` (`docs/specs/maintenance_plan.md` §"Statement
+// emit_column_scoped_merge` (`docs/specs/incremental_models.md` §"Statement
 // emission (single owner)"); this crate's Spark-dialect variant is asserted
 // byte-identical to the old text this function used to produce in
 // `crates/smelt-logical/tests/emit_statements.rs`.

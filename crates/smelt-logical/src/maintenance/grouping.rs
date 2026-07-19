@@ -1,6 +1,6 @@
 //! Per-column mutation-sensitivity / column provenance
 //! (`model_properties.md` §"Per-column mutation-sensitivity / column
-//! provenance"; `maintenance_plan.md` §Design "Factoring by
+//! provenance"; `incremental_models.md` §Design "Factoring by
 //! mutation-sensitivity"): for each non-skeleton output column, which
 //! sources' *post-creation* deltas can change that column's value.
 //!
@@ -10,7 +10,7 @@
 //! scope the tracer catalogue (EX-02/07/13/…) already covers. A CTE, set
 //! operation, derived-table FROM item, or an unqualified reference ambiguous
 //! among more than one joined source is outside what this classifier
-//! resolves; per the fail-closed constraint (`maintenance_plan.md`
+//! resolves; per the fail-closed constraint (`incremental_models.md`
 //! §"Constraints & Invariants"), such a model **never** silently drops a
 //! source from a column's sensitivity — it collapses the *whole model's*
 //! non-skeleton columns into one degenerate group sensitive to every
@@ -97,7 +97,7 @@ pub fn derive_column_groups(
     // single top-level SELECT scope's own FROM items — the shape every
     // tracer catalogue example uses. A CTE or set operation composes
     // provenance through more than one scope, which this leaf classifier
-    // does not attempt (tracked: `docs/specs/maintenance_plan.md` §Known
+    // does not attempt (tracked: `docs/specs/incremental_models.md` §Known
     // Divergences).
     if select.with_clause().is_some() || select.has_set_operation() {
         return degenerate_whole_model(
@@ -233,7 +233,7 @@ pub fn derive_column_groups(
 
 /// The fail-closed collapse: every payload column lands in one group
 /// sensitive to every declared source ("widens to the whole table, never
-/// silently" — `maintenance_plan.md` §"Constraints & Invariants").
+/// silently" — `incremental_models.md` §"Constraints & Invariants").
 fn degenerate_whole_model(
     payload_columns: &[String],
     all_sources: &BTreeSet<String>,

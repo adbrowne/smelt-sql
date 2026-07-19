@@ -10,7 +10,7 @@ timeseries:
 -- Declares `granularity: hour` but the model's own `order_date` projection
 -- only truncates to `day` — a narrowing declaration (finer than what the
 -- grouping actually derives), refused with `MaintenanceGranularityMismatch`
--- (`docs/specs/maintenance_plan.md` §Design "Grain is declared" /
+-- (`docs/specs/incremental_models.md` §Design "Grain is declared" /
 -- "Widen-never-narrow").
 SELECT
     date_trunc('day', o.order_date) AS order_date,

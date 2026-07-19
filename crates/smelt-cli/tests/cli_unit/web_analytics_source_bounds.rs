@@ -2,14 +2,16 @@
 //! a `source_bounds` field with the derived per-source bound map.
 //!
 //! The sessions model calls `smelt.functions.sessionize(...)` over
-//! `smelt.silver.events_parsed` — that source has `timeseries: event_date`.
-//! The sessions model's own SQL has no RANGE BETWEEN or WHERE INTERVAL,
-//! so the bound for events_parsed should be Bounded(event_date, PT0S, PT0S)
-//! (fully partition-local, before=0, after=0).
+//! `smelt.silver.events_deduped` — the composed keyed+timeseries dedupe
+//! stage, whose declared clock is `first_seen_date`. The sessions model's
+//! own SQL has no RANGE BETWEEN or WHERE INTERVAL, but `sessionize`'s own
+//! body declares a 2-day lookback frame (`max_lookback`) the planner derives
+//! from the expanded SQL, so the bound for events_deduped should be
+//! Bounded(first_seen_date, P2D, PT0S).
 //!
 //! The test verifies:
 //! - `source_bounds` field is present in the JSON for the `sessions` model.
-//! - It contains an entry for `events_parsed`.
+//! - It contains an entry for `events_deduped`.
 //! - The bound is `bounded` type.
 
 use smelt_cli::{build_dependency_graph, build_explain_output, Config};
@@ -83,13 +85,13 @@ fn test_explain_json_exposes_bounds() {
         inc.source_bounds
     );
 
-    // events_parsed is the upstream timeseries source; its canonical key is "silver.events_parsed".
+    // events_deduped is the upstream timeseries source; its canonical key is "silver.events_deduped".
     let bound = inc
         .source_bounds
-        .get("silver.events_parsed")
+        .get("silver.events_deduped")
         .unwrap_or_else(|| {
             panic!(
-                "sessions source_bounds must have 'silver.events_parsed' entry; keys: {:?}",
+                "sessions source_bounds must have 'silver.events_deduped' entry; keys: {:?}",
                 inc.source_bounds.keys().collect::<Vec<_>>()
             )
         });
@@ -100,23 +102,24 @@ fn test_explain_json_exposes_bounds() {
     // The bound type must be "bounded" (sessions SQL has no INTERVAL lookback)
     assert!(
         json_str.contains("\"bounded\""),
-        "events_parsed bound must be bounded type; JSON: {json_str}"
+        "events_deduped bound must be bounded type; JSON: {json_str}"
     );
     assert!(
-        json_str.contains("event_date"),
-        "events_parsed bound must name the partition_col 'event_date'; JSON: {json_str}"
+        json_str.contains("first_seen_date"),
+        "events_deduped bound must name the partition_col 'first_seen_date'; JSON: {json_str}"
     );
     assert!(
         json_str.contains("\"before\""),
-        "events_parsed bound must have 'before' field; JSON: {json_str}"
+        "events_deduped bound must have 'before' field; JSON: {json_str}"
     );
     assert!(
         json_str.contains("\"after\""),
-        "events_parsed bound must have 'after' field; JSON: {json_str}"
+        "events_deduped bound must have 'after' field; JSON: {json_str}"
     );
 
-    // The bound for a partition-local sessions model should be PT0S/PT0S
-    // (no RANGE BETWEEN INTERVAL in the sessions.sql or compute_session_start_date.sql)
+    // The bound should be P2D/PT0S — sessionize's own 2-day max_lookback
+    // frame, derived from the expanded function body (no RANGE BETWEEN
+    // INTERVAL in sessions.sql's own outer text).
     let _ = bound; // used in shape checks above
                    // Verify round-trip serialization
     let json_output = serde_json::to_string_pretty(&output).expect("serialize full output");
@@ -137,7 +140,7 @@ fn test_explain_json_exposes_bounds() {
 /// AND CAST(arrival_time AS DATE)`. The planner reads that filter as a
 /// derived `Bounded(event_date, before=3d, after=0)` reach on
 /// `bronze.raw_events` — this is the observable clamp
-/// `docs/specs/batched_models.md` §"Observing the per-source clamp"
+/// `docs/specs/incremental_models.md` §"Observing the per-source clamp"
 /// describes.
 #[test]
 fn test_explain_json_events_parsed_late_window_bound() {

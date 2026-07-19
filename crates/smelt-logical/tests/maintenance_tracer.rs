@@ -77,7 +77,7 @@ fn ex02_inputs() -> ModelInputs<'static> {
     // `events` is append-only and none of `user_id`/`page`/`referrer`
     // aggregate over it, so the whole payload lands in one group with empty
     // sensitivity — the load-bearing append-only case
-    // (`maintenance_plan.md` §Design "Factoring by mutation-sensitivity").
+    // (`incremental_models.md` §Design "Factoring by mutation-sensitivity").
     let skeleton = skeleton_columns(sql, &["event_id".to_string()], Some("event_date"));
     assert_eq!(skeleton, set(&["event_id", "event_date"]));
     let grouping = derive_column_groups(sql, &sources, &skeleton);
@@ -134,7 +134,7 @@ fn ex02_delete_insert_carries_the_partition_predicate_on_the_delete_and_the_clam
     // The caller (the runtime's output clamp — `model_transforms.md` §"the
     // two clamps") is responsible for folding the region predicate into the
     // body it hands the emitter; the emitter does not add a second, outer
-    // WHERE to the INSERT (`maintenance_plan.md` §"Statement emission
+    // WHERE to the INSERT (`incremental_models.md` §"Statement emission
     // (single owner)").
     let body = "SELECT event_id, user_id, event_date, event_ts, page, referrer FROM events \
                 WHERE event_date >= DATE '2026-01-01' AND event_date < DATE '2026-01-08'";
@@ -354,8 +354,7 @@ fn ex24_inputs(
             mutation_sensitivity: set(&["payments"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner,
+            add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
         column_add_proof: None,
     };
@@ -407,6 +406,7 @@ fn ex24_keyed_fold_sql_combines_matched_and_inserts_unseen_keys() {
             "target.lifetime_spend + delta.lifetime_spend".to_string(),
         )],
         "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments_delta GROUP BY user_id",
+        None,
         MaintenanceDialect::DuckDb,
     );
     let sql = &group.statements[0].sql;
@@ -562,7 +562,7 @@ fn ex40_aggregate_field_add_is_column_merge_with_ledger_catch_up() {
 }
 
 /// `emit_column_scoped_merge`'s production shape (`docs/specs/
-/// maintenance_plan.md` §"Statement emission (single owner)"): `UPDATE
+/// incremental_models.md` §"Statement emission (single owner)"): `UPDATE
 /// SET *`, keyed on `unique_key`, no column-list `SET` and no predicate of
 /// its own on either the scan or the write target — partition-scoping, when
 /// the technique is not the declared full-scan case, is folded into

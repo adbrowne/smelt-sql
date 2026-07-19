@@ -1,6 +1,6 @@
 //! Phase MP16 (`docs/plans/20260707-maintenance-plan-impl.md`): the
 //! adjointness law between the graph layer's two directions
-//! (`maintenance_plan.md` §"Backward resolution — what must exist": "The two
+//! (`incremental_models.md` §"Backward resolution — what must exist": "The two
 //! directions are **adjoint, not inverse**: `forward(backward(P)) ⊇ P`").
 //!
 //! Pure math only — no CLI, no runtime, no on-disk workspace. Exercises
@@ -14,10 +14,21 @@
 
 use std::collections::BTreeMap;
 
-use smelt_logical::maintenance::propagate::{propagate, required_inputs, DayInterval, Edge};
+use smelt_logical::maintenance::locality::LocalitySlice;
+use smelt_logical::maintenance::propagate::{
+    project_observed_delta, propagate, required_inputs, DayInterval, Edge, PartitionGrain,
+};
 
 fn iv(start: i64, end: i64) -> DayInterval {
     DayInterval::new(start, end)
+}
+
+fn deltas(items: &[(&str, DayInterval)]) -> BTreeMap<String, Vec<DayInterval>> {
+    let mut m: BTreeMap<String, Vec<DayInterval>> = BTreeMap::new();
+    for (name, interval) in items {
+        m.entry(name.to_string()).or_default().push(*interval);
+    }
+    m
 }
 
 fn edge(upstream: &str, downstream: &str, before_days: i64, after_days: i64) -> Edge {
@@ -140,4 +151,248 @@ fn build_order_includes_no_inbound_target_alongside_an_unrelated_chain() {
     assert!(!resolved.required.contains_key("bronze"));
     assert!(!resolved.required.contains_key("silver"));
     assert!(!resolved.required.contains_key("rollup"));
+}
+
+// ---------------------------------------------------------------------------
+// Phase B1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// the graph layer admits a locality-admitted composed node (`grain: key` +
+// `timeseries:`, admitted key temporal locality) as a clocked propagation
+// participant at its own declared granularity — it is no longer refused as
+// `PartitionGrain::Keyed`. A bare keyed node (no admitted time axis) still
+// refuses, with a refined message naming the missing time axis and the
+// composed-shape fix.
+// ---------------------------------------------------------------------------
+
+/// A chain `source -> composed(keyed+timeseries) -> rollup`: the middle
+/// node stands in for a locality-admitted composed model, sandwiched
+/// between two ordinary Day-grain nodes with its OWN declared granularity
+/// (Month) — so the containment law also pins that the composed node's own
+/// grain (not just its neighbours') drives outward alignment through it,
+/// exactly as any other clocked node's would (`incremental_models.md`
+/// §"The graph layer": "A locality-admitted time-partitioned keyed output
+/// is not refused... a clocked node whose edges use its declared
+/// granularity like any other node").
+#[test]
+fn composed_node_contributes_edges() {
+    let mut into_composed = edge("source", "composed", 0, 0);
+    into_composed.downstream_grain = PartitionGrain::Month;
+    let mut out_of_composed = edge("composed", "rollup", 0, 0);
+    out_of_composed.upstream_grain = PartitionGrain::Month;
+    let edges = vec![into_composed, out_of_composed];
+    assert_forward_backward_containment(&edges, "rollup", iv(400, 402));
+}
+
+/// A graph with no `PartitionGrain::Keyed` edge at all — precisely what a
+/// locality-admitted composed node classifies as (its declared
+/// granularity, never `Keyed`) — never trips `refuse_keyed_nodes`, in
+/// either direction.
+#[test]
+fn admitted_composed_node_is_not_refused() {
+    let edges = vec![
+        edge("source", "composed", 0, 0),
+        edge("composed", "rollup", 0, 0),
+    ];
+    propagate(&edges, &deltas(&[("source", iv(1, 2))])).expect("admitted composed node runs");
+    required_inputs(&edges, "rollup", iv(1, 2)).expect("admitted composed node resolves");
+}
+
+// ---------------------------------------------------------------------------
+// Phase B2 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// the composed node's own inbound edge carries a REAL route-derived margin
+// (`smelt_logical::maintenance::propagate::locality_margin_days`) rather
+// than B1's placeholder-exact zero — routes 1–2 project exactly, route 3
+// widens backward by `r` + margins. `composed_projection_adjoint` pins the
+// adjointness law over both shapes; the containment law extends to a strict
+// superset (not equality) for the widened case.
+// ---------------------------------------------------------------------------
+
+/// The adjointness law `forward(backward(P)) ⊇ P` over a composed node,
+/// route-parameterised: an exact (route 1/2, zero-margin) inbound edge and a
+/// widened (route-3-style, nonzero-margin) inbound edge both satisfy the
+/// law, through the same `source -> composed -> rollup` chain shape.
+#[test]
+fn composed_projection_adjoint() {
+    for (before_days, after_days) in [(0, 0), (3, 1)] {
+        let into_composed = edge("source", "composed", before_days, after_days);
+        let out_of_composed = edge("composed", "rollup", 0, 0);
+        let edges = vec![into_composed, out_of_composed];
+        assert_forward_backward_containment(&edges, "rollup", iv(100, 103));
+    }
+}
+
+/// Route 1/2 (exact, zero margin): the composed node's forward-projected
+/// dirt from a replayed upstream delta equals the delta exactly — no
+/// widening at all through the composed edge.
+#[test]
+fn composed_projection_exact_route_has_no_widening() {
+    let edges = vec![edge("source", "composed", 0, 0)];
+    let delta = iv(10, 12);
+    let forward = propagate(&edges, &deltas(&[("source", delta)])).expect("propagate");
+    assert_eq!(
+        forward.dirty.get("composed"),
+        Some(&vec![delta]),
+        "a zero-margin composed edge must project the exact delta, not a widened one"
+    );
+}
+
+/// Route 3 (widened by `r` + margins): the composed node's forward-projected
+/// dirt from a replayed upstream delta strictly CONTAINS the exact delta —
+/// the plan's own wording, "route 3 asserts the r-widened containment, not
+/// equality."
+#[test]
+fn composed_projection_widened_route_is_a_strict_superset_of_the_exact_delta() {
+    let edges = vec![edge("source", "composed", 3, 1)];
+    let delta = iv(10, 12);
+    let forward = propagate(&edges, &deltas(&[("source", delta)])).expect("propagate");
+    let dirty = forward
+        .dirty
+        .get("composed")
+        .expect("composed must be dirty");
+    assert_eq!(dirty, &vec![iv(9, 15)]);
+    assert!(
+        dirty[0].start <= delta.start && delta.end <= dirty[0].end && dirty[0] != delta,
+        "route 3's widened projection must strictly contain (not equal) the exact delta: \
+         {dirty:?} vs {delta:?}"
+    );
+}
+
+/// A bare keyed node (no admitted time axis) still refuses fail-loud, in
+/// both directions, with a message naming the missing time axis and the
+/// composed-shape fix rather than the old bare "keyed-grain" wording.
+#[test]
+fn bare_keyed_node_still_refuses_with_refined_message() {
+    let mut e = edge("source", "bare_keyed", 0, 0);
+    e.downstream_grain = PartitionGrain::Keyed;
+    let edges = vec![e];
+
+    let fwd = propagate(&edges, &deltas(&[("source", iv(1, 2))]))
+        .expect_err("bare keyed node must refuse");
+    assert!(fwd.contains("without an admitted time axis"), "{fwd}");
+    assert!(fwd.contains("timeseries"), "{fwd}");
+    assert!(fwd.contains("bare_keyed"), "{fwd}");
+
+    let bwd =
+        required_inputs(&edges, "bare_keyed", iv(1, 2)).expect_err("bare keyed node must refuse");
+    assert!(bwd.contains("without an admitted time axis"), "{bwd}");
+}
+
+// ---------------------------------------------------------------------------
+// Phase D3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// the adjointness law extended over an observed-delta-fed composed edge —
+// the origin's own delta is no longer a hand-typed `DayInterval`, but
+// `project_observed_delta`'s own output (a composed model's recorded
+// key-level observed delta, projected to partition-day intervals via its
+// established locality route). `forward(backward(P)) ⊇ P` must still hold
+// when replayed through that projected, possibly-multi-interval delta.
+// ---------------------------------------------------------------------------
+
+/// Route 1/2 (`LocalitySlice::Window`/`DeltaValues`, exact projection): a
+/// composed origin's recorded observed delta (3 distinct touched
+/// partitions) projects to exactly those 3 one-day intervals; replaying
+/// them forward through the composed edge must still cover each of the 3
+/// periods `required_inputs` resolves for `rollup`.
+#[test]
+fn observed_delta_fed_composed_edge_satisfies_adjointness_exact_route() {
+    let edges = vec![
+        edge("source", "composed", 0, 0),
+        edge("composed", "rollup", 0, 0),
+    ];
+    let slice = LocalitySlice::Window {
+        partition_column: "d".to_string(),
+        margin_before: smelt_logical::Seconds::ZERO,
+        margin_after: smelt_logical::Seconds::ZERO,
+        recurrence_bounded: false,
+    };
+    let partitions = vec![
+        "2026-01-10".to_string(),
+        "2026-01-12".to_string(),
+        "2026-01-15".to_string(),
+    ];
+    let projected = project_observed_delta(&slice, &partitions);
+    assert_eq!(
+        projected.len(),
+        3,
+        "3 distinct partitions project to 3 distinct intervals"
+    );
+
+    // Every one of the 3 projected intervals must independently satisfy
+    // `forward(backward(P)) ⊇ P` at `rollup` when replayed through the
+    // SAME `source -> composed -> rollup` chain — the projected delta is
+    // fed at `composed`'s own axis (the observed delta is recorded at the
+    // composed model's own output, per `docs/specs/incremental_models.md`
+    // §"The graph layer" — "Observed deltas on model edges").
+    for period in &projected {
+        let resolved = required_inputs(&edges, "rollup", *period).expect("resolve");
+        let composed_required = resolved
+            .required
+            .get("composed")
+            .cloned()
+            .unwrap_or_default();
+        let replay: BTreeMap<String, Vec<DayInterval>> =
+            [("composed".to_string(), composed_required)]
+                .into_iter()
+                .collect();
+        let forward = propagate(&edges, &replay).expect("propagate");
+        let dirty = forward.dirty.get("rollup").unwrap_or_else(|| {
+            panic!("rollup must be dirty after replaying its own resolved composed requirement")
+        });
+        assert!(
+            dirty
+                .iter()
+                .any(|d| d.start <= period.start && period.end <= d.end),
+            "forward(backward({period:?})) must cover {period:?} at rollup; got {dirty:?}"
+        );
+    }
+}
+
+/// Route 3 (`LocalitySlice::RecurrenceBounded`, widened projection): the
+/// observed delta's single touched partition widens backward by `r` +
+/// margins before it ever reaches the graph — the widened interval (not
+/// the raw observed day) is what must satisfy adjointness through the
+/// composed edge, proving the law holds over the widened form too, not
+/// just the exact one the previous test pins.
+#[test]
+fn observed_delta_fed_composed_edge_satisfies_adjointness_widened_route() {
+    let edges = vec![
+        edge("source", "composed", 0, 0),
+        edge("composed", "rollup", 0, 0),
+    ];
+    let slice = LocalitySlice::RecurrenceBounded {
+        partition_column: "d".to_string(),
+        margin_before: smelt_logical::Seconds::days(5),
+        margin_after: smelt_logical::Seconds::ZERO,
+        r: smelt_logical::Seconds::days(4),
+    };
+    let partitions = vec!["2026-01-10".to_string()];
+    let projected = project_observed_delta(&slice, &partitions);
+    assert_eq!(projected.len(), 1);
+    let period = projected[0];
+    // Widened, not exact: the projected interval spans more than the
+    // observed single day.
+    assert!(
+        period.end - period.start > 1,
+        "route 3 must widen: {period:?}"
+    );
+
+    let resolved = required_inputs(&edges, "rollup", period).expect("resolve");
+    let composed_required = resolved
+        .required
+        .get("composed")
+        .cloned()
+        .unwrap_or_default();
+    let replay: BTreeMap<String, Vec<DayInterval>> = [("composed".to_string(), composed_required)]
+        .into_iter()
+        .collect();
+    let forward = propagate(&edges, &replay).expect("propagate");
+    let dirty = forward
+        .dirty
+        .get("rollup")
+        .expect("rollup must be dirty after replaying the widened requirement");
+    assert!(
+        dirty
+            .iter()
+            .any(|d| d.start <= period.start && period.end <= d.end),
+        "forward(backward({period:?})) must cover the widened period {period:?} at rollup; \
+         got {dirty:?}"
+    );
 }

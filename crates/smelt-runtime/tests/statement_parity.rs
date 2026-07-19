@@ -1,5 +1,5 @@
 //! Statement-parity CI gate (`docs/specs/architecture.md` §"Constraints &
-//! Invariants" item 12; `docs/specs/maintenance_plan.md` §"Statement
+//! Invariants" item 12; `docs/specs/incremental_models.md` §"Statement
 //! emission (single owner)"): the SQL text a run actually executes must be
 //! byte-identical to the single-owner emitters' output. This file proves
 //! it by capturing the real statements sent to a live DuckDB connection
@@ -30,7 +30,7 @@
 use std::path::Path;
 use std::sync::{Arc, Mutex};
 
-use arrow::array::{Int64Array, RecordBatch};
+use arrow::array::{Array, Int64Array, RecordBatch};
 use arrow::datatypes::SchemaRef;
 use async_trait::async_trait;
 
@@ -43,22 +43,34 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    MaintenanceDialect, Region,
+    emit_keyed_fold_suppressed, emit_recurrence_bound_probe, MaintenanceDialect, Region,
+    TargetSlicePredicate,
+};
+use smelt_logical::maintenance::locality::LocalitySlice;
+use smelt_planner::{
+    AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
 };
 use smelt_runtime::execute::{execute_project, BackendFactory, BackendFuture};
+use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
 use smelt_runtime::types::ExecuteRequest;
 use tokio_util::sync::CancellationToken;
 
 /// Wraps a real [`DuckDbBackend`], delegating every call, but recording the
 /// [`StatementGroup`] passed to `execute_statement_group` — the single
 /// point every emitted maintenance statement flows through on its way to
-/// the connection (`docs/specs/maintenance_plan.md` §"Statement emission
+/// the connection (`docs/specs/incremental_models.md` §"Statement emission
 /// (single owner)"). Recording here, rather than trusting the emitter was
 /// called with the "right" inputs, is what proves *executed* SQL, not just
 /// *constructed* SQL, matches the emitter's output.
 struct RecordingBackend {
     inner: DuckDbBackend,
     groups: Mutex<Vec<StatementGroup>>,
+    /// Every raw SQL string handed to `execute_sql` directly (not via
+    /// `execute_statement_group`) — the checked route-3 out-of-slice match
+    /// probe runs this way (`maintenance_driver::run_windowed_keyed_
+    /// maintenance`'s probe-gate, not a `StatementGroup`), so `groups`
+    /// alone would miss it.
+    sql_log: Mutex<Vec<String>>,
 }
 
 impl RecordingBackend {
@@ -66,17 +78,23 @@ impl RecordingBackend {
         Self {
             inner,
             groups: Mutex::new(Vec::new()),
+            sql_log: Mutex::new(Vec::new()),
         }
     }
 
     fn recorded_groups(&self) -> Vec<StatementGroup> {
         self.groups.lock().unwrap().clone()
     }
+
+    fn recorded_sql(&self) -> Vec<String> {
+        self.sql_log.lock().unwrap().clone()
+    }
 }
 
 #[async_trait]
 impl Backend for RecordingBackend {
     async fn execute_sql(&self, sql: &str) -> Result<Vec<RecordBatch>, BackendError> {
+        self.sql_log.lock().unwrap().push(sql.to_string());
         self.inner.execute_sql(sql).await
     }
 
@@ -133,10 +151,6 @@ impl Backend for RecordingBackend {
 
     fn capabilities(&self) -> BackendCapabilities {
         self.inner.capabilities()
-    }
-
-    fn supports_column_scoped_merge(&self) -> bool {
-        self.inner.supports_column_scoped_merge()
     }
 
     async fn load_table(
@@ -275,9 +289,6 @@ impl Backend for ArcBackend {
     }
     fn dialect(&self) -> SqlDialect {
         self.0.dialect()
-    }
-    fn supports_column_scoped_merge(&self) -> bool {
-        self.0.supports_column_scoped_merge()
     }
     fn capabilities(&self) -> BackendCapabilities {
         self.0.capabilities()
@@ -562,7 +573,7 @@ async fn region_recompute_statements_come_from_the_emitter() {
     // Result-equivalence: the region DELETE+INSERT statements the run
     // actually executed must leave `daily_events` multiset-equal to a full
     // refresh of the model's own SQL — the technique the plan describes
-    // (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    // (`docs/specs/incremental_models.md` §"Statement emission (single
     // owner)") reproduces a full refresh, not merely emitter-shaped text.
     let full_refresh_sql = "SELECT * FROM (VALUES (DATE '2024-01-01', 10), \
                              (DATE '2024-01-02', 20)) AS t(event_date, amount)";
@@ -578,7 +589,7 @@ async fn region_recompute_statements_come_from_the_emitter() {
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/batched_models.md` §"First-run and backfill" — "First-run
+/// (`docs/specs/incremental_models.md` §"First-run and backfill" — "First-run
 /// bootstrap for a self-referential model"): building from scratch (no
 /// pre-seeded target table) must emit exactly ONE statement group before
 /// any region `DELETE`+`INSERT` — a plain `CREATE TABLE main.running_balance
@@ -892,20 +903,28 @@ async fn keyed_fold_statements_come_from_the_emitter() {
         "executed CREATE group must be byte-identical to a direct emitter call"
     );
 
-    // Step 2: combiner-aware MERGE.
+    // Step 2: combiner-aware MERGE. `first_seen`/`last_seen` are both
+    // Comparable (MIN/MAX are registry-backed deterministic functions) over
+    // a proven `device_id` key, so a real run now resolves `Suppressed`
+    // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // Phase C6 — `resolve_cumulative_write_suppression`, wired into
+    // `execute_cumulative_aggregate`) — the matched arm carries an `IS
+    // DISTINCT FROM` guard over both fold columns.
     let merge_sql = &groups[1].statements[0].sql;
     assert_eq!(groups[1].statements.len(), 1);
     let prefix = "MERGE INTO main.device_user_edges AS target USING (";
     let suffix = ") AS delta ON target.device_id = delta.device_id \
-                  WHEN MATCHED THEN UPDATE SET first_seen = LEAST(target.first_seen, delta.first_seen), \
-                  last_seen = GREATEST(target.last_seen, delta.last_seen) \
-                  WHEN NOT MATCHED THEN INSERT *";
+                  WHEN MATCHED AND (target.first_seen IS DISTINCT FROM (LEAST(target.first_seen, \
+                  delta.first_seen)) OR target.last_seen IS DISTINCT FROM (GREATEST(target.\
+                  last_seen, delta.last_seen))) THEN UPDATE SET first_seen = LEAST(target.\
+                  first_seen, delta.first_seen), last_seen = GREATEST(target.last_seen, \
+                  delta.last_seen) WHEN NOT MATCHED THEN INSERT *";
     assert!(
         merge_sql.starts_with(prefix) && merge_sql.ends_with(suffix),
         "unexpected merge statement: {merge_sql}"
     );
     let delta_select = &merge_sql[prefix.len()..merge_sql.len() - suffix.len()];
-    let expected_merge = emit_keyed_fold(
+    let expected_merge = emit_keyed_fold_suppressed(
         "main.device_user_edges",
         &["device_id".to_string()],
         &[
@@ -919,6 +938,8 @@ async fn keyed_fold_statements_come_from_the_emitter() {
             ),
         ],
         delta_select,
+        None,
+        &["first_seen".to_string(), "last_seen".to_string()],
         MaintenanceDialect::DuckDb,
     );
     assert_eq!(
@@ -939,6 +960,409 @@ async fn keyed_fold_statements_come_from_the_emitter() {
         )
         .await,
         "the CREATE+MERGE statements execute_project actually ran must reproduce a full refresh"
+    );
+}
+
+/// The slice-predicated keyed-fold family: a `refresh: keyed` model that
+/// also declares its own `timeseries:` block, admitted through key temporal
+/// locality's route 1 (key-embedded — `partition_column` is itself a
+/// `unique_key` column, `docs/specs/incremental_models.md` §"Key temporal
+/// locality (the time-partitioned output)"; `docs/plans/20260715-composed-
+/// axes-conditional-maintenance.md` Phase A2). The established
+/// [`smelt_logical::maintenance::locality::LocalitySlice`] licenses a
+/// `target.<partition_column> BETWEEN ...` predicate on the `MERGE`'s `ON`
+/// clause (`emit_keyed_fold`'s `slice` parameter) — this is
+/// `keyed_fold_statements_come_from_the_emitter` above with one addition (the
+/// keyed model's own `timeseries:` block), proving the *slice-carrying*
+/// MERGE `execute_project` actually runs is still byte-identical to a direct
+/// `emit_keyed_fold` call with that same slice, not merely slice-shaped
+/// text.
+///
+/// `MAX` (not `SUM`) keeps the cell `Grade::Idempotent`
+/// (`WindowedKeyedRule::ledger_grade`), so the step routes through
+/// `Backend::execute_statement_group` — the funnel this test's
+/// `RecordingBackend` records — rather than the ledger-interleaved additive
+/// path, matching `keyed_fold_statements_come_from_the_emitter`'s own choice
+/// of combiner.
+///
+/// This is also the doubly-predicated statement-parity leg
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// C6): `max_amount` is Comparable (a registry-backed deterministic
+/// aggregate) over the proven `{device_id, event_date}` key, so a real run
+/// now resolves `WriteSuppression::Suppressed`
+/// (`resolve_cumulative_write_suppression`, wired into `execute_cumulative_
+/// aggregate`) — the executed `MERGE` carries **both** the slice predicate
+/// on the `ON` clause's target read AND the `IS DISTINCT FROM` suppression
+/// arm on the matched clause, byte-identical to a direct `emit_keyed_fold_
+/// suppressed` call with the same slice.
+#[tokio::test]
+async fn keyed_fold_slice_predicated_merge_statements_come_from_the_emitter() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources")).unwrap();
+
+    std::fs::write(
+        project_dir.join("models/sources/events.yml"),
+        "description: statement-parity locality source.\n\
+         mutation_profile: append_only\n\
+         timeseries:\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20granularity: day\n\
+         columns:\n\
+         \x20\x20- name: device_id\n\
+         \x20\x20\x20\x20type: INTEGER\n\
+         \x20\x20- name: event_date\n\
+         \x20\x20\x20\x20type: DATE\n\
+         \x20\x20- name: amount\n\
+         \x20\x20\x20\x20type: DOUBLE\n",
+    )
+    .unwrap();
+
+    // Route 1 (key-embedded): `event_date` is both the model's own
+    // `timeseries.partition_column` and a `unique_key` column (GROUP BY 1,
+    // 2) — the same composed shape `crates/smelt-runtime/tests/
+    // locality_route1_slice_pruning.rs` exercises end-to-end (result
+    // equivalence + slice-shape assertions). This test's own contribution is
+    // the statement-parity leg: byte-identity against a direct emitter
+    // call, the missing coverage this phase's review flagged.
+    write_model(
+        project_dir,
+        "device_daily",
+        "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         timeseries:\n\
+         \x20\x20event_time_column: event_date\n\
+         \x20\x20partition_column: event_date\n\
+         \x20\x20granularity: day\n\
+         ---\n\
+         SELECT device_id, event_date, MAX(amount) AS max_amount \
+         FROM smelt.sources.events GROUP BY device_id, event_date",
+    );
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: keyed_slice_statement_parity_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main;\n\
+             CREATE TABLE main.sources_events (device_id INTEGER, event_date DATE, amount DOUBLE);\n\
+             INSERT INTO main.sources_events VALUES \
+             (1, DATE '2024-01-01', 10.0), \
+             (1, DATE '2024-01-02', 20.0), \
+             (2, DATE '2024-01-02', 5.0);",
+        )
+        .expect("seed source table");
+    }
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    // Window 1: day 1 alone — first-run CREATE TABLE ... AS, no MERGE yet.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "keyed-slice-statement-parity-run-1".to_string(),
+            make_request("dev", "2024-01-01", "2024-01-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("window 1 (create) must run");
+    }
+
+    // Window 2: day 2 alone — a single MERGE step carrying the locality
+    // slice (zero margin, since the model's SQL has no lookback construct:
+    // the slice is exactly this step's own date).
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    execute_project(
+        "keyed-slice-statement-parity-run-2".to_string(),
+        make_request("dev", "2024-01-02", "2024-01-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("window 2 (slice-predicated merge) must run");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    assert_eq!(
+        groups.len(),
+        1,
+        "window 2 covers exactly one day-step, one MERGE group: {:?}",
+        groups
+    );
+
+    let merge_sql = &groups[0].statements[0].sql;
+    assert_eq!(groups[0].statements.len(), 1);
+
+    let key = vec!["device_id".to_string(), "event_date".to_string()];
+    let folds = vec![(
+        "max_amount".to_string(),
+        "GREATEST(target.max_amount, delta.max_amount)".to_string(),
+    )];
+    let slice = TargetSlicePredicate::Range {
+        partition_column: "event_date".to_string(),
+        lower: "2024-01-02".to_string(),
+        upper: "2024-01-02".to_string(),
+    };
+
+    let prefix = "MERGE INTO main.device_daily AS target USING (";
+    let suffix = ") AS delta ON target.device_id = delta.device_id AND \
+                  target.event_date = delta.event_date AND \
+                  target.event_date BETWEEN '2024-01-02' AND '2024-01-02' \
+                  WHEN MATCHED AND (target.max_amount IS DISTINCT FROM (GREATEST(target.\
+                  max_amount, delta.max_amount))) THEN UPDATE SET \
+                  max_amount = GREATEST(target.max_amount, delta.max_amount) \
+                  WHEN NOT MATCHED THEN INSERT *";
+    assert!(
+        merge_sql.starts_with(prefix) && merge_sql.ends_with(suffix),
+        "unexpected slice-predicated merge statement: {merge_sql}"
+    );
+    assert!(
+        merge_sql.contains("BETWEEN") && merge_sql.contains("IS DISTINCT FROM"),
+        "the composed model's suppressed merge must carry BOTH the slice predicate and the \
+         suppression arm: {merge_sql}"
+    );
+    let delta_select = &merge_sql[prefix.len()..merge_sql.len() - suffix.len()];
+
+    let expected = emit_keyed_fold_suppressed(
+        "main.device_daily",
+        &key,
+        &folds,
+        delta_select,
+        Some(&slice),
+        &["max_amount".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &groups[0],
+        "executed slice-predicated MERGE group must be byte-identical to a direct emitter call \
+         over the same table/key/folds/slice/delta_select"
+    );
+
+    // Result-equivalence: the CREATE (window 1) + slice-predicated MERGE
+    // (window 2) statements the run actually executed must leave
+    // `device_daily` multiset-equal to a full refresh of the model's own
+    // aggregation over every seeded row.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT * FROM main.device_daily",
+            "SELECT device_id, event_date, MAX(amount) AS max_amount \
+             FROM main.sources_events GROUP BY device_id, event_date"
+        )
+        .await,
+        "the CREATE+slice-predicated-MERGE statements execute_project actually ran must \
+         reproduce a full refresh"
+    );
+}
+
+/// Statement-parity leg for the **checked route-3** (recurrence-bounded,
+/// declared `r`) merge (`docs/specs/incremental_models.md` §"Key temporal
+/// locality", route 3; `docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase A4): the out-of-slice match probe and the merge
+/// itself are each byte-identical to a direct call of their single-owner
+/// emitters (`emit_recurrence_bound_probe`, `emit_keyed_fold`).
+///
+/// Driven directly through `maintenance_driver::run_windowed_keyed_
+/// maintenance` (not the full `execute_project` pipeline): route 3's
+/// flagship shape needs an extremal-fold (`MIN`/`MAX`) partition column,
+/// which trips the *unrelated* NOT-NULL diagnostic `execute_project`'s
+/// pre-execution gate enforces regardless of locality admission — the
+/// same pre-existing blocker `docs/specs/incremental_models.md` §Known
+/// Divergences documents for route 2's own real-fixture coverage. Calling
+/// the driver directly still proves the actual SQL a run executes matches
+/// the emitters, the parity gate's whole point; it does not touch the
+/// (separately tracked) nullability gap.
+#[tokio::test]
+async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let db_path = tmp.path().join("run.duckdb");
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS main;\n\
+             CREATE TABLE main.raw_events (event_id INTEGER, event_ts TIMESTAMP, event_date DATE);",
+        )
+        .expect("create raw_events");
+    }
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open backend");
+    let backend = RecordingBackend::new(inner);
+
+    let classification = CumulativeClassification {
+        unique_key: vec!["event_id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "last_seen_date".to_string(),
+            per_partition_agg: "MAX".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::Max,
+        }],
+        driving_source: DrivingSource {
+            name: "smelt.sources.raw.events".to_string(),
+            timeseries: smelt_core::config::TimeseriesConfig {
+                event_time_column: "event_ts".to_string(),
+                partition_column: "event_date".to_string(),
+                granularity: smelt_core::config::Granularity::Day,
+                week_start: None,
+                assert_monotonic: false,
+            },
+        },
+    };
+    let slice = LocalitySlice::RecurrenceBounded {
+        partition_column: "last_seen_date".to_string(),
+        margin_before: smelt_logical::analysis::source_bounds::Seconds::days(3),
+        margin_after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+        r: smelt_logical::analysis::source_bounds::Seconds::days(3),
+    };
+    let compile_step = |step: &smelt_runtime::maintenance_driver::MaintenanceStep| {
+        Ok(format!(
+            "SELECT event_id, MAX(event_date) AS last_seen_date FROM main.raw_events \
+             WHERE event_date = '{}' GROUP BY event_id",
+            step.partition_value
+        ))
+    };
+
+    backend
+        .execute_sql(
+            "INSERT INTO main.raw_events VALUES (1, TIMESTAMP '2026-02-01 00:00:00', DATE \
+             '2026-02-01')",
+        )
+        .await
+        .expect("insert day 1");
+    let create_steps = driving_steps(
+        "2026-02-01",
+        "2026-02-02",
+        &smelt_core::config::Granularity::Day,
+    )
+    .expect("steps");
+    run_windowed_keyed_maintenance(
+        &backend,
+        "events_last_seen",
+        "main",
+        "events_last_seen",
+        &create_steps,
+        &classification,
+        Some(&slice),
+        &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
+            why: "test asserts the unconditional checked-merge shape".to_string(),
+        },
+        compile_step,
+    )
+    .await
+    .expect("day 1 create must succeed");
+
+    // Day 2: an in-bound redelivery — the probe must run, find no
+    // violation, and the merge must apply.
+    backend
+        .execute_sql(
+            "INSERT INTO main.raw_events VALUES (1, TIMESTAMP '2026-02-02 00:00:00', DATE \
+             '2026-02-02')",
+        )
+        .await
+        .expect("insert day 2");
+    let steps = driving_steps(
+        "2026-02-02",
+        "2026-02-03",
+        &smelt_core::config::Granularity::Day,
+    )
+    .expect("steps");
+    run_windowed_keyed_maintenance(
+        &backend,
+        "events_last_seen",
+        "main",
+        "events_last_seen",
+        &steps,
+        &classification,
+        Some(&slice),
+        &smelt_logical::maintenance::choice::WriteSuppression::Unconditional {
+            why: "test asserts the unconditional checked-merge shape".to_string(),
+        },
+        compile_step,
+    )
+    .await
+    .expect("in-bound redelivery must merge cleanly");
+
+    // The probe: byte-identical to a direct `emit_recurrence_bound_probe`
+    // call over this step's own delta SELECT and slice lower bound
+    // (2026-02-02 widened backward by r=3 days → 2026-01-30).
+    let executed = backend.recorded_sql();
+    let probe_sql = executed
+        .iter()
+        .find(|s| s.contains("__recurrence_violations"))
+        .expect("the checked route must execute the out-of-slice match probe");
+    let delta_select = "SELECT event_id, MAX(event_date) AS last_seen_date FROM main.raw_events \
+                         WHERE event_date = '2026-02-02' GROUP BY event_id";
+    let expected_probe = emit_recurrence_bound_probe(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        "last_seen_date",
+        delta_select,
+        "2026-01-30",
+    );
+    assert_eq!(
+        probe_sql, &expected_probe.sql,
+        "executed probe must be byte-identical to a direct emitter call"
+    );
+
+    // The merge: byte-identical to a direct `emit_keyed_fold` call with the
+    // same `Range` predicate the checked route resolves to (same shape as
+    // route 1's window).
+    let groups = backend.recorded_groups();
+    let merge_group = groups
+        .iter()
+        .find(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .expect("the merge action must have executed via execute_statement_group");
+    let range_slice = TargetSlicePredicate::Range {
+        partition_column: "last_seen_date".to_string(),
+        lower: "2026-01-30".to_string(),
+        upper: "2026-02-02".to_string(),
+    };
+    let expected_merge = emit_keyed_fold(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        &[(
+            "last_seen_date".to_string(),
+            "GREATEST(target.last_seen_date, delta.last_seen_date)".to_string(),
+        )],
+        delta_select,
+        Some(&range_slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        merge_group, &expected_merge,
+        "executed checked-merge group must be byte-identical to a direct emitter call"
     );
 }
 
@@ -1168,9 +1592,1106 @@ async fn column_scoped_merge_statements_come_from_the_emitter() {
     );
 }
 
+/// Phase C4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the change-suppressed column-scoped MERGE (T1) dispatches through
+/// `maintenance_driver::execute_column_scoped_merge_full` exactly like the
+/// unconditional variant above, but building its `StatementGroup` via
+/// `emit_column_scoped_merge_suppressed` and handing it straight to
+/// `Backend::execute_statement_group` — never `Backend::merge_into` (which
+/// would route back through the unconditional emitter). This proves the
+/// EXECUTED statement text is byte-identical to a direct call of
+/// `emit_column_scoped_merge_suppressed` over the same inputs, the same
+/// property `column_scoped_merge_statements_come_from_the_emitter` proves
+/// for the unconditional variant.
+#[tokio::test]
+async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create dim table");
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'gold'), (2, 'silver')")
+        .await
+        .expect("seed dim table (user_id=1 mutated)");
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let suppression = smelt_logical::maintenance::choice::WriteSuppression::Suppressed {
+        compared_columns: vec!["tier".to_string()],
+    };
+
+    let window = smelt_backend::PartitionRange {
+        column: String::new(),
+        start: "2026-01-01".to_string(),
+        end: "2026-01-02".to_string(),
+    };
+    smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+        &window,
+    )
+    .await
+    .expect("suppressed column-scoped merge must succeed");
+
+    let groups = backend.recorded_groups();
+    let merge_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .collect();
+    assert_eq!(merge_groups.len(), 1, "exactly one MERGE group: {groups:?}");
+    let group = merge_groups[0];
+    assert!(!group.transactional);
+    assert_eq!(group.statements.len(), 1);
+
+    let expected = smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed(
+        "main.dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &["tier".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, group,
+        "executed suppressed MERGE group must be byte-identical to a direct emitter call over \
+         the same inputs"
+    );
+
+    // Result-equivalence: the same full-refresh oracle property the
+    // unconditional leg proves.
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT * FROM main.dim_users",
+            "SELECT user_id, tier FROM main.sources_users"
+        )
+        .await,
+        "the suppressed MERGE must reproduce a full refresh"
+    );
+}
+
+/// T5 (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// D2) — structural no-authoring gate extension for observed-delta
+/// recording. `docs/specs/incremental_models.md` §"The graph layer" —
+/// "Observed deltas on model edges" places the recorded delta in the SAME
+/// warehouse-resident, "bookkeeping" class as the reconciliation ledger
+/// (`smelt_state::ddl_duckdb::generate_ledger_table_ddl`/
+/// `generate_ledger_insert_sql`): D1's ruling is that this is smelt-state
+/// storage for a run's own byproduct, not a maintenance statement the run's
+/// *write* executes, so `smelt_logical::maintenance::emit`'s single-owner
+/// rule does not apply to it, and `no_maintenance_statement_authoring_
+/// outside_the_emitter` above is not extended with an allowlist entry (the
+/// recording query is a `SELECT ... LEFT JOIN`, not one of that gate's
+/// forbidden `DELETE FROM `/`MERGE INTO `/`CREATE TABLE {}.{} AS`/
+/// `CREATE TEMP TABLE ` shapes — confirmed by that test's own green run,
+/// unmodified by this phase).
+///
+/// What IS asserted here, as the phase's own structural gate: the "one
+/// comparison, two consumers" claim
+/// (`crate::maintenance_driver::changed_row_predicate`'s doc comment) — the
+/// observed-delta recording query's `IS DISTINCT FROM` guard must be
+/// BYTE-IDENTICAL to the suppressed MERGE's own matched-arm guard over the
+/// same `compared_columns`, so change-suppression and delta-recording can
+/// never silently diverge on what counts as "changed".
+#[test]
+fn observed_delta_predicate_matches_suppressed_merge_guard_byte_for_byte() {
+    let compared_columns = vec!["tier".to_string(), "email".to_string()];
+
+    let merge_group = smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed(
+        "main.dim_users",
+        &["user_id".to_string()],
+        "SELECT * FROM main.sources_users",
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    let merge_sql = &merge_group.statements[0].sql;
+
+    let record_sql = smelt_runtime::maintenance_driver::changed_row_predicate(
+        "target",
+        "source",
+        &compared_columns,
+    );
+
+    assert!(
+        merge_sql.contains(&record_sql),
+        "the recorded-delta predicate must appear byte-identical inside the suppressed MERGE's \
+         own matched-arm guard — predicate: {record_sql:?}, MERGE: {merge_sql:?}"
+    );
+
+    // The recording query built off the SAME predicate carries it verbatim
+    // too — a second cross-check at the query-assembly level, not just the
+    // bare predicate.
+    let changed_keys_query = smelt_runtime::maintenance_driver::changed_keys_select(
+        "main.dim_users",
+        &["user_id".to_string()],
+        "SELECT * FROM main.sources_users",
+        &compared_columns,
+        None,
+    );
+    assert!(
+        changed_keys_query.contains(&record_sql),
+        "changed_keys_select must carry the identical predicate text, got: {changed_keys_query:?}"
+    );
+}
+
+/// Phase C5 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the change-suppressed keyed-fold `MERGE` (T1 for `refresh: keyed`
+/// models): `emit_keyed_fold_suppressed` carries the same suppression
+/// predicate machinery as C4's `emit_column_scoped_merge_suppressed`, but
+/// compares the stored value against the fold's own combine expression.
+/// This is a direct-dispatch leg (no `execute_project` model pipeline
+/// involved, matching this phase's "runtime e2e" test — the abstract
+/// `MaintenancePlan`/`choice::resolve_keyed_write_mechanism` this phase adds
+/// is not yet wired into the live `refresh: keyed` per-partition loop
+/// (`smelt_runtime::cumulative`); that wiring is out of this phase's file
+/// scope). It proves two things over a real DuckDB connection:
+///
+/// - The executed `StatementGroup` is byte-identical to a direct
+///   `emit_keyed_fold_suppressed` call over the same inputs.
+/// - A `run_marker` fold column — only ever overwritten when the matched
+///   arm's `UPDATE SET` actually fires — proves the suppressed row was
+///   never written at all (not merely that it landed on the same bits): a
+///   device whose delta contributes zero new events (`event_count`
+///   unchanged after the additive combine) keeps its **prior** run's
+///   marker, while a device whose combined result differs gets the new
+///   run's marker, and a brand-new device is inserted with it.
+#[tokio::test]
+async fn suppressed_keyed_fold_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.device_daily (device_id BIGINT, event_count BIGINT, run_marker \
+             VARCHAR)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.device_daily VALUES (1, 5, 'run1'), (2, 3, 'run1')")
+        .await
+        .expect("seed target table");
+
+    // Device 1's delta contributes zero new events (an unchanged-effect
+    // re-run); device 2's delta genuinely adds events; device 3 is brand
+    // new.
+    let delta_select = "SELECT * FROM (VALUES (1, 0, 'run2'), (2, 4, 'run2'), (3, 10, 'run2')) AS \
+                         t(device_id, event_count, run_marker)";
+    let folds = vec![
+        (
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        ),
+        ("run_marker".to_string(), "delta.run_marker".to_string()),
+    ];
+    let key = vec!["device_id".to_string()];
+    let compared_columns = vec!["event_count".to_string()];
+
+    let group = emit_keyed_fold_suppressed(
+        "main.device_daily",
+        &key,
+        &folds,
+        delta_select,
+        None,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&group)
+        .await
+        .expect("suppressed keyed-fold merge must succeed");
+
+    let recorded = backend.recorded_groups();
+    assert_eq!(recorded.len(), 1);
+    assert_eq!(&recorded[0], &group);
+    let expected = emit_keyed_fold_suppressed(
+        "main.device_daily",
+        &key,
+        &folds,
+        delta_select,
+        None,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &recorded[0],
+        "executed suppressed keyed-fold group must be byte-identical to a direct emitter call \
+         over the same inputs"
+    );
+
+    let rows = backend
+        .execute_sql(
+            "SELECT device_id, event_count, run_marker FROM main.device_daily ORDER BY device_id",
+        )
+        .await
+        .expect("read back target");
+    let batch = &rows[0];
+    let markers: Vec<String> = {
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("run_marker is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    assert_eq!(
+        markers,
+        vec!["run1".to_string(), "run2".to_string(), "run2".to_string()],
+        "device 1's suppressed row must keep its prior run's marker (never written); device 2 \
+         (changed) and device 3 (new) must carry the new run's marker"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT device_id, event_count FROM main.device_daily",
+            "SELECT device_id, event_count FROM (VALUES (1, 5), (2, 7), (3, 10)) AS \
+             t(device_id, event_count)"
+        )
+        .await,
+        "the suppressed keyed-fold merge must reproduce the full-refresh oracle's combined state"
+    );
+}
+
+/// Phase C5 — the staged-candidate conditional `DELETE`+`INSERT` (T2): the
+/// merge-less keyed-shaped realisation. Proves the executed `StatementGroup`
+/// is byte-identical to a direct `emit_staged_candidate_conditional` call,
+/// that the same `run_marker` technique proves an unchanged row is never
+/// touched (its prior marker survives), and that a mid-group failure rolls
+/// back the whole transaction — including the staged temp relation's own
+/// `CREATE` — leaving no temp relation behind.
+#[tokio::test]
+async fn staged_candidate_conditional_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR, run_marker VARCHAR)",
+        )
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_users VALUES (1, 'bronze', 'run1'), (2, 'silver', 'run1'), (3, \
+             'gold', 'run1')",
+        )
+        .await
+        .expect("seed target table");
+
+    // user 1: unchanged tier ('bronze' -> 'bronze'); user 2: changed tier;
+    // user 4: brand new. user 3 is absent from the candidate set (out of
+    // this run's touched region) and must be left untouched entirely.
+    let candidate_select = "SELECT * FROM (VALUES (1, 'bronze', 'run2'), (2, 'platinum', \
+                             'run2'), (4, 'new', 'run2')) AS t(user_id, tier, run_marker)";
+    let key = vec!["user_id".to_string()];
+    let compared_columns = vec!["tier".to_string()];
+
+    let group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&group)
+        .await
+        .expect("staged-candidate conditional write must succeed");
+
+    let recorded = backend.recorded_groups();
+    assert_eq!(recorded.len(), 1);
+    let expected = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_dim_users",
+        &key,
+        candidate_select,
+        &compared_columns,
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        &expected, &recorded[0],
+        "executed staged-candidate group must be byte-identical to a direct emitter call over \
+         the same inputs"
+    );
+
+    let rows = backend
+        .execute_sql("SELECT user_id, tier, run_marker FROM main.dim_users ORDER BY user_id")
+        .await
+        .expect("read back target");
+    let batch = &rows[0];
+    let tiers: Vec<String> = {
+        let col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("tier is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    let markers: Vec<String> = {
+        let col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("run_marker is a string column");
+        (0..col.len()).map(|i| col.value(i).to_string()).collect()
+    };
+    assert_eq!(
+        tiers,
+        vec![
+            "bronze".to_string(),
+            "platinum".to_string(),
+            "gold".to_string(),
+            "new".to_string()
+        ]
+    );
+    assert_eq!(
+        markers,
+        vec![
+            "run1".to_string(), // user 1: suppressed, never deleted/reinserted
+            "run2".to_string(), // user 2: changed, deleted+reinserted
+            "run1".to_string(), // user 3: absent from candidate set, untouched
+            "run2".to_string(), // user 4: new, inserted
+        ],
+        "an unchanged staged candidate must never delete/reinsert its row (prior marker \
+         survives); a changed or new row must carry the new run's marker"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT user_id, tier FROM main.dim_users",
+            "SELECT user_id, tier FROM (VALUES (1, 'bronze'), (2, 'platinum'), (3, 'gold'), (4, \
+             'new')) AS t(user_id, tier)"
+        )
+        .await,
+        "the staged-candidate conditional write must reproduce the full-refresh oracle"
+    );
+
+    let staged_relations = backend
+        .execute_sql(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = \
+             '__smelt_staged_dim_users'",
+        )
+        .await
+        .expect("query duckdb_tables");
+    let count = staged_relations[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("count(*) is Int64")
+        .value(0);
+    assert_eq!(
+        count, 0,
+        "the staged temp relation must be dropped by the end of a successful group"
+    );
+}
+
+/// A mid-group failure (the candidate `INSERT`'s projection does not match
+/// the staged relation's own `CREATE`-derived shape — a column-count
+/// mismatch DuckDB rejects) must roll back the **entire** transaction,
+/// including the temp relation's own `CREATE`: no temp relation is left
+/// behind, and the target table is completely untouched.
+#[tokio::test]
+async fn staged_candidate_interrupted_run_leaves_no_temp_relation_behind() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze')")
+        .await
+        .expect("seed target table");
+
+    // Hand-build a group whose CREATE (shape-only, `LIMIT 0` over a 2-column
+    // projection) disagrees with its own INSERT (a 3-column projection) —
+    // the same shape `emit_staged_candidate_conditional` would build if a
+    // caller ever violated its full-row-projection contract. DuckDB rejects
+    // the INSERT with a column-count mismatch mid-transaction.
+    let mut group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.dim_users",
+        "__smelt_staged_broken",
+        &["user_id".to_string()],
+        "SELECT user_id, tier FROM (VALUES (1, 'bronze')) AS t(user_id, tier)",
+        &["tier".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    group.statements[1] = smelt_logical::maintenance::emit::MaintenanceStatement {
+        sql: "INSERT INTO __smelt_staged_broken SELECT user_id, tier, 'extra' FROM (VALUES (1, \
+              'bronze')) AS t(user_id, tier, junk)"
+            .to_string(),
+    };
+
+    let result = backend.execute_statement_group(&group).await;
+    assert!(
+        result.is_err(),
+        "the deliberately-broken INSERT must fail: {result:?}"
+    );
+
+    let staged_relations = backend
+        .execute_sql(
+            "SELECT count(*) FROM duckdb_tables() WHERE table_name = '__smelt_staged_broken'",
+        )
+        .await
+        .expect("query duckdb_tables");
+    let count = staged_relations[0]
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("count(*) is Int64")
+        .value(0);
+    assert_eq!(
+        count, 0,
+        "a rolled-back transaction must leave no staged temp relation behind — its own CREATE \
+         is part of the same failed transaction"
+    );
+
+    assert!(
+        multiset_equal(
+            &backend,
+            "SELECT user_id, tier FROM main.dim_users",
+            "SELECT user_id, tier FROM (VALUES (1, 'bronze')) AS t(user_id, tier)"
+        )
+        .await,
+        "the target table must be completely untouched by a rolled-back staged-candidate group"
+    );
+}
+
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase C6's
+/// own real-fixture requirement: `examples/web_analytics`'s
+/// `silver.events_deduped` (the flagship composed shape — key-addressed via
+/// `event_id`, time-partitioned via `first_seen_date`, admitted through
+/// route 3's declared `key_recurrence`) driven through the SAME real model
+/// text `smelt run` executes for that example, via `execute_project` and a
+/// `RecordingBackend` so the executed SQL can be inspected directly — the
+/// real-fixture counterpart to `keyed_fold_slice_predicated_merge_
+/// statements_come_from_the_emitter`'s synthetic composed fixture above.
+///
+/// Only the two files this model actually needs
+/// (`models/sources/raw/events.yml`, `models/silver/events_deduped.sql`)
+/// are copied byte-for-byte off disk — not the whole example (which also
+/// needs `smelt-datagen`-generated Parquet + the `functions/` dir neither
+/// model here calls) — into a fresh scratch project, seeded directly via
+/// `raw.events` INSERTs rather than a full datagen run.
+///
+/// Day 1 seeds `event_id` 1; day 2 redelivers the SAME `event_id` 1 with
+/// byte-identical payload fields (only `arrival_time`, a column this model
+/// never selects, would differ in a real redelivery — irrelevant here) —
+/// exactly `datagen.yaml`'s `redelivery:` storm, collapsed to one pair —
+/// alongside a genuinely new `event_id` 2. Day 2's `MERGE` step must carry
+/// **both** predicates (the route-3 `RecurrenceBounded` slice on the target
+/// read, `IS DISTINCT FROM` suppression on the matched arm) and must write
+/// zero rows for the redelivered key while still inserting the new one.
+#[tokio::test]
+async fn events_deduped_composed_suppression_storm_rerun_writes_zero_rows() {
+    let tmp = tempfile::tempdir().expect("tempdir");
+    let project_dir = tmp.path();
+    std::fs::create_dir_all(project_dir.join("models/sources/raw")).unwrap();
+    std::fs::create_dir_all(project_dir.join("models/silver")).unwrap();
+
+    let fixture_root = repo_root().join("examples/web_analytics");
+    let events_yml = std::fs::read_to_string(fixture_root.join("models/sources/raw/events.yml"))
+        .expect("read examples/web_analytics/models/sources/raw/events.yml");
+    let events_deduped_sql =
+        std::fs::read_to_string(fixture_root.join("models/silver/events_deduped.sql"))
+            .expect("read examples/web_analytics/models/silver/events_deduped.sql");
+    std::fs::write(
+        project_dir.join("models/sources/raw/events.yml"),
+        &events_yml,
+    )
+    .unwrap();
+    std::fs::write(
+        project_dir.join("models/silver/events_deduped.sql"),
+        &events_deduped_sql,
+    )
+    .unwrap();
+
+    let db_path = project_dir.join("run.duckdb");
+    let smelt_yml = format!(
+        "name: events_deduped_storm_test\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\ntarget: dev\n",
+        db = db_path.display()
+    );
+    std::fs::write(project_dir.join("smelt.yml"), &smelt_yml).unwrap();
+
+    {
+        let conn = duckdb::Connection::open(&db_path).expect("open duckdb");
+        conn.execute_batch(
+            "CREATE SCHEMA IF NOT EXISTS raw;\n\
+             CREATE TABLE raw.events (\n\
+               event_id BIGINT, device_id INTEGER, user_id INTEGER, seconds_in_day INTEGER,\n\
+               event_time VARCHAR, arrival_time VARCHAR, utm_campaign VARCHAR, payload VARCHAR,\n\
+               event_date VARCHAR\n\
+             );\n\
+             -- Day 1: event_id 1 first seen.\n\
+             INSERT INTO raw.events VALUES (\n\
+               1, 10, NULL, 100, '2026-04-01T00:01:40', '2026-04-01T00:01:41', NULL,\n\
+               '{\"event_name\": \"page_view\", \"platform\": \"web\", \"url\": \"/home\"}',\n\
+               '2026-04-01'\n\
+             );\n\
+             -- Day 2: event_id 1 redelivered (byte-identical payload fields — only\n\
+             -- arrival_time, never selected by this model, differs), plus a\n\
+             -- genuinely new event_id 2.\n\
+             INSERT INTO raw.events VALUES (\n\
+               1, 10, NULL, 100, '2026-04-01T00:01:40', '2026-04-02T00:01:41', NULL,\n\
+               '{\"event_name\": \"page_view\", \"platform\": \"web\", \"url\": \"/home\"}',\n\
+               '2026-04-01'\n\
+             );\n\
+             INSERT INTO raw.events VALUES (\n\
+               2, 11, NULL, 200, '2026-04-02T00:03:20', '2026-04-02T00:03:21', NULL,\n\
+               '{\"event_name\": \"page_view\", \"platform\": \"web\", \"url\": \"/pricing\"}',\n\
+               '2026-04-02'\n\
+             );",
+        )
+        .expect("seed raw.events");
+    }
+
+    let config = Arc::new(Config::load(project_dir).expect("load config"));
+
+    // Window 1: day 1 alone — first-run CREATE, no MERGE yet.
+    {
+        let (db, graph) = build_db_and_graph(project_dir, &config);
+        let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+        let factory = RecordingBackendFactory {
+            db_path: db_path.clone(),
+            backend: Arc::clone(&backend_slot),
+        };
+        execute_project(
+            "events-deduped-storm-run-1".to_string(),
+            make_request("dev", "2026-04-01", "2026-04-02"),
+            Arc::clone(&config),
+            graph,
+            db,
+            project_dir,
+            &factory,
+            &smelt_runtime::NoOpReporter,
+            CancellationToken::new(),
+        )
+        .await
+        .expect("day 1 (create) must run");
+    }
+
+    // Window 2: day 2 — the redelivery-storm step, a single MERGE.
+    let (db, graph) = build_db_and_graph(project_dir, &config);
+    let backend_slot: Arc<Mutex<Option<Arc<RecordingBackend>>>> = Arc::new(Mutex::new(None));
+    let factory = RecordingBackendFactory {
+        db_path: db_path.clone(),
+        backend: Arc::clone(&backend_slot),
+    };
+    execute_project(
+        "events-deduped-storm-run-2".to_string(),
+        make_request("dev", "2026-04-02", "2026-04-03"),
+        Arc::clone(&config),
+        graph,
+        db,
+        project_dir,
+        &factory,
+        &smelt_runtime::NoOpReporter,
+        CancellationToken::new(),
+    )
+    .await
+    .expect("day 2 (redelivery-storm merge) must run");
+
+    let backend = backend_slot
+        .lock()
+        .unwrap()
+        .clone()
+        .expect("backend recorded");
+    let groups = backend.recorded_groups();
+    let merge_group = groups
+        .iter()
+        .find(|g| g.statements[0].sql.starts_with("MERGE INTO"))
+        .expect("day 2 must execute exactly one MERGE group");
+    let merge_sql = &merge_group.statements[0].sql;
+
+    assert!(
+        merge_sql.contains("BETWEEN"),
+        "the composed model's merge must carry the route-3 recurrence-bounded slice on the \
+         target read: {merge_sql}"
+    );
+    assert!(
+        merge_sql.contains("IS DISTINCT FROM"),
+        "the composed model's merge must carry the suppression arm: {merge_sql}"
+    );
+
+    // Zero-write proof: reissue the exact statement text the run recorded
+    // — DuckDB's own `MERGE` returns the count of rows it actually
+    // modified (`crates/smelt-runtime/tests/technique_lowering.rs::
+    // merge_affected_row_count`'s own technique). The run already brought
+    // the target to its converged state, so replaying the identical
+    // statement now must match every row (`event_id` 1's redelivered
+    // duplicate, `event_id` 2 already inserted) but write none of them.
+    let replay = backend
+        .execute_sql(merge_sql)
+        .await
+        .expect("replaying the recorded merge must succeed");
+    let batch = replay.first().expect("MERGE returns one Count row");
+    let affected = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<Int64Array>()
+        .expect("Count column is Int64")
+        .value(0);
+    assert_eq!(
+        affected, 0,
+        "replaying day 2's already-converged merge must write zero rows — the redelivery \
+         storm's unchanged payload must be fully suppressed"
+    );
+
+    // Result-equivalence: the maintained state must still equal a full
+    // refresh of the model's own MIN-fold dedup over every seeded row.
+    assert!(
+        multiset_equal(
+            backend.as_ref(),
+            "SELECT event_id, device_id, user_id, first_seen_date FROM main.silver_events_deduped",
+            "SELECT event_id, MIN(device_id) AS device_id, MIN(user_id) AS user_id, \
+             MIN(CAST(event_date AS DATE)) AS first_seen_date FROM raw.events GROUP BY event_id"
+        )
+        .await,
+        "the composed suppressed-merge run must still reproduce a full refresh"
+    );
+}
+
+// =============================================================================
+// T3 — delta-restricted region recompute over a model edge (`docs/plans/
+// 20260715-composed-axes-conditional-maintenance.md` Phase E3): the
+// statements `maintenance_driver::execute_delete_insert_with_delta_
+// restriction` actually executes must be byte-identical to a direct call of
+// `emit_delete_insert_delta_restricted`/`emit_delete_insert` with the same
+// inputs — the same proof shape as the suppressed-MERGE and staged-
+// candidate legs above.
+// =============================================================================
+
+/// A licensed restriction (`P1` Closed ∧ a non-empty recorded delta) must
+/// execute exactly `emit_delete_insert_delta_restricted`'s own output, byte
+/// for byte.
+#[tokio::test]
+async fn delta_restricted_recompute_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.enriched (event_id VARCHAR, event_date DATE, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.enriched VALUES ('ev-1', '2026-07-01', 'OLD'), \
+             ('ev-2', '2026-07-01', 'OLD')",
+        )
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql(
+            "CREATE TABLE main.enrichment_recompute (event_id VARCHAR, event_date DATE, tier VARCHAR)",
+        )
+        .await
+        .expect("create recompute source");
+    backend
+        .execute_sql(
+            "INSERT INTO main.enrichment_recompute VALUES ('ev-1', '2026-07-01', 'NEW'), \
+             ('ev-2', '2026-07-01', 'NEW')",
+        )
+        .await
+        .expect("seed recompute source");
+
+    let ensure_sql = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend
+        .execute_sql(&ensure_sql)
+        .await
+        .expect("ensure observed-delta table");
+    let upsert_sql = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "silver.fact",
+        "2026-07-01",
+        "2026-07-02",
+        "SELECT * FROM (VALUES ('ev-1', NULL)) AS t(delta_key, delta_partition)",
+    );
+    backend
+        .execute_sql(&upsert_sql)
+        .await
+        .expect("record the upstream observed delta");
+
+    let region = smelt_logical::maintenance::emit::Region {
+        start: "'2026-07-01'".to_string(),
+        end: "'2026-07-02'".to_string(),
+    };
+    let body = "SELECT event_id, event_date, tier FROM main.enrichment_recompute";
+    let closure = smelt_logical::maintenance::SkeletonSourceClosure::Closed;
+
+    smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
+        &backend,
+        "main",
+        "enriched",
+        "event_date",
+        &region,
+        body,
+        Some("event_id"),
+        Some(&closure),
+        "silver.fact",
+        "2026-07-01",
+        "2026-07-02",
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    )
+    .await
+    .expect("delta-restricted recompute must succeed");
+
+    let groups = backend.recorded_groups();
+    let delete_insert_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| g.statements[0].sql.starts_with("DELETE FROM main.enriched"))
+        .collect();
+    assert_eq!(
+        delete_insert_groups.len(),
+        1,
+        "exactly one delta-restricted DELETE+INSERT group: {groups:?}"
+    );
+    let group = delete_insert_groups[0];
+
+    let expected = smelt_logical::maintenance::emit::emit_delete_insert_delta_restricted(
+        "main.enriched",
+        "event_date",
+        &region,
+        body,
+        "event_id",
+        &["ev-1".to_string()],
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements, expected.statements,
+        "the executed delta-restricted group must be byte-identical to a direct emitter call \
+         over the same inputs"
+    );
+    assert_eq!(group.transactional, expected.transactional);
+}
+
+/// An `Open` closure (or an absent/empty delta — asserted below) must
+/// execute exactly `emit_delete_insert`'s own unrestricted output, never a
+/// partially-restricted variant.
+#[tokio::test]
+async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql("CREATE TABLE main.enriched (event_id VARCHAR, event_date DATE, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql(
+            "CREATE TABLE main.enrichment_recompute (event_id VARCHAR, event_date DATE, tier VARCHAR)",
+        )
+        .await
+        .expect("create recompute source");
+
+    let region = smelt_logical::maintenance::emit::Region {
+        start: "'2026-07-01'".to_string(),
+        end: "'2026-07-02'".to_string(),
+    };
+    let body = "SELECT event_id, event_date, tier FROM main.enrichment_recompute";
+    let closure = smelt_logical::maintenance::SkeletonSourceClosure::Open {
+        reason: "test".to_string(),
+    };
+
+    smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
+        &backend,
+        "main",
+        "enriched",
+        "event_date",
+        &region,
+        body,
+        Some("event_id"),
+        Some(&closure),
+        "silver.fact",
+        "2026-07-01",
+        "2026-07-02",
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    )
+    .await
+    .expect("unrestricted recompute must succeed");
+
+    let groups = backend.recorded_groups();
+    let delete_insert_groups: Vec<_> = groups
+        .iter()
+        .filter(|g| g.statements[0].sql.starts_with("DELETE FROM main.enriched"))
+        .collect();
+    assert_eq!(delete_insert_groups.len(), 1, "{groups:?}");
+    let group = delete_insert_groups[0];
+
+    let expected = smelt_logical::maintenance::emit::emit_delete_insert(
+        "main.enriched",
+        "event_date",
+        &region,
+        body,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements, expected.statements,
+        "an Open closure must execute the byte-identical unrestricted emitter output"
+    );
+}
+
+/// Phase F3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the fingerprint-sidecar diff query is emitter-authored (unlike the T5
+/// observed-delta recording query above, which D1 ruled smelt-state
+/// bookkeeping): `smelt_runtime::maintenance_driver::
+/// diff_fingerprint_sidecar_changed_keys`/`refresh_fingerprint_sidecar` must
+/// execute SQL text byte-identical to a direct call of
+/// `smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`/
+/// `emit_fingerprint_digest_select` and
+/// `smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql`/
+/// `_gc_sql` over the same resolved inputs — this is a direct-dispatch leg
+/// (no `execute_project` model pipeline involved, matching the precedent
+/// `suppressed_keyed_fold_statements_come_from_the_emitter` documents: the
+/// sidecar is not yet wired into the live trigger/technique-selection
+/// pipeline, that wiring is a later phase's scope).
+#[tokio::test]
+async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let inner = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+    let backend = RecordingBackend::new(inner);
+
+    backend
+        .execute_sql(
+            "CREATE TABLE main.dim_users (id INTEGER, name VARCHAR, tier VARCHAR, notes VARCHAR)",
+        )
+        .await
+        .expect("create source table");
+    backend
+        .execute_sql(
+            "INSERT INTO main.dim_users VALUES \
+             (1, 'Alice', 'gold', 'n1'), (2, 'Bob', 'silver', 'n2'), (3, 'Cara', 'gold', 'n3')",
+        )
+        .await
+        .expect("seed source table");
+
+    let projection = smelt_logical::analysis::fingerprint::Projection::Columns(
+        ["name".to_string(), "tier".to_string()]
+            .into_iter()
+            .collect(),
+    );
+    let source_key = vec!["id".to_string()];
+    let all_source_columns = vec![
+        "id".to_string(),
+        "name".to_string(),
+        "tier".to_string(),
+        "notes".to_string(),
+    ];
+    // Phase F4 — the consuming model's SQL text, folded into the sidecar's
+    // identity stamp (`compute_fingerprint_sidecar_stamp`).
+    let model_sql = "SELECT id, name, tier FROM smelt.sources.dim_users";
+
+    // Run 1: absent sidecar — every source row is "changed" (whole-table
+    // delta), and this diff also creates the sidecar table.
+    let changed = smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys(
+        &backend,
+        "main",
+        "smelt.sources.dim_users",
+        "main.dim_users",
+        &source_key,
+        &projection,
+        &all_source_columns,
+        model_sql,
+    )
+    .await
+    .expect("first diff against an absent sidecar");
+    let mut changed_sorted = changed.clone();
+    changed_sorted.sort();
+    assert_eq!(
+        changed_sorted,
+        vec!["1".to_string(), "2".to_string(), "3".to_string()],
+        "an absent sidecar must report every current source row as changed"
+    );
+
+    // The executed diff SQL must be byte-identical to a direct emitter call
+    // over the same resolved inputs.
+    let identity = smelt_logical::analysis::fingerprint::projection_identity(&projection);
+    let stamp =
+        smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp(&identity, model_sql);
+    let expected_diff_sql = smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff(
+        "main.dim_users",
+        &source_key,
+        &["name".to_string(), "tier".to_string()],
+        "main._smelt_fingerprint_sidecar",
+        "smelt.sources.dim_users",
+        &identity,
+        &stamp,
+        MaintenanceDialect::DuckDb,
+    );
+    let recorded_sql = backend.recorded_sql();
+    assert!(
+        recorded_sql.contains(&expected_diff_sql),
+        "executed diff SQL must be byte-identical to a direct emitter call: {recorded_sql:?}"
+    );
+
+    // Refresh: populate the sidecar (a trivial, empty write_group — this
+    // leg tests statement byte-identity, not the write/refresh
+    // transactionality already covered by
+    // `smelt-backend-duckdb`'s own unit tests).
+    let empty_write_group = StatementGroup {
+        statements: vec![],
+        transactional: false,
+    };
+    smelt_runtime::maintenance_driver::refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        "smelt.sources.dim_users",
+        "main.dim_users",
+        &source_key,
+        &projection,
+        &all_source_columns,
+        model_sql,
+        &empty_write_group,
+    )
+    .await
+    .expect("sidecar refresh");
+
+    let expected_digest_select = smelt_logical::maintenance::emit::emit_fingerprint_digest_select(
+        "main.dim_users",
+        &source_key,
+        &["name".to_string(), "tier".to_string()],
+        MaintenanceDialect::DuckDb,
+    );
+    let expected_refresh_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_refresh_sql(
+        "main",
+        "smelt.sources.dim_users",
+        &identity,
+        &stamp,
+        &expected_digest_select,
+    );
+    let expected_gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
+        "main",
+        "smelt.sources.dim_users",
+        &identity,
+        &expected_digest_select,
+    );
+    let recorded_sql = backend.recorded_sql();
+    assert!(
+        recorded_sql.contains(&expected_refresh_sql),
+        "executed refresh SQL must be byte-identical to a direct emitter/ddl call: {recorded_sql:?}"
+    );
+    assert!(
+        recorded_sql.contains(&expected_gc_sql),
+        "executed GC SQL must be byte-identical to a direct emitter/ddl call: {recorded_sql:?}"
+    );
+
+    // Run 2: mutate exactly 2 of the 3 rows' projected columns — the diff
+    // must report exactly those 2 keys, never the untouched third.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'platinum' WHERE id = 1")
+        .await
+        .expect("mutate row 1");
+    backend
+        .execute_sql("UPDATE main.dim_users SET name = 'Roberta' WHERE id = 2")
+        .await
+        .expect("mutate row 2");
+
+    let changed_after_edit =
+        smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys(
+            &backend,
+            "main",
+            "smelt.sources.dim_users",
+            "main.dim_users",
+            &source_key,
+            &projection,
+            &all_source_columns,
+            model_sql,
+        )
+        .await
+        .expect("second diff after a targeted edit");
+    let mut changed_after_edit_sorted = changed_after_edit;
+    changed_after_edit_sorted.sort();
+    assert_eq!(
+        changed_after_edit_sorted,
+        vec!["1".to_string(), "2".to_string()],
+        "the diff must report exactly the 2 edited keys, never the untouched third"
+    );
+
+    // An edit to a column OUTSIDE the P4 projection (`notes`) must yield an
+    // EMPTY changed set once the sidecar reflects that edit's siblings.
+    smelt_runtime::maintenance_driver::refresh_fingerprint_sidecar(
+        &backend,
+        "main",
+        "smelt.sources.dim_users",
+        "main.dim_users",
+        &source_key,
+        &projection,
+        &all_source_columns,
+        model_sql,
+        &empty_write_group,
+    )
+    .await
+    .expect("second sidecar refresh");
+    backend
+        .execute_sql("UPDATE main.dim_users SET notes = 'edited' WHERE id = 3")
+        .await
+        .expect("mutate row 3's out-of-projection column");
+    let changed_out_of_projection =
+        smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys(
+            &backend,
+            "main",
+            "smelt.sources.dim_users",
+            "main.dim_users",
+            &source_key,
+            &projection,
+            &all_source_columns,
+            model_sql,
+        )
+        .await
+        .expect("third diff after an out-of-projection edit");
+    assert!(
+        changed_out_of_projection.is_empty(),
+        "an edit outside the P4 projection must never dirty the changed-key set: \
+         {changed_out_of_projection:?}"
+    );
+}
+
 // =============================================================================
 // Structural gate: no maintenance-statement authoring outside the emitter
-// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)";
+// (`docs/specs/incremental_models.md` §"Statement emission (single owner)";
 // `docs/plans/20260710-emit-unification.md` Phase 4). Same `rg`-over-sources
 // style as `crates/smelt-core/tests/hardening_budget.rs`: a source scan, not
 // a runtime assertion, so it catches a regression at review time rather than
@@ -1204,7 +2725,7 @@ struct StatementAuthoringHit {
 /// Every entry here belongs to `Backend::delete_partitions`/
 /// `Backend::insert_overwrite`, serving `IncrementalStrategy::
 /// InsertOverwrite` — a per-partition materialization strategy that
-/// predates `maintenance_plan.md`'s single-owner emitters entirely and
+/// predates `incremental_models.md`'s single-owner emitters entirely and
 /// that no live derivation selects today: `smelt_runtime::
 /// maintenance_driver::resolve_incremental_strategy` and the batch loop's
 /// own dispatch (`crates/smelt-runtime/src/execute.rs`) only ever resolve
@@ -1261,7 +2782,15 @@ fn scan_statement_authoring_file(path: &Path, hits: &mut Vec<StatementAuthoringH
         }
         let forbidden = line.contains("DELETE FROM ")
             || line.contains("MERGE INTO ")
-            || line.contains("CREATE TABLE {}.{} AS");
+            || line.contains("CREATE TABLE {}.{} AS")
+            // The staged-candidate conditional DELETE+INSERT's temp
+            // relation (T2, `docs/plans/20260715-composed-axes-conditional-
+            // maintenance.md` Phase C5) — a distinctive shape with no
+            // pre-existing production match, unlike a bare `DROP TABLE `
+            // (which the generic table-lifecycle helpers already construct
+            // legitimately, outside any maintenance-statement family — see
+            // `Backend::drop_table_if_exists`'s own implementations).
+            || line.contains("CREATE TEMP TABLE ");
         if !forbidden {
             continue;
         }
@@ -1309,7 +2838,7 @@ fn scan_statement_authoring_dir(dir: &Path, hits: &mut Vec<StatementAuthoringHit
 /// — it is not a `smelt-backend*` or `smelt-runtime` crate). Backends
 /// execute emitted `StatementGroup`s (`Backend::execute_statement_group`);
 /// they never author maintenance-statement text of their own
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 #[test]
 fn no_maintenance_statement_authoring_outside_the_emitter() {
     let crates_dir = repo_root().join("crates");
@@ -1326,7 +2855,7 @@ fn no_maintenance_statement_authoring_outside_the_emitter() {
     assert!(
         hits.is_empty(),
         "maintenance-statement text constructed outside smelt-logical's single-owner emitters \
-         (docs/specs/maintenance_plan.md §\"Statement emission (single owner)\") — backends must \
+         (docs/specs/incremental_models.md §\"Statement emission (single owner)\") — backends must \
          execute an emitted StatementGroup, never author their own SQL text:\n{}",
         hits.iter()
             .map(|h| format!("  {}:{}: {}", h.file.display(), h.line_no, h.text))

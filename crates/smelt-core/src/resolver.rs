@@ -669,6 +669,7 @@ mod tests {
             watermark: None,
             unique_key: None,
             retention: None,
+            referential_integrity: None,
         };
 
         let collisions = compute_emitted_name_collisions(&[&m], &[], &[src], "main");

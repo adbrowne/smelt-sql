@@ -8,7 +8,7 @@ timeseries:
   granularity: day
 # The local gap/platform-boundary detection windows partition by device_id,
 # not session_start_date — the analyzer cannot statically prove they are
-# partition-aligned (same shape as `silver/events_parsed.sql`'s own
+# partition-aligned (same shape as `silver/events_deduped.sql`'s own
 # redelivery-dedup window). It is safe in practice: each window's own
 # `_local_root_ts` output feeds only the epoch-bucketing and self-read gate
 # below, both scoped to that same event's own row, never chunked across a
@@ -35,7 +35,7 @@ batched:
 -- below) to learn which sessions are still open and when they rooted. See
 -- `docs/research/20260711-clock-vs-root-anchored-sessions.md`
 -- §"silver.sessions_chained — root-anchored cut" for the design and
--- `docs/specs/batched_models.md` §"Window independence and self-referential
+-- `docs/specs/incremental_models.md` §"Window independence and self-referential
 -- models" for why a backward-bounded (no forward reach) self-read proves
 -- `Ordered`: the planner forces this model's partitions to build strictly in
 -- temporal order, one at a time — backfills of this table cannot be
@@ -53,7 +53,7 @@ batched:
 -- same identity scheme as `silver.sessions`.
 WITH events AS (
     SELECT device_id, event_ts, event_date, platform, utm_campaign
-    FROM smelt.silver.events_parsed
+    FROM smelt.silver.events_deduped
 ),
 -- Local (in-batch) natural-boundary detection: identical gap/platform rule
 -- to `sessionize`'s own `_marked`/`_bounded`/candidate steps, but with no
@@ -260,7 +260,7 @@ sessionized AS (
 -- declares that reach, so a run touching day D also rewrites its
 -- skew-reached prior partitions — the same ±-day Form B write rebase
 -- `silver.sessions` gets, composed with the self-edge's own `Ordered`
--- forcing (`docs/specs/batched_models.md` §"Window independence and
+-- forcing (`docs/specs/incremental_models.md` §"Window independence and
 -- self-referential models").
 --
 -- `aggregated` is a named CTE (rather than the model's own bare final

@@ -1,7 +1,7 @@
 #![cfg(feature = "duckdb")]
 //! Standing generative maintenance-conformance gate
 //! (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 3;
-//! `docs/specs/maintenance_plan.md` §"The equivalence invariant"). Drives
+//! `docs/specs/incremental_models.md` §"The equivalence invariant"). Drives
 //! the append-only partition-grain `ModelRecipe` pool
 //! (`smelt_maintenance_testkit::recipe`) end-to-end through the real
 //! `smelt_runtime::execute_project` pipeline, asserting S-restricted

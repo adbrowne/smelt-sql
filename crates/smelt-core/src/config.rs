@@ -67,25 +67,25 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
             "batched" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'batched'. `refresh: batched` is now \
                  `refresh: incremental` with `grain: partition` — {} \
-                 (see docs/specs/batched_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             "keyed" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'keyed'. `refresh: keyed` is now \
                  `refresh: incremental` with `grain: key` — {} \
-                 (see docs/specs/keyed_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             "cumulative" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'cumulative'. `refresh: cumulative` is now \
                  `refresh: incremental` with `grain: key` — {} \
-                 (see docs/specs/keyed_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             "versioned" => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: 'versioned'. `refresh: versioned` is now \
                  `refresh: incremental` with `grain: key` (+ `versioning: interval`) — {} \
-                 (see docs/specs/versioned_models.md)",
+                 (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
             _ => Err(serde::de::Error::custom(format!(
@@ -124,7 +124,7 @@ pub enum Grain {
     Partition,
     /// A stored row is the end-state per key. `unique_key` is required
     /// (composite-valued); `timeseries:` is admitted only when key temporal
-    /// locality is established (`docs/specs/keyed_models.md` §"Key temporal
+    /// locality is established (`docs/specs/incremental_models.md` §"Key temporal
     /// locality").
     Key,
     /// A stored row is the trajectory: one row per `(key, partition)`.
@@ -161,6 +161,60 @@ impl Serialize for Grain {
             Grain::Key => serializer.serialize_str("key"),
             Grain::KeyPerPartition => serializer.serialize_str("key_per_partition"),
         }
+    }
+}
+
+impl std::fmt::Display for Grain {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let s = match self {
+            Grain::Partition => "partition",
+            Grain::Key => "key",
+            Grain::KeyPerPartition => "key_per_partition",
+        };
+        write!(f, "{s}")
+    }
+}
+
+/// Derive the `grain` label from the two declared-and-checked shape-defining
+/// facts (`docs/specs/models.md` §"Refresh axis", §"The Relation Contract"):
+/// the **clock** (a `timeseries:` block is present) and the **identity** (a
+/// `unique_key:` is declared), plus whether the clock's `partition_column`
+/// is itself a member of the identity.
+///
+/// Pure — no I/O, no SQL parsing. The four corners:
+///
+/// | clock | identity | `partition_column ∈ key` | Derived grain |
+/// |---|---|---|---|
+/// | yes | no | — | `Partition` |
+/// | no | yes | — | `Key` |
+/// | yes | yes | no | `Key` (time-partitioned) |
+/// | yes | yes | yes | `KeyPerPartition` (the trajectory) |
+///
+/// Returns `None` when **neither** fact is present — there is nothing to
+/// derive a shape from (`models.md` §"Constraint violations": "no
+/// shape-defining fact declared"). Callers that have already established at
+/// least one fact is present (e.g. by checking `clock || identity.is_some()`)
+/// can `.expect()` the result; callers validating fresh frontmatter should
+/// treat `None` as the "neither declared" hard-error case.
+pub fn derive_grain(
+    clock: bool,
+    identity: Option<&[String]>,
+    partition_col: Option<&str>,
+) -> Option<Grain> {
+    match (clock, identity) {
+        (true, None) => Some(Grain::Partition),
+        (false, Some(_)) => Some(Grain::Key),
+        (true, Some(key)) => {
+            let partition_in_key = partition_col
+                .map(|p| key.iter().any(|k| k == p))
+                .unwrap_or(false);
+            Some(if partition_in_key {
+                Grain::KeyPerPartition
+            } else {
+                Grain::Key
+            })
+        }
+        (false, None) => None,
     }
 }
 
@@ -422,11 +476,20 @@ pub struct ModelConfig {
     /// `Config::get_refresh`).
     #[serde(default)]
     pub refresh: Option<RefreshStrategy>,
-    /// Declared grain (`partition` | `key` | `key_per_partition`). Required
-    /// whenever `refresh: incremental` is set, rejected otherwise. See
-    /// [`Grain`].
+    /// Declared grain (`partition` | `key` | `key_per_partition`) — an
+    /// optional **check-only assertion**, validated against the derived
+    /// shape facts rather than driving them. See [`Grain`],
+    /// [`derive_grain`], and `docs/specs/models.md` §"Refresh axis".
     #[serde(default)]
     pub grain: Option<Grain>,
+    /// The identity fact — top-level `unique_key:` (`docs/specs/models.md`
+    /// §"Refresh axis", §"The Relation Contract"). A single string is sugar
+    /// for a one-element list. Frontmatter wins over this smelt.yml override
+    /// when both set it (see [`Config::get_unique_key_with_metadata`]).
+    /// Distinct from the `batched:` sub-block's `unique_key` (a
+    /// partition-grain dedup aid, never key-addressing).
+    #[serde(default, deserialize_with = "crate::sources::opt_string_or_vec")]
+    pub unique_key: Option<Vec<String>>,
     /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
     /// itself is `refresh: incremental` + `grain: partition`, not the
     /// presence of this block.
@@ -535,7 +598,7 @@ impl<'de> Deserialize<'de> for DataLatency {
 ///
 /// Variant declaration order is increasing coarseness (`Hour` finest, `Year`
 /// coarsest) and derives `PartialOrd`/`Ord` on that basis — `g_run >= g_part`
-/// comparisons (`batched_models.md` §"Run window vs partition granularity")
+/// comparisons (`incremental_models.md` §"Run window vs partition granularity")
 /// read this as a plain enum comparison rather than a bespoke arithmetic
 /// table.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Deserialize, Serialize)]
@@ -576,7 +639,7 @@ pub struct BatchedSafetyOverrides {
 ///
 /// UPSERT (`MERGE`) is **not** an incremental strategy — it is the physical
 /// primitive used by the `refresh: incremental` + `grain: key` merge loop
-/// (`docs/specs/keyed_models.md`), which is a separate sibling rule
+/// (`docs/specs/incremental_models.md`), which is a separate sibling rule
 /// with a different equivalence contract. `Backend::merge_into` remains on
 /// the backend trait for that caller; it is not reachable from this enum.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
@@ -680,8 +743,8 @@ pub struct BatchedConfig {
     /// Output columns exempt from the determinism requirement — audit stamps
     /// and surrogates the modeller accepts may vary (e.g. `inserted_at =
     /// NOW()`, `batch_id = UUID()`). A non-deterministic value is admitted
-    /// only when it flows exclusively into a listed column (`batched_models.md`
-    /// §"Non-determinism and the equivalence contract"). Listing
+    /// only when it flows exclusively into a listed column (`incremental_models.md`
+    /// §"Non-determinism and the payload rule"). Listing
     /// `timeseries.event_time_column`, `timeseries.partition_column`, or a
     /// `unique_key` column here is a configuration error — validated in
     /// `smelt-core::metadata::validate_timeseries`.
@@ -692,7 +755,7 @@ pub struct BatchedConfig {
     pub safety_overrides: BatchedSafetyOverrides,
 }
 
-/// The `maintenance:` block (`maintenance_plan.md` §Surface "Frontmatter"):
+/// The `maintenance:` block (`incremental_models.md` §Surface "Frontmatter"):
 /// per-cell technique preferences/pins and the scan-locality guardrail.
 /// Almost every model sets none of it — the plan derives cells, clamps, and
 /// locality verdicts on its own; this block only *constrains* the derived
@@ -725,11 +788,30 @@ pub struct MaintenanceDefaults {
 /// `cells[].prefer`. `technique:` pins (bypassing the cost model) reuse
 /// [`CellTechnique`] instead, since it additionally admits
 /// `rederive_columns`.
+///
+/// `Suppress`/`Unconditional` are a second, orthogonal bias dimension folded
+/// onto the same `prefer:` key rather than a new declared field: which
+/// matched-arm *variant* a suppressible cell's already-chosen family
+/// (`ColumnScopedMerge`/keyed fold) writes, independent of the `Fold`/
+/// `Recompute` family choice above
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// G1; `docs/research/20260715-conditional-maintenance-without-cdf.md` item
+/// 8: conditional variants change *which technique serves a cell*,
+/// "steerable via `maintenance:` prefer/pin" — no new declared model
+/// surface). Meaningful only when the resolved family is suppressible; a
+/// value here never changes family choice itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TechniquePreference {
     Fold,
     Recompute,
+    /// Soft bias toward the change-suppressed matched-arm variant, e.g. to
+    /// override the first-build/definition-change-backfill posture's
+    /// default of not preferring it.
+    Suppress,
+    /// Soft bias toward the plain unconditional matched arm, overriding the
+    /// steady-state trigger's default preference for suppression.
+    Unconditional,
     /// The cost model decides (the default when `defaults.prefer` is absent).
     Auto,
 }
@@ -737,7 +819,7 @@ pub enum TechniquePreference {
 /// One `maintenance.cells[]` entry: a per-`(columns × trigger)` override.
 /// `columns` naming members of more than one derived column group is an
 /// error — it would silently re-partition the plan
-/// (`maintenance_plan.md` §Surface "Frontmatter").
+/// (`incremental_models.md` §Surface "Frontmatter").
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub struct MaintenanceCellConfig {
@@ -754,20 +836,50 @@ pub struct MaintenanceCellConfig {
     /// pin naming an unadmitted technique is an error, not an override).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub technique: Option<CellTechnique>,
+    /// Hard per-cell **addressing** pin (`incremental_models.md` §"Per-cell
+    /// write addressing" → "User pins"): an **open name** resolved against
+    /// the write-pattern registry (`smelt_logical::maintenance::
+    /// lookup_write_pattern`), not a sealed keyword set — deliberately
+    /// `Option<String>`, not an enum, so a new backend-contributed pattern
+    /// name is admitted the moment it registers, with no `smelt-core`
+    /// release required. An unrecognised name, or one the target backend
+    /// cannot execute, is `MaintenanceWritePatternUnavailable`; a
+    /// registry-recognised, backend-capable name whose addressing cannot
+    /// uphold this cell's equivalence invariant is
+    /// `MaintenanceWriteAddressingRefused` — both validated downstream
+    /// (`smelt-db`'s maintenance-plan diagnostics), never here (this struct
+    /// only parses the open string).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub write: Option<String>,
 }
 
 /// `maintenance.cells[].technique` — the hard-pin value set (a superset of
 /// [`TechniquePreference`]: `rederive_columns` is only meaningful as an
 /// explicit pin, never a soft bias).
+///
+/// `Suppress`/`Unconditional` mirror [`TechniquePreference`]'s own pair: the
+/// same orthogonal write-suppression dimension, but as a hard pin — never a
+/// family pin (it does not select `Fold`/`Recompute`/`RederiveColumns`).
+/// Forcing `Suppress` on a cell whose write-suppression proof (P2/P3)
+/// itself refused is a hard, fail-loud refusal, exactly like pinning a
+/// family the derived plan never admitted — a pin bypasses the cost model,
+/// never the admission proof. `Unconditional` never refuses: the plain
+/// matched arm is always a safe fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CellTechnique {
     Fold,
     Recompute,
     RederiveColumns,
+    /// Force the change-suppressed matched-arm variant on, bypassing the
+    /// first-build/definition-change-backfill posture's default.
+    Suppress,
+    /// Force the plain unconditional matched arm, bypassing the
+    /// steady-state trigger's default preference for suppression.
+    Unconditional,
 }
 
-/// The partition-locality guardrail (`maintenance_plan.md` §Semantics "The
+/// The partition-locality guardrail (`incremental_models.md` §Semantics "The
 /// K8 guardrail"). A project-level block in `smelt.yml` sets the baseline;
 /// a per-model block refines it (narrower wins, exactly like the technique
 /// ladder). Check-only: never modifies a derived clamp, only refuses (or
@@ -804,7 +916,7 @@ pub enum ScanBoundsViolation {
 #[serde(deny_unknown_fields)]
 pub struct PerSourceScanBounds {
     /// Ceiling on the derived scan span for this source. Parsed but not yet
-    /// checked against the derived clamp (`maintenance_plan.md` §Known
+    /// checked against the derived clamp (`incremental_models.md` §Known
     /// Divergences) — reserved for a future phase.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub max_lookback: Option<String>,
@@ -828,7 +940,7 @@ impl ScanBoundsConfig {
 }
 
 /// Project-level `maintenance:` block in `smelt.yml` — today only the
-/// `scan_bounds` baseline (`maintenance_plan.md` §Surface "Frontmatter":
+/// `scan_bounds` baseline (`incremental_models.md` §Surface "Frontmatter":
 /// "A project-level default in `smelt.yml` sets the baseline; per-model
 /// blocks refine it").
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
@@ -1036,6 +1148,32 @@ impl Config {
             }
         }
         self.get_grain(model_name)
+    }
+
+    /// Get the declared top-level `unique_key:` for a model, from smelt.yml only.
+    ///
+    /// **Precedence**: smelt.yml only (for now). Use
+    /// [`Config::get_unique_key_with_metadata`] to also consider SQL frontmatter.
+    pub fn get_unique_key(&self, model_name: &str) -> Option<&[String]> {
+        self.models
+            .get(model_name)
+            .and_then(|m| m.unique_key.as_deref())
+    }
+
+    /// Get the declared top-level `unique_key:` for a model.
+    ///
+    /// **Precedence**: SQL file metadata > smelt.yml model config.
+    pub fn get_unique_key_with_metadata<'a>(
+        &'a self,
+        model_name: &str,
+        sql_metadata: Option<&'a ModelMetadata>,
+    ) -> Option<&'a [String]> {
+        if let Some(metadata) = sql_metadata {
+            if let Some(unique_key) = metadata.unique_key.as_deref() {
+                return Some(unique_key);
+            }
+        }
+        self.get_unique_key(model_name)
     }
 
     /// Get the `batched:` block for a model, when the model is selected into

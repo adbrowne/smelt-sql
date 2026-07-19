@@ -23,14 +23,26 @@ maintenance:
 ---
 -- Fact (events) enriched with the dimension (users) — the fact+dimension
 -- enrichment shape MP11 wires a live column-scoped MERGE for
--- (docs/specs/maintenance_plan.md §"Per-cell admission"; the
+-- (docs/specs/incremental_models.md §"Per-cell admission"; the
 -- `smelt-runtime::maintenance_driver` "first live cell" story). `raw.users`
 -- is an unclocked, explicitly `mutation_profile: mutable_snapshot`
 -- dimension: renaming a user broadcasts to every fact row that references
 -- them — the `{user_name}` column group's `UpstreamMutation` cell.
+--
+-- `event_date` is a `CAST`, not `date_trunc(...)`: the P1 skeleton-source-
+-- closure proof's per-column provenance conjunct (`model_properties.md`
+-- §"Skeleton-source closure") resolves a `CAST`/arithmetic expression's
+-- inner column reference correctly but currently misresolves a bare
+-- `FUNCTION_CALL`-shaped one once 2+ FROM sources are in scope (the
+-- call's own name token is misread as an unqualified column reference,
+-- short-circuiting before its argument is visited) — tracked as a
+-- pre-existing `smelt-parser`/`smelt-logical::analysis::skeleton_closure`
+-- gap, not something T3 over external sources (`docs/plans/
+-- 20260715-composed-axes-conditional-maintenance.md` Phase F5) fixes.
+-- `CAST` produces the identical day value and is the supported form.
 SELECT
     e.event_id,
-    date_trunc('day', e.event_timestamp) AS event_date,
+    CAST(e.event_timestamp AS DATE) AS event_date,
     e.user_id,
     e.event_type,
     u.user_name

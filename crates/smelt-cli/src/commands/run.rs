@@ -73,7 +73,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
     graph.warn_unused_ephemerals(&config);
 
     // `--since-upstream`: forward propagation from caller-declared per-source
-    // deltas (`maintenance_plan.md` §CLI). A separate codepath from the
+    // deltas (`incremental_models.md` §CLI). A separate codepath from the
     // regular selector-driven run below — it computes its own (model,
     // region) set from the propagation graph rather than a --select/--start/
     // --end window, then loops `execute_project` once per propagated region.
@@ -282,7 +282,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
 }
 
 /// `smelt run --since-upstream` — forward propagation from caller-declared
-/// per-source deltas (`maintenance_plan.md` §CLI, §"The graph layer").
+/// per-source deltas (`incremental_models.md` §CLI, §"The graph layer").
 ///
 /// Argument parsing + reporter wiring only (per the Run Pipeline Parity
 /// invariant): `smelt_runtime::propagation` computes the real per-workspace
@@ -304,7 +304,7 @@ async fn run_since_upstream(
     .map_err(|e| anyhow::anyhow!("{}", e))?;
 
     // Each `--source` address must resolve to either a declared source or an
-    // upstream maintained model (`maintenance_plan.md` §"Upstream model
+    // upstream maintained model (`incremental_models.md` §"Upstream model
     // edges": "`--source <address>` accepts either a declared source or an
     // upstream maintained model"). Resolution goes through the canonical
     // `resolve_ref_path` resolver — no parallel leaf-only path (`cli.md`

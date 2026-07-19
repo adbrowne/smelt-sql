@@ -40,7 +40,7 @@ pub enum BackendError {
 
     /// A fold was refused because the delta is already reflected in the
     /// warehouse-resident reconciliation ledger (never-fold-twice,
-    /// `docs/specs/maintenance_plan.md` §Constraints "Never fold a delta
+    /// `docs/specs/incremental_models.md` §Constraints "Never fold a delta
     /// already reflected in the state"). Distinct from `ExecutionFailed` so
     /// callers can surface a `KeyedReprocessedWindow`-shaped refusal instead
     /// of a generic execution error.

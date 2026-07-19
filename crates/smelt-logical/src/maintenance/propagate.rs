@@ -1,5 +1,5 @@
 //! Cross-model dirty-partition propagation — the graph layer
-//! (`maintenance_plan.md` §"The graph layer").
+//! (`incremental_models.md` §"The graph layer").
 //!
 //! Runs start from *what changed upstream*, not from a cron tick: given the
 //! partition intervals that landed on each source, this module computes
@@ -20,7 +20,7 @@
 //! model's merged dirt across its inbound edges is then the delta its own
 //! consumers see, recursively (topological order).
 //!
-//! Known boundaries (`maintenance_plan.md` §Known Divergences):
+//! Known boundaries (`incremental_models.md` §Known Divergences):
 //! - **Day-ordinal intervals, Day/Month grains**: intervals are whole days
 //!   (clamp seconds ceiled *outward* — a 36h lookback dirties 2 whole
 //!   partitions; widening is safe, narrowing never is), anchored to the
@@ -35,7 +35,7 @@
 
 use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
-use super::ScanClamp;
+use super::{locality, ScanClamp};
 use crate::analysis::source_bounds::Seconds;
 
 const DAY_SECONDS: u64 = 86_400;
@@ -178,9 +178,135 @@ impl PartitionGrain {
     }
 }
 
-/// Ratified P7: a keyed-grain node has no partition axis, so interval dirt
-/// through it would be wrong-and-quiet — refuse fail-loud until keyed
-/// dirt-sets exist (S12).
+/// Route-aware day-margin projection for a locality-admitted composed
+/// node's own inbound (driving-source → composed-output) edge
+/// (`incremental_models.md` §"What the composed shape uniquely enables"):
+/// routes 1–2 project **exactly** — [`locality::LocalitySlice::DeltaValues`]
+/// (route 2, key-determined) carries no margin at all, and
+/// [`locality::LocalitySlice::Window`] (route 1 key-embedded, or route 3
+/// with a statically-derived `r` already folded in) projects only the
+/// driving source's own derived read margin. Route 3 with a **declared**
+/// `r` ([`locality::LocalitySlice::RecurrenceBounded`]) widens backward by
+/// the declared/derived recurrence bound plus lateness/skew margins —
+/// already folded into that variant's own `margin_before` by
+/// `locality::establish_locality`'s route-3 derivation, so no separate `r`
+/// arithmetic is needed here. Never narrows — a route this function doesn't
+/// recognize is a compile error (exhaustive match), not a silent default.
+pub fn locality_margin_days(slice: &locality::LocalitySlice) -> (i64, i64) {
+    use locality::LocalitySlice;
+    match slice {
+        LocalitySlice::DeltaValues { .. } => (0, 0),
+        LocalitySlice::Window {
+            margin_before,
+            margin_after,
+            ..
+        }
+        | LocalitySlice::RecurrenceBounded {
+            margin_before,
+            margin_after,
+            ..
+        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
+    }
+}
+
+/// Parse an ISO `YYYY-MM-DD` date literal to a day ordinal. Not a general
+/// user-input parser — the only strings this ever sees are `smelt-state`'s
+/// own `CAST(... AS VARCHAR)` projections of a `DATE`-typed partition
+/// column (`crates/smelt-runtime/src/maintenance_driver.rs`'s
+/// `changed_keys_select`), so a malformed string here is an internal
+/// programming-error signal, not unrecognised user input — the caller
+/// ([`project_observed_delta`]) skips an unparseable entry rather than
+/// panicking, keeping this module's "pure, no I/O, never panics on its
+/// inputs" contract intact.
+fn parse_iso_day(s: &str) -> Option<i64> {
+    let mut parts = s.splitn(3, '-');
+    let y: i64 = parts.next()?.parse().ok()?;
+    let m: u32 = parts.next()?.parse().ok()?;
+    let d: u32 = parts.next()?.parse().ok()?;
+    if parts.next().is_some() {
+        return None;
+    }
+    Some(day_ordinal(y, m, d))
+}
+
+/// Project a locality-admitted composed model's **key-level observed
+/// delta** (`smelt-state`'s recorded `partitions` column,
+/// `docs/specs/incremental_models.md` §"The graph layer" — "Observed
+/// deltas on model edges") to partition-day intervals via its established
+/// key-temporal-locality route, so forward propagation dirties exactly the
+/// touched partitions instead of the whole declared write window.
+///
+/// - **Routes 1–2 project exactly** — each observed partition's own day,
+///   nothing more: [`locality::LocalitySlice::DeltaValues`] (route 2,
+///   key-determined) and a route-1 [`locality::LocalitySlice::Window`]
+///   (`recurrence_bounded: false` — key-embedded). A key-embedded or
+///   key-determined output's touched partition for a given key IS the
+///   partition that key's row lives in; there is no "could also be
+///   elsewhere" case to widen for.
+/// - **Both route-3 sub-routes widen** by `r` plus lateness/skew margins
+///   (`incremental_models.md` §"Row movement", §"What the composed shape
+///   uniquely enables"): a key that most recently touched partition `p`
+///   may still hold a row recorded up to `r` earlier that this write's
+///   observed-delta record does not itself carry.
+///   - The **statically-derived** sub-route renders as
+///     [`locality::LocalitySlice::Window`] with `recurrence_bounded: true`
+///     — structurally the same shape route 1 uses, but its
+///     `margin_before`/`margin_after` folds in a proven key-recurrence
+///     bound `r` rather than a bare read-side lateness margin, so it must
+///     widen the same way the declared sub-route does.
+///   - The **declared** sub-route
+///     ([`locality::LocalitySlice::RecurrenceBounded`]) widens by that
+///     variant's own `margin_before`/`margin_after` (already includes `r`,
+///     per its own doc comment).
+///
+/// An empty `partitions` slice projects to an empty `Vec` — the graph half
+/// of the no-op cascade (an empty recorded delta propagates nothing).
+/// Malformed partition strings are skipped, never panic (see
+/// [`parse_iso_day`]). Never narrows below the observed partitions
+/// themselves in any route (asserted as a property by this module's own
+/// test suite) — widen-never-narrow.
+pub fn project_observed_delta(
+    slice: &locality::LocalitySlice,
+    partitions: &[String],
+) -> Vec<DayInterval> {
+    use locality::LocalitySlice;
+    let (before, after) = match slice {
+        LocalitySlice::DeltaValues { .. } => (0, 0),
+        LocalitySlice::Window {
+            recurrence_bounded: false,
+            ..
+        } => (0, 0),
+        LocalitySlice::Window {
+            margin_before,
+            margin_after,
+            recurrence_bounded: true,
+            ..
+        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
+        LocalitySlice::RecurrenceBounded {
+            margin_before,
+            margin_after,
+            ..
+        } => (clamp_days(*margin_before), clamp_days(*margin_after)),
+    };
+    let intervals: Vec<DayInterval> = partitions
+        .iter()
+        .filter_map(|p| parse_iso_day(p))
+        .map(|day| DayInterval::new(day - before, day + 1 + after))
+        .collect();
+    normalize(intervals)
+}
+
+/// Ratified P7: a **bare** keyed-grain node — no admitted time axis — has
+/// no partition axis, so interval dirt through it would be wrong-and-quiet
+/// — refuse fail-loud until keyed dirt-sets exist (S12). A **locality-
+/// admitted** keyed node (the composed shape, `incremental_models.md`
+/// §"Key temporal locality (the time-partitioned output)") never reaches
+/// this check as [`PartitionGrain::Keyed`] at all — the caller
+/// (`smelt-runtime::propagation::build_forward_graph`) classifies it by its
+/// declared `timeseries.granularity` instead, so it composes through the
+/// graph like any other clocked node (`incremental_models.md` §"The graph
+/// layer": "A locality-admitted time-partitioned keyed output is not
+/// refused").
 fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
     for e in edges {
         let (name, grain) = if e.upstream_grain == PartitionGrain::Keyed {
@@ -192,8 +318,12 @@ fn refuse_keyed_nodes(edges: &[Edge]) -> Result<(), String> {
         };
         debug_assert_eq!(grain, PartitionGrain::Keyed);
         return Err(format!(
-            "'{name}' is keyed-grain: it has no partition axis for interval dirt to \
-             propagate over — keyed dirt-sets are not yet supported (S12)"
+            "'{name}' is keyed-grain without an admitted time axis: it has no partition axis \
+             for interval dirt to propagate over. Declare a timeseries: block and establish \
+             key temporal locality (docs/specs/incremental_models.md §\"Key temporal \
+             locality\") to admit it as a locality-admitted composed node that participates in \
+             propagation like any other clocked node — keyed dirt-sets over a bare keyed node \
+             are not yet supported (S12)"
         ));
     }
     Ok(())
@@ -451,4 +581,299 @@ pub fn required_inputs(
         required,
         build_order,
     })
+}
+
+// ---------------------------------------------------------------------------
+// Phase B2 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// `locality_margin_days`'s route-aware mapping, and the composed-node
+// forward/backward projection it feeds (`propagate`/`required_inputs`
+// already generically apply an edge's `(before_days, after_days)` margin —
+// this module's own composition math — so these tests exercise that SAME
+// machinery with margins actually derived from a [`locality::LocalitySlice`]
+// rather than a hand-typed clamp, pinning that routes 1–2 project exactly
+// and route 3 widens, and that widening never narrows the exact result.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod locality_margin_tests {
+    use super::*;
+
+    fn edge(before_days: i64, after_days: i64) -> Edge {
+        Edge {
+            upstream: "source".to_string(),
+            downstream: "composed".to_string(),
+            before_days,
+            after_days,
+            upstream_grain: PartitionGrain::Day,
+            downstream_grain: PartitionGrain::Day,
+        }
+    }
+
+    #[test]
+    fn delta_values_route_2_projects_zero_margin() {
+        let slice = locality::LocalitySlice::DeltaValues {
+            partition_column: "d".to_string(),
+        };
+        assert_eq!(locality_margin_days(&slice), (0, 0));
+    }
+
+    #[test]
+    fn window_route_1_or_static_route_3_projects_the_derived_margin() {
+        let slice = locality::LocalitySlice::Window {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(2),
+            margin_after: Seconds::days(1),
+            recurrence_bounded: true,
+        };
+        assert_eq!(locality_margin_days(&slice), (2, 1));
+    }
+
+    #[test]
+    fn window_route_projects_ceil_of_a_partial_day_margin() {
+        // A 36h backward margin must widen to 2 whole days — a partial-day
+        // margin widens to the whole partition it touches (this module's
+        // own `clamp_days` rule, reused here rather than reimplemented).
+        let slice = locality::LocalitySlice::Window {
+            partition_column: "d".to_string(),
+            margin_before: Seconds(36 * 3600),
+            margin_after: Seconds::ZERO,
+            recurrence_bounded: true,
+        };
+        assert_eq!(locality_margin_days(&slice), (2, 0));
+    }
+
+    #[test]
+    fn recurrence_bounded_route_3_declared_projects_the_folded_margin() {
+        // `margin_before` already has `r` folded in per the variant's own
+        // doc comment — no separate `r` arithmetic in `locality_margin_days`.
+        let slice = locality::LocalitySlice::RecurrenceBounded {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(7),
+            margin_after: Seconds::ZERO,
+            r: Seconds::days(5),
+        };
+        assert_eq!(locality_margin_days(&slice), (7, 0));
+    }
+
+    /// An upstream delta `[a, b)` through a zero-margin (route 1/2, no
+    /// lookback) composed edge dirties downstream exactly the same interval
+    /// (mod grain alignment, which is a no-op at Day grain).
+    #[test]
+    fn zero_margin_edge_projects_the_exact_delta_forward() {
+        let e = edge(0, 0);
+        let delta = DayInterval::new(10, 12);
+        assert_eq!(e.reflect(&delta), delta);
+    }
+
+    /// The same delta through a nonzero-margin (route 3) edge dirties the
+    /// widened interval — strictly larger than the exact delta.
+    #[test]
+    fn nonzero_margin_edge_widens_the_delta_forward() {
+        let e = edge(3, 1);
+        let delta = DayInterval::new(10, 12);
+        let widened = e.reflect(&delta);
+        assert_eq!(widened, DayInterval::new(9, 15));
+        assert!(widened.start <= delta.start && delta.end <= widened.end);
+        assert_ne!(widened, delta, "a nonzero margin must actually widen");
+    }
+
+    /// Property (table-driven over a few margin values, not a single
+    /// example): the projected forward interval always **contains** the
+    /// exact delta — widen-never-narrow holds regardless of which margin a
+    /// route derives.
+    #[test]
+    fn forward_projection_always_contains_the_exact_delta() {
+        let delta = DayInterval::new(100, 103);
+        for (before, after) in [(0, 0), (1, 0), (0, 1), (2, 3), (7, 5)] {
+            let e = edge(before, after);
+            let projected = e.reflect(&delta);
+            assert!(
+                projected.start <= delta.start && delta.end <= projected.end,
+                "margin ({before}, {after}): projected {projected:?} must contain exact {delta:?}"
+            );
+        }
+    }
+
+    /// Backward resolution (`required_inputs`) is route-aware the same way:
+    /// a zero-margin composed edge resolves a downstream period to the exact
+    /// same upstream slice; a nonzero-margin edge resolves to the widened
+    /// slice.
+    #[test]
+    fn required_inputs_resolves_route_aware_through_a_composed_edge() {
+        let period = DayInterval::new(20, 21);
+
+        let exact_edges = vec![edge(0, 0)];
+        let exact = required_inputs(&exact_edges, "composed", period).expect("resolve");
+        assert_eq!(exact.required.get("source"), Some(&vec![period]));
+
+        let widened_edges = vec![edge(3, 1)];
+        let widened = required_inputs(&widened_edges, "composed", period).expect("resolve");
+        assert_eq!(
+            widened.required.get("source"),
+            Some(&vec![DayInterval::new(17, 22)])
+        );
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Phase D3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+// `project_observed_delta` — key→partition projection of a composed
+// model's recorded observed delta via its established locality route.
+// ---------------------------------------------------------------------------
+#[cfg(test)]
+mod project_observed_delta_tests {
+    use super::*;
+
+    fn window_slice() -> locality::LocalitySlice {
+        locality::LocalitySlice::Window {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(2),
+            margin_after: Seconds::days(1),
+            recurrence_bounded: false,
+        }
+    }
+
+    /// Route 3's **statically-derived** sub-route: a `Window` slice whose
+    /// margin folds in a proven key-recurrence bound `r` (not just a
+    /// read-side lateness margin). Distinguished from `window_slice()`
+    /// (route 1) only by `recurrence_bounded: true` — the two are
+    /// otherwise the same struct shape (`locality::LocalitySlice::Window`'s
+    /// own doc comment).
+    fn static_recurrence_window_slice() -> locality::LocalitySlice {
+        locality::LocalitySlice::Window {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(3),
+            margin_after: Seconds::ZERO,
+            recurrence_bounded: true,
+        }
+    }
+
+    fn delta_values_slice() -> locality::LocalitySlice {
+        locality::LocalitySlice::DeltaValues {
+            partition_column: "d".to_string(),
+        }
+    }
+
+    fn recurrence_bounded_slice() -> locality::LocalitySlice {
+        locality::LocalitySlice::RecurrenceBounded {
+            partition_column: "d".to_string(),
+            margin_before: Seconds::days(5),
+            margin_after: Seconds::ZERO,
+            r: Seconds::days(4),
+        }
+    }
+
+    #[test]
+    fn route_1_window_projects_exactly_the_observed_partitions() {
+        let partitions = vec!["2026-01-10".to_string(), "2026-01-12".to_string()];
+        let projected = project_observed_delta(&window_slice(), &partitions);
+        assert_eq!(
+            projected,
+            vec![
+                DayInterval::new(day_ordinal(2026, 1, 10), day_ordinal(2026, 1, 11)),
+                DayInterval::new(day_ordinal(2026, 1, 12), day_ordinal(2026, 1, 13)),
+            ],
+            "route 1 (Window, recurrence_bounded: false) must project each observed partition \
+             to its own exact day, ignoring the slice's own read-side lateness margin"
+        );
+    }
+
+    #[test]
+    fn route_3_static_window_widens_backward_by_the_folded_margin() {
+        // Regression: a `Window` slice with `recurrence_bounded: true` (the
+        // statically-derived route-3 sub-route) must widen by its own
+        // margin the same way `RecurrenceBounded` does — the earlier bug
+        // treated every `Window` as route 1 and silently applied zero
+        // widening here, which is a silent under-propagation of a real,
+        // reachable admission path (`incremental_models.md` §"Row
+        // movement": both route-3 sub-routes widen; only routes 1–2
+        // project exactly).
+        let partitions = vec!["2026-01-10".to_string()];
+        let projected = project_observed_delta(&static_recurrence_window_slice(), &partitions);
+        let day = day_ordinal(2026, 1, 10);
+        assert_eq!(
+            projected,
+            vec![DayInterval::new(day - 3, day + 1)],
+            "a statically-derived route-3 Window (recurrence_bounded: true) must widen backward \
+             by its folded margin, not project the observed partition exactly"
+        );
+    }
+
+    #[test]
+    fn route_2_delta_values_projects_exactly_the_observed_partitions() {
+        let partitions = vec!["2026-01-10".to_string()];
+        let projected = project_observed_delta(&delta_values_slice(), &partitions);
+        assert_eq!(
+            projected,
+            vec![DayInterval::new(
+                day_ordinal(2026, 1, 10),
+                day_ordinal(2026, 1, 11)
+            )]
+        );
+    }
+
+    #[test]
+    fn route_3_recurrence_bounded_widens_backward_by_r_and_margins() {
+        let partitions = vec!["2026-01-10".to_string()];
+        let projected = project_observed_delta(&recurrence_bounded_slice(), &partitions);
+        let day = day_ordinal(2026, 1, 10);
+        assert_eq!(
+            projected,
+            vec![DayInterval::new(day - 5, day + 1)],
+            "route 3's declared r (already folded into margin_before) must widen the observed \
+             partition backward, not just project it exactly"
+        );
+    }
+
+    #[test]
+    fn empty_partitions_project_to_nothing() {
+        assert_eq!(project_observed_delta(&window_slice(), &[]), Vec::new());
+        assert_eq!(
+            project_observed_delta(&recurrence_bounded_slice(), &[]),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn malformed_partition_strings_are_skipped_not_panicked() {
+        let partitions = vec!["not-a-date".to_string(), "2026-01-10".to_string()];
+        let projected = project_observed_delta(&window_slice(), &partitions);
+        assert_eq!(
+            projected,
+            vec![DayInterval::new(
+                day_ordinal(2026, 1, 10),
+                day_ordinal(2026, 1, 11)
+            )]
+        );
+    }
+
+    /// Property: for every route, the projection never narrows below the
+    /// observed partitions themselves — every observed day's own
+    /// `[d, d+1)` slice is fully contained in the projected result.
+    #[test]
+    fn projection_never_narrows_below_the_observed_partitions() {
+        let partitions = vec![
+            "2026-02-01".to_string(),
+            "2026-02-15".to_string(),
+            "2026-03-01".to_string(),
+        ];
+        for slice in [
+            window_slice(),
+            static_recurrence_window_slice(),
+            delta_values_slice(),
+            recurrence_bounded_slice(),
+        ] {
+            let projected = project_observed_delta(&slice, &partitions);
+            for p in &partitions {
+                let day = parse_iso_day(p).expect("valid test date");
+                let observed = DayInterval::new(day, day + 1);
+                assert!(
+                    projected
+                        .iter()
+                        .any(|iv| iv.start <= observed.start && observed.end <= iv.end),
+                    "observed partition {p} (day {day}) must be covered by the projection \
+                     {projected:?} under slice {slice:?}"
+                );
+            }
+        }
+    }
 }

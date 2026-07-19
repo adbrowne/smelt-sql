@@ -10,8 +10,13 @@
 
 use std::path::Path;
 
+use smelt_backend::Backend;
 use smelt_core::{discover_source_infos, ModelDiscovery};
-use smelt_runtime::propagation::{build_forward_graph, plan_since_upstream, SourceDelta};
+use smelt_runtime::propagation::{
+    build_forward_graph, plan_since_upstream, plan_since_upstream_with_observed_deltas,
+    resolve_build_plan, ObservedDeltaLookup, SourceDelta,
+};
+use smelt_state::ddl_duckdb::ObservedDelta;
 
 fn write(dir: &Path, rel: &str, content: &str) {
     let path = dir.join(rel);
@@ -80,7 +85,7 @@ fn single_clocked_source_derives_a_real_edge_and_propagates() {
 
 /// A source nothing in the workspace declares a delta for contributes no
 /// dirt — no implicit whole-table or recorded-state fallback
-/// (`maintenance_plan.md` §CLI: "a source named without a matching
+/// (`incremental_models.md` §CLI: "a source named without a matching
 /// `--landed` delta propagates nothing for that invocation").
 #[test]
 fn source_without_a_delta_propagates_nothing() {
@@ -112,7 +117,7 @@ fn source_without_a_delta_propagates_nothing() {
 }
 
 /// A maintained model is a delta origin of the same standing as a source
-/// (`maintenance_plan.md` §"Upstream model edges"): a `--source
+/// (`incremental_models.md` §"Upstream model edges"): a `--source
 /// <model-address>` landed delta propagates to that model's downstreams,
 /// and the origin model itself is **not** re-run (its landed delta is the
 /// window a completed run already wrote for it). The `silver -> gold` edge
@@ -197,7 +202,7 @@ fn model_delta_origin_propagates_to_downstreams_without_rerunning_origin() {
 
 /// A self-referential model (a ref to its own address) refuses fail-loud
 /// before any interval math runs — `MaintenanceGraphUnsupportedNode`
-/// (`maintenance_plan.md` §"The graph layer" — refusals).
+/// (`incremental_models.md` §"The graph layer" — refusals).
 #[test]
 fn self_referential_model_refuses() {
     let tmp = tempfile::TempDir::new().unwrap();
@@ -329,4 +334,717 @@ fn key_per_partition_upstream_propagates_by_granularity_not_refused_as_keyed() {
         "expected daily_totals to be propagated from the trajectory delta: {:?}",
         plan.runs
     );
+}
+
+/// Phase B1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// a **locality-admitted composed node** (`grain: key` + `timeseries:`,
+/// admitted key temporal locality) sits *inside* a real propagation chain
+/// instead of terminating it (`incremental_models.md` §"The graph layer": "A
+/// locality-admitted time-partitioned keyed output is not refused").
+///
+/// This phase's own flagship fixture (`examples/web_analytics/models/
+/// silver/events_deduped.sql`) is not yet buildable — its
+/// extremal-fold (`MIN`/`MAX`) `timeseries.partition_column` hits a
+/// pre-existing, out-of-scope NOT-NULL inference gap (`docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` §"Blocked phases",
+/// 2026-07-18, W1). `examples/timeseries` already carries an equivalent,
+/// already-landed composed shape wired for exactly this scenario
+/// (`user_daily_spend.sql`'s own doc comment cites this plan's Phase A5):
+/// `raw.transactions -> user_daily_spend` (`grain: key` + `timeseries:`,
+/// route 1 key-embedded) `-> user_spend_rollup` (`grain: partition`).
+#[test]
+fn composed_node_in_the_chain() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the graph must build without MaintenanceGraphUnsupportedNode: user_daily_spend is a \
+         locality-admitted composed node, not a bare keyed refusal",
+    );
+
+    // Inbound: the composed node's own driving-source edge. Phase B2
+    // ("Key→partition dirt projection through composed nodes") derives this
+    // margin for real from the model's admitted `KeyLocality` verdict
+    // (`locality_margin_days`) rather than a placeholder — it genuinely IS
+    // `(0, 0)` here because `user_daily_spend`'s SQL reads no lookback
+    // window against its driving source (route 1 key-embedded, zero
+    // derived read margin; see the model's own doc comment).
+    let inbound = edges
+        .iter()
+        .find(|e| e.upstream == "raw.transactions" && e.downstream == "user_daily_spend")
+        .unwrap_or_else(|| panic!("expected an inbound edge into the composed node: {edges:?}"));
+    assert_eq!(
+        inbound.downstream_grain,
+        smelt_logical::maintenance::propagate::PartitionGrain::Day,
+        "the composed node classifies by its declared granularity, not PartitionGrain::Keyed"
+    );
+    assert_eq!(
+        (inbound.before_days, inbound.after_days),
+        (0, 0),
+        "user_daily_spend's real derived margin is genuinely zero: {inbound:?}"
+    );
+
+    // Outbound: the composed node feeds an ordinary downstream consumer.
+    let outbound = edges
+        .iter()
+        .find(|e| e.upstream == "user_daily_spend" && e.downstream == "user_spend_rollup")
+        .unwrap_or_else(|| panic!("expected an outbound edge from the composed node: {edges:?}"));
+    assert_eq!(
+        outbound.upstream_grain,
+        smelt_logical::maintenance::propagate::PartitionGrain::Day,
+        "the composed node's own outbound edge must not be PartitionGrain::Keyed"
+    );
+
+    // The whole graph — including the bare Day-grain neighbours — still
+    // propagates end to end through the composed node without refusing.
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "raw.transactions".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    plan_since_upstream(&models, &source_infos, &order, &deltas)
+        .expect("a delta on the composed node's driving source must propagate through it");
+}
+
+/// Phase B2: a locality-admitted composed node whose own SQL reads a
+/// **nonzero** lookback window against its driving source (route 1
+/// key-embedded, mirroring `examples/timeseries`'s own `user_spend_rollup.sql`
+/// pushdown-margin construct — a `WHERE col >= CAST(col AS DATE) - INTERVAL
+/// '…days'` Form B relation — but here applied directly on the composed
+/// model's own driving-source read) must derive a genuinely nonzero
+/// `before_days` on its inbound edge, proving `locality_margin_days` pulls a
+/// real margin through end to end rather than only ever seeing the
+/// (coincidentally zero) `user_daily_spend` case.
+#[test]
+fn composed_node_with_a_lookback_window_derives_a_nonzero_inbound_margin() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/bronze.yml",
+        "description: bronze\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: ts\n  type: TIMESTAMP\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: ts\n  event_time_column: ts\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/composed.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT\n    user_id,\n    CAST(ts AS DATE) AS d,\n    SUM(amount) AS total\n\
+         FROM smelt.sources.bronze\n\
+         WHERE ts >= CAST(ts AS DATE) - INTERVAL '3 days'\n\
+         GROUP BY 1, 2\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the graph must build: composed's WHERE clause admits route 1 with a derived \
+                 nonzero read margin",
+    );
+    let inbound = edges
+        .iter()
+        .find(|e| e.upstream == "bronze" && e.downstream == "composed")
+        .unwrap_or_else(|| panic!("expected an inbound edge into composed: {edges:?}"));
+    assert!(
+        inbound.before_days > 0,
+        "a 3-day lookback WHERE clause must derive a nonzero before_days margin: {inbound:?}"
+    );
+}
+
+/// A **bare** keyed model (no `timeseries:` declared at all) that another
+/// model reads still refuses fail-loud in the real per-workspace assembly
+/// — `MaintenanceGraphUnsupportedNode`, naming the missing time axis — the
+/// same safety property `keyed_grain_model_never_derives_an_edge` pins for
+/// the model's own creation edge, but exercised here through the edge an
+/// explicitly-mutable **unclocked** dimension source contributes (the one
+/// real path that reaches a bare keyed node as a graph node today).
+#[test]
+fn bare_keyed_upstream_still_refuses() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/payments.yml",
+        "description: payments\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: amount\n  type: DECIMAL(10,2)\n- name: d\n  type: DATE\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/sources/dims.yml",
+        "description: dims\ncolumns:\n- name: user_id\n  type: INTEGER\n\
+         - name: region\n  type: VARCHAR\n\
+         mutation_profile:\n  kind: mutable_snapshot\n",
+    );
+    write(
+        root,
+        "models/bare_keyed.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n---\n\
+         SELECT p.user_id, SUM(p.amount) AS total, d.region\n\
+         FROM smelt.sources.payments p\n\
+         JOIN smelt.sources.dims d ON p.user_id = d.user_id\n\
+         GROUP BY p.user_id, d.region\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let order = vec!["bare_keyed".to_string()];
+    let err = plan_since_upstream(&models, &source_infos, &order, &[])
+        .expect_err("a bare keyed node reached by the graph must still refuse");
+    let msg = err.to_string();
+    assert!(msg.contains("MaintenanceGraphUnsupportedNode"), "{msg}");
+    assert!(msg.contains("without an admitted time axis"), "{msg}");
+    assert!(msg.contains("bare_keyed"), "{msg}");
+}
+
+/// Phase B3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// a **locality-admitted composed node** itself — not its driving source —
+/// is the `--source` delta origin. `examples/timeseries`'s already-landed
+/// composed chain (`raw.transactions -> user_daily_spend [grain: key +
+/// timeseries, route 1] -> user_spend_rollup`, the same fixture
+/// `composed_node_in_the_chain` uses mid-chain) is reused here with the
+/// delta seeded directly on `user_daily_spend`'s own declared output axis
+/// (`spend_date`) instead of on `raw.transactions`: its landed window
+/// reflects through the real (zero-margin) outbound edge to
+/// `user_spend_rollup`, and the composed origin itself is never re-run —
+/// exactly the same "origin is not re-run" contract
+/// `model_delta_origin_propagates_to_downstreams_without_rerunning_origin`
+/// pins for a bare `grain: partition` origin, now exercised for a composed
+/// keyed+timeseries origin.
+#[test]
+fn composed_model_as_source() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    let plan = plan_since_upstream(&models, &source_infos, &order, &deltas).expect(
+        "a landed delta declared directly on a locality-admitted composed model must \
+         propagate through its outbound edge",
+    );
+
+    assert!(
+        plan.runs.iter().any(|r| r.model == "user_spend_rollup"),
+        "user_daily_spend's landed delta must propagate to user_spend_rollup: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "user_daily_spend"),
+        "the composed origin itself must NOT be re-run — its landed delta is already \
+         written: {:?}",
+        plan.runs
+    );
+    assert!(
+        plan.dirty_set_report
+            .contains("user_spend_rollup <- user_daily_spend"),
+        "the dirty set must show the composed model edge: {}",
+        plan.dirty_set_report
+    );
+    assert!(
+        !plan.dirty_set_report.contains("RUN user_daily_spend"),
+        "the composed origin must not appear as a scheduled run: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// Phase D3 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
+/// a composed model edge's recorded observed delta narrows forward
+/// propagation to exactly the touched partitions (widened only by the
+/// downstream edge's own real derived margin — `user_spend_rollup`'s
+/// 3-day pushdown lookback, unrelated to D3's own projection) instead of
+/// the whole declared `--landed` window. `examples/timeseries`'s
+/// `user_daily_spend` (route 1, key-embedded — `LocalitySlice::Window`
+/// with zero widening) is reused, matching `composed_model_as_source`'s
+/// own fixture and substitution rationale.
+#[test]
+fn observed_delta_narrows_composed_edge_to_recorded_partitions() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    // A wide declared window (20 days) — the pre-D3 behaviour would dirty
+    // `user_spend_rollup` over this entire window (mod the edge's own
+    // margin). The recorded observed delta only touched 3 far-apart
+    // partitions within it.
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 40);
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+
+    let mut observed: ObservedDeltaLookup = ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "user_daily_spend".to_string(),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.start),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.end),
+        ),
+        ObservedDelta {
+            changed_keys: vec!["u1".to_string(), "u2".to_string(), "u3".to_string()],
+            partitions: vec![
+                smelt_logical::maintenance::propagate::ordinal_to_iso(21),
+                smelt_logical::maintenance::propagate::ordinal_to_iso(30),
+                smelt_logical::maintenance::propagate::ordinal_to_iso(39),
+            ],
+        },
+    );
+
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("an observed delta on a composed origin must project and propagate");
+
+    // `user_spend_rollup`'s own inbound edge derives a real 3-day backward
+    // pushdown margin (its WHERE clause's `INTERVAL '3 days'` lookback) —
+    // each of the 3 exact observed partitions widens by that margin. The
+    // three widened regions ([18,22), [27,31), [36,40)) stay disjoint
+    // (spaced far enough apart) and are collectively much narrower than
+    // the declared 20-day window.
+    let rollup_runs: Vec<_> = plan
+        .runs
+        .iter()
+        .filter(|r| r.model == "user_spend_rollup")
+        .collect();
+    assert!(
+        !rollup_runs.is_empty(),
+        "the observed delta must still propagate: {:?}",
+        plan.runs
+    );
+    let total_days: i64 = rollup_runs
+        .iter()
+        .map(|r| {
+            let start = r.start.as_deref().expect("bounded run");
+            let end = r.end.as_deref().expect("bounded run");
+            let s = chrono::NaiveDate::parse_from_str(start, "%Y-%m-%d").unwrap();
+            let e = chrono::NaiveDate::parse_from_str(end, "%Y-%m-%d").unwrap();
+            (e - s).num_days()
+        })
+        .sum();
+    assert!(
+        total_days < 20,
+        "observed-delta projection must be narrower than the full 20-day declared window: \
+         got {total_days} total dirtied days across {rollup_runs:?}"
+    );
+    // Every one of the 3 observed partitions must still be covered
+    // (widen-never-narrow) — spot-check the middle one.
+    let day_30_iso = smelt_logical::maintenance::propagate::ordinal_to_iso(30);
+    assert!(
+        rollup_runs
+            .iter()
+            .any(|r| r.start.as_deref().unwrap() <= day_30_iso.as_str()
+                && day_30_iso.as_str() < r.end.as_deref().unwrap()),
+        "the observed partition {day_30_iso} must be covered by some dirtied run: {rollup_runs:?}"
+    );
+}
+
+/// D3: a **present-and-empty** recorded observed delta (a fully-suppressed
+/// conditional write — nothing changed) propagates **nothing** downstream —
+/// the graph half of the no-op cascade.
+#[test]
+fn empty_observed_delta_schedules_zero_downstream_regions() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window,
+    }];
+
+    let mut observed: ObservedDeltaLookup = ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "user_daily_spend".to_string(),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.start),
+            smelt_logical::maintenance::propagate::ordinal_to_iso(window.end),
+        ),
+        ObservedDelta {
+            changed_keys: vec![],
+            partitions: vec![],
+        },
+    );
+
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        plan.runs.is_empty(),
+        "an empty recorded delta must schedule zero downstream regions: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan
+            .dirty_set_report
+            .contains("user_spend_rollup <- user_daily_spend"),
+        "an empty recorded delta must not appear as dirt in the report: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// D3: an **absent** observed-delta record (e.g. a run that predates
+/// conditional-write recording) falls back to the declared `--landed`
+/// window unchanged — the D1 widen-never-narrow rule. Same fixture and
+/// deltas as `composed_model_as_source`, but driven through
+/// `plan_since_upstream_with_observed_deltas` with an empty lookup, proving
+/// the fallback path is identical to `plan_since_upstream`'s own behaviour.
+#[test]
+fn absent_observed_delta_falls_back_to_the_written_window() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_rollup")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+
+    let no_observed = ObservedDeltaLookup::new();
+    let with_lookup = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &no_observed,
+    )
+    .expect("absent record must fall back, not error");
+    let baseline = plan_since_upstream(&models, &source_infos, &order, &deltas)
+        .expect("baseline plan_since_upstream");
+
+    assert_eq!(
+        with_lookup.runs, baseline.runs,
+        "an absent observed-delta record must propagate identically to the no-observed-delta \
+         baseline"
+    );
+    assert!(
+        with_lookup
+            .runs
+            .iter()
+            .any(|r| r.model == "user_spend_rollup"),
+        "the declared window must still propagate downstream: {:?}",
+        with_lookup.runs
+    );
+}
+
+/// Phase B3: `resolve_build_plan` (the `smelt build --include-upstreams`
+/// backward-resolution assembly) walks *through* a locality-admitted
+/// composed ancestor exactly like any other clocked model — the composed
+/// node appears in the build order (built before its consumer,
+/// `user_spend_rollup`, and after its own upstream source), and its
+/// required slice is a real bounded region, not a whole-table fallback.
+/// Shares the graph layer's "one edge object, both directions" law with
+/// [`composed_node_in_the_chain`] (forward) and B2's pure-math
+/// `required_inputs_resolves_route_aware_through_a_composed_edge`
+/// (`crates/smelt-logical/tests/maintenance_tracer_propagation.rs`) — this
+/// test is the real per-workspace assembly's own leg of that same coverage.
+#[test]
+fn resolve_build_plan_walks_through_a_composed_ancestor() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let period = smelt_logical::maintenance::propagate::DayInterval::new(20, 21);
+    let resolved = resolve_build_plan(&models, &source_infos, "user_spend_rollup", period)
+        .expect("backward resolution must walk through the composed ancestor without refusing");
+
+    let names: Vec<&str> = resolved
+        .build_order
+        .iter()
+        .map(|r| r.model.as_str())
+        .collect();
+    assert!(
+        names.contains(&"user_daily_spend"),
+        "the composed ancestor must be a build step, not silently skipped: {names:?}"
+    );
+    assert!(
+        names.contains(&"user_spend_rollup"),
+        "the target itself must be a build step: {names:?}"
+    );
+    let composed_pos = names.iter().position(|n| *n == "user_daily_spend").unwrap();
+    let target_pos = names
+        .iter()
+        .position(|n| *n == "user_spend_rollup")
+        .unwrap();
+    assert!(
+        composed_pos < target_pos,
+        "the composed ancestor must build before its consumer: {names:?}"
+    );
+    assert!(
+        resolved.report.contains("BUILD user_daily_spend"),
+        "the report must show the composed ancestor as a build step: {}",
+        resolved.report
+    );
+}
+
+// ---------------------------------------------------------------------------
+// Phase D3 real-fixture e2e: `examples/web_analytics`'s flagship composed
+// model, `silver.events_deduped` (route 3, declared recurrence bound) ->
+// `silver.sessions`. Proves the D2 write-side (`smelt_state::ddl_duckdb`'s
+// real DDL/DML, executed against a real DuckDB backend — the SAME warehouse
+// round trip `crates/smelt-runtime/tests/observed_delta.rs` and
+// `crates/smelt-backend-duckdb/src/lib.rs`'s own tests already prove for the
+// write side) and this phase's read+project+propagate side compose
+// end to end over the actual flagship fixture: a fully-suppressed
+// `events_deduped` run (an empty recorded delta, exactly what a
+// change-suppressed conditional write records when nothing differs —
+// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D2)
+// schedules zero downstream `silver.sessions` regions under
+// `--since-upstream`.
+#[tokio::test]
+async fn web_analytics_events_deduped_fully_suppressed_schedules_no_downstream_sessions() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/web_analytics")
+        .canonicalize()
+        .expect("examples/web_analytics exists");
+
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    // `silver.sessions_chained` is a deliberately self-referential rolling-
+    // window demo model elsewhere in this same workspace
+    // (`incremental_models.md`'s own "table-graph cycle" refusal —
+    // unrelated to `events_deduped`/`sessions`); `build_forward_graph`
+    // refuses the WHOLE graph fail-loud on any self-referential node it
+    // discovers, not just ones reachable from this test's target edge, so
+    // it must be excluded here to exercise the events_deduped -> sessions
+    // edge in isolation.
+    let models: Vec<_> = discovery
+        .discover_models()
+        .expect("discover models")
+        .into_iter()
+        .filter(|m| m.canonical_path() != "silver.sessions_chained")
+        .collect();
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+
+    // `events_deduped` (route 3, declared recurrence bound via
+    // `sources.raw.events`'s `key_recurrence`) must be a real, locality-
+    // admitted graph node whose outbound edge reaches `silver.sessions` —
+    // the same real per-workspace derivation `smelt explain` uses.
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the real web_analytics graph must build: events_deduped is locality-admitted \
+         (route 3, declared)",
+    );
+    assert!(
+        edges
+            .iter()
+            .any(|e| e.upstream == "silver.events_deduped" && e.downstream == "silver.sessions"),
+        "expected a real outbound edge silver.events_deduped -> silver.sessions: {edges:?}"
+    );
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "silver.events_deduped" || a == "silver.sessions")
+        .collect();
+
+    let window = smelt_logical::maintenance::propagate::DayInterval::new(100, 101);
+    let window_start = smelt_logical::maintenance::propagate::ordinal_to_iso(window.start);
+    let window_end = smelt_logical::maintenance::propagate::ordinal_to_iso(window.end);
+
+    // The real D2 write-side round trip: a real DuckDB backend, the real
+    // `_smelt_observed_delta` DDL, and a real upsert recording a
+    // fully-suppressed run (a change-suppressed conditional write whose
+    // `IS DISTINCT FROM` guard matched zero rows — nothing to record but the
+    // schema itself, `docs/specs/incremental_models.md` §"The graph layer":
+    // "a fully-suppressed run's changed-keys query returns zero rows ...
+    // still inserts a row — present-and-empty, not absent").
+    let tmp = tempfile::TempDir::new().unwrap();
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb backend");
+    let ddl = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend.execute_sql(&ddl).await.expect("create delta table");
+    let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        "silver.events_deduped",
+        &window_start,
+        &window_end,
+        "SELECT NULL::VARCHAR AS delta_key, NULL::VARCHAR AS delta_partition WHERE FALSE",
+    );
+    backend
+        .execute_sql(&upsert)
+        .await
+        .expect("record the fully-suppressed run's empty delta");
+
+    // The real D3 read side: `generate_observed_delta_select_sql` against
+    // the SAME real backend, decoded into an `ObservedDelta`.
+    let select = smelt_state::ddl_duckdb::generate_observed_delta_select_sql(
+        "main",
+        "silver.events_deduped",
+        &window_start,
+        &window_end,
+    );
+    let batches = backend.execute_sql(&select).await.expect("read delta row");
+    assert_eq!(
+        batches.iter().map(|b| b.num_rows()).sum::<usize>(),
+        1,
+        "the fully-suppressed run's row must be present (empty, not absent)"
+    );
+    let observed_delta = decode_observed_delta_row(&batches);
+    assert!(
+        observed_delta.is_empty(),
+        "a fully-suppressed run's recorded delta must be present-and-empty: {observed_delta:?}"
+    );
+
+    let mut observed: ObservedDeltaLookup = ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "silver.events_deduped".to_string(),
+            window_start,
+            window_end,
+        ),
+        observed_delta,
+    );
+
+    let deltas = vec![SourceDelta {
+        source: "silver.events_deduped".to_string(),
+        landed: window,
+    }];
+    let plan = plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        !plan.runs.iter().any(|r| r.model == "silver.sessions"),
+        "a fully-suppressed events_deduped run must schedule zero downstream silver.sessions \
+         regions: {:?}",
+        plan.runs
+    );
+    assert!(
+        !plan
+            .dirty_set_report
+            .contains("silver.sessions <- silver.events_deduped"),
+        "the dirty set must show no dirt on the events_deduped -> sessions edge: {}",
+        plan.dirty_set_report
+    );
+}
+
+/// Decode the single `(changed_keys, partitions)` row
+/// `generate_observed_delta_select_sql` projects — the two `VARCHAR[]`
+/// columns — into an [`ObservedDelta`]. Mirrors
+/// `crates/smelt-runtime/tests/observed_delta.rs`'s own
+/// `batches_to_string_lists` decode helper (this phase's read side is the
+/// consumer of that exact same D2-written table).
+fn decode_observed_delta_row(batches: &[arrow::array::RecordBatch]) -> ObservedDelta {
+    use arrow::array::{Array, ListArray, StringArray};
+    for batch in batches {
+        if batch.num_rows() == 0 {
+            continue;
+        }
+        let changed = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("changed_keys is a LIST column");
+        let partitions = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<ListArray>()
+            .expect("partitions is a LIST column");
+        let changed_keys: Vec<String> = changed
+            .value(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("changed_keys elements are VARCHAR")
+            .iter()
+            .map(|v| v.unwrap_or_default().to_string())
+            .collect();
+        let parts: Vec<String> = partitions
+            .value(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .expect("partitions elements are VARCHAR")
+            .iter()
+            .map(|v| v.unwrap_or_default().to_string())
+            .collect();
+        return ObservedDelta {
+            changed_keys,
+            partitions: parts,
+        };
+    }
+    panic!("expected exactly one row in the observed-delta batches");
 }

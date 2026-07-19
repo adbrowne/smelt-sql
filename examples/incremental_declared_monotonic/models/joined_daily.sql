@@ -19,7 +19,7 @@ maintenance:
 -- `{attribute}` mutation-sensitive group cannot be partition-bounded; the
 -- `maintenance.scan_bounds.per_source.lookup.allow_full_scan: true`
 -- declaration above accepts that full-table cost rather than refusing
--- (`docs/specs/maintenance_plan.md` §Semantics "Partition-local maintenance
+-- (`docs/specs/incremental_models.md` §Semantics "Partition-local maintenance
 -- (the K8 guardrail)").
 --
 -- `ABS(...)` is a real, recognized SQL function (so type inference is

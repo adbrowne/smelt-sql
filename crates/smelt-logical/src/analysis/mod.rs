@@ -1,13 +1,16 @@
 pub mod bounded_domain;
 pub mod decomposed_state;
 pub mod discriminants;
+pub mod fingerprint;
 pub mod functional_dependency;
 pub mod horizon_ceiling;
 pub mod input_delta;
 pub mod join_shape;
 pub mod model_diff;
 pub mod monotonicity;
+pub mod not_null;
 pub mod presentation;
+pub mod skeleton_closure;
 pub mod source_bounds;
 pub mod temporal;
 pub mod walk;
@@ -180,7 +183,7 @@ pub fn find_item_expr_by_alias_or_position(
 
 /// The verdict for whether a SELECT scope's own `GROUP BY` / `DISTINCT` key
 /// is a superset of the model's `partition_column` — the shared
-/// partition-alignment signal (`batched_models.md` §"Safety checks") that
+/// partition-alignment signal (`incremental_models.md` §"Safety checks") that
 /// licenses group-aligned `HAVING`/`DISTINCT` admission
 /// (`rules::incremental`) and is available to other per-scope consumers
 /// (UNION-branch / window admission) as the same reusable check.
@@ -257,7 +260,7 @@ pub fn resolve_scope_group_by(
 /// containing the projected `partition_col` expression — found among
 /// `select`'s **own** select-list items, so a subquery/UNION-branch body is
 /// judged by its own projections and its own `GROUP BY`, never the outer
-/// query's (`batched_models.md` §"Safety checks").
+/// query's (`incremental_models.md` §"Safety checks").
 pub fn scope_group_by_alignment(
     select: &smelt_parser::SelectStmt,
     partition_col: &str,

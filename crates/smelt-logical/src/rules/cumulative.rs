@@ -1,6 +1,6 @@
 //! Classifier for the `refresh: keyed` mode.
 //!
-//! See `docs/specs/keyed_models.md` for the normative spec. This module is
+//! See `docs/specs/incremental_models.md` §"The key grain (`grain: key`)" for the normative spec. This module is
 //! the mode's built seed: the direct-monoid families (additive fold,
 //! extremal/lattice fold) — the overwrite, once-write, and plain-overwrite
 //! families are not yet classified here.
@@ -108,7 +108,7 @@ pub fn combiner_for(agg_name: &str) -> Option<CrossPartitionCombiner> {
 
 /// A diagnostic code emitted by the keyed classifier.
 ///
-/// Mirrors `keyed_models.md` §"Diagnostic codes" (owned by this spec).
+/// Mirrors `incremental_models.md` §"Key-grain diagnostic codes".
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum KeyedDiagnostic {
     KeyedRequiresGroupBy,
@@ -125,7 +125,7 @@ pub enum KeyedDiagnostic {
     },
     /// Interim not-yet-supported refusal: no clocked driving source was
     /// found, and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/keyed_models.md` §Known Divergences). This is a
+    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain"). This is a
     /// fail-loud "not yet" refusal, not a model error.
     KeyedSnapshotPostureUnsupported,
     KeyedMultipleDrivingSources {
@@ -221,11 +221,85 @@ pub struct DrivingSource {
 /// `KeyedGroupByContainsPartitionColumn`.
 pub type SourceTimeseriesMap = HashMap<String, TimeseriesConfig>;
 
+/// Derive a `grain: key` model's `unique_key` from its own GROUP BY: the
+/// SELECT aliases corresponding to each GROUP BY expression, falling back
+/// to the raw expression text for a GROUP BY expression with no matching
+/// non-aggregate projection (e.g. an expression-based GROUP BY).
+fn group_by_unique_key_from_analysis(analysis: &crate::analysis::SelectAnalysis) -> Vec<String> {
+    let mut unique_key: Vec<String> = Vec::new();
+    for group_expr in &analysis.group_by_exprs {
+        let matched = analysis.items.iter().find_map(|item| match item {
+            SelectItemKind::GroupByKey { text, alias, .. } if text == group_expr => {
+                Some(alias.clone())
+            }
+            _ => None,
+        });
+        if let Some(alias) = matched {
+            unique_key.push(alias);
+        } else {
+            unique_key.push(group_expr.clone());
+        }
+    }
+    unique_key
+}
+
+/// Derive a `grain: key` model's `unique_key` from its own GROUP BY clause,
+/// independent of the full [`classify_cumulative`] admission (aggregator
+/// allowlisting, driving-source resolution). Plan derivation
+/// (`smelt-db::queries::maintenance::derive_model_maintenance_plan`) needs
+/// only the key itself — admitted or not — to thread the model's real
+/// `unique_key` into `PlanGrain::Key`/`SourceFacts` instead of a hardcoded
+/// empty vec.
+///
+/// Returns an empty vec when the SQL doesn't parse or declares no GROUP BY.
+pub fn group_by_unique_key(sql: &str) -> Vec<String> {
+    match analyze_select(sql) {
+        Some(analysis) => group_by_unique_key_from_analysis(&analysis),
+        None => Vec::new(),
+    }
+}
+
+/// Compare a **declared** top-level `unique_key:` (`docs/specs/models.md`
+/// §"Refresh axis") against the GROUP-BY-derived key [`group_by_unique_key`]
+/// computes for the same SQL — a leaf classifier check over one
+/// already-bounded model's own text (`architecture.md` §"Property
+/// composition walk rule"), order-independent (declaring the same columns in
+/// a different order is agreement, not a mismatch).
+///
+/// `Ok(())` on agreement (including when `declared` is empty and so is the
+/// derived key). `Err((declared, derived))` on disagreement — both lists, in
+/// their original declared/derived order, for the caller to name in a
+/// diagnostic (`models.md` §"Constraint violations": "For aggregated key
+/// bodies: `unique_key` ≠ the `GROUP BY` column set → hard error (checked
+/// restatement)"). This function only compares; it does not decide which
+/// list wins — `smelt-db::queries::maintenance` is the sole caller that
+/// turns a mismatch into a refused plan.
+pub fn declared_unique_key_matches(
+    declared: &[String],
+    sql: &str,
+) -> Result<(), (Vec<String>, Vec<String>)> {
+    let derived = group_by_unique_key(sql);
+    let mut declared_sorted = declared.to_vec();
+    declared_sorted.sort();
+    let mut derived_sorted = derived.clone();
+    derived_sorted.sort();
+    if declared_sorted == derived_sorted {
+        Ok(())
+    } else {
+        Err((declared.to_vec(), derived))
+    }
+}
+
 /// Classify a `cumulative_aggregate` model.
 ///
 /// `sql` is the inlined model SQL (post function expansion). `refs` is the
 /// list of `smelt.<path>` references discovered in the FROM clause. Source
 /// timeseries declarations are looked up via `source_timeseries`.
+/// `model_has_timeseries` is whether the model's own frontmatter declares a
+/// `timeseries:` block — it narrows `KeyedGroupByContainsPartitionColumn`
+/// to the no-`timeseries:` case (a model that declares its own
+/// `timeseries:` is instead decided by the key-temporal-locality gate,
+/// `maintenance::locality::establish_locality`).
 ///
 /// Returns the classification on success, or a vector of diagnostics
 /// describing every classifier rejection (the function does not short-circuit
@@ -234,6 +308,7 @@ pub fn classify_cumulative(
     sql: &str,
     refs: &[String],
     source_timeseries: &SourceTimeseriesMap,
+    model_has_timeseries: bool,
 ) -> Result<CumulativeClassification, Vec<KeyedDiagnostic>> {
     let mut diagnostics = Vec::new();
 
@@ -252,24 +327,7 @@ pub fn classify_cumulative(
     // Build the unique_key as the SELECT aliases corresponding to GROUP BY
     // expressions. Each GROUP BY expression is matched to a projection by
     // textual identity (the analyser already resolves ordinals).
-    let mut unique_key: Vec<String> = Vec::new();
-    for group_expr in &analysis.group_by_exprs {
-        // Find the matching projection by expression text.
-        let matched = analysis.items.iter().find_map(|item| match item {
-            SelectItemKind::GroupByKey { text, alias, .. } if text == group_expr => {
-                Some(alias.clone())
-            }
-            _ => None,
-        });
-        if let Some(alias) = matched {
-            unique_key.push(alias);
-        } else {
-            // GROUP BY expression has no matching non-aggregate projection —
-            // fall back to the raw expression text. This is unusual but
-            // not necessarily fatal (e.g. an expression-based GROUP BY).
-            unique_key.push(group_expr.clone());
-        }
-    }
+    let unique_key = group_by_unique_key_from_analysis(&analysis);
 
     // Walk the projection list. Non-key projections must be allowlisted
     // aggregator calls. GroupByKey items are the key columns.
@@ -419,21 +477,30 @@ pub fn classify_cumulative(
         }
     };
 
-    // Rule: GROUP BY must not contain the driving source's partition column.
-    if let Some(ds) = &driving_source {
-        let partition_col = &ds.timeseries.partition_column;
-        let partition_col_lower = partition_col.to_ascii_lowercase();
-        let contains_partition = unique_key
-            .iter()
-            .any(|k| k.to_ascii_lowercase() == partition_col_lower)
-            || analysis
-                .group_by_exprs
+    // Rule: GROUP BY must not contain the driving source's partition column
+    // — narrowed to models with no `timeseries:` block of their own
+    // (`docs/specs/incremental_models.md` §"Key temporal locality"). A
+    // keyed model whose GROUP BY includes the partition column AND that
+    // declares its own `timeseries:` is not this rule's concern: it is a
+    // candidate for the key-embedded locality route (route 1 —
+    // `partition_column` is a `unique_key` column), decided by the locality
+    // gate (`maintenance::locality::establish_locality`), not refused here.
+    if !model_has_timeseries {
+        if let Some(ds) = &driving_source {
+            let partition_col = &ds.timeseries.partition_column;
+            let partition_col_lower = partition_col.to_ascii_lowercase();
+            let contains_partition = unique_key
                 .iter()
-                .any(|e| e.to_ascii_lowercase() == partition_col_lower);
-        if contains_partition {
-            diagnostics.push(KeyedDiagnostic::KeyedGroupByContainsPartitionColumn {
-                partition_column: partition_col.clone(),
-            });
+                .any(|k| k.to_ascii_lowercase() == partition_col_lower)
+                || analysis
+                    .group_by_exprs
+                    .iter()
+                    .any(|e| e.to_ascii_lowercase() == partition_col_lower);
+            if contains_partition {
+                diagnostics.push(KeyedDiagnostic::KeyedGroupByContainsPartitionColumn {
+                    partition_column: partition_col.clone(),
+                });
+            }
         }
     }
 
@@ -525,7 +592,7 @@ GROUP BY device_id, user_id"#;
 
         let refs = vec!["smelt.silver.events_parsed".to_string()];
         let classification =
-            classify_cumulative(sql, &refs, &events_source_map()).expect("must classify");
+            classify_cumulative(sql, &refs, &events_source_map(), false).expect("must classify");
 
         assert_eq!(classification.unique_key, vec!["device_id", "user_id"]);
         assert_eq!(classification.aggregator_columns.len(), 3);
@@ -561,7 +628,7 @@ GROUP BY device_id, user_id"#;
     fn test_no_group_by_refused() {
         let sql = "SELECT COUNT(*) AS n FROM smelt.silver.events_parsed";
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedRequiresGroupBy)),
@@ -579,7 +646,7 @@ GROUP BY device_id, user_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter().any(|d| matches!(
                 d,
@@ -600,7 +667,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter().any(|d| matches!(
                 d,
@@ -621,7 +688,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedUnknownCombiner { .. })),
@@ -641,7 +708,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id, user_id, event_date"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter().any(|d| matches!(
                 d,
@@ -653,6 +720,51 @@ GROUP BY device_id, user_id, event_date"#;
         );
     }
 
+    /// The same GROUP BY-contains-partition-column shape, but the model
+    /// declares its own `timeseries:` block: `KeyedGroupByContainsPartitionColumn`
+    /// must NOT fire. The model is instead a candidate for the key-embedded
+    /// locality route (`partition_column` is a `unique_key` column) and is
+    /// decided by the locality gate
+    /// (`maintenance::locality::establish_locality`), not refused here
+    /// (`docs/specs/incremental_models.md` §"Key temporal locality").
+    #[test]
+    fn test_group_by_contains_partition_column_not_refused_when_model_has_timeseries() {
+        let sql = r#"SELECT
+    device_id,
+    user_id,
+    event_date,
+    COUNT(*) AS n
+FROM smelt.silver.events_parsed
+GROUP BY device_id, user_id, event_date"#;
+        let refs = vec!["smelt.silver.events_parsed".to_string()];
+        let result = classify_cumulative(sql, &refs, &events_source_map(), true);
+        match result {
+            // With the check narrowed off, this shape has no other
+            // rejection — GROUP BY over three plain columns plus a bare
+            // COUNT(*) classifies cleanly, and `event_date` lands in the
+            // derived unique_key exactly as it would for any other key
+            // column.
+            Ok(classification) => {
+                assert!(
+                    classification.unique_key.iter().any(|k| k == "event_date"),
+                    "expected event_date in unique_key: {:?}",
+                    classification.unique_key
+                );
+            }
+            Err(diagnostics) => {
+                assert!(
+                    !diagnostics.iter().any(|d| matches!(
+                        d,
+                        KeyedDiagnostic::KeyedGroupByContainsPartitionColumn { .. }
+                    )),
+                    "KeyedGroupByContainsPartitionColumn must not fire when the model \
+                     declares its own timeseries: block; diagnostics: {:?}",
+                    diagnostics
+                );
+            }
+        }
+    }
+
     /// An OVER (...) projection produces KeyedForbidsWindowFunctions.
     #[test]
     fn test_window_function_refused() {
@@ -662,7 +774,7 @@ GROUP BY device_id, user_id, event_date"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsWindowFunctions)),
@@ -680,7 +792,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.events_parsed
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.events_parsed".to_string()];
-        let err = classify_cumulative(sql, &refs, &events_source_map()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &events_source_map(), false).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedForbidsNondeterministic { .. })),
@@ -698,7 +810,7 @@ GROUP BY device_id"#;
 FROM smelt.silver.lookup_table
 GROUP BY device_id"#;
         let refs = vec!["smelt.silver.lookup_table".to_string()];
-        let err = classify_cumulative(sql, &refs, &HashMap::new()).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &HashMap::new(), false).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedSnapshotPostureUnsupported)),
@@ -723,7 +835,7 @@ GROUP BY device_id"#;
         let mut map = HashMap::new();
         map.insert("smelt.silver.events_a".to_string(), ts("event_date"));
         map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
-        let err = classify_cumulative(sql, &refs, &map).unwrap_err();
+        let err = classify_cumulative(sql, &refs, &map, false).unwrap_err();
         assert!(
             err.iter()
                 .any(|d| matches!(d, KeyedDiagnostic::KeyedMultipleDrivingSources { .. })),
@@ -752,8 +864,8 @@ GROUP BY device_id"#;
         let mut map = HashMap::new();
         map.insert("smelt.silver.events_a".to_string(), ts("event_date"));
         map.insert("smelt.silver.events_b".to_string(), ts("event_date"));
-        let classification =
-            classify_cumulative(sql, &refs, &map).expect("must classify: only events_a is joined");
+        let classification = classify_cumulative(sql, &refs, &map, false)
+            .expect("must classify: only events_a is joined");
         assert_eq!(classification.driving_source.name, "smelt.silver.events_a");
     }
 
@@ -773,7 +885,7 @@ GROUP BY e.device_id, e.user_id"#;
             "smelt.silver.user_lookup".to_string(),
         ];
         let classification =
-            classify_cumulative(sql, &refs, &events_source_map()).expect("must classify");
+            classify_cumulative(sql, &refs, &events_source_map(), false).expect("must classify");
         assert_eq!(
             classification.driving_source.name,
             "smelt.silver.events_parsed"

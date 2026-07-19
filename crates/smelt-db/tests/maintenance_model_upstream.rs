@@ -1,4 +1,4 @@
-//! Upstream model edges (`maintenance_plan.md` §"Upstream model edges"): a
+//! Upstream model edges (`incremental_models.md` §"Upstream model edges"): a
 //! maintained model's ref to **another maintained model in the same project**
 //! is a plan edge of the same standing as a `sources.*` ref. The upstream's
 //! own `timeseries:` clock supplies the creation-trigger cell's clamp; an
@@ -253,4 +253,98 @@ SELECT event_id, event_date FROM smelt.raw_view
         "a view/full upstream must contribute no refusal: {:?}",
         plan.plan.refusals
     );
+}
+
+/// `incremental_models.md` §"Key temporal locality (the time-partitioned
+/// output)" — "The output as a clocked source": a downstream **keyed**
+/// model may take a locality-admitted composed upstream **model's own
+/// output** as its clocked driving source, exactly as it would a declared
+/// `sources:` entry — not just contribute a partition-grain creation cell
+/// (`model_upstream_derives_creation_cell`, above, covers that half).
+///
+/// The upstream (`user_daily_spend`) admits route 1 (key-embedded:
+/// `spend_date` is itself a `unique_key` column) over a declared source.
+/// The downstream (`user_running_total`) reads the upstream's own output —
+/// no declared `sources:` ref at all — and must *also* admit route 1 over
+/// it: `resolve_driving_source`'s candidate pool must include the
+/// upstream's own composed output, not just declared sources
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// A5).
+#[test]
+fn downstream_keyed_model_selects_a_composed_upstream_model_as_driving_source() {
+    let upstream = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: spend_date
+  partition_column: spend_date
+  granularity: day
+---
+SELECT
+    user_id,
+    CAST(transaction_timestamp AS DATE) AS spend_date,
+    SUM(amount) AS total_amount
+FROM smelt.sources.transactions
+GROUP BY 1, 2
+"#;
+    let transactions_source = r#"
+description: Raw transactions, append-only, clocked on transaction_timestamp.
+columns:
+  - name: user_id
+    type: INTEGER
+  - name: transaction_timestamp
+    type: TIMESTAMP
+  - name: amount
+    type: DECIMAL(18,2)
+timeseries:
+  event_time_column: transaction_timestamp
+  partition_column: transaction_timestamp
+  granularity: day
+mutation_profile:
+  kind: append_only
+"#;
+    let downstream = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: spend_date
+  partition_column: spend_date
+  granularity: day
+---
+SELECT
+    user_id,
+    spend_date,
+    SUM(total_amount) AS running_total
+FROM smelt.user_daily_spend
+GROUP BY 1, 2
+"#;
+
+    let plan = plan_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/transactions.yml", transactions_source),
+            ("models/user_daily_spend.sql", upstream),
+            ("models/user_running_total.sql", downstream),
+        ],
+        "user_running_total",
+    );
+
+    assert!(
+        !plan
+            .plan
+            .refusals
+            .iter()
+            .any(|r| matches!(r, Refusal::LocalityNotEstablished { .. })),
+        "the composed upstream's own output must resolve as a driving source \
+         (route 1, key-embedded): {:?}",
+        plan.plan.refusals
+    );
+    let locality = plan
+        .plan
+        .key_locality
+        .as_ref()
+        .expect("route 1 must admit and populate key_locality");
+    assert_eq!(locality.slice.partition_column(), "spend_date");
 }

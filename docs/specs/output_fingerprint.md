@@ -1,7 +1,7 @@
 ---
 feature: output_fingerprint
 status: experimental
-last_reviewed: 2026-06-04
+last_reviewed: 2026-07-19
 owners: [andrew]
 ---
 
@@ -112,6 +112,26 @@ The detector is **conservative**: it errs toward flagging. `deterministic == tru
 
 **Recursive sub-fingerprint.** Representing a single-subquery `FROM` by the fingerprint of its inner `SELECT` (rather than its token text) is what makes CTE-inline ≡ derived-table hold *and* lets an inner-body refactor stay equivalent. Soundness is inherited: equal nested fingerprints denote equal nested relations.
 
+**Two fingerprint artifact classes.** This document's fingerprint is a **model-SQL structural**
+comparison function — ephemeral, recomputed by both sides at decision time, never persisted, with
+zero migration obligation (§Design "The fingerprint is an ephemeral comparison function, not a
+stored artifact", below). A second, unrelated artifact — the **row-content fingerprint sidecar**
+(`sources.md` §"The fingerprint sidecar") — digests external source *row content* (not SQL
+structure) to synthesize a change feed for a `mutable_snapshot` source with no native one. The two
+share no digest algorithm requirement, API, or canonical form; they both happen to use content
+hashing because that is the natural tool for "did this content change," not because they are the
+same mechanism, and a soundness result about one says nothing about the other. The sidecar's
+persistence is not an exception to this spec's "never persisted" principle below — it persists a
+*different quantity* (last-seen external row content) for a *different purpose* (cross-run change
+detection over data smelt does not control), where this spec's fingerprint persists nothing
+because both sides of its comparison — two versions of smelt-owned, always-recompilable SQL — are
+always available to recompute. The sidecar's own schema-versioning strategy — so the persisted
+digest format itself can evolve without silently comparing against a stale-format row — is that
+spec's answer to give, not this one's: it stamps every stored row with a digest-construction
+version alongside a projection identity and a model-definition hash, and treats any stored row
+whose stamp does not match the freshly computed one as absent rather than comparing against it
+(`sources.md` §"The fingerprint sidecar" — "Invalidation").
+
 **The fingerprint is an ephemeral comparison function, not a stored artifact.** Equivalence is computed by fingerprinting *both* sides with the *current* compiler at decision time; the digest is never persisted. This frees the canonicalisation algorithm to change between releases with zero migration obligation and no version-stable-form contract — the comparison is always apples-to-apples. The persisted artifact is the expanded logical SQL (see `run_state.md`), not the hash. Rationale: research §5.6 and Open Question 15.
 
 ## Constraints & Invariants
@@ -136,4 +156,4 @@ The detector is **conservative**: it errs toward flagging. `deterministic == tru
 - **Tests**: `crates/smelt-fingerprint/tests/soundness_prop.rs` (the soundness gate), `tests/determinism_prop.rs` (determinism gate), `tests/corpus_equivalent.rs` / `tests/corpus_negative.rs` (golden equivalences and non-equivalences), `tests/determinism.rs` (determinism unit cases), `tests/oracle_tests.rs`
 - **User docs**: none yet (not user-facing)
 - **Plans (history)**: none yet — predecessor research is `docs/research/20260601-virtual-environments.md`
-- **Related specs**: `virtual_environments.md` (the reuse layer built on this), `run_state.md` (what is persisted), `planner_integration.md` (the author-declared `deterministic` property), `functions.md` (function-property declarations), `architecture.md` (the distinct parser-compat fingerprint; crate responsibilities), `types.md` (the type vocabulary folded as `output_schema`)
+- **Related specs**: `virtual_environments.md` (the reuse layer built on this), `run_state.md` (what is persisted), `planner_integration.md` (the author-declared `deterministic` property), `functions.md` (function-property declarations), `architecture.md` (the distinct parser-compat fingerprint; crate responsibilities), `types.md` (the type vocabulary folded as `output_schema`), `sources.md` (the row-content fingerprint sidecar — a distinct artifact class, boundary drawn in §Design "Two fingerprint artifact classes")

@@ -22,7 +22,7 @@
 //! `LEFT JOIN`, correlated `EXISTS`, stacked window frames, cross-source
 //! column-name collision, a mutable source aggregated directly), and the
 //! Link-C oracle (`smelt_maintenance_testkit::oracle`) — see
-//! `docs/specs/maintenance_plan.md` §References → Tests.
+//! `docs/specs/incremental_models.md` §References → Tests.
 
 mod coverage_matrix_gaps;
 mod g_04_idempotent_min_mutable_snapshot;

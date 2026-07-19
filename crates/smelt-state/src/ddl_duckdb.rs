@@ -311,7 +311,7 @@ fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String 
 
 // ── Warehouse-resident per-delta reconciliation ledger (MP12) ──────────────
 //
-// `docs/specs/maintenance_plan.md` §"The reconciliation ledger": an
+// `docs/specs/incremental_models.md` §"The reconciliation ledger": an
 // **additive**-graded group's storage must record delta identities, not just
 // a frontier watermark, because re-folding one double-counts. The ledger
 // table generated here is that storage for the keyed `merge_into` fold path
@@ -326,7 +326,7 @@ fn format_dot_path(column: &str, path: &[String], leaf: Option<&str>) -> String 
 //
 // Idempotent-graded groups never call any of these — a warehouse ledger
 // table only exists for a project once an additive-fold cell has actually
-// folded (`docs/specs/maintenance_plan.md` §Constraints; review checklist
+// folded (`docs/specs/incremental_models.md` §Constraints; review checklist
 // "no warehouse tables for idempotent-only plans").
 
 /// Table name for the warehouse-resident per-delta reconciliation ledger.
@@ -400,6 +400,309 @@ pub fn generate_ledger_exists_sql(
 
 fn escape_sql_literal(s: &str) -> String {
     s.replace('\'', "''")
+}
+
+// ── Warehouse-resident observed output delta (T5) ───────────────────────
+//
+// `docs/specs/incremental_models.md` §"The graph layer" — "Observed deltas
+// on model edges": a conditional write (`WriteSuppression::Suppressed`)
+// already computes the changed-row set it actually touched; this table
+// records it — key-level v1 (the model's `unique_key` values plus the
+// touched partition value, comparable columns only). It is warehouse-
+// resident, alongside the reconciliation ledger above, and — per the D1
+// spec ruling — in the SAME excluded "bookkeeping" class as that ledger:
+// this is smelt-state storage for a run's own byproduct, not a maintenance
+// statement a run's *write* executes, so it sits outside
+// `smelt_logical::maintenance::emit`'s single-owner rule
+// (`crates/smelt-runtime/tests/statement_parity.rs`'s structural
+// no-authoring gate does not scan `smelt-state`, matching the ledger's own
+// precedent).
+//
+// One row per `(model_name, window_start, window_end)` — a re-run of the
+// same window is an idempotent REPLACE (`ON CONFLICT ... DO UPDATE`), never
+// a duplicate: this is a **recorded snapshot of the last run's delta for
+// that window**, not an append-only log. `changed_keys`/`partitions` are
+// `VARCHAR[]` (never `NULL` — an empty array is a real, present-and-empty
+// delta; a `NULL` never appears because the upsert always coalesces to
+// `[]`). Absent a row for a window is the "no delta was ever recorded"
+// case a consumer must not conflate with an empty delta
+// (`incremental_models.md` §"The graph layer" — "Empty and absent are
+// distinct").
+
+/// Table name for the warehouse-resident observed-output-delta record.
+pub const OBSERVED_DELTA_TABLE_NAME: &str = "_smelt_observed_delta";
+
+/// DDL creating the observed-delta table if it does not already exist.
+/// Idempotent — safe to run before every conditional write.
+pub fn generate_observed_delta_table_ddl(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\
+         model_name VARCHAR NOT NULL, \
+         window_start VARCHAR NOT NULL, \
+         window_end VARCHAR NOT NULL, \
+         changed_keys VARCHAR[] NOT NULL, \
+         partitions VARCHAR[] NOT NULL, \
+         PRIMARY KEY (model_name, window_start, window_end))",
+        quote_identifier(schema),
+        OBSERVED_DELTA_TABLE_NAME,
+    )
+}
+
+/// Upsert one `(model, run window)`'s observed delta: `changed_keys_query`
+/// is the caller's already-built SELECT of every changed row's `unique_key`
+/// value(s), collapsed to one `VARCHAR` column named `delta_key`;
+/// `partition_expr` is `Some("<column-or-expr>")` naming the touched-
+/// partition projection carried by that same query as a `delta_partition`
+/// column (only meaningful for a composed, locality-admitted model), or
+/// `None` when the write has no partition axis (a bare keyed model's
+/// dimension MERGE) — in that case `partitions` is always recorded empty.
+/// `ARRAY_AGG` over zero rows is `NULL` in DuckDB; `COALESCE` folds that
+/// back to `[]` so a fully-suppressed run (nothing changed) still inserts a
+/// row — present-and-empty, not absent. Re-running the same window replaces
+/// via `ON CONFLICT ... DO UPDATE`, never duplicating
+/// (`PRIMARY KEY (model_name, window_start, window_end)` is the same
+/// window's own replace key).
+pub fn generate_observed_delta_upsert_sql(
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+    changed_keys_query: &str,
+) -> String {
+    format!(
+        "INSERT INTO {schema}.{table} (model_name, window_start, window_end, changed_keys, partitions) \
+         SELECT '{model}', '{window_start}', '{window_end}', \
+         COALESCE(ARRAY_AGG(DISTINCT __smelt_delta.delta_key) FILTER (WHERE __smelt_delta.delta_key IS NOT NULL), []::VARCHAR[]), \
+         COALESCE(ARRAY_AGG(DISTINCT __smelt_delta.delta_partition) FILTER (WHERE __smelt_delta.delta_partition IS NOT NULL), []::VARCHAR[]) \
+         FROM ({changed_keys_query}) AS __smelt_delta \
+         ON CONFLICT (model_name, window_start, window_end) DO UPDATE SET \
+         changed_keys = excluded.changed_keys, partitions = excluded.partitions",
+        schema = quote_identifier(schema),
+        table = OBSERVED_DELTA_TABLE_NAME,
+        model = escape_sql_literal(model),
+        window_start = escape_sql_literal(window_start),
+        window_end = escape_sql_literal(window_end),
+        changed_keys_query = changed_keys_query,
+    )
+}
+
+/// Read-side counterpart to [`generate_observed_delta_upsert_sql`]: the SQL
+/// to fetch one `(model, window)`'s recorded row back
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D3
+/// — "Key→partition projection of observed deltas"). Pure string generation
+/// only, matching this module's own convention — the backend executes it
+/// and decodes the two `VARCHAR[]` columns into an [`ObservedDelta`]; a
+/// caller finding **no row** for the `(model, window)` key is the "never
+/// recorded" case (`incremental_models.md` §"The graph layer": "Empty and
+/// absent are distinct" — widen-never-narrow falls back to the written
+/// window), which this SQL alone cannot distinguish from a genuine
+/// zero-row query result — the caller's row-count check is what tells them
+/// apart, exactly as the DDL/DML tests above already exercise via
+/// `execute_sql(...).num_rows()`.
+pub fn generate_observed_delta_select_sql(
+    schema: &str,
+    model: &str,
+    window_start: &str,
+    window_end: &str,
+) -> String {
+    format!(
+        "SELECT changed_keys, partitions FROM {schema}.{table} \
+         WHERE model_name = '{model}' AND window_start = '{window_start}' AND window_end = '{window_end}'",
+        schema = quote_identifier(schema),
+        table = OBSERVED_DELTA_TABLE_NAME,
+        model = escape_sql_literal(model),
+        window_start = escape_sql_literal(window_start),
+        window_end = escape_sql_literal(window_end),
+    )
+}
+
+/// One `(model, window)` row read back from the observed-delta table — the
+/// backend's decoded counterpart of the two `VARCHAR[]` columns
+/// [`generate_observed_delta_select_sql`] projects. `Option<ObservedDelta>`
+/// at the call site (not this type) carries the empty-vs-absent distinction:
+/// `None` means no row was found for that `(model, window)` (never
+/// recorded); `Some` with both vectors empty means the row exists and
+/// records a fully-suppressed run (present-and-empty). This type itself
+/// only ever represents a **found** row, so its own `is_empty` reports
+/// whether that found row's delta was empty.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct ObservedDelta {
+    /// The model's `unique_key` values that changed in this window.
+    pub changed_keys: Vec<String>,
+    /// The touched partition values (the model's `timeseries.partition_column`
+    /// projection), empty when the model has no partition axis.
+    pub partitions: Vec<String>,
+}
+
+impl ObservedDelta {
+    /// Whether this **found** row recorded a fully-suppressed run (nothing
+    /// changed) — distinct from "no row was found at all"
+    /// (`Option<ObservedDelta>::None` at the call site).
+    pub fn is_empty(&self) -> bool {
+        self.changed_keys.is_empty() && self.partitions.is_empty()
+    }
+}
+
+// ── Warehouse-resident row-content fingerprint sidecar (F3,
+// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase F3;
+// `docs/specs/sources.md` §"The fingerprint sidecar") ───────────────────
+//
+// Synthesizes a change feed for a `mutable_snapshot` external source with
+// no native change feed: a row-content digest last observed for each
+// source key, that a consuming run diffs the source's CURRENT content
+// against to derive an exact changed-key set instead of treating every
+// re-scan as a whole-table delta. This table's own DDL/DML is warehouse-
+// resident bookkeeping, in the SAME excluded class as the reconciliation
+// ledger and the observed-output-delta table above (`incremental_models.md`
+// §"Statement emission (single owner)"'s third exclusion) — DuckDB-scoped
+// today, matching both those precedents; no Spark DDL exists here, and a
+// non-DuckDB target fails loud at the call site
+// (`crates/smelt-runtime/src/maintenance_driver.rs`) rather than being
+// handed this DuckDB-flavored SQL.
+//
+// A row is namespaced by `(source_address, projection_identity,
+// source_key)` — projection identity, not consumer identity: a canonical
+// identifier of the P4 fingerprint projection's column set
+// (`smelt_logical::analysis::fingerprint::projection_identity`). The
+// synthesized DIFF query that compares current source content against this
+// table is emitter-authored
+// (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`) —
+// unlike this table's own storage DDL/DML, the diff is a maintenance-
+// relevant derived comparison, not a record of smelt's own run history.
+
+/// Table name for the warehouse-resident row-content fingerprint sidecar.
+pub const FINGERPRINT_SIDECAR_TABLE_NAME: &str = "_smelt_fingerprint_sidecar";
+
+/// DDL creating the fingerprint sidecar table if it does not already
+/// exist. Idempotent — safe to run before every diff/refresh.
+///
+/// The `stamp` column (Phase F4,
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md`) carries
+/// each row's identity stamp
+/// (`smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp`
+/// — digest-construction version, P4 projection identity, and the
+/// consuming model's own SQL provenance combined). It is a plain value
+/// column, not part of the primary key: the partition key stays
+/// `(source_address, projection_identity, source_key)`, but a row's stamp
+/// can go stale in place (a model-definition edit that leaves the
+/// projection's column set unchanged still changes the stamp) — the diff
+/// query filters on it (`smelt_logical::maintenance::emit::
+/// emit_fingerprint_sidecar_diff`) so a stale-stamped row is excluded from
+/// the comparison entirely, structurally identical to an absent sidecar,
+/// never trusted as a valid prior digest.
+pub fn generate_fingerprint_sidecar_table_ddl(schema: &str) -> String {
+    format!(
+        "CREATE TABLE IF NOT EXISTS {}.{} (\
+         source_address VARCHAR NOT NULL, \
+         projection_identity VARCHAR NOT NULL, \
+         source_key VARCHAR NOT NULL, \
+         digest VARCHAR NOT NULL, \
+         stamp VARCHAR NOT NULL, \
+         PRIMARY KEY (source_address, projection_identity, source_key))",
+        quote_identifier(schema),
+        FINGERPRINT_SIDECAR_TABLE_NAME,
+    )
+}
+
+/// Upsert every currently-observed `(key, digest)` pair
+/// `digest_select_sql` projects
+/// (`smelt_logical::maintenance::emit::emit_fingerprint_digest_select`'s
+/// output — `delta_key`/`delta_digest` columns) into the sidecar partition
+/// named by `(source_address, projection_identity)`, stamping every row
+/// with `stamp` (Phase F4's identity stamp — see
+/// `generate_fingerprint_sidecar_table_ddl`'s doc comment). Idempotent: an
+/// unchanged key's digest is overwritten with the identical value it
+/// already held (`ON CONFLICT ... DO UPDATE`), never duplicated — the same
+/// "re-running a window is a REPLACE, never a duplicate" shape
+/// [`generate_observed_delta_upsert_sql`] uses above. Because this upsert
+/// runs over EVERY currently-observed key (not just a changed subset), it
+/// also self-heals a stale stamp: any row for a still-existing key is
+/// unconditionally re-stamped with the current `stamp` on every refresh, so
+/// invalidation never needs a separate "clear the stale partition" write —
+/// the read side's stamp filter is what makes the stale window (between an
+/// invalidating edit and the next refresh) always degrade to the
+/// unconditional whole-table path, never a silent skip.
+///
+/// A source key absent from the sidecar before this call is, by
+/// construction, new — this upsert is what "populates the sidecar as a
+/// byproduct" of a first run against an unpopulated one
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "First run and
+/// `--full-refresh`").
+pub fn generate_fingerprint_sidecar_refresh_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+    digest_select_sql: &str,
+) -> String {
+    format!(
+        "INSERT INTO {schema}.{table} (source_address, projection_identity, source_key, digest, \
+         stamp) SELECT '{source_address}', '{projection_identity}', __smelt_digest.delta_key, \
+         __smelt_digest.delta_digest, '{stamp}' FROM ({digest_select_sql}) AS __smelt_digest \
+         ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET \
+         digest = excluded.digest, stamp = excluded.stamp",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+        stamp = escape_sql_literal(stamp),
+        digest_select_sql = digest_select_sql,
+    )
+}
+
+/// Read-side existence check for a stale-stamped row in the sidecar's
+/// `(source_address, projection_identity)` partition (Phase F4): a
+/// non-empty result means at least one stored row's stamp no longer
+/// matches the freshly computed `stamp` — a model-definition edit, a
+/// digest-version bump, or a hand-corrupted stamp value. The diff query
+/// itself (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`)
+/// already excludes every such row from its comparison unconditionally (its
+/// own `stamp = '...'` filter), so this query changes no behaviour — it
+/// exists purely so the caller
+/// (`smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys`)
+/// can log loudly that an invalidation happened, rather than degrading to
+/// the whole-table path in silence.
+pub fn generate_fingerprint_sidecar_stale_check_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+) -> String {
+    format!(
+        "SELECT 1 FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
+         projection_identity = '{projection_identity}' AND stamp <> '{stamp}' LIMIT 1",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+        stamp = escape_sql_literal(stamp),
+    )
+}
+
+/// GC a sidecar partition's keys that no longer appear in the source
+/// (`docs/specs/sources.md` §"The fingerprint sidecar" — "GC": "A key's
+/// disappearance from the source is itself a change ... and drops its
+/// sidecar row"). Must run against the SAME `digest_select_sql` the paired
+/// diff query read, in the same transaction as that diff's consuming write
+/// (`Backend::execute_write_and_refresh_fingerprint_sidecar`), so a key
+/// deleted between the diff and this refresh cannot be silently left
+/// behind or double-counted next run.
+pub fn generate_fingerprint_sidecar_gc_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+    digest_select_sql: &str,
+) -> String {
+    format!(
+        "DELETE FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
+         projection_identity = '{projection_identity}' AND source_key NOT IN \
+         (SELECT __smelt_digest.delta_key FROM ({digest_select_sql}) AS __smelt_digest)",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+        digest_select_sql = digest_select_sql,
+    )
 }
 
 #[cfg(test)]
@@ -906,5 +1209,200 @@ mod tests {
         assert!(sql.contains("grp = '{*}'"));
         assert!(sql.contains("input_name = 'smelt.events'"));
         assert!(sql.contains("delta_id = '2026-01-01'"));
+    }
+
+    // ── warehouse-resident observed-output-delta DDL/DML (T5) ──────────
+
+    #[test]
+    fn observed_delta_table_ddl_is_idempotent_and_windows_never_duplicate() {
+        let ddl = generate_observed_delta_table_ddl("main");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_observed_delta"));
+        assert!(ddl.contains("changed_keys VARCHAR[] NOT NULL"));
+        assert!(ddl.contains("partitions VARCHAR[] NOT NULL"));
+        assert!(ddl.contains("PRIMARY KEY (model_name, window_start, window_end)"));
+    }
+
+    #[test]
+    fn observed_delta_upsert_replaces_on_conflict_never_duplicates() {
+        let sql = generate_observed_delta_upsert_sql(
+            "main",
+            "dim_users",
+            "2026-01-01",
+            "2026-01-02",
+            "SELECT id AS delta_key, NULL AS delta_partition FROM changed",
+        );
+        assert!(sql.contains("INSERT INTO main._smelt_observed_delta"));
+        assert!(sql.contains("'dim_users'"));
+        assert!(sql.contains("'2026-01-01'"));
+        assert!(sql.contains("'2026-01-02'"));
+        assert!(sql.contains("ON CONFLICT (model_name, window_start, window_end) DO UPDATE SET"));
+        assert!(sql.contains("SELECT id AS delta_key, NULL AS delta_partition FROM changed"));
+    }
+
+    #[test]
+    fn observed_delta_upsert_coalesces_empty_delta_to_present_empty_arrays() {
+        // A fully-suppressed run's changed-keys query returns zero rows;
+        // ARRAY_AGG over zero rows is NULL in DuckDB, so the upsert must
+        // COALESCE to `[]` — the row still gets inserted (present), just
+        // with empty arrays, never a NULL array (which would collapse the
+        // empty/absent distinction the spec requires).
+        let sql = generate_observed_delta_upsert_sql(
+            "main",
+            "dim_users",
+            "2026-01-01",
+            "2026-01-02",
+            "SELECT id AS delta_key, NULL AS delta_partition FROM changed WHERE FALSE",
+        );
+        assert!(sql.contains("COALESCE(ARRAY_AGG(DISTINCT __smelt_delta.delta_key)"));
+        assert!(sql.contains("[]::VARCHAR[]"));
+    }
+
+    #[test]
+    fn observed_delta_upsert_escapes_single_quotes_in_model_name() {
+        let sql = generate_observed_delta_upsert_sql(
+            "main",
+            "model's_name",
+            "2026-01-01",
+            "2026-01-02",
+            "SELECT id AS delta_key, NULL AS delta_partition FROM changed",
+        );
+        assert!(sql.contains("'model''s_name'"));
+    }
+
+    // ── observed-delta read API (D3) ────────────────────────────────────
+
+    #[test]
+    fn observed_delta_select_sql_filters_on_every_key_field() {
+        let sql = generate_observed_delta_select_sql(
+            "main",
+            "silver.events_deduped",
+            "2026-01-01",
+            "2026-01-02",
+        );
+        assert!(sql.contains("SELECT changed_keys, partitions FROM main._smelt_observed_delta"));
+        assert!(sql.contains("model_name = 'silver.events_deduped'"));
+        assert!(sql.contains("window_start = '2026-01-01'"));
+        assert!(sql.contains("window_end = '2026-01-02'"));
+    }
+
+    #[test]
+    fn observed_delta_select_sql_escapes_single_quotes_in_model_name() {
+        let sql =
+            generate_observed_delta_select_sql("main", "model's_name", "2026-01-01", "2026-01-02");
+        assert!(sql.contains("model_name = 'model''s_name'"));
+    }
+
+    #[test]
+    fn observed_delta_is_empty_distinguishes_found_empty_from_nonempty() {
+        assert!(ObservedDelta::default().is_empty());
+        assert!(ObservedDelta {
+            changed_keys: vec![],
+            partitions: vec![],
+        }
+        .is_empty());
+        assert!(!ObservedDelta {
+            changed_keys: vec!["k1".to_string()],
+            partitions: vec!["2026-01-01".to_string()],
+        }
+        .is_empty());
+    }
+
+    // ── warehouse-resident row-content fingerprint sidecar (F3) ─────────
+
+    #[test]
+    fn fingerprint_sidecar_table_ddl_is_idempotent_and_keyed_by_source_key() {
+        let ddl = generate_fingerprint_sidecar_table_ddl("main");
+        assert!(ddl.contains("CREATE TABLE IF NOT EXISTS main._smelt_fingerprint_sidecar"));
+        assert!(ddl.contains("source_address VARCHAR NOT NULL"));
+        assert!(ddl.contains("projection_identity VARCHAR NOT NULL"));
+        assert!(ddl.contains("source_key VARCHAR NOT NULL"));
+        assert!(ddl.contains("digest VARCHAR NOT NULL"));
+        assert!(ddl.contains("stamp VARCHAR NOT NULL"));
+        assert!(ddl.contains("PRIMARY KEY (source_address, projection_identity, source_key)"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_refresh_sql_upserts_on_conflict() {
+        let sql = generate_fingerprint_sidecar_refresh_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "v1:cols:name,tier:sha256:deadbeef",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("INSERT INTO main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("'smelt.sources.dim_users'"));
+        assert!(sql.contains("'cols:name,tier'"));
+        assert!(sql.contains("'v1:cols:name,tier:sha256:deadbeef'"));
+        assert!(sql.contains(
+            "ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET"
+        ));
+        assert!(sql.contains("digest = excluded.digest, stamp = excluded.stamp"));
+        assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_refresh_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_refresh_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "stamp's",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("'stamp''s'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_stale_check_sql_detects_a_stamp_mismatch() {
+        let sql = generate_fingerprint_sidecar_stale_check_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "v1:cols:name,tier:sha256:deadbeef",
+        );
+        assert!(sql.contains("SELECT 1 FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("stamp <> 'v1:cols:name,tier:sha256:deadbeef'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_stale_check_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_stale_check_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "stamp's",
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("stamp <> 'stamp''s'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_gc_sql_deletes_orphaned_keys() {
+        let sql = generate_fingerprint_sidecar_gc_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("DELETE FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("source_key NOT IN"));
+        assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_gc_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_gc_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
     }
 }

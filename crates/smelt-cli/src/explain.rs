@@ -1,7 +1,7 @@
 use crate::discovery::ModelFile;
 use anyhow::Result;
 use serde::Serialize;
-use smelt_core::config::{Config, RefreshStrategy, TimeseriesConfig};
+use smelt_core::config::{Config, Grain, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::{BatchedConfig, Granularity, Materialization, ModelOriginKind};
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
@@ -101,20 +101,237 @@ fn is_self_origin(origins: &[String]) -> bool {
     origins.len() == 1
 }
 
+/// The clock slot's shared fields (`docs/specs/models.md` §"The Relation
+/// Contract": clock and identity "carry identical field paths" across
+/// both providers). Rendered identically whichever provider filled it.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RelationContractClock {
+    pub event_time_column: String,
+    pub partition_column: String,
+    pub granularity: Granularity,
+}
+
+/// One provider's fill of the Relation Contract's **declared-and-checked**
+/// shape-defining slots — the clock and identity — plus the derived
+/// `grain` label that summarizes them (`docs/specs/models.md` §"Refresh
+/// axis", §"The Relation Contract"; `docs/specs/sources.md` §"The source
+/// as a Relation Contract provider"). Both a source and a model output are
+/// rendered through this one struct — a consumer never needs to know
+/// which provider filled it (`clock`/`identity` are the two fields every
+/// provider fills through the same field paths).
+///
+/// `clock`/`identity`/`derived_grain` are all `None` for a provider that
+/// declares neither fact — legal for a source (no admission gate to
+/// fail), reported rather than refused.
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct RelationContractView {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub clock: Option<RelationContractClock>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub identity: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub derived_grain: Option<Grain>,
+}
+
+impl RelationContractView {
+    /// Provider-agnostic construction from the raw declared facts — reads
+    /// `Option<&TimeseriesConfig>` / `Option<&[String]>` directly rather
+    /// than a `SourceInfo` or `ModelMetadata`, so there is exactly one
+    /// derivation reused by both providers
+    /// (`smelt_core::config::derive_grain`), never a source-specific or
+    /// model-specific reimplementation.
+    pub fn from_facts(
+        timeseries: Option<&TimeseriesConfig>,
+        unique_key: Option<&[String]>,
+    ) -> Self {
+        let derived_grain = smelt_core::config::derive_grain(
+            timeseries.is_some(),
+            unique_key,
+            timeseries.map(|t| t.partition_column.as_str()),
+        );
+        RelationContractView {
+            clock: timeseries.map(|ts| RelationContractClock {
+                event_time_column: ts.event_time_column.clone(),
+                partition_column: ts.partition_column.clone(),
+                granularity: ts.granularity,
+            }),
+            identity: unique_key.map(|k| k.to_vec()),
+            derived_grain,
+        }
+    }
+}
+
+/// Which provider filled one inbound edge's [`RelationContractView`] — a
+/// declared `sources.*` ref or an upstream maintained model
+/// (`docs/specs/incremental_models.md` §"Upstream model edges": the graph
+/// layer treats both edge kinds as the same standing).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum RelationContractProvider {
+    Source,
+    Model,
+}
+
+/// One inbound edge's provider identity and Relation Contract fill
+/// (`docs/specs/models.md` §"The Relation Contract").
+#[derive(Debug, Clone, PartialEq, Serialize)]
+pub struct InboundEdgeContract {
+    pub name: String,
+    pub provider: RelationContractProvider,
+    pub contract: RelationContractView,
+}
+
+impl InboundEdgeContract {
+    pub fn source(name: String, contract: RelationContractView) -> Self {
+        InboundEdgeContract {
+            name,
+            provider: RelationContractProvider::Source,
+            contract,
+        }
+    }
+
+    pub fn model(name: String, contract: RelationContractView) -> Self {
+        InboundEdgeContract {
+            name,
+            provider: RelationContractProvider::Model,
+            contract,
+        }
+    }
+}
+
+/// Render one [`RelationContractView`] as indented text lines shared by
+/// the model's own contract and every inbound edge's contract — the same
+/// field names (`clock:`, `identity:`, `derived grain:`) print for both
+/// providers (`docs/specs/models.md` §"The Relation Contract").
+fn write_relation_contract(out: &mut String, indent: &str, contract: &RelationContractView) {
+    use std::fmt::Write as _;
+    match &contract.clock {
+        Some(clock) => {
+            let _ = writeln!(
+                out,
+                "{indent}clock:    event_time_column={} partition_column={} granularity={:?}",
+                clock.event_time_column, clock.partition_column, clock.granularity
+            );
+        }
+        None => {
+            let _ = writeln!(out, "{indent}clock:    (none)");
+        }
+    }
+    match &contract.identity {
+        Some(key) => {
+            let _ = writeln!(out, "{indent}identity: {}", key.join(", "));
+        }
+        None => {
+            let _ = writeln!(out, "{indent}identity: (none)");
+        }
+    }
+    match &contract.derived_grain {
+        Some(grain) => {
+            let _ = writeln!(out, "{indent}derived grain: {grain}");
+        }
+        None => {
+            let _ = writeln!(out, "{indent}derived grain: (unclassified)");
+        }
+    }
+}
+
+/// Assemble a model's own [`RelationContractView`] plus its inbound edges'
+/// contracts (`docs/specs/models.md` §"The Relation Contract").
+///
+/// Model-to-model edges come from `model_upstream`
+/// (`DependencyGraph::get_upstream`) — resolved against `models` for each
+/// upstream's own declared clock/identity. Source edges are read directly
+/// off `model`'s own `smelt.sources.*` refs (`model.refs`), because the
+/// graph layer's dependency map excludes per-entity source refs entirely
+/// (`smelt_core::graph::DependencyGraph::build` filters `first == "sources"`
+/// out of `deps`) — the graph layer's model/source distinction, not a
+/// second one invented here. Edges are sorted by name for a deterministic
+/// report.
+pub fn build_relation_contract(
+    model: &ModelFile,
+    models: &[ModelFile],
+    model_upstream: &[String],
+    source_infos: &[smelt_core::SourceInfo],
+) -> (RelationContractView, Vec<InboundEdgeContract>) {
+    let own_metadata = model.metadata.as_deref();
+    let own_contract = RelationContractView::from_facts(
+        own_metadata.and_then(|m| m.timeseries.as_ref()),
+        own_metadata.and_then(|m| m.unique_key.as_deref()),
+    );
+
+    let mut edges: Vec<InboundEdgeContract> = model_upstream
+        .iter()
+        .filter_map(|name| {
+            models
+                .iter()
+                .find(|m| &m.canonical_path() == name)
+                .map(|m| {
+                    let md = m.metadata.as_deref();
+                    InboundEdgeContract::model(
+                        name.clone(),
+                        RelationContractView::from_facts(
+                            md.and_then(|m| m.timeseries.as_ref()),
+                            md.and_then(|m| m.unique_key.as_deref()),
+                        ),
+                    )
+                })
+        })
+        .collect();
+
+    for r in &model.refs {
+        let segs = r.smelt_ref.to_path();
+        if segs.first().map(String::as_str) != Some("sources") {
+            continue;
+        }
+        // `SourceInfo::address_segments` is the full scan-root-stripped path,
+        // `sources` segment included (`discover_source_infos` /
+        // `ModelDiscovery::compute_address_segments`) — the same segments a
+        // `smelt.sources.<...>` ref carries, so no prefix-stripping here.
+        let Some(info) = source_infos.iter().find(|s| s.address_segments == segs) else {
+            continue;
+        };
+        let name = segs.join(".");
+        if edges.iter().any(|e| e.name == name) {
+            continue;
+        }
+        edges.push(InboundEdgeContract::source(
+            name,
+            RelationContractView::from_facts(info.timeseries.as_ref(), info.unique_key.as_deref()),
+        ));
+    }
+
+    edges.sort_by(|a, b| a.name.cmp(&b.name));
+
+    (own_contract, edges)
+}
+
 /// Build the plain-text `smelt explain <model>` maintenance-plan report
-/// (`maintenance_plan.md` §Surface "CLI": "prints the plan (cells, clamps,
+/// (`incremental_models.md` §Surface "CLI": "prints the plan (cells, clamps,
 /// locality, guarantee ledger, edges)"). Pure string-builder — no I/O — so it
 /// is directly unit-testable; the caller only `println!`s the result.
 ///
 /// `result` is the plan derived by `smelt_db::maintenance_plan_report`
 /// (already-derived data; this function never re-derives admission,
-/// locality, or ledger logic). `upstream` is the model's inbound edges
-/// (`DependencyGraph::get_upstream`), and `model_name` is its canonical path.
+/// locality, or ledger logic). `own_contract` is this model's own Relation
+/// Contract fill (`docs/specs/models.md` §"The Relation Contract");
+/// `edges` are its inbound edges — a declared source or an upstream
+/// maintained model, rendered through the same contract rows regardless
+/// of which provider filled them. `model_name` is its canonical path.
+/// `cells_cfg` is the model's own `maintenance.cells[]` frontmatter (empty
+/// when the model declares none) — read to look up each cell's active
+/// `write:` pin, if any (`docs/specs/incremental_models.md` §"Per-cell
+/// write addressing"), and its narrowed `prefer`/`technique` override for
+/// the write-variant row below. `defaults_cfg` is the model's own
+/// `maintenance.defaults` block (the broad end of the same ladder,
+/// `smelt_logical::maintenance::choice::effective_override`).
 pub fn build_maintenance_plan_report(
     model_name: &str,
     result: &smelt_db::queries::maintenance::MaintenancePlanResult,
-    upstream: &[String],
-) -> String {
+    own_contract: &RelationContractView,
+    edges: &[InboundEdgeContract],
+    cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
+    defaults_cfg: Option<&smelt_core::config::MaintenanceDefaults>,
+) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
 
@@ -158,6 +375,19 @@ pub fn build_maintenance_plan_report(
             let _ = writeln!(out, "      corner:    {:?}", cell.corner);
             let _ = writeln!(out, "      technique: {:?}", cell.technique);
             let _ = writeln!(out, "      ledger_catch_up: {}", cell.ledger_catch_up);
+            // Region row identity (P2, `model_properties.md` §"Region row
+            // identity") — plain data carried on the cell
+            // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+            // Phase C3), reported alongside the technique it will drive a
+            // future conditional write's compare-join for.
+            let _ = writeln!(out, "      region key: {:?}", cell.row_identity.identity);
+            if let Some(proven) = &cell.row_identity.proven_mismatch {
+                let _ = writeln!(
+                    out,
+                    "      region key: NOTE declared key wins over a differing proven grain \
+                     key {proven:?}"
+                );
+            }
             match &cell.partition_local {
                 PartitionLocal::Yes => {
                     let _ = writeln!(out, "      locality:  partition_local");
@@ -182,9 +412,278 @@ pub fn build_maintenance_plan_report(
                     );
                 }
             }
+            // Open write-pattern registry (`docs/specs/incremental_models.md`
+            // §"Per-cell write addressing"): the admissible pattern-name set
+            // for this cell's own declared facts (structural + registry-
+            // capability factors only — the fourth, backend-capability
+            // factor is not narrowed here since `smelt explain` has no live
+            // target connection; `BackendWriteCapabilities::all()` reports
+            // every pattern a real backend *could* provide), and the active
+            // `write:` pin (if any) this cell's `maintenance.cells[]` entry
+            // names.
+            let facts = smelt_logical::maintenance::OutputContractFacts {
+                has_identity: matches!(
+                    cell.row_identity.identity,
+                    smelt_logical::maintenance::RowIdentity::Key(_)
+                ),
+                has_partition_axis: own_contract.clock.is_some(),
+            };
+            let admissible = smelt_logical::maintenance::admissible_write_patterns(
+                facts,
+                smelt_logical::maintenance::BackendWriteCapabilities::all(),
+            );
+            let _ = writeln!(
+                out,
+                "      admissible write patterns: {}",
+                if admissible.is_empty() {
+                    "(none)".to_string()
+                } else {
+                    admissible.join(", ")
+                }
+            );
+            match smelt_db::queries::maintenance::matching_write_pin(
+                cell,
+                &result.column_groups,
+                cells_cfg,
+            ) {
+                Some(pin) => {
+                    let _ = writeln!(out, "      write pin: {pin}");
+                }
+                None => {
+                    let _ = writeln!(out, "      write pin: (none)");
+                }
+            }
+            // Observed-delta recording (`incremental_models.md` §"The graph
+            // layer" — "Observed deltas on model edges"; §Known
+            // Divergences): recording is wired for exactly the
+            // change-suppressed column-scoped MERGE family
+            // (`Technique::ColumnScopedMerge`) — the keyed-fold and
+            // staged-candidate write families do not record yet, and every
+            // other technique (region rewrite, in-place update) has no
+            // conditional write to suppress in the first place. This reads
+            // the cell's own derived `technique` only — no re-derivation of
+            // whether a write is actually conditional at runtime.
+            //
+            // A `ColumnScopedMerge` cell only actually records at runtime
+            // when `choice::resolve_write_suppression` resolves `Suppressed`
+            // rather than fail-closed `Unconditional`
+            // (`smelt-runtime::maintenance_driver::
+            // execute_column_scoped_write_with_observed_delta`) — and P2 row
+            // identity (`RowIdentity::WholeRow` never proves a per-row join
+            // identity to compare on) is one of that resolution's two
+            // independent fail-closed gates, alongside P3 per-column
+            // comparability. `facts.has_identity` above already carries the
+            // P2 half of that verdict (consulted, not re-derived); the P3
+            // comparability half is not independently re-checked here — this
+            // reporting path has no `sql`/`JoinContext` threaded to redo the
+            // property-composition walk, so a `Key`-identity cell with an
+            // incomparable compared column can still print "yes" even though
+            // it resolves `Unconditional` at runtime (the authoritative
+            // check remains `choice::resolve_write_suppression`).
+            if cell.technique == Technique::ColumnScopedMerge && facts.has_identity {
+                let _ = writeln!(
+                    out,
+                    "      observed-delta recording: yes (change-suppressed column-scoped MERGE)"
+                );
+            } else if cell.technique == Technique::ColumnScopedMerge {
+                let _ = writeln!(
+                    out,
+                    "      observed-delta recording: no (no proven row identity — matched arm \
+                     falls back to unconditional rewrite, nothing to record)"
+                );
+            }
+            // Write variant (`docs/plans/20260715-composed-axes-conditional-
+            // maintenance.md` Phase G1; `incremental_models.md` §"Windowed
+            // maintenance and the horizon" category 2, §"Interchangeability
+            // and choice"): which matched-arm shape the override ladder's
+            // conditional-variant dimension resolves for a suppressible
+            // cell (`Technique::ColumnScopedMerge` or `Technique::KeyedFold`),
+            // and why — pin / preference / default / first-build, mirroring
+            // `choice::VariantReason`. Like the observed-delta recording
+            // line above, this reporting path has no `sql`/`JoinContext`
+            // threaded to redo the P3 comparability walk, so `facts.
+            // has_identity` (the P2 half only) is the best-effort proxy for
+            // "the conditional variant is admitted" in the branches below
+            // that print a preference/pin/default line — the authoritative
+            // check at runtime is `choice::resolve_write_suppression` folded
+            // through `choice::resolve_write_variant`.
+            //
+            // The one case that IS fully decidable without a P3 walk is
+            // `!facts.has_identity` (`RowIdentity::WholeRow`):
+            // `resolve_write_suppression` checks row identity first and
+            // short-circuits to `Unconditional` before ever consulting
+            // comparability or the column group, so a `technique: suppress`
+            // pin over a `WholeRow` cell is genuinely, always inadmissible —
+            // this block calls the real resolvers for that decidable case
+            // and propagates the resulting `ChoiceRefusal` as an actual
+            // `explain` error, rather than the silently-wrong success line a
+            // pre-this-fix version printed unconditionally here regardless
+            // of any pin.
+            if matches!(
+                cell.technique,
+                Technique::ColumnScopedMerge | Technique::KeyedFold
+            ) {
+                // The write-suppression dimension's own narrowed override
+                // (`smelt_logical::maintenance::choice::effective_override`),
+                // matched the same way `matching_write_pin` matches a
+                // `cells[].write` pin: `on:` against this trigger's own
+                // source address, `columns` against any member of the
+                // cell's group. `Trigger::ColumnAdded` (the
+                // definition-change trigger) has no `on:` address of its
+                // own, mirroring `smelt-db`'s own `trigger_on_address`.
+                let trigger_address = match &cell.trigger {
+                    smelt_logical::maintenance::Trigger::NewData { source }
+                    | smelt_logical::maintenance::Trigger::UpstreamMutation { source } => {
+                        Some(source.clone())
+                    }
+                    smelt_logical::maintenance::Trigger::Backfill => Some("backfill".to_string()),
+                    smelt_logical::maintenance::Trigger::ColumnAdded { .. } => None,
+                };
+                let group_columns: Vec<String> = result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == cell.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default();
+                let overrides = trigger_address
+                    .as_deref()
+                    .map(|addr| {
+                        smelt_logical::maintenance::choice::effective_override(
+                            defaults_cfg,
+                            cells_cfg,
+                            addr,
+                            &group_columns,
+                        )
+                    })
+                    .unwrap_or_default();
+
+                use smelt_core::config::{CellTechnique, TechniquePreference};
+
+                if !facts.has_identity {
+                    // Real (not proxy): a `WholeRow` cell always resolves
+                    // `WriteSuppression::Unconditional` regardless of the
+                    // column group or comparability
+                    // (`resolve_write_suppression`'s own fail-closed first
+                    // check), so calling the real resolvers here with an
+                    // empty compared-column set is exact, not an
+                    // approximation. A hard `technique: suppress` pin over
+                    // this is a genuine `ChoiceRefusal`.
+                    let raw_suppression =
+                        smelt_logical::maintenance::choice::resolve_write_suppression(
+                            &[],
+                            &[],
+                            &cell.row_identity,
+                        );
+                    smelt_logical::maintenance::choice::resolve_write_variant(
+                        &raw_suppression,
+                        &cell.trigger,
+                        cell.ledger_catch_up,
+                        &overrides,
+                    )
+                    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (default — no proven row identity, \
+                         the conditional variant is never admitted for this cell)"
+                    );
+                } else if let Some(CellTechnique::Suppress) = overrides.technique {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: suppressed (pinned via `technique: suppress`)"
+                    );
+                } else if let Some(CellTechnique::Unconditional) = overrides.technique {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (pinned via `technique: \
+                         unconditional`, overriding whatever the structural default would \
+                         otherwise prefer)"
+                    );
+                } else if matches!(overrides.prefer, Some(TechniquePreference::Suppress)) {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: suppressed (soft-preferred via `prefer: \
+                         suppress`, overriding the structural default)"
+                    );
+                } else if matches!(overrides.prefer, Some(TechniquePreference::Unconditional)) {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (soft-preferred via `prefer: \
+                         unconditional`, overriding the structural default)"
+                    );
+                } else if smelt_logical::maintenance::choice::trigger_has_prior_state(
+                    &cell.trigger,
+                    cell.ledger_catch_up,
+                ) {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: suppressed (preference — steady-state trigger \
+                         over prior state)"
+                    );
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (first-build posture — this trigger \
+                         has no prior stored state on this column group to diff against; the \
+                         conditional variant is admitted but not preferred here)"
+                    );
+                }
+            }
         }
     }
     let _ = writeln!(out);
+
+    // Key temporal locality (`incremental_models.md` §"Key temporal
+    // locality (the time-partitioned output)"): for an admitted `grain:
+    // key` + `timeseries:` model, print the established route/slice and
+    // the derived settle bound. Route 2's settle bound is honestly `Never`
+    // via `SettleBound`'s own `Debug` — never a large sentinel duration
+    // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    // Phase A5's review checklist).
+    if let Some(locality) = &result.plan.key_locality {
+        use smelt_logical::maintenance::locality::LocalitySlice;
+        let route = match &locality.slice {
+            LocalitySlice::Window {
+                recurrence_bounded: false,
+                ..
+            } => "route 1 (key-embedded)",
+            LocalitySlice::Window {
+                recurrence_bounded: true,
+                ..
+            } => "route 3 (recurrence-bounded, statically derived)",
+            LocalitySlice::DeltaValues { .. } => "route 2 (key-determined)",
+            LocalitySlice::RecurrenceBounded { .. } => {
+                "route 3 (recurrence-bounded, declared key_recurrence)"
+            }
+        };
+        // Observed-delta key→partition projection form
+        // (`incremental_models.md` §"What the composed shape uniquely
+        // enables" — "Exact key→partition dirt projection"; §Known
+        // Divergences): routes 1–2 project a recorded observed delta to
+        // *exact* touched partitions (a stored row's partition value is a
+        // per-key constant); route 3 widens the projection backward by the
+        // recurrence bound `r` plus the route's own margins, since a key's
+        // partition value may move under that route. This mirrors
+        // `smelt_logical::maintenance::propagate::project_observed_delta`'s
+        // own route dispatch — read here, never re-derived.
+        let projection = match &locality.slice {
+            LocalitySlice::Window {
+                recurrence_bounded: false,
+                ..
+            } => "exact (key-embedded)",
+            LocalitySlice::DeltaValues { .. } => "exact (key-determined)",
+            LocalitySlice::Window {
+                recurrence_bounded: true,
+                ..
+            }
+            | LocalitySlice::RecurrenceBounded { .. } => "widened by `r` + margins",
+        };
+        let _ = writeln!(out, "Key temporal locality:");
+        let _ = writeln!(out, "  route: {route}");
+        let _ = writeln!(out, "  slice: {:?}", locality.slice);
+        let _ = writeln!(out, "  settle bound: {:?}", locality.settle_bound);
+        let _ = writeln!(out, "  observed-delta projection: {projection}");
+        let _ = writeln!(out);
+    }
 
     if result.plan.refusals.is_empty() {
         let _ = writeln!(out, "Refusals: (none)");
@@ -196,13 +695,31 @@ pub fn build_maintenance_plan_report(
     }
     let _ = writeln!(out);
 
-    if upstream.is_empty() {
+    // Relation Contract (`docs/specs/models.md` §"The Relation Contract"):
+    // this model's own clock/identity/derived-grain rows, then one contract
+    // block per inbound edge — a source and an upstream model render
+    // through the same rows (`write_relation_contract`), never a
+    // provider-specific format.
+    let _ = writeln!(out, "Relation contract:");
+    write_relation_contract(&mut out, "  ", own_contract);
+    let _ = writeln!(out);
+
+    if edges.is_empty() {
         let _ = writeln!(out, "Inbound edges: (none)");
     } else {
-        let _ = writeln!(out, "Inbound edges: {}", upstream.join(", "));
+        let names: Vec<&str> = edges.iter().map(|e| e.name.as_str()).collect();
+        let _ = writeln!(out, "Inbound edges: {}", names.join(", "));
+        for edge in edges {
+            let provider = match edge.provider {
+                RelationContractProvider::Source => "source",
+                RelationContractProvider::Model => "model",
+            };
+            let _ = writeln!(out, "  - {} ({})", edge.name, provider);
+            write_relation_contract(&mut out, "      ", &edge.contract);
+        }
     }
 
-    out
+    Ok(out)
 }
 
 /// How a `--show-sql` region's literal bounds are sourced
@@ -285,7 +802,7 @@ pub struct CellStatements {
 
 /// Build the [`StatementGroup`] a plan cell would execute, using the same
 /// pure emitters a run executes
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)"):
 /// this is the CLI-side "same inputs, same emitter" observation path —
 /// `--show-sql` never connects to a backend or executes anything, so every
 /// SELECT body here is compiled through the sanctioned
@@ -298,7 +815,7 @@ pub struct CellStatements {
 /// technique-specific inputs (unique key, keyed-fold driving-source
 /// classification) cannot be assembled from the discovered project, or when
 /// the technique has no production consumer yet (`Technique::InPlaceUpdate`,
-/// `maintenance_plan.md` — no live plan cell lowers to it).
+/// `incremental_models.md` — no live plan cell lowers to it).
 ///
 /// `resolver` must be built from the *actual* discovered project (the same
 /// way `smelt-runtime`'s dry-run compile path in `execute.rs` builds it —
@@ -422,9 +939,17 @@ pub fn build_cell_statement_group(
             ))
         }
         Technique::KeyedFold => {
-            let classification =
-                classify_cumulative_sql(&model.name, &stripped_sql, source_timeseries)
-                    .map_err(|e| format!("{e}"))?;
+            let model_has_timeseries = model
+                .metadata
+                .as_ref()
+                .is_some_and(|m| m.timeseries.is_some());
+            let classification = classify_cumulative_sql(
+                &model.name,
+                &stripped_sql,
+                source_timeseries,
+                model_has_timeseries,
+            )
+            .map_err(|e| format!("{e}"))?;
 
             let (raw_start, raw_end) = region.raw();
             let time_range = TimeRange {
@@ -469,6 +994,11 @@ pub fn build_cell_statement_group(
                 &classification.unique_key,
                 &folds,
                 &compiled.sql,
+                // `smelt explain` does not yet render the locality-derived
+                // target-scan slice predicate — that surface lands in
+                // `docs/plans/20260715-composed-axes-conditional-
+                // maintenance.md` phase A5.
+                None,
                 dialect,
             ))
         }
@@ -491,7 +1021,7 @@ pub fn build_cell_statement_group(
             ))
         }
         Technique::InPlaceUpdate => Err("Technique::InPlaceUpdate has no production consumer yet \
-             (docs/specs/maintenance_plan.md § Known Divergences)"
+             (docs/specs/incremental_models.md § Known Divergences)"
             .to_string()),
     }
 }
@@ -597,27 +1127,44 @@ pub struct ExplainCellJson {
     pub trigger: String,
     pub corner: String,
     pub technique: String,
+    /// The region row identity (P2, `model_properties.md` §"Region row
+    /// identity"): `"Key([...])"` or `"WholeRow"`.
+    pub row_identity: String,
+    /// The proven grain key that a declared `unique_key` overrode, when the
+    /// two disagreed while both were present — surfaced rather than
+    /// silently dropped.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub row_identity_proven_mismatch: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_statements_reason: Option<String>,
     pub statements: Vec<ExplainStatementJson>,
 }
 
 /// The `--json --show-sql` per-model report:
-/// `{"model": "<name>", "cells": [...]}`, each cell carrying its own
-/// `statements` array (`docs/specs/cli.md` §"`smelt explain <model>`
-/// maintenance-plan report").
+/// `{"model": "<name>", "contract": {...}, "inbound_edges": [...], "cells":
+/// [...]}`, carrying the Relation Contract slots
+/// (`docs/specs/models.md` §"The Relation Contract") for both this model
+/// and every inbound edge alongside each cell's own `statements` array
+/// (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
+/// report").
 #[derive(Debug, Serialize)]
 pub struct ExplainMaintenanceJson {
     pub model: String,
+    pub contract: RelationContractView,
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub inbound_edges: Vec<InboundEdgeContract>,
     pub cells: Vec<ExplainCellJson>,
 }
 
 /// Build the `--json --show-sql` report from the derived plan cells and
-/// their built statement groups.
+/// their built statement groups, plus the model's own Relation Contract
+/// fill and its inbound edges' contracts.
 pub fn build_maintenance_plan_json(
     model_name: &str,
     plan_cells: &[PlanCell],
     statements: &[CellStatements],
+    own_contract: RelationContractView,
+    inbound_edges: Vec<InboundEdgeContract>,
 ) -> ExplainMaintenanceJson {
     let cells = plan_cells
         .iter()
@@ -647,6 +1194,8 @@ pub fn build_maintenance_plan_json(
                 trigger: format!("{:?}", cell.trigger),
                 corner: format!("{:?}", cell.corner),
                 technique: format!("{:?}", cell.technique),
+                row_identity: format!("{:?}", cell.row_identity.identity),
+                row_identity_proven_mismatch: cell.row_identity.proven_mismatch.clone(),
                 no_statements_reason,
                 statements,
             }
@@ -654,6 +1203,8 @@ pub fn build_maintenance_plan_json(
         .collect();
     ExplainMaintenanceJson {
         model: model_name.to_string(),
+        contract: own_contract,
+        inbound_edges,
         cells,
     }
 }
@@ -999,6 +1550,7 @@ mod tests {
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
                 grain: Some(smelt_core::config::Grain::Partition),
+                unique_key: None,
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
@@ -1102,6 +1654,7 @@ mod tests {
                 }),
                 refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
                 grain: Some(smelt_core::config::Grain::Partition),
+                unique_key: None,
                 batched: Some(BatchedConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
@@ -1310,6 +1863,12 @@ mod tests {
             partition_local: PartitionLocal::Yes,
             scans: vec![],
             ledger_catch_up: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            skeleton_source_closure: None,
+            fingerprint_projections: std::collections::BTreeMap::new(),
         };
 
         let source_timeseries = smelt_planner::SourceTimeseriesMap::new();

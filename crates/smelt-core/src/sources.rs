@@ -111,7 +111,7 @@ pub enum Redelivery {
 /// lies within `window` of each other on the event-time axis. Valid under
 /// any `mutation_profile.kind` (`sources.md` §"`mutation_profile` — the
 /// structured block"). Consumed by key temporal locality
-/// (`keyed_models.md`); always runtime-checked, never trusted
+/// (`incremental_models.md`); always runtime-checked, never trusted
 /// (`KeyedRecurrenceBoundViolated`).
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct KeyRecurrence {
@@ -227,9 +227,40 @@ pub struct SourceInfo {
     /// How far back the source can be re-read. Absent = assumed fully
     /// replayable (`sources.md`'s trusted-replayable default).
     pub retention: Option<DataLatency>,
+    /// Asserts that a consuming model's equi-join into these column(s) never
+    /// drops a driving row (`sources.md` §"Referential integrity") —
+    /// composite-valued like `unique_key` (a single declared string
+    /// normalizes to a one-element list). A **narrowing** declaration under
+    /// the trust rule, paired with the count-preservation tripwire. `None` =
+    /// undeclared/unguaranteed: an inner/equi-join enrichment into this
+    /// source is not proven row-preserving by this fact alone.
+    pub referential_integrity: Option<Vec<String>>,
 }
 
 impl SourceInfo {
+    /// The derived Relation Contract `grain` label for this source
+    /// (`docs/specs/sources.md` §"The source as a Relation Contract
+    /// provider": "A source has an **effective grain** too … derived from
+    /// its clock and identity the same way a model's is"). Reuses the
+    /// identical pure derivation a model output's
+    /// `ModelMetadata::resolved_grain` reads
+    /// (`docs/specs/models.md` §"Refresh axis") — one derivation, two
+    /// providers, never a source-specific reimplementation.
+    ///
+    /// `None` when the source declares **neither** `timeseries:` nor
+    /// `unique_key:` — a legal, shape-fact-free source (reported as such
+    /// by `smelt explain`, never refused: a source's declaration surface
+    /// has no `refresh: incremental`-style admission gate to fail).
+    pub fn resolved_grain(&self) -> Option<crate::config::Grain> {
+        crate::config::derive_grain(
+            self.timeseries.is_some(),
+            self.unique_key.as_deref(),
+            self.timeseries
+                .as_ref()
+                .map(|t| t.partition_column.as_str()),
+        )
+    }
+
     /// Returns the fully-qualified database name for this source given the active
     /// target name and schema.
     ///
@@ -320,6 +351,14 @@ pub enum SourceError {
         expected_kind: &'static str,
         actual_kind: &'static str,
     },
+
+    #[error(
+        "`referential_integrity: {referential_integrity:?}` is not a subset of the declared `unique_key: {unique_key:?}` — a source's referential-integrity columns must name a subset of its own row identity"
+    )]
+    ReferentialIntegrityNotSubsetOfUniqueKey {
+        referential_integrity: Vec<String>,
+        unique_key: Vec<String>,
+    },
 }
 
 // ---------------------------------------------------------------------------
@@ -375,6 +414,11 @@ struct RawSourceYaml {
     /// How far back the source can be re-read.
     #[serde(default)]
     retention: Option<DataLatency>,
+
+    /// Referential-integrity world-fact — single string or list, both
+    /// accepted (`sources.md` §"Referential integrity").
+    #[serde(default, deserialize_with = "opt_string_or_vec")]
+    referential_integrity: Option<Vec<String>>,
 }
 
 /// `mutation_profile:` accepts either the bare-string shorthand
@@ -449,7 +493,12 @@ where
     StringOrVec::deserialize(deserializer).map(Into::into)
 }
 
-fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
+/// Crate-visible so `metadata::ModelMetadata::unique_key` and
+/// `config::ModelConfig::unique_key` (the top-level identity fact,
+/// `docs/specs/models.md` §"Refresh axis") share the same single-string-is-sugar
+/// convention as the source-side `unique_key:`/`key_recurrence.key` fields
+/// this helper was written for.
+pub(crate) fn opt_string_or_vec<'de, D>(deserializer: D) -> Result<Option<Vec<String>>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
@@ -643,6 +692,20 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
 
     let mutation_profile = normalize_mutation_profile(raw.mutation_profile, &raw.source_lateness)?;
 
+    // Validate the referential_integrity/unique_key subset rule (sources.md
+    // §"Diagnostic codes" `MalformedSource`): when both are declared,
+    // referential_integrity's columns must be a subset of unique_key's —
+    // this rule only applies when a unique_key is declared at all.
+    if let (Some(ri), Some(uk)) = (&raw.referential_integrity, &raw.unique_key) {
+        let uk_set: std::collections::BTreeSet<&str> = uk.iter().map(String::as_str).collect();
+        if !ri.iter().all(|c| uk_set.contains(c.as_str())) {
+            return Err(SourceError::ReferentialIntegrityNotSubsetOfUniqueKey {
+                referential_integrity: ri.clone(),
+                unique_key: uk.clone(),
+            });
+        }
+    }
+
     Ok(SourceInfo {
         path: path.to_path_buf(),
         address_segments: vec![stem],
@@ -658,6 +721,7 @@ pub fn parse_source_yaml(path: &Path) -> Result<SourceInfo, SourceError> {
         }),
         unique_key: raw.unique_key,
         retention: raw.retention,
+        referential_integrity: raw.referential_integrity,
     })
 }
 
@@ -1119,5 +1183,112 @@ sources:
             vec!["billing", "raw", "events"],
             "address must include full path since billing/ is not a paths prefix"
         );
+    }
+
+    /// `referential_integrity:` accepts the bare-string sugar, normalizing
+    /// to a one-element list (`sources.md` §"Referential integrity").
+    #[test]
+    fn referential_integrity_bare_string_parses() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("customers.yml");
+        std::fs::write(
+            &path,
+            r#"
+columns:
+  - name: customer_id
+    type: INTEGER
+referential_integrity: customer_id
+"#,
+        )
+        .unwrap();
+
+        let info = parse_source_yaml(&path).expect("should parse");
+        assert_eq!(
+            info.referential_integrity,
+            Some(vec!["customer_id".to_string()])
+        );
+    }
+
+    /// `referential_integrity:` also accepts a list form.
+    #[test]
+    fn referential_integrity_list_parses() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("customers.yml");
+        std::fs::write(
+            &path,
+            r#"
+columns:
+  - name: customer_id
+    type: INTEGER
+  - name: region
+    type: VARCHAR
+unique_key: [customer_id, region]
+referential_integrity: [customer_id, region]
+"#,
+        )
+        .unwrap();
+
+        let info = parse_source_yaml(&path).expect("should parse");
+        assert_eq!(
+            info.referential_integrity,
+            Some(vec!["customer_id".to_string(), "region".to_string()])
+        );
+    }
+
+    /// A `referential_integrity` column set that is not a subset of a
+    /// declared `unique_key` is a `MalformedSource`-class error
+    /// (`sources.md`'s `MalformedSource` diagnostic row).
+    #[test]
+    fn referential_integrity_not_subset_of_unique_key_is_error() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("customers.yml");
+        std::fs::write(
+            &path,
+            r#"
+columns:
+  - name: customer_id
+    type: INTEGER
+  - name: region
+    type: VARCHAR
+unique_key: [customer_id]
+referential_integrity: [customer_id, region]
+"#,
+        )
+        .unwrap();
+
+        let result = parse_source_yaml(&path);
+        assert!(
+            matches!(
+                result,
+                Err(SourceError::ReferentialIntegrityNotSubsetOfUniqueKey { .. })
+            ),
+            "expected ReferentialIntegrityNotSubsetOfUniqueKey, got: {result:?}"
+        );
+    }
+
+    /// Absent a declared `unique_key`, any `referential_integrity` value is
+    /// accepted — the subset rule only applies when a `unique_key` is
+    /// declared (`sources.md`'s `MalformedSource` row wording).
+    #[test]
+    fn referential_integrity_without_unique_key_is_accepted() {
+        let dir = tempfile::TempDir::new().unwrap();
+        let path = dir.path().join("customers.yml");
+        std::fs::write(
+            &path,
+            r#"
+columns:
+  - name: customer_id
+    type: INTEGER
+referential_integrity: [customer_id]
+"#,
+        )
+        .unwrap();
+
+        let info = parse_source_yaml(&path).expect("should parse without a declared unique_key");
+        assert_eq!(
+            info.referential_integrity,
+            Some(vec!["customer_id".to_string()])
+        );
+        assert!(info.unique_key.is_none());
     }
 }

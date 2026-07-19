@@ -59,7 +59,7 @@ BEGIN
   ) AS _smelt_output_clamp WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-11'
 COMMIT
 
--- trigger: NewData { source: "silver.events_parsed" }
+-- trigger: NewData { source: "silver.events_deduped" }
 BEGIN
   DELETE FROM main.silver_sessions_chained WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-11'
   INSERT INTO main.silver_sessions_chained SELECT * FROM (

@@ -173,7 +173,7 @@ scaffolds soak sessions on its own.
 
 - `cargo test -p smelt-cli --test maintenance_conformance` — the
   maintenance-conformance equivalence gate
-  (`docs/specs/maintenance_plan.md` §"The equivalence invariant"). Default
+  (`docs/specs/incremental_models.md` §"The equivalence invariant"). Default
   depth is small (`SMELT_CONFORMANCE_CASES`, unset → 12); a soak pass runs
   `SMELT_CONFORMANCE_CASES=200 cargo test -p smelt-cli --test
   maintenance_conformance --quiet 2>&1 | tail -40`. Automated nightly via the

@@ -149,37 +149,37 @@ discriminant = "dynamic"
 
 # ── smelt-db / queries/schema ─────────────────────────────────────────────────
 
-["crates/smelt-db/src/queries/schema.rs:581"]
+["crates/smelt-db/src/queries/schema.rs:590"]
 classification = "legitimate"
 reason = "param type resolution: non-Concrete SmeltType constraints have no SQL DataType; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:644"]
+["crates/smelt-db/src/queries/schema.rs:653"]
 classification = "legitimate"
 reason = "schema column type fallback — col.data_type is optional; Unknown for columns with no inferred type"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:670"]
+["crates/smelt-db/src/queries/schema.rs:679"]
 classification = "legitimate"
 reason = "schema column type fallback — resolved model column type unavailable; Unknown is conservative"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:769"]
+["crates/smelt-db/src/queries/schema.rs:778"]
 classification = "legitimate"
 reason = "recursive CTE column bootstrap — types unknown until recursive reference resolves; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:856"]
+["crates/smelt-db/src/queries/schema.rs:865"]
 classification = "legitimate"
 reason = "sources.yml column with no declared type — Unresolved because user can add a type: field to fix; ColumnTypeUnresolved fires to notify"
 discriminant = "unresolved"
 
-["crates/smelt-db/src/queries/schema.rs:891"]
+["crates/smelt-db/src/queries/schema.rs:900"]
 classification = "legitimate"
 reason = "CTE column type fallback when count mismatches or type unavailable — conservative Unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/queries/schema.rs:1184"]
+["crates/smelt-db/src/queries/schema.rs:1193"]
 classification = "legitimate"
 reason = "resolved model schema column type fallback — unwrap_or for optional TypedColumn; conservative"
 discriminant = "dynamic"
@@ -349,17 +349,17 @@ classification = "legitimate"
 reason = "resolve_struct_return_type: row-var name mismatch between param and return — unresolvable"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:641"]
+["crates/smelt-db/src/type_inference/function_call.rs:790"]
 classification = "legitimate"
 reason = "Coalesce: all args Unknown/Null — result type genuinely unknown; Unknown is correct"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:658"]
+["crates/smelt-db/src/type_inference/function_call.rs:807"]
 classification = "legitimate"
 reason = "Ifnull: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"
 
-["crates/smelt-db/src/type_inference/function_call.rs:929"]
+["crates/smelt-db/src/type_inference/function_call.rs:1078"]
 classification = "legitimate"
 reason = "Greatest/Least: unwrap_or fallback — both arg types Unknown; result type genuinely unknown"
 discriminant = "dynamic"
@@ -511,22 +511,22 @@ classification = "legitimate"
 reason = "struct field parse fallback: Unknown is returned for the field value when parsing fails, but the error is surfaced via UnknownStructFieldType diagnostic (struct_field_unknown_ranges / struct_field_type_unknown_diagnostics_for_file, hardening Phase 3)"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3187"]
+["crates/smelt-types/src/signatures.rs:3226"]
 classification = "legitimate"
 reason = "return type resolution: Ordered constraint — no SQL scalar equivalent; Unknown is the correct stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:3189"]
+["crates/smelt-types/src/signatures.rs:3228"]
 classification = "legitimate"
 reason = "return type resolution: Any constraint — Unknown is the deliberate no-constraint stand-in"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4106"]
+["crates/smelt-types/src/signatures.rs:4147"]
 classification = "legitimate"
 reason = "ARRAY_AGG/LIST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"
 
-["crates/smelt-types/src/signatures.rs:4808"]
+["crates/smelt-types/src/signatures.rs:4849"]
 classification = "legitimate"
 reason = "CAST built-in sig: polymorphic return type uses Unknown as DataType placeholder in TypeExpr"
 discriminant = "dynamic"

@@ -132,10 +132,12 @@ models:
     tags: [<tag>, ...]
     target: <target_name>
     refresh: incremental
-    grain: partition
+    unique_key: [<column>, ...]
     batched:
       # batched fields...
 ```
+
+`refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` / `key_per_partition` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.
 
 ### Model Fields
 
@@ -144,9 +146,10 @@ models:
 | `materialization` | string | no | _(project default)_ | Materialization type for this model |
 | `tags` | string[] | no | `[]` | Tags for model selection (used with `--select tag:X`) |
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
-| `timeseries` | object | no | | Time-dimension declaration for `grain: partition` / `grain: key_per_partition` models. Forbidden on `grain: key` models (see [Timeseries Configuration](#timeseries-configuration)) |
+| `timeseries` | object | no | | Time-dimension declaration — the **clock** shape-defining fact (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
-| `grain` | string | no | | Required with `refresh: incremental`: `partition`, `key`, or `key_per_partition` |
+| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from the `batched:` sub-block's `unique_key` (a partition-grain dedup aid, never identity). |
+| `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
 | `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
@@ -158,7 +161,7 @@ models:
 
 ### Timeseries Configuration
 
-Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. `grain: key` models must **not** declare `timeseries:` — the keyed output has no partition column, and the rule reads partition shape from the driving source instead (declaring both is a hard error, `KeyedForbidsTimeseries`). The `timeseries:` and `batched:` keys are siblings, not nested.
+Models that process time-partitioned data must declare a `timeseries:` block. This is required for `refresh: incremental` + `grain: partition` models. A `grain: key` model *may also* declare `timeseries:` to time-partition its keyed output — the key and clock axes are independent, not alternatives — but only when key temporal locality is established (a proof, or a checked declaration, that every duplicate delivery of one key stays within a bounded window of itself on the event axis; see the [composed shape](../guide/incremental-models.md#the-composed-shape-key-time)). A `grain: key` model whose `timeseries:` block satisfies none of the three locality routes is refused (`KeyedForbidsTimeseries`, naming the missing route). The `timeseries:` and `batched:` keys are siblings, not nested.
 
 ```yaml
 models:
@@ -264,6 +267,29 @@ The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, 
 | `scan_bounds.per_source.<address>.allow_full_scan` | bool | no | `false` | Named acceptance of a full (unbounded) read of the source at `<address>`. |
 
 A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
+
+`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` primarily choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). The same keys also carry a `suppress`/`unconditional` value that steers the orthogonal [conditional-write](../guide/incremental-models.md#conditional-writes) dimension: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — `prefer: suppress`/`prefer: unconditional` nudge the default without ever refusing, and `technique: suppress`/`technique: unconditional` force it, refusing loudly if the proof itself never admitted suppression. This ladder only drives the live run path for `ColumnScopedMerge` cells today; a `KeyedFold` cell's `refresh: keyed` executor still always honours a proven `Suppressed` verdict unconditionally, regardless of trigger or override — `smelt explain` resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.
+
+#### `cells[].write` — the physical addressing pin
+
+`maintenance.cells[].write` is a separate axis from `prefer`/`technique`: it pins *how* a cell physically locates the rows it writes (region `DELETE`+`INSERT`, keyed `MERGE`, column-scoped `MERGE`, in-place `UPDATE`, full rebuild, or a backend-contributed pattern), not which technique family runs.
+
+```yaml
+maintenance:
+  cells:
+    - columns: [amount]
+      on: backfill
+      technique: recompute
+      write: region
+```
+
+`write:` is an **open name**, not a sealed keyword set — it resolves against a registry of currently-known write patterns, and the set grows as backends contribute new ones. A pin is validated, never silently honoured or downgraded:
+
+- An unrecognised pattern name, or one the model's target backend cannot execute (e.g. `write: column` on a backend with no column-scoped `MERGE`), fails the build with `MaintenanceWritePatternUnavailable`, naming the pattern and the backend.
+- A recognised, backend-capable pattern that this cell's own declared facts cannot support (e.g. `write: keyed` on an output with no `unique_key`) fails with `MaintenanceWriteAddressingRefused`, naming the cell and the pattern.
+- A refused pin never falls back to a different addressing — fix the pin or the model's declared facts.
+
+`smelt explain <model>` prints each cell's admissible pattern set and its active pin (if any), so you can see what a pin would resolve against before setting one.
 
 ---
 

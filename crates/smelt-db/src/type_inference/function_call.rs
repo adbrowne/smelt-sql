@@ -429,33 +429,177 @@ pub fn registry_migrated_names() -> &'static [&'static str] {
 
 /// Policy for deriving [`TypedColumn::nullable`] on a registry-resolved call.
 ///
-/// The registry itself doesn't track nullability (§16 defers it — see "Out of
-/// scope" in the plan), so Phase 9 mirrors the legacy per-function rule via a
-/// tiny lookup table. Migrating a new entry to the registry means adding a row
-/// here.
-fn registry_result_nullable(name: &str, arg_nullable: &[bool]) -> bool {
-    match name {
-        // Non-nullable aggregates / niladic clocks / ranking windows /
-        // deterministic niladic scalars — mirrors the legacy per-function rule.
-        "COUNT"
-        | "NOW"
-        | "CURRENT_DATE"
-        | "CURRENT_TIMESTAMP"
-        | "APPROX_COUNT_DISTINCT"
-        | "ROW_NUMBER"
-        | "RANK"
-        | "DENSE_RANK"
-        | "NTILE"
-        | "CUME_DIST"
-        | "PERCENT_RANK"
-        | "PI"
-        | "RANDOM" => false,
-        // ABS preserves its arg's nullability — legacy returns the arg
-        // TypedColumn verbatim when a single-arg inference succeeds.
-        "ABS" => arg_nullable.first().copied().unwrap_or(true),
-        // Everything else is nullable per legacy.
-        _ => true,
+/// The registry itself doesn't track nullability for most functions (§16
+/// defers it — see "Out of scope" in the plan), so Phase 9 mirrors the
+/// legacy per-function rule via a tiny lookup table. Migrating a new entry to
+/// the registry means adding a row here.
+///
+/// The one exception is a signature carrying a
+/// [`smelt_types::signatures::NullabilityPropagation`] tag (currently
+/// `MIN`/`MAX`'s grouped-extremal rule): that registry-declared policy is
+/// consulted first and takes precedence over the name-matched default below,
+/// per the function-registry single-ownership invariant.
+fn registry_result_nullable(
+    sig: &smelt_types::signatures::Signature,
+    name: &str,
+    arg_nullable: &[bool],
+    grouped: bool,
+) -> bool {
+    use smelt_types::signatures::NullabilityPropagation;
+    match sig.nullability {
+        // Grouped extremal fold (MIN/MAX): a NOT NULL argument is NOT NULL
+        // under a GROUP BY (every group has ≥1 row); ungrouped input stays
+        // nullable (a zero-row table folds to a single NULL row).
+        NullabilityPropagation::GroupedExtremal => {
+            let all_args_not_null = !arg_nullable.is_empty() && arg_nullable.iter().all(|&n| !n);
+            !(grouped && all_args_not_null)
+        }
+        NullabilityPropagation::None => match name {
+            // Non-nullable aggregates / niladic clocks / ranking windows /
+            // deterministic niladic scalars — mirrors the legacy per-function rule.
+            "COUNT"
+            | "NOW"
+            | "CURRENT_DATE"
+            | "CURRENT_TIMESTAMP"
+            | "APPROX_COUNT_DISTINCT"
+            | "ROW_NUMBER"
+            | "RANK"
+            | "DENSE_RANK"
+            | "NTILE"
+            | "CUME_DIST"
+            | "PERCENT_RANK"
+            | "PI"
+            | "RANDOM" => false,
+            // ABS preserves its arg's nullability — legacy returns the arg
+            // TypedColumn verbatim when a single-arg inference succeeds.
+            "ABS" => arg_nullable.first().copied().unwrap_or(true),
+            // Everything else is nullable per legacy.
+            _ => true,
+        },
     }
+}
+
+/// Whether `func` sits inside a `SELECT ... GROUP BY ...` that guarantees
+/// every group produces at least one output row — the enclosing
+/// `SelectStmt` (nearest CST ancestor) carries a `GROUP_BY_CLAUSE`, and that
+/// clause is not undermined by an explicit empty `GROUPING SETS (...)`
+/// member.
+///
+/// Grouped-scope detection only: this walks up from the call site to find
+/// its own statement's GROUP BY, not any outer query's — a scalar subquery
+/// or CTE body nested inside `func`'s arguments never affects this, since
+/// `ancestors()` only visits nodes strictly containing `func` itself.
+///
+/// Two further hazards, beyond the grand-total-row shapes handled by
+/// [`group_by_has_grand_total_row`], defeat the "every group has ≥1 row"
+/// guarantee even when a non-empty `GROUP_BY_CLAUSE` is present:
+///
+/// - A `FILTER (WHERE ...)` clause attached to `func` itself: even though
+///   every group has ≥1 row, if every row in a group fails the filter
+///   predicate, the aggregate result for that group is NULL regardless of
+///   the argument's nullability.
+/// - `GROUP BY ALL` (DuckDB) when the select list contains only aggregate
+///   items: `GROUP BY ALL` groups by every non-aggregate select item, so
+///   zero non-aggregate items means zero actual grouping keys — this
+///   degenerates to the ungrouped case (a zero-row table folds to a single
+///   NULL row), not a real "every group has ≥1 row" guarantee.
+fn is_grouped_query(func: &FunctionCall, ctx: &TypeContext) -> bool {
+    if is_window_function_call(func) {
+        return false;
+    }
+    if func.filter_clause().is_some() {
+        return false;
+    }
+    let Some(select) = func.syntax().ancestors().find_map(SelectStmt::cast) else {
+        return false;
+    };
+    let Some(group_by) = select.group_by_clause() else {
+        return false;
+    };
+    if group_by_has_grand_total_row(group_by.syntax()) {
+        return false;
+    }
+    if group_by.is_all() && !select_list_has_non_aggregate_item(&select, ctx) {
+        return false;
+    }
+    true
+}
+
+/// True if `select`'s select list contains at least one item whose
+/// expression is not an aggregate/window call (i.e. would form a real
+/// `GROUP BY ALL` grouping key). Used only to disambiguate the DuckDB
+/// `GROUP BY ALL` form, where an all-aggregate select list means zero
+/// actual grouping keys.
+fn select_list_has_non_aggregate_item(select: &SelectStmt, ctx: &TypeContext) -> bool {
+    let Some(select_list) = select.select_list() else {
+        return false;
+    };
+    let has_non_aggregate = select_list.items().any(|item| {
+        item.expression()
+            .is_some_and(|expr| infer_expression_kind(&expr, ctx) == ExprKind::Scalar)
+    });
+    has_non_aggregate
+}
+
+/// True when `func` is invoked as a window function — i.e. its enclosing
+/// `Expr` carries an `OVER (...)` clause (a [`WindowSpec`]).
+///
+/// `FUNCTION_CALL` and its `OVER` clause are parsed as sibling children of
+/// the same wrapping `EXPRESSION` node (see `smelt-parser`'s
+/// `parse_primary_expr`: `FUNCTION_CALL` is finished first, then
+/// `parse_window_spec()` appends `WINDOW_SPEC` as the next sibling before the
+/// wrapping `EXPRESSION` node closes) — so walking from `func`'s syntax node
+/// to its parent and casting to [`Expr`] recovers that wrapper, and
+/// `Expr::window_spec()` finds the sibling `WINDOW_SPEC` if present.
+///
+/// This matters for grouped-extremal nullability: the "every group has ≥1
+/// row" guarantee that justifies inferring `MIN`/`MAX` as NOT NULL under a
+/// `GROUP BY` says nothing about a per-row *window frame* within a group — a
+/// bounded frame (e.g. `ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING`) can be
+/// empty at a partition's boundary rows, and engines including DuckDB return
+/// NULL for `MIN`/`MAX` over an empty window frame regardless of the
+/// argument's nullability or the enclosing query's `GROUP BY`.
+fn is_window_function_call(func: &FunctionCall) -> bool {
+    func.syntax()
+        .parent()
+        .and_then(Expr::cast)
+        .is_some_and(|expr| expr.window_spec().is_some())
+}
+
+/// True if `group_by`'s CST subtree guarantees an always-present grand-total
+/// row — i.e. is NOT safely "grouped" for grouped-extremal nullability
+/// purposes, even though it has a non-empty `GROUP_BY_CLAUSE`. Two shapes
+/// trigger this:
+///
+/// - An explicit empty `GROUPING SETS (...)` member (`()`), anywhere,
+///   including nested inside another `GROUPING SETS`.
+/// - A top-level or nested `ROLLUP(...)`/`CUBE(...)` call. Per
+///   `smelt-parser`'s grammar (see `parser/select.rs` around
+///   `parse_grouping_set_element`), smelt has no dedicated CUBE/ROLLUP
+///   grammar: `ROLLUP(a, b)` / `CUBE(a, b)` appearing directly in a
+///   `GROUP BY` list, or nested inside `GROUPING SETS (...)`, parses via the
+///   generic `parse_expression()` path as an ordinary `FUNCTION_CALL` node.
+///   Both `ROLLUP` and `CUBE` always include the empty (grand-total) grouping
+///   in their expansion.
+///
+/// An empty/grand-total grouping set produces a row that, over a zero-row
+/// input table, still collapses to a single NULL row — the same
+/// empty-input soundness boundary the plain ungrouped case hits (`SELECT
+/// MIN(x) FROM t` stays nullable even for NOT NULL `x`). So a `GROUP BY`
+/// containing either shape does not establish the guarantee that every
+/// group produces at least one row, which grouped-extremal nullability
+/// inference relies on. Plain `GROUP BY k` (no grouping sets, no
+/// ROLLUP/CUBE) is unaffected and returns `false`, staying safely grouped.
+fn group_by_has_grand_total_row(group_by: &smelt_parser::syntax_kind::SyntaxNode) -> bool {
+    group_by.descendants().any(|node| {
+        (node.kind() == smelt_parser::SyntaxKind::GROUPING_SET && node.children().next().is_none())
+            || FunctionCall::cast(node.clone()).is_some_and(|call| {
+                call.name().is_some_and(|name| {
+                    let upper = name.to_ascii_uppercase();
+                    upper == "ROLLUP" || upper == "CUBE"
+                })
+            })
+    })
 }
 
 /// Registry-first inference for the allowlisted subset of built-ins.
@@ -501,7 +645,12 @@ fn try_registry_inference(
 
     match unify_call_with_expected(sig, &arg_types, ctx.expected_return.as_ref(), &registry_lub) {
         Ok(result) => {
-            let nullable = registry_result_nullable(upper_name, &arg_nullable);
+            let nullable = registry_result_nullable(
+                sig,
+                upper_name,
+                &arg_nullable,
+                is_grouped_query(func, ctx),
+            );
             Some(Some(TypedColumn {
                 data_type: result.return_type,
                 nullable,

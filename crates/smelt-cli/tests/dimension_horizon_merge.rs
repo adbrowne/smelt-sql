@@ -1,7 +1,7 @@
 //! F15 — dimension-driven horizon-bounded MERGE equivalence fixture.
 //!
 //! Proves the SQL emitted by `smelt_runtime::dimension_horizon_merge`
-//! satisfies the `maintenance_plan.md` §"The equivalence invariant" oracle:
+//! satisfies the `incremental_models.md` §"The equivalence invariant" oracle:
 //! merging a dimension batch clamped to `[conv_ts − H, conv_ts]` via
 //! `Backend::merge_into` produces exactly the same result — row for row —
 //! as a full rebuild that recomputes the target from the same batch data.

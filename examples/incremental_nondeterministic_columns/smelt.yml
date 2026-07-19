@@ -2,8 +2,8 @@ name: incremental_nondeterministic_columns
 version: 1
 
 # Fixture for the `batched.nondeterministic_columns` opt-in
-# (docs/specs/batched_models.md §"Non-determinism and the equivalence
-# contract"): an incremental model that stamps every row with `NOW()`, a
+# (docs/specs/incremental_models.md §"Safety checks" — "Non-determinism and
+# the payload rule"): an incremental model that stamps every row with `NOW()`, a
 # run-nondeterministic value the modeller accepts varying between runs. The
 # deterministic columns (event_date, user_id, event_count) must still match a
 # full-refresh rebuild for every partition.

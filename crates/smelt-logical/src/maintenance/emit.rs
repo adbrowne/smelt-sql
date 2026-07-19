@@ -1,6 +1,6 @@
 //! Physical maintenance SQL emission — the single author of every
 //! maintenance statement a run executes
-//! (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+//! (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 //!
 //! One emitter per [`Technique`](super::Technique), following the
 //! physical-maintenance notation of
@@ -39,7 +39,7 @@ impl MaintenanceStatement {
 /// An ordered group of [`MaintenanceStatement`]s produced by one emitter
 /// call, plus whether they must run inside a single backend transaction. A
 /// paired region `DELETE`+`INSERT` is transactional: a failed `INSERT` must
-/// roll back its `DELETE` (`docs/specs/maintenance_plan.md` §"Statement
+/// roll back its `DELETE` (`docs/specs/incremental_models.md` §"Statement
 /// emission (single owner)").
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct StatementGroup {
@@ -129,6 +129,72 @@ pub fn emit_delete_insert(
     }
 }
 
+/// Delta-restricted region recompute (T3, `docs/specs/model_transforms.md`
+/// §"Delta-restricted enrichment join"): identical to [`emit_delete_insert`]
+/// except both the `DELETE` and the `INSERT` gain an extra `restrict_column
+/// IN (...)` semi-join predicate over `delta_keys` — the exact upstream
+/// observed delta on this cell's driving model edge
+/// (`crate::maintenance::choice::resolve_recompute_restriction`, licensed
+/// only when P1 skeleton-source closure is `Closed` for the cell's
+/// enrichment join(s) *and* a non-empty delta was recorded).
+///
+/// This restricts recompute **breadth** only: `body` is exactly the same
+/// already-clamped compiled SELECT [`emit_delete_insert`] would have
+/// received — the caller's read of upstream state (`S`) is untouched; the
+/// semi-join filters candidate *output* rows after `body` evaluates them,
+/// never the source scan itself (`docs/plans/20260715-composed-axes-
+/// conditional-maintenance.md` Phase E3's "no scope creep" note, mirroring
+/// C4's for write suppression). Wrapping `body` in an outer `SELECT … WHERE`
+/// (rather than injecting the predicate into `body`'s own text) keeps this
+/// emitter agnostic to `body`'s internal shape, the same way
+/// [`emit_column_scoped_merge`]'s `USING (source_select)` wrapping does.
+///
+/// A caller with `RecomputeRestriction::Unrestricted` (`Open` closure, an
+/// absent delta, or a present-but-empty one) must call
+/// [`emit_delete_insert`] directly instead of this function with a vacuous
+/// key set — the two emitted statement groups are then byte-identical to
+/// today's unrestricted form, never a partially-restricted one.
+///
+/// # Panics
+/// Panics if `delta_keys` is empty — an empty delta means nothing changed
+/// upstream and should never reach this emitter (the caller's fail-closed
+/// admission, `resolve_recompute_restriction`, treats an empty delta as
+/// `Unrestricted`, matching the change-suppressed emitters' non-empty-set
+/// contract).
+pub fn emit_delete_insert_delta_restricted(
+    table: &str,
+    partition_col: &str,
+    region: &Region,
+    body: &str,
+    restrict_column: &str,
+    delta_keys: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !delta_keys.is_empty(),
+        "emit_delete_insert_delta_restricted requires a non-empty delta key set for {table} — \
+         an empty delta must fall back to emit_delete_insert, never a vacuous restriction"
+    );
+    let pred = region.predicate(None, partition_col);
+    let key_list = delta_keys
+        .iter()
+        .map(|k| format!("'{}'", k.replace('\'', "''")))
+        .collect::<Vec<_>>()
+        .join(", ");
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(format!(
+                "DELETE FROM {table} WHERE {pred} AND {restrict_column} IN ({key_list})"
+            )),
+            MaintenanceStatement::new(format!(
+                "INSERT INTO {table} SELECT * FROM ({body}) AS _smelt_delta_scope WHERE \
+                 _smelt_delta_scope.{restrict_column} IN ({key_list})"
+            )),
+        ],
+        transactional: true,
+    }
+}
+
 /// Column-scoped re-derivation (bottom-left): the keyed `MERGE` production
 /// actually executes for `Technique::ColumnScopedMerge`
 /// (`crate::maintenance_driver::execute_column_scoped_merge`/
@@ -181,6 +247,61 @@ pub fn emit_column_scoped_merge(
     }
 }
 
+/// Change-suppressed column-scoped `MERGE` (T1,
+/// `docs/specs/model_transforms.md` §"Change-suppressed MERGE"): identical to
+/// [`emit_column_scoped_merge`] except the matched arm is guarded by an
+/// `IS DISTINCT FROM` predicate over `compared_columns` — `WHEN MATCHED AND
+/// (target.c1 IS DISTINCT FROM source.c1 OR …) THEN UPDATE SET *` — so an
+/// unchanged-input re-run's `MERGE` matches every row but writes none of
+/// them. This suppresses the WRITE only: the `USING (source_select)` scan is
+/// exactly the caller's already-compiled delta, untouched — restricting what
+/// is evaluated (as opposed to what is written) is a different licence this
+/// emitter does not grant (`docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase C4's "no scope creep" note).
+///
+/// `compared_columns` must be the caller's already fail-closed-admitted set
+/// (`crate::maintenance::choice::resolve_write_suppression`'s
+/// `WriteSuppression::Suppressed` — every member proven `Comparable` by the
+/// P3 change-comparability walk, over a P2-proven row identity): this
+/// emitter does no admission of its own, only string assembly, matching
+/// every other function in this module.
+///
+/// # Panics
+/// Panics if `compared_columns` is empty — an unconditionally-refusing
+/// caller should build [`emit_column_scoped_merge`] instead of handing this
+/// emitter a vacuous compare set (a vacuous `OR` predicate would suppress
+/// every write, silently turning a matched row into a permanent no-op).
+pub fn emit_column_scoped_merge_suppressed(
+    table: &str,
+    unique_key: &[String],
+    source_select: &str,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_column_scoped_merge_suppressed requires a non-empty compared-column set for {table}"
+    );
+    let on = unique_key
+        .iter()
+        .map(|k| format!("target.{k} = source.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("target.{c} IS DISTINCT FROM source.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "MERGE INTO {table} AS target USING ({source_select}) AS source ON {on} \
+             WHEN MATCHED AND ({suppression}) THEN UPDATE SET * \
+             WHEN NOT MATCHED THEN INSERT *"
+        ))],
+        transactional: false,
+    }
+}
+
 /// In-place field backfill (top-left with an empty input delta): `UPDATE`
 /// the stored region from its own columns; no upstream read at all.
 pub fn emit_in_place_update(
@@ -200,8 +321,40 @@ pub fn emit_in_place_update(
     )]
 }
 
+/// A target-scan slice predicate for a locality-admitted keyed fold
+/// (`docs/specs/incremental_models.md` §"Key temporal locality"): restricts
+/// the `MERGE`'s `ON` condition to target rows the write provably cannot
+/// touch outside of. The two shapes mirror the two routes
+/// [`crate::maintenance::locality::LocalitySlice`] can derive:
+///
+/// - [`TargetSlicePredicate::Range`] (route 1) — target rows whose
+///   partition column lies in `[lower, upper]`. Concrete bounds are
+///   computed by the caller (one step's own partition value, widened by
+///   the route's derived margins); `lower`/`upper` are plain
+///   date/timestamp literal text, unescaped (this emitter escapes them,
+///   matching every other emitter in this module).
+/// - [`TargetSlicePredicate::DeltaValues`] (route 2) — target rows whose
+///   partition column appears among the step's own delta relation's
+///   partition-column values, read directly off the same already-compiled
+///   delta `SELECT` the `MERGE` scans (`delta_select`) rather than a
+///   caller-precomputed range: under route 2 the value is a per-key
+///   constant, so the delta's own values are the exact (never widened)
+///   slice.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum TargetSlicePredicate {
+    Range {
+        partition_column: String,
+        lower: String,
+        upper: String,
+    },
+    DeltaValues {
+        partition_column: String,
+        delta_select: String,
+    },
+}
+
 /// Fold-a-delta into keyed end-state (top-left): the combiner-aware `MERGE`
-/// production actually executes for `refresh: keyed` (`keyed_models.md`,
+/// production actually executes for `refresh: keyed` (`incremental_models.md`,
 /// `crate::cumulative::execute_cumulative_aggregate`'s `WindowedKeyedRule`
 /// impl) — combine every aggregator column on matched keys via its own
 /// cross-partition combiner, insert unseen keys wholesale.
@@ -219,18 +372,55 @@ pub fn emit_in_place_update(
 /// `dialect` is accepted for signature symmetry with the other emitters in
 /// this module; the keyed-fold `MERGE` shape is currently dialect-invariant
 /// (no branch reads it yet).
+///
+/// `slice` is the target-scan slice predicate a locality-admitted model
+/// (`incremental_models.md` §"Key temporal locality") licenses: an extra
+/// `AND target.<partition_column> BETWEEN '<lower>' AND '<upper>'` clause on
+/// the `ON` condition, restricting which target rows the `MERGE` needs to
+/// scan/match. It is provably safe — a target row outside the slice cannot
+/// match any delta key (routes 1-2) or is transactionally checked not to
+/// (route 3) — and it never changes *which* delta rows merge (`incremental_
+/// models.md`: "Pruning is not a write clamp" — every scanned delta row
+/// still merges). `None` renders byte-identical output to the pre-locality
+/// shape (a non-time-partitioned keyed model, or a locality-admitted model
+/// this phase doesn't yet slice-prune).
 pub fn emit_keyed_fold(
     schema_table: &str,
     key: &[String],
     folds: &[(String, String)],
     delta_select: &str,
+    slice: Option<&TargetSlicePredicate>,
     _dialect: MaintenanceDialect,
 ) -> StatementGroup {
-    let on = key
+    let mut on = key
         .iter()
         .map(|k| format!("target.{k} = delta.{k}"))
         .collect::<Vec<_>>()
         .join(" AND ");
+    if let Some(slice) = slice {
+        match slice {
+            TargetSlicePredicate::Range {
+                partition_column,
+                lower,
+                upper,
+            } => {
+                let safe_lower = lower.replace('\'', "''");
+                let safe_upper = upper.replace('\'', "''");
+                on.push_str(&format!(
+                    " AND target.{partition_column} BETWEEN '{safe_lower}' AND '{safe_upper}'"
+                ));
+            }
+            TargetSlicePredicate::DeltaValues {
+                partition_column,
+                delta_select,
+            } => {
+                on.push_str(&format!(
+                    " AND target.{partition_column} IN (SELECT DISTINCT {partition_column} FROM \
+                     ({delta_select}) AS __locality_delta_values)"
+                ));
+            }
+        }
+    }
     let sets = folds
         .iter()
         .map(|(col, expr)| format!("{col} = {expr}"))
@@ -244,6 +434,303 @@ pub fn emit_keyed_fold(
         ))],
         transactional: false,
     }
+}
+
+/// Change-suppressed keyed fold `MERGE` (T1, `docs/specs/model_transforms.md`
+/// §"Change-suppressed MERGE and the staged-candidate conditional
+/// DELETE+INSERT"): identical to [`emit_keyed_fold`] except the matched arm
+/// is guarded by an `IS DISTINCT FROM` predicate comparing each compared
+/// fold column's **current stored value** against **what the fold's own
+/// combine expression would write** — `WHEN MATCHED AND (target.c1 IS
+/// DISTINCT FROM (<c1's combine expr>) OR …) THEN UPDATE SET …` — so a delta
+/// whose combine result reproduces the stored value exactly (an idempotent
+/// re-merge of already-reflected rows) writes nothing for that row. This
+/// mirrors [`emit_column_scoped_merge_suppressed`]'s suppression shape, but
+/// the RHS of each comparison is the column's own fold expression (already
+/// written in terms of `target.*`/`delta.*`) rather than a plain
+/// `source.<col>` reference, since a keyed fold's matched arm never copies
+/// the delta's column verbatim — it combines it with the stored value via a
+/// `CrossPartitionCombiner`.
+///
+/// `compared_columns` must name a subset of `folds`'s own output columns
+/// (the caller's already fail-closed-admitted set, `crate::maintenance::
+/// choice::resolve_write_suppression`'s `WriteSuppression::Suppressed` —
+/// every member proven `Comparable` by the P3 change-comparability walk,
+/// over a P2-proven row identity): this emitter does no admission of its
+/// own, only string assembly, matching every other function in this module.
+///
+/// # Panics
+/// Panics if `compared_columns` is empty (a vacuous `OR` predicate would
+/// suppress every write silently), or if any member of `compared_columns`
+/// does not name a column present in `folds` (the caller handed this
+/// emitter a compare set that does not match the fold it is suppressing).
+pub fn emit_keyed_fold_suppressed(
+    schema_table: &str,
+    key: &[String],
+    folds: &[(String, String)],
+    delta_select: &str,
+    slice: Option<&TargetSlicePredicate>,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_keyed_fold_suppressed requires a non-empty compared-column set for {schema_table}"
+    );
+    let mut on = key
+        .iter()
+        .map(|k| format!("target.{k} = delta.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    if let Some(slice) = slice {
+        match slice {
+            TargetSlicePredicate::Range {
+                partition_column,
+                lower,
+                upper,
+            } => {
+                let safe_lower = lower.replace('\'', "''");
+                let safe_upper = upper.replace('\'', "''");
+                on.push_str(&format!(
+                    " AND target.{partition_column} BETWEEN '{safe_lower}' AND '{safe_upper}'"
+                ));
+            }
+            TargetSlicePredicate::DeltaValues {
+                partition_column,
+                delta_select,
+            } => {
+                on.push_str(&format!(
+                    " AND target.{partition_column} IN (SELECT DISTINCT {partition_column} FROM \
+                     ({delta_select}) AS __locality_delta_values)"
+                ));
+            }
+        }
+    }
+    let suppression = compared_columns
+        .iter()
+        .map(|c| {
+            let expr = folds
+                .iter()
+                .find(|(col, _)| col == c)
+                .map(|(_, expr)| expr.as_str())
+                .unwrap_or_else(|| {
+                    panic!(
+                        "emit_keyed_fold_suppressed: compared column '{c}' for {schema_table} is \
+                         not among the fold's own columns"
+                    )
+                });
+            format!("target.{c} IS DISTINCT FROM ({expr})")
+        })
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let sets = folds
+        .iter()
+        .map(|(col, expr)| format!("{col} = {expr}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    StatementGroup {
+        statements: vec![MaintenanceStatement::new(format!(
+            "MERGE INTO {schema_table} AS target USING ({delta_select}) AS delta ON {on} \
+             WHEN MATCHED AND ({suppression}) THEN UPDATE SET {sets} \
+             WHEN NOT MATCHED THEN INSERT *"
+        ))],
+        transactional: false,
+    }
+}
+
+/// The staged-candidate conditional `DELETE`+`INSERT` (T2, `docs/specs/
+/// model_transforms.md` §"Change-suppressed MERGE and the staged-candidate
+/// conditional DELETE+INSERT"): the merge-less realisation of the same
+/// no-op-write-elimination licence, for a backend that cannot run `MERGE` at
+/// all (a documented gap: Spark-over-Parquet). One transaction:
+///
+/// 1. `CREATE TEMP TABLE <staged_relation> AS <candidate_select> LIMIT 0` —
+///    stage an empty relation shaped like the candidate rows.
+/// 2. `INSERT INTO <staged_relation> <candidate_select>` — populate it with
+///    this run's computed candidate rows (the caller's already-compiled
+///    delta/re-derivation SELECT, full-row projection, same contract as
+///    [`emit_column_scoped_merge`]'s `source_select`).
+/// 3. `DELETE FROM <table> USING <staged_relation> WHERE <key join> AND
+///    (<IS DISTINCT FROM over compared_columns>)` — remove exactly the
+///    stored rows whose staged candidate differs from what is stored (never
+///    a row whose applied effect is the identity).
+/// 4. `INSERT INTO <table> SELECT s.* FROM <staged_relation> AS s WHERE NOT
+///    EXISTS (target row still present for this key)` — reinsert the rows
+///    just deleted, plus any brand-new key the target never had. A row
+///    whose staged candidate matched the stored state was never deleted in
+///    step 3, so it is correctly skipped here too — it still "exists" in
+///    the target under its own key.
+/// 5. `DROP TABLE <staged_relation>` — cleanup.
+///
+/// Every statement is transactional as one unit
+/// (`StatementGroup::transactional`): the group is only ever handed to
+/// [`crate::maintenance`]'s consumers via `Backend::execute_statement_group`,
+/// whose real (DuckDB) implementation runs it inside one native transaction,
+/// so a failure at any step (including a candidate-select error) rolls back
+/// every earlier statement — the temp relation's own `CREATE` included —
+/// leaving both the target table and the temp-relation namespace exactly as
+/// they were before the group started.
+///
+/// This phase's realisation is the **keyed-shaped** path only — `key` is a
+/// declared/proven row identity (`RowIdentity::Key`, never `WholeRow`); the
+/// whole-row `EXCEPT ALL`-both-ways realisation for a keyless region remains
+/// unbuilt (`docs/specs/model_transforms.md` §Known Divergences).
+///
+/// # Panics
+/// Panics if `key` or `compared_columns` is empty — an identity-free or
+/// vacuous-compare call has no sound conditional shape to emit (the caller
+/// must fail closed to the unconditional region `DELETE`+`INSERT`
+/// ([`emit_delete_insert`]) instead of reaching this emitter).
+pub fn emit_staged_candidate_conditional(
+    table: &str,
+    staged_relation: &str,
+    key: &[String],
+    candidate_select: &str,
+    compared_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> StatementGroup {
+    assert!(
+        !key.is_empty(),
+        "emit_staged_candidate_conditional requires a non-empty row identity (key) for {table}"
+    );
+    assert!(
+        !compared_columns.is_empty(),
+        "emit_staged_candidate_conditional requires a non-empty compared-column set for {table}"
+    );
+    let key_join_table_staged = key
+        .iter()
+        .map(|k| format!("{table}.{k} = {staged_relation}.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_join_t_s = key
+        .iter()
+        .map(|k| format!("t.{k} = s.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let suppression = compared_columns
+        .iter()
+        .map(|c| format!("{table}.{c} IS DISTINCT FROM {staged_relation}.{c}"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+    let create = format!(
+        "CREATE TEMP TABLE {staged_relation} AS SELECT * FROM ({candidate_select}) AS \
+         __smelt_staged_shape LIMIT 0"
+    );
+    let insert_candidates = format!("INSERT INTO {staged_relation} {candidate_select}");
+    let delete = format!(
+        "DELETE FROM {table} USING {staged_relation} WHERE {key_join_table_staged} AND \
+         ({suppression})"
+    );
+    let insert = format!(
+        "INSERT INTO {table} SELECT s.* FROM {staged_relation} AS s WHERE NOT EXISTS (SELECT 1 \
+         FROM {table} AS t WHERE {key_join_t_s})"
+    );
+    let drop = format!("DROP TABLE {staged_relation}");
+    StatementGroup {
+        statements: vec![
+            MaintenanceStatement::new(create),
+            MaintenanceStatement::new(insert_candidates),
+            MaintenanceStatement::new(delete),
+            MaintenanceStatement::new(insert),
+            MaintenanceStatement::new(drop),
+        ],
+        transactional: true,
+    }
+}
+
+/// The out-of-slice match probe for a **checked** route-3 (recurrence-
+/// bounded, declared `r`) merge (`docs/specs/incremental_models.md`
+/// §"Key temporal locality", route 3): a read-only query the caller
+/// (`smelt-runtime`'s `maintenance_driver`) executes and inspects the
+/// result of *before* running the merge action, so a violation is caught
+/// without ever writing to the target — "the whole transaction rolls
+/// back" trivially, since nothing was written yet.
+///
+/// Returns one row with two columns:
+/// - `violation_count` (`BIGINT`) — the number of distinct keys the step's
+///   own delta shares with a stored target row whose partition column lies
+///   *before* the slice's lower bound (`slice_lower`) — exactly the
+///   "matched (or would duplicate) a stored key outside the slice" check
+///   the spec names.
+/// - `sample_keys` (`VARCHAR`, `NULL` when `violation_count` is `0`) — up
+///   to 5 comma-joined key tuples, for the `KeyedRecurrenceBoundViolated`
+///   diagnostic's "sample keys" obligation.
+///
+/// `slice_lower` is the same concrete lower-bound literal the merge's own
+/// `TargetSlicePredicate::Range` uses (the step's own partition value,
+/// widened backward by the declared `r` plus margins) — this emitter does
+/// no date arithmetic of its own, matching every other emitter in this
+/// module.
+pub fn emit_recurrence_bound_probe(
+    schema_table: &str,
+    key: &[String],
+    partition_column: &str,
+    delta_select: &str,
+    slice_lower: &str,
+) -> MaintenanceStatement {
+    let key_list = key.join(", ");
+    let join_cond = key
+        .iter()
+        .map(|k| format!("target.{k} = delta.{k}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    let key_concat = key
+        .iter()
+        .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+        .collect::<Vec<_>>()
+        .join(" || '|' || ");
+    let safe_lower = slice_lower.replace('\'', "''");
+    let sql = format!(
+        "WITH __recurrence_violations AS (\
+            SELECT DISTINCT {key_concat} AS violation_key \
+            FROM {schema_table} AS target \
+            JOIN (SELECT DISTINCT {key_list} FROM ({delta_select})) AS delta ON {join_cond} \
+            WHERE target.{partition_column} < '{safe_lower}'\
+         ) \
+         SELECT COUNT(*) AS violation_count, \
+                (SELECT STRING_AGG(violation_key, ', ') FROM \
+                 (SELECT violation_key FROM __recurrence_violations LIMIT 5) AS __sample) \
+                 AS sample_keys \
+         FROM __recurrence_violations"
+    );
+    MaintenanceStatement::new(sql)
+}
+
+/// The referential-integrity count-preservation tripwire
+/// (`docs/specs/sources.md` §"Referential integrity"; `model_properties.md`
+/// §"Skeleton-source closure" P1, row-preservation conjunct 4): a read-only
+/// query the caller (`smelt-runtime`) executes and inspects *before*
+/// trusting an inner-join enrichment recompute a declared
+/// `referential_integrity` world-fact licensed, so a violation is caught
+/// without ever writing to the target — "the whole transaction rolls back"
+/// trivially, the same shape [`emit_recurrence_bound_probe`] uses for
+/// route 3's out-of-slice match probe.
+///
+/// Returns one row with two columns:
+/// - `driving_count` (`BIGINT`) — the row count of `driving_select` (the
+///   fact side alone, scoped to the touched region) — the count a
+///   row-preserving join must not fall short of.
+/// - `enriched_count` (`BIGINT`) — the row count of `enriched_select` (the
+///   SAME region's inner-join enrichment recompute). `enriched_count <
+///   driving_count` disproves the declared `referential_integrity` — some
+///   driving row's join key had no match in the dimension, so the inner
+///   join silently dropped it — and the caller fails the run loudly
+///   (`SourceCountPreservationViolated`) rather than trusting the
+///   declaration's licensed technique against a stale or simply wrong
+///   fact.
+///
+/// `driving_select`/`enriched_select` are the caller's own already-compiled
+/// `SELECT`s (scoped to the touched region); this emitter does no scoping
+/// of its own, matching every other function in this module.
+pub fn emit_count_preservation_probe(
+    driving_select: &str,
+    enriched_select: &str,
+) -> MaintenanceStatement {
+    let sql = format!(
+        "SELECT (SELECT COUNT(*) FROM ({driving_select}) AS __smelt_driving) AS driving_count, \
+         (SELECT COUNT(*) FROM ({enriched_select}) AS __smelt_enriched) AS enriched_count"
+    );
+    MaintenanceStatement::new(sql)
 }
 
 /// First-run `CREATE TABLE … AS` for a windowed-keyed-maintenance cell
@@ -271,7 +758,7 @@ pub fn emit_create_table_as(
 }
 
 /// First-run bootstrap for a **self-referential** partition-grain model
-/// (`docs/specs/batched_models.md` §"First-run and backfill" —
+/// (`docs/specs/incremental_models.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"): the target does not
 /// exist yet, and the model's own first-batch SELECT reads that same target
 /// via `smelt.<self>`, so `CREATE TABLE … AS SELECT …` cannot resolve it —
@@ -338,5 +825,1061 @@ fn bootstrap_column_sql_type(dt: &smelt_types::DataType, dialect: MaintenanceDia
             "STRING".to_string()
         }
         _ => dt.to_backend_sql(),
+    }
+}
+
+// ── Fingerprint sidecar diff (F3, `docs/plans/20260715-composed-axes-
+// conditional-maintenance.md` Phase F3; `docs/specs/sources.md` §"The
+// fingerprint sidecar") ────────────────────────────────────────────────
+//
+// The sidecar's own storage DDL/DML (table creation, the upsert-refresh,
+// the GC delete) is warehouse-resident bookkeeping, in the same excluded
+// class as the reconciliation ledger and the observed-output-delta record
+// (`docs/specs/incremental_models.md` §"Statement emission (single
+// owner)"'s third exclusion) — it lives in `smelt_state::ddl_duckdb`, not
+// here. The DIFF query below is different: unlike the ledger/observed-delta
+// bookkeeping, it is not a record of smelt's own run history — it is the
+// derived comparison that decides which source keys count as "changed", the
+// same kind of maintenance-relevant computation `emit_column_scoped_merge_
+// suppressed`'s `IS DISTINCT FROM` guard is. F3 rules it emitter-authored.
+
+/// Tag prefixed onto a NULL column's pre-image before hashing — see
+/// [`column_fingerprint_expr`]. A single-character tag with no column
+/// content appended, so its pre-image (`'N'`) can never be reproduced by a
+/// real column value's own tagged pre-image (which always starts with
+/// [`VALUE_TAG`] instead).
+const NULL_TAG: &str = "N";
+
+/// Tag prefixed onto a real (non-NULL) column value's pre-image before
+/// hashing — see [`column_fingerprint_expr`]. Distinct from [`NULL_TAG`] so
+/// no column value, however it stringifies, can ever collide with the NULL
+/// pre-image.
+const VALUE_TAG: &str = "V";
+
+/// A single column's fingerprint: `sha256` of a tagged pre-image,
+/// `'N'` when the column is NULL, `'V' || CAST(col AS VARCHAR)` otherwise.
+/// This is the collision-free replacement for the old
+/// `COALESCE(CAST(col AS VARCHAR), sentinel)` scheme: that scheme conflated
+/// a real value literally equal to the sentinel string with a true NULL
+/// (both coalesced to the identical sentinel text). Here NULL and every
+/// real value start from structurally disjoint pre-images — `'N'` alone
+/// vs. `'V'` followed by (possibly empty, possibly arbitrary) content — so
+/// no column content, whatever it contains, can ever produce the NULL
+/// pre-image.
+///
+/// The output is always a fixed-length 64-character hex string (DuckDB's
+/// `sha256()` return shape), which is what lets [`concat_varchar_expr`]
+/// join multiple columns' fingerprints with no separator at all — see its
+/// own doc comment for why fixed-length concatenation removes the
+/// separator-collision hazard structurally rather than by convention.
+fn column_fingerprint_expr(column: &str) -> String {
+    format!(
+        "sha256(CASE WHEN {column} IS NULL THEN '{NULL_TAG}' ELSE CONCAT('{VALUE_TAG}', CAST({column} AS VARCHAR)) END)"
+    )
+}
+
+/// A row-content fingerprint over one or more DIGEST columns: always the
+/// full collision-free construction, single- or multi-column alike. This is
+/// a digest-of-digests: each column is hashed independently first via
+/// [`column_fingerprint_expr`] into a FIXED-length (64 hex character)
+/// output, and only those fixed-length outputs are concatenated — with no
+/// separator, because none is needed. The old scheme joined raw
+/// (variable-length) `CAST(... AS VARCHAR)` text with a `\u{1}` separator
+/// character; since that separator was not escaped within column content, a
+/// column value that itself contained a literal `\u{1}` byte could make two
+/// genuinely different multi-column tuples reassemble into the identical
+/// joined string (e.g. columns `('John\u{1}Smith', 'X')` and `('John',
+/// 'Smith\u{1}X')` joined to the same text). Fixed-length concatenation
+/// removes this class of bug structurally: every joined component is
+/// exactly 64 characters, so there is no byte position at which one
+/// column's content could be misread as spanning into an adjacent column's
+/// slot, regardless of what that content is.
+///
+/// This is safe to use unconditionally for a digest because `delta_digest`
+/// is never surfaced to a caller as a literal value — it is only ever
+/// compared for equality against another digest computed the same way
+/// (`IS DISTINCT FROM`). Contrast [`key_expr_for_columns`], which builds
+/// the sidecar's KEY expression and — for a single column — must stay a
+/// literal, un-hashed value instead; see that function's own doc comment
+/// for why.
+fn concat_varchar_expr(columns: &[String]) -> String {
+    let per_column = columns
+        .iter()
+        .map(|c| column_fingerprint_expr(c))
+        .collect::<Vec<_>>()
+        .join(", ");
+    if columns.len() == 1 {
+        // Already a single fixed-length sha256 digest — nothing to join.
+        per_column
+    } else {
+        format!("CONCAT({per_column})")
+    }
+}
+
+/// The NULL-key sentinel: a KEY column that is truly NULL is coalesced to
+/// this fixed marker purely so `delta_key` never violates the sidecar's
+/// `source_key VARCHAR NOT NULL` column. Unlike [`NULL_TAG`]/[`VALUE_TAG`],
+/// this is NOT collision-free against an adversarial real value — a real
+/// source-key column whose content happened to literally equal this marker
+/// would be indistinguishable from a true NULL key. That gap is deliberate
+/// and narrower in scope than the digest fix: see [`key_expr_for_columns`].
+const KEY_NULL_SENTINEL: &str = "\u{2}NULL\u{2}";
+
+/// Builds the sidecar's KEY expression (`delta_key`) over `columns` — the
+/// row's identifying key.
+///
+/// **Single column: stays a literal, un-hashed value.** Unlike the digest
+/// expression, `delta_key` is not an opaque comparison-only token: it is
+/// surfaced to callers (`smelt_runtime::maintenance_driver::
+/// diff_fingerprint_sidecar_changed_keys`'s returned `Vec<String>`) and
+/// consumed downstream as a literal predicate value spliced back against
+/// the source's own real key column
+/// (`emit_delete_insert_delta_restricted`'s `restrict_column IN
+/// (delta_keys)`) — the same literal-value contract
+/// `smelt_runtime::maintenance_driver::changed_keys_select`'s own
+/// `key_expr` upholds (see that function's doc comment for the parallel
+/// case). Hashing a single-column key would silently break every consumer
+/// that expects `delta_key` to equal the real key's own text. A NULL key
+/// column is coalesced to [`KEY_NULL_SENTINEL`] purely to satisfy the
+/// sidecar's `NOT NULL` column — narrower than the digest's fix (source
+/// identity keys are not expected to be NULL in practice, and the
+/// literal-value contract above forecloses hashing NULL away the way the
+/// digest does).
+///
+/// **Multi-column: gets the full collision-free construction.** A
+/// composite key has no literal consumer today — no downstream restriction
+/// wiring exists for a composite key (`emit_delete_insert_delta_restricted`'s
+/// `restrict_column` is always a single physical column) — so there is no
+/// contract to preserve, and the composite-key collision the review flagged
+/// (two distinct real composite keys silently overwriting the same sidecar
+/// row because their old-scheme joined text collided) is worth closing.
+fn key_expr_for_columns(columns: &[String]) -> String {
+    if columns.len() == 1 {
+        format!(
+            "COALESCE(CAST({} AS VARCHAR), '{KEY_NULL_SENTINEL}')",
+            columns[0]
+        )
+    } else {
+        concat_varchar_expr(columns)
+    }
+}
+
+/// The row-content digest `SELECT` over an external `mutable_snapshot`
+/// source (`docs/specs/sources.md` §"The fingerprint sidecar" — "Digest"):
+/// `sha256(...)` over `digest_columns` — the caller's already-resolved P4
+/// fingerprint projection (`model_properties.md` §"Fingerprint
+/// projection"; the source's FULL column list when the projection failed
+/// closed to `FullRow`) — keyed by `source_key`. Pure string construction,
+/// matching this module's whole-file convention: the caller resolves which
+/// columns to digest and which key columns identify a row; this emitter
+/// only builds the SQL.
+///
+/// `dialect` is accepted for signature symmetry with every other emitter in
+/// this module; only the DuckDB shape is built today (`sha256()` is a
+/// DuckDB built-in scalar function) — a Spark digest-select variant is
+/// unbuilt, matching this phase's DuckDB-only sidecar scope. The runtime
+/// caller (`smelt_runtime::maintenance_driver`) gates on the backend's
+/// dialect before ever reaching this function, so a Spark target fails
+/// loud at that call site rather than being handed DuckDB-flavored SQL.
+///
+/// # Panics
+/// Panics if `source_key` or `digest_columns` is empty — a caller with no
+/// key to identify rows by, or nothing to digest, has no business building
+/// a sidecar digest select at all.
+pub fn emit_fingerprint_digest_select(
+    source_table: &str,
+    source_key: &[String],
+    digest_columns: &[String],
+    _dialect: MaintenanceDialect,
+) -> String {
+    assert!(
+        !source_key.is_empty(),
+        "emit_fingerprint_digest_select requires a non-empty source key for {source_table}"
+    );
+    assert!(
+        !digest_columns.is_empty(),
+        "emit_fingerprint_digest_select requires a non-empty digest column set for {source_table}"
+    );
+    let key_expr = key_expr_for_columns(source_key);
+    let digest_expr = concat_varchar_expr(digest_columns);
+    format!(
+        "SELECT {key_expr} AS delta_key, sha256({digest_expr}) AS delta_digest FROM {source_table}"
+    )
+}
+
+/// The synthesized external change-feed diff (`docs/specs/sources.md`
+/// §"The fingerprint sidecar"): compares `source_table`'s CURRENT
+/// `(key, digest)` pairs (via [`emit_fingerprint_digest_select`]) against
+/// the sidecar's own stored partition for `(source_address,
+/// projection_identity)`, producing the changed-key set a `mutable_snapshot`
+/// source's otherwise whole-table delta collapses to.
+///
+/// A `FULL OUTER JOIN` so three shapes all surface as a changed
+/// `delta_key`: a source key with no sidecar row (new — or, on a first run
+/// against an unpopulated sidecar, EVERY row, which is exactly the
+/// whole-table delta the widen-never-narrow default already produces, with
+/// no special-casing needed here); a sidecar row with no source key (the
+/// source row was deleted — GC's own trigger, reported via
+/// `COALESCE(..., sidecar.source_key)`); and a matched pair whose digests
+/// differ (`IS DISTINCT FROM`, the same exact-compare shape every other
+/// change-suppression guard in this module uses). A matched pair with equal
+/// digests is excluded — never surfaced as a false "changed" result, the
+/// digest-soundness oracle's negative leg
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// F1's ruling; `docs/specs/sources.md` §"The fingerprint sidecar" —
+/// "Digest" — "the collision-soundness invariant").
+///
+/// `sidecar_table` is already fully qualified (`schema.table`);
+/// `source_address`/`projection_identity`/`stamp` are plain string values,
+/// escaped here (this emitter, like every other, does its own literal
+/// quoting — see `emit_delete_insert_delta_restricted`'s `delta_keys`
+/// handling for the same pattern).
+///
+/// `stamp` (Phase F4,
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` —
+/// "Sidecar invalidation") is the freshly computed identity stamp
+/// (`smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp`
+/// — digest-construction version, this same `projection_identity`, and the
+/// consuming model's own SQL provenance combined). The sidecar-side
+/// subquery filters on `stamp = '...'` in addition to `source_address`/
+/// `projection_identity`: a stored row whose stamp does not match is
+/// excluded from the comparison entirely, so it never joins against the
+/// current source content — structurally identical to that key having no
+/// sidecar row at all. This is the mechanism that makes an invalidated
+/// partition (a model-definition edit, a P4 projection change reusing the
+/// same identity text is impossible by construction, or a digest-version
+/// bump) degrade to exactly the same whole-table delta an absent sidecar
+/// already produces above — never a narrower, partially-trusted
+/// comparison, and never a silent skip.
+#[allow(clippy::too_many_arguments)]
+pub fn emit_fingerprint_sidecar_diff(
+    source_table: &str,
+    source_key: &[String],
+    digest_columns: &[String],
+    sidecar_table: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+    dialect: MaintenanceDialect,
+) -> String {
+    let digest_select =
+        emit_fingerprint_digest_select(source_table, source_key, digest_columns, dialect);
+    let source_address_lit = source_address.replace('\'', "''");
+    let projection_identity_lit = projection_identity.replace('\'', "''");
+    let stamp_lit = stamp.replace('\'', "''");
+    format!(
+        "SELECT COALESCE(__smelt_src.delta_key, __smelt_sidecar.source_key) AS delta_key \
+         FROM ({digest_select}) AS __smelt_src \
+         FULL OUTER JOIN (SELECT source_key, digest FROM {sidecar_table} \
+         WHERE source_address = '{source_address_lit}' AND projection_identity = '{projection_identity_lit}' \
+         AND stamp = '{stamp_lit}') \
+         AS __smelt_sidecar ON __smelt_src.delta_key = __smelt_sidecar.source_key \
+         WHERE __smelt_sidecar.source_key IS NULL \
+         OR __smelt_src.delta_key IS NULL \
+         OR __smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"
+    )
+}
+
+#[cfg(test)]
+mod fingerprint_sidecar_tests {
+    use super::*;
+
+    /// Run `emit_fingerprint_digest_select` for a single-row `source_table`
+    /// (a derived-table expression, e.g. `(SELECT 1 AS id, 'x' AS val)")
+    /// against a real DuckDB and return the resulting `delta_digest` value
+    /// — used by the two collision-regression tests below to prove the
+    /// FIX's actual SQL output against real DuckDB semantics (NULL
+    /// handling, `chr()`, `CONCAT`), not merely against string-literal
+    /// expectations of what DuckDB is assumed to do.
+    fn digest_for_source(
+        conn: &duckdb::Connection,
+        source_table: &str,
+        source_key: &[String],
+        digest_columns: &[String],
+    ) -> String {
+        let sql = emit_fingerprint_digest_select(
+            source_table,
+            source_key,
+            digest_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        conn.query_row(&sql, [], |row| row.get::<_, String>(1))
+            .expect("digest select query")
+    }
+
+    /// Same as [`digest_for_source`] but returns the `delta_key` column
+    /// instead — used by the composite-source-key collision regression
+    /// test below.
+    fn key_for_source(
+        conn: &duckdb::Connection,
+        source_table: &str,
+        source_key: &[String],
+        digest_columns: &[String],
+    ) -> String {
+        let sql = emit_fingerprint_digest_select(
+            source_table,
+            source_key,
+            digest_columns,
+            MaintenanceDialect::DuckDb,
+        );
+        conn.query_row(&sql, [], |row| row.get::<_, String>(0))
+            .expect("key select query")
+    }
+
+    #[test]
+    fn digest_select_single_column_key_and_digest() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // The single-column KEY stays literal (`COALESCE(CAST(... AS
+        // VARCHAR), sentinel)`) — it is surfaced downstream as a real
+        // predicate value, unlike the digest, which is always the full
+        // tagged-hash construction (see `key_expr_for_columns`'s doc
+        // comment for why the two differ).
+        assert_eq!(
+            sql,
+            "SELECT COALESCE(CAST(user_id AS VARCHAR), '\u{2}NULL\u{2}') AS delta_key, \
+             sha256(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+             VARCHAR)) END)) AS delta_digest FROM raw.dim_users"
+        );
+    }
+
+    #[test]
+    fn digest_select_multi_column_key_and_digest_concatenates() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["tenant_id".to_string(), "user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // Each column is hashed to a fixed-length digest FIRST, and only
+        // those fixed-length digests are concatenated — no separator, since
+        // fixed-length components have no boundary to confuse.
+        assert!(sql.contains(
+            "CONCAT(sha256(CASE WHEN tenant_id IS NULL THEN 'N' ELSE CONCAT('V', CAST(tenant_id \
+             AS VARCHAR)) END), sha256(CASE WHEN user_id IS NULL THEN 'N' ELSE CONCAT('V', CAST(\
+             user_id AS VARCHAR)) END)) AS delta_key"
+        ));
+        assert!(sql.contains(
+            "sha256(CONCAT(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+             VARCHAR)) END), sha256(CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier \
+             AS VARCHAR)) END))) AS delta_digest"
+        ));
+    }
+
+    /// Regression for the NULL-vs-empty-string digest collision (the first
+    /// bug this fingerprint scheme had): DuckDB's `CONCAT` silently drops
+    /// NULL arguments, so before any fix at all, `CONCAT(NULL, sep, 'x')`
+    /// and `CONCAT('', sep, 'x')` produced the identical string (and
+    /// therefore the identical digest) — a false-negative "unchanged"
+    /// verdict for a row whose projected value went from empty string to
+    /// NULL (or vice versa). The tagged pre-image construction rules this
+    /// out structurally: a NULL column's pre-image is the bare tag `'N'`,
+    /// disjoint from EVERY real value's pre-image (`'V' || content`,
+    /// including the empty string, `'V'`), so the two can never coincide.
+    #[test]
+    fn digest_select_distinguishes_null_from_empty_string_in_multi_column_projection() {
+        let sql = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // Each column branches on its own NULL-ness independently, so a
+        // NULL `name` renders as the `'N'` tag branch, structurally
+        // distinct from the `'V'`-tagged empty-string branch — not simply
+        // vanishing from a CONCAT the way a dropped NULL argument would.
+        assert!(sql.contains(
+            "CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS VARCHAR)) END"
+        ));
+        assert!(sql.contains(
+            "CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier AS VARCHAR)) END"
+        ));
+    }
+
+    /// Regression for the NULL-digest crash (the second bug this
+    /// fingerprint scheme had): before any fix, a single-column projection
+    /// built `sha256(CAST(col AS VARCHAR))` directly, so a NULL projected
+    /// value produced `sha256(NULL) = NULL` in DuckDB — which then violated
+    /// the sidecar's `NOT NULL digest` column constraint on upsert. The
+    /// emitted digest expression must never let a NULL value reach
+    /// `sha256` un-tagged, for both the single- and multi-column shapes.
+    #[test]
+    fn digest_select_single_column_never_feeds_sha256_a_bare_null() {
+        let single = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(single.contains(
+            "sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS VARCHAR)) END)"
+        ));
+        assert!(!single.contains("sha256(CAST(name AS VARCHAR))"));
+
+        let multi = emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        // Every column reaching the hash must be wrapped in the tagged
+        // CASE — none of the bare `CAST(... AS VARCHAR)` forms may appear
+        // unwrapped, and no raw `CONCAT(CAST(` (the old un-hashed
+        // multi-column join shape) may appear either.
+        assert!(!multi.contains("sha256(CAST("));
+        assert!(!multi.contains("CONCAT(CAST("));
+    }
+
+    /// Regression for the separator-collision bug found in a follow-up
+    /// review: the earlier fix joined raw (unescaped) column text with a
+    /// `\u{1}` separator, so a column value that itself contained a literal
+    /// `\u{1}` byte could make two DISTINCT multi-column tuples reassemble
+    /// into the identical joined string before hashing —
+    /// `('John\u{1}Smith', 'X')` and `('John', 'Smith\u{1}X')` both joined
+    /// to `John\u{1}Smith\u{1}X`. Confirmed empirically against a real
+    /// DuckDB: this computes the ACTUAL digest SQL's result for both
+    /// tuples and asserts they differ, proving the fixed-length
+    /// digest-of-digests construction never lets one column's content
+    /// bleed across a boundary into another, regardless of what that
+    /// content contains.
+    #[test]
+    fn digest_distinguishes_tuples_that_collided_under_the_old_separator_scheme() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_key = vec!["id".to_string()];
+        let digest_columns = vec!["name".to_string(), "tier".to_string()];
+
+        // Tuple A: `name` contains a literal SOH (`\u{1}`) byte before
+        // "Smith".
+        let digest_a = digest_for_source(
+            &conn,
+            "(SELECT 1 AS id, 'John' || chr(1) || 'Smith' AS name, 'X' AS tier)",
+            &source_key,
+            &digest_columns,
+        );
+        // Tuple B: a DIFFERENT (name, tier) pair whose old-scheme joined
+        // text was byte-identical to tuple A's:
+        // `'John' + SEP + 'Smith' + SEP + 'X'`.
+        let digest_b = digest_for_source(
+            &conn,
+            "(SELECT 2 AS id, 'John' AS name, 'Smith' || chr(1) || 'X' AS tier)",
+            &source_key,
+            &digest_columns,
+        );
+
+        assert_ne!(
+            digest_a, digest_b,
+            "two genuinely different (name, tier) tuples must never hash identically, even when \
+             a column's own content contains the old separator byte"
+        );
+    }
+
+    /// Regression for the sentinel-collision bug found in the same
+    /// follow-up review: the earlier fix coalesced a NULL column to the
+    /// fixed sentinel string `\u{2}NULL\u{2}`, so a REAL column value that
+    /// happened to literally equal that sentinel text was indistinguishable
+    /// from a true NULL of the same row shape. Confirmed empirically
+    /// against a real DuckDB: computes the actual digest for a true-NULL
+    /// row and for a row whose value is literally the old sentinel text,
+    /// and asserts they differ.
+    #[test]
+    fn digest_distinguishes_a_real_value_equal_to_the_old_sentinel_from_a_true_null() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_key = vec!["id".to_string()];
+        let digest_columns = vec!["val".to_string()];
+
+        let digest_null = digest_for_source(
+            &conn,
+            "(SELECT 1 AS id, CAST(NULL AS VARCHAR) AS val)",
+            &source_key,
+            &digest_columns,
+        );
+        let digest_sentinel_lookalike = digest_for_source(
+            &conn,
+            "(SELECT 2 AS id, (chr(2) || 'NULL' || chr(2)) AS val)",
+            &source_key,
+            &digest_columns,
+        );
+
+        assert_ne!(
+            digest_null, digest_sentinel_lookalike,
+            "a real column value equal to the old NULL sentinel must never hash identically to a \
+             true NULL"
+        );
+    }
+
+    /// Regression for the composite `source_key` half of the
+    /// separator-collision bug: [`key_expr_for_columns`] reuses
+    /// [`concat_varchar_expr`] for a MULTI-column key (only a single-column
+    /// key stays literal — see that function's doc comment), so a composite
+    /// key is exposed to the exact same old-scheme collision the digest
+    /// was. This is a real correctness hazard beyond a false "unchanged"
+    /// verdict: two distinct real composite source keys reassembling to the
+    /// SAME `delta_key` string would conflate onto the SAME sidecar row
+    /// (`source_key` is part of the sidecar's own primary key), silently
+    /// overwriting one key's stored digest with the other's. Confirmed
+    /// empirically against a real DuckDB: computes the actual `delta_key`
+    /// for two engineered-to-collide composite keys and asserts they
+    /// differ.
+    #[test]
+    fn composite_source_key_distinguishes_tuples_that_collided_under_the_old_separator_scheme() {
+        let conn = duckdb::Connection::open_in_memory().expect("open in-memory duckdb");
+        let source_key = vec!["tenant".to_string(), "user".to_string()];
+        let digest_columns = vec!["val".to_string()];
+
+        let key_a = key_for_source(
+            &conn,
+            "(SELECT 'John' || chr(1) || 'Smith' AS tenant, 'X' AS user, 'v' AS val)",
+            &source_key,
+            &digest_columns,
+        );
+        let key_b = key_for_source(
+            &conn,
+            "(SELECT 'John' AS tenant, 'Smith' || chr(1) || 'X' AS user, 'v' AS val)",
+            &source_key,
+            &digest_columns,
+        );
+
+        assert_ne!(
+            key_a, key_b,
+            "two genuinely different composite source keys must never produce the same \
+             delta_key, even when a key column's own content contains the old separator byte"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty source key")]
+    fn digest_select_panics_on_empty_source_key() {
+        emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &[],
+            &["name".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "non-empty digest column set")]
+    fn digest_select_panics_on_empty_digest_columns() {
+        emit_fingerprint_digest_select(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    fn sidecar_diff_full_outer_joins_source_against_sidecar_partition() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string(), "tier".to_string()],
+            "main._smelt_fingerprint_sidecar",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "v1:cols:name,tier:sha256:deadbeef",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(sql.contains("FULL OUTER JOIN"));
+        assert!(sql.contains("FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("stamp = 'v1:cols:name,tier:sha256:deadbeef'"));
+        assert!(sql.contains("__smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"));
+        assert!(sql.contains("__smelt_sidecar.source_key IS NULL"));
+        assert!(sql.contains("__smelt_src.delta_key IS NULL"));
+        assert!(sql.contains(
+            "SELECT COALESCE(CAST(user_id AS VARCHAR), '\u{2}NULL\u{2}') AS delta_key, \
+             sha256(CONCAT(sha256(CASE WHEN name IS NULL THEN 'N' ELSE CONCAT('V', CAST(name AS \
+             VARCHAR)) END), sha256(CASE WHEN tier IS NULL THEN 'N' ELSE CONCAT('V', CAST(tier \
+             AS VARCHAR)) END))) AS delta_digest FROM raw.dim_users"
+        ));
+    }
+
+    #[test]
+    fn sidecar_diff_escapes_single_quotes_in_literals() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            "main._smelt_fingerprint_sidecar",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "stamp's",
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("stamp = 'stamp''s'"));
+    }
+
+    /// Phase F4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// — "Sidecar invalidation"): a stale-stamped row must never be joined
+    /// against the current source content — the `stamp = '...'` filter
+    /// excludes it from the sidecar-side subquery regardless of
+    /// `source_address`/`projection_identity` matching, structurally
+    /// identical to that key having no sidecar row at all.
+    #[test]
+    fn sidecar_diff_stamp_filter_excludes_mismatched_rows_from_the_comparison() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            "main._smelt_fingerprint_sidecar",
+            "smelt.sources.dim_users",
+            "cols:name",
+            "v2:cols:name:sha256:newhash",
+            MaintenanceDialect::DuckDb,
+        );
+        // The sidecar-side subquery must filter on the CURRENT stamp only —
+        // a row stamped under any other value is never a candidate match.
+        assert!(sql.contains(
+            "WHERE source_address = 'smelt.sources.dim_users' AND projection_identity = \
+             'cols:name' AND stamp = 'v2:cols:name:sha256:newhash'"
+        ));
+    }
+}
+
+#[cfg(test)]
+mod column_scoped_merge_tests {
+    use super::*;
+
+    fn keys() -> Vec<String> {
+        vec!["id".to_string()]
+    }
+
+    /// The unconditional variant's emitted text must be byte-unchanged from
+    /// before this phase — the regression guard the plan phase's TDD list
+    /// names explicitly.
+    #[test]
+    fn unconditional_variant_text_is_unchanged() {
+        let group = emit_column_scoped_merge(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO warehouse.dim_users AS target USING (SELECT * FROM delta) AS source ON \
+             target.id = source.id WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *"
+        );
+        assert!(!group.transactional);
+    }
+
+    /// The suppressed variant's matched arm carries `IS DISTINCT FROM` over
+    /// exactly the compared column set, in order, ORed together.
+    #[test]
+    fn suppressed_variant_carries_is_distinct_from_over_compared_columns() {
+        let compared = vec!["tier".to_string(), "email".to_string()];
+        let group = emit_column_scoped_merge_suppressed(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            &compared,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO warehouse.dim_users AS target USING (SELECT * FROM delta) AS source ON \
+             target.id = source.id WHEN MATCHED AND (target.tier IS DISTINCT FROM source.tier OR \
+             target.email IS DISTINCT FROM source.email) THEN UPDATE SET * WHEN NOT MATCHED THEN \
+             INSERT *"
+        );
+        assert!(!group.transactional);
+    }
+
+    /// A vacuous compare set would suppress every write silently — refuse
+    /// via panic rather than emit a matched arm that never fires.
+    #[test]
+    #[should_panic(expected = "requires a non-empty compared-column set")]
+    fn suppressed_variant_panics_on_empty_compare_set() {
+        emit_column_scoped_merge_suppressed(
+            "warehouse.dim_users",
+            &keys(),
+            "SELECT * FROM delta",
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod keyed_fold_suppressed_tests {
+    use super::*;
+
+    fn key() -> Vec<String> {
+        vec!["device_id".to_string()]
+    }
+
+    fn folds() -> Vec<(String, String)> {
+        vec![
+            (
+                "event_count".to_string(),
+                "target.event_count + delta.event_count".to_string(),
+            ),
+            (
+                "last_seen".to_string(),
+                "GREATEST(target.last_seen, delta.last_seen)".to_string(),
+            ),
+        ]
+    }
+
+    /// The suppressed variant's matched arm carries `IS DISTINCT FROM` over
+    /// exactly the compared fold columns, comparing the stored value against
+    /// the fold's own combine expression (not a plain `delta.<col>`).
+    #[test]
+    fn suppressed_variant_carries_is_distinct_from_over_compared_fold_columns() {
+        let group = emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &["event_count".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(group.statements.len(), 1);
+        assert_eq!(
+            group.statements[0].sql,
+            "MERGE INTO main.device_daily AS target USING (SELECT * FROM delta) AS delta ON \
+             target.device_id = delta.device_id WHEN MATCHED AND (target.event_count IS DISTINCT \
+             FROM (target.event_count + delta.event_count)) THEN UPDATE SET event_count = \
+             target.event_count + delta.event_count, last_seen = GREATEST(target.last_seen, \
+             delta.last_seen) WHEN NOT MATCHED THEN INSERT *"
+        );
+        assert!(!group.transactional);
+    }
+
+    /// Composes with a locality slice predicate on the `ON` condition,
+    /// exactly like the unconditional `emit_keyed_fold`.
+    #[test]
+    fn suppressed_variant_composes_with_slice_predicate() {
+        let slice = TargetSlicePredicate::Range {
+            partition_column: "event_date".to_string(),
+            lower: "2026-01-01".to_string(),
+            upper: "2026-01-02".to_string(),
+        };
+        let group = emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            Some(&slice),
+            &["event_count".to_string(), "last_seen".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let sql = &group.statements[0].sql;
+        assert!(sql.contains(
+            "target.device_id = delta.device_id AND target.event_date BETWEEN '2026-01-01' AND \
+             '2026-01-02'"
+        ));
+        assert!(sql.contains(
+            "target.event_count IS DISTINCT FROM (target.event_count + delta.event_count)"
+        ));
+        assert!(sql.contains(
+            "target.last_seen IS DISTINCT FROM (GREATEST(target.last_seen, delta.last_seen))"
+        ));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty compared-column set")]
+    fn suppressed_variant_panics_on_empty_compare_set() {
+        emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "is not among the fold's own columns")]
+    fn suppressed_variant_panics_on_unknown_compared_column() {
+        emit_keyed_fold_suppressed(
+            "main.device_daily",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &["not_a_fold_column".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod composed_slice_bounded_suppression_tests {
+    //! `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+    //! C6: composing suppression (C4/C5) with locality (A2) — a composed
+    //! (key + time) output's suppressed `MERGE` carries **both** predicates
+    //! (the slice on the target read, `IS DISTINCT FROM` on the matched
+    //! arm); a bare keyed model with no established locality slice carries
+    //! only the suppression arm, never an invented slice. This module makes
+    //! that composition explicit at the emitter level (mirroring the
+    //! `events_deduped`-shaped fixture: `event_id` key, `first_seen_date`
+    //! slice) — `keyed_fold_suppressed_tests::
+    //! suppressed_variant_composes_with_slice_predicate`/`suppressed_
+    //! variant_carries_is_distinct_from_over_compared_fold_columns` (C5)
+    //! already exercise the same emitter branches; these tests are this
+    //! phase's own explicit, named proof of the same claim.
+
+    use super::*;
+
+    fn key() -> Vec<String> {
+        vec!["event_id".to_string()]
+    }
+
+    fn folds() -> Vec<(String, String)> {
+        vec![(
+            "device_id".to_string(),
+            "MIN(target.device_id, delta.device_id)".to_string(),
+        )]
+    }
+
+    #[test]
+    fn composed_model_suppressed_merge_carries_both_predicates() {
+        let slice = TargetSlicePredicate::Range {
+            partition_column: "first_seen_date".to_string(),
+            lower: "2026-04-01".to_string(),
+            upper: "2026-04-01".to_string(),
+        };
+        let group = emit_keyed_fold_suppressed(
+            "main.events_deduped",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            Some(&slice),
+            &["device_id".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let sql = &group.statements[0].sql;
+        assert!(
+            sql.contains("target.first_seen_date BETWEEN '2026-04-01' AND '2026-04-01'"),
+            "composed model's suppressed merge must carry the slice predicate: {sql}"
+        );
+        assert!(
+            sql.contains("IS DISTINCT FROM"),
+            "composed model's suppressed merge must ALSO carry the suppression arm: {sql}"
+        );
+    }
+
+    #[test]
+    fn bare_keyed_model_suppressed_merge_carries_only_the_suppression_arm() {
+        let group = emit_keyed_fold_suppressed(
+            "main.events_deduped",
+            &key(),
+            &folds(),
+            "SELECT * FROM delta",
+            None,
+            &["device_id".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        let sql = &group.statements[0].sql;
+        assert!(
+            sql.contains("IS DISTINCT FROM"),
+            "bare keyed model's suppressed merge must carry the suppression arm: {sql}"
+        );
+        assert!(
+            !sql.contains("BETWEEN") && !sql.contains(" IN ("),
+            "bare keyed model's suppressed merge must never invent a slice: {sql}"
+        );
+    }
+}
+
+#[cfg(test)]
+mod staged_candidate_conditional_tests {
+    use super::*;
+
+    /// The staged-candidate group emits exactly the five statements in
+    /// order: temp-relation CREATE, candidate INSERT, conditional
+    /// DELETE+INSERT reading the staged relation with an `IS DISTINCT FROM`
+    /// restriction, DROP — flagged one-transaction.
+    #[test]
+    fn staged_group_emits_ordered_statements_as_one_transaction() {
+        let group = emit_staged_candidate_conditional(
+            "main.dim_users",
+            "__smelt_staged_dim_users",
+            &["user_id".to_string()],
+            "SELECT user_id, tier, email FROM source_delta",
+            &["tier".to_string(), "email".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 5);
+        assert_eq!(
+            group.statements[0].sql,
+            "CREATE TEMP TABLE __smelt_staged_dim_users AS SELECT * FROM (SELECT user_id, tier, \
+             email FROM source_delta) AS __smelt_staged_shape LIMIT 0"
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "INSERT INTO __smelt_staged_dim_users SELECT user_id, tier, email FROM source_delta"
+        );
+        assert_eq!(
+            group.statements[2].sql,
+            "DELETE FROM main.dim_users USING __smelt_staged_dim_users WHERE main.dim_users.user_id \
+             = __smelt_staged_dim_users.user_id AND (main.dim_users.tier IS DISTINCT FROM \
+             __smelt_staged_dim_users.tier OR main.dim_users.email IS DISTINCT FROM \
+             __smelt_staged_dim_users.email)"
+        );
+        assert_eq!(
+            group.statements[3].sql,
+            "INSERT INTO main.dim_users SELECT s.* FROM __smelt_staged_dim_users AS s WHERE NOT \
+             EXISTS (SELECT 1 FROM main.dim_users AS t WHERE t.user_id = s.user_id)"
+        );
+        assert_eq!(
+            group.statements[4].sql,
+            "DROP TABLE __smelt_staged_dim_users"
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty row identity")]
+    fn staged_group_panics_on_empty_key() {
+        emit_staged_candidate_conditional(
+            "main.dim_users",
+            "__smelt_staged_dim_users",
+            &[],
+            "SELECT user_id, tier FROM source_delta",
+            &["tier".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty compared-column set")]
+    fn staged_group_panics_on_empty_compare_set() {
+        emit_staged_candidate_conditional(
+            "main.dim_users",
+            "__smelt_staged_dim_users",
+            &["user_id".to_string()],
+            "SELECT user_id, tier FROM source_delta",
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+}
+
+#[cfg(test)]
+mod delta_restricted_delete_insert_tests {
+    use super::*;
+
+    fn region() -> Region {
+        Region {
+            start: "'2026-07-01'".to_string(),
+            end: "'2026-07-02'".to_string(),
+        }
+    }
+
+    #[test]
+    fn restricted_group_gains_the_semi_join_on_both_statements() {
+        let group = emit_delete_insert_delta_restricted(
+            "main.events_enriched",
+            "event_date",
+            &region(),
+            "SELECT event_id, event_date, session_id FROM events_enriched_recompute",
+            "event_id",
+            &["ev-1".to_string(), "ev-2".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+
+        assert!(group.transactional);
+        assert_eq!(group.statements.len(), 2);
+        assert_eq!(
+            group.statements[0].sql,
+            "DELETE FROM main.events_enriched WHERE event_date >= '2026-07-01' AND event_date < \
+             '2026-07-02' AND event_id IN ('ev-1', 'ev-2')"
+        );
+        assert_eq!(
+            group.statements[1].sql,
+            "INSERT INTO main.events_enriched SELECT * FROM (SELECT event_id, event_date, \
+             session_id FROM events_enriched_recompute) AS _smelt_delta_scope WHERE \
+             _smelt_delta_scope.event_id IN ('ev-1', 'ev-2')"
+        );
+    }
+
+    #[test]
+    fn restricted_group_escapes_single_quotes_in_delta_keys() {
+        let group = emit_delete_insert_delta_restricted(
+            "main.t",
+            "d",
+            &region(),
+            "SELECT 1",
+            "k",
+            &["o'brien".to_string()],
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(group.statements[0].sql.contains("k IN ('o''brien')"));
+    }
+
+    #[test]
+    #[should_panic(expected = "requires a non-empty delta key set")]
+    fn restricted_group_panics_on_empty_delta_keys() {
+        emit_delete_insert_delta_restricted(
+            "main.t",
+            "d",
+            &region(),
+            "SELECT 1",
+            "k",
+            &[],
+            MaintenanceDialect::DuckDb,
+        );
+    }
+
+    /// The fallback path (`Open` closure or no recorded delta) must call
+    /// `emit_delete_insert` directly rather than this function — asserting
+    /// the two are byte-identical when the same inputs would otherwise
+    /// apply (E3 review checklist: "either absent -> byte-identical
+    /// unrestricted statement").
+    #[test]
+    fn unrestricted_fallback_is_byte_identical_to_emit_delete_insert() {
+        let body = "SELECT event_id, event_date FROM events_enriched_recompute";
+        let restricted_fallback = emit_delete_insert(
+            "main.events_enriched",
+            "event_date",
+            &region(),
+            body,
+            MaintenanceDialect::DuckDb,
+        );
+        let direct = emit_delete_insert(
+            "main.events_enriched",
+            "event_date",
+            &region(),
+            body,
+            MaintenanceDialect::DuckDb,
+        );
+        assert_eq!(restricted_fallback, direct);
+    }
+}
+
+#[cfg(test)]
+mod count_preservation_probe_tests {
+    use super::*;
+
+    #[test]
+    fn probe_compares_driving_and_enriched_row_counts() {
+        let probe = emit_count_preservation_probe(
+            "SELECT event_id FROM main.raw_events WHERE event_date >= '2026-07-01'",
+            "SELECT e.event_id FROM main.raw_events e JOIN main.raw_users u ON e.user_id = \
+             u.user_id WHERE e.event_date >= '2026-07-01'",
+        );
+        assert_eq!(
+            probe.sql,
+            "SELECT (SELECT COUNT(*) FROM (SELECT event_id FROM main.raw_events WHERE \
+             event_date >= '2026-07-01') AS __smelt_driving) AS driving_count, (SELECT \
+             COUNT(*) FROM (SELECT e.event_id FROM main.raw_events e JOIN main.raw_users u ON \
+             e.user_id = u.user_id WHERE e.event_date >= '2026-07-01') AS __smelt_enriched) AS \
+             enriched_count"
+        );
     }
 }

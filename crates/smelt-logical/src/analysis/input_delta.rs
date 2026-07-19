@@ -186,6 +186,7 @@ mod tests {
             watermark: None,
             unique_key: None,
             retention: None,
+            referential_integrity: None,
         }
     }
 

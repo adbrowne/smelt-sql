@@ -7,7 +7,7 @@ timeseries:
   partition_column: event_date
   granularity: day
 ---
--- Per-event wide table that joins every silver/events_parsed row to its
+-- Per-event wide table that joins every silver/events_deduped row to its
 -- session (silver/sessions) and attaches each available identity algorithm's
 -- resolved amplitude_id. The wide shape carries the no-merging baseline
 -- (silver's amplitude_id) plus three refinements (forward_only, backward_fill,
@@ -66,7 +66,7 @@ SELECT
     COALESCE(b.backward_fill_amplitude_id,       'd:' || CAST(e.device_id AS VARCHAR)) AS backward_fill_amplitude_id,
     COALESCE(c.connected_components_amplitude_id, 'd:' || CAST(e.device_id AS VARCHAR)) AS connected_components_amplitude_id,
     COALESCE(c.connected_components_cluster_id,   'd:' || CAST(e.device_id AS VARCHAR)) AS connected_components_cluster_id
-FROM smelt.silver.events_parsed e
+FROM smelt.silver.events_deduped e
 JOIN smelt.silver.sessions s
     ON e.device_id = s.device_id
    AND e.event_ts >= s.session_start
@@ -85,3 +85,17 @@ LEFT JOIN smelt.gold.identity_connected_components c
 WHERE s.session_start_date
     BETWEEN e.event_date - INTERVAL '1 day'
         AND e.event_date + INTERVAL '1 day'
+-- Form B: this model's own `event_date` and `silver.events_deduped`'s
+-- `first_seen_date` are the same value by construction (both are
+-- `MIN(event_date)` per `event_id` upstream) — a true 1:1, zero-skew read.
+-- The planner's cross-axis Form B derivation only registers a *nonzero*
+-- margin (a same-name, same-axis zero margin is derived separately, and
+-- this model's own declared `partition_column` stays `event_date` — it is
+-- not renamed to `first_seen_date` because `marts.daily_active_users_by_method`
+-- and its own tests already read this model under the `event_date` name).
+-- This filter restates the tautology as an explicit, conservative 1-day
+-- bound so `silver.events_deduped`'s read stays partition-pruned rather
+-- than falling back to an unbounded scan.
+  AND e.first_seen_date
+      BETWEEN e.event_date - INTERVAL '1 day'
+          AND e.event_date + INTERVAL '1 day'

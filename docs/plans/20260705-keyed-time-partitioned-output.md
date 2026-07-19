@@ -1,5 +1,11 @@
 # Plan: Time-partitioned keyed output (key temporal locality)
 
+> **SUPERSEDED (2026-07-17).** Absorbed into
+> [`docs/plans/20260715-composed-axes-conditional-maintenance.md`](20260715-composed-axes-conditional-maintenance.md)
+> (Group A, phases A1–A5). This plan cites the retired `keyed_models.md` spec and the removed
+> `refresh: keyed` surface; do not execute it. Of its phases, only Phase 5 (the `key_recurrence`
+> source declaration parse) ever landed — the successor plan's Phase A4 consumes it.
+
 **Date**: 2026-07-05
 **Spec**: [`docs/specs/keyed_models.md`](../specs/keyed_models.md)
 **Spec diff**: commit `42da901d` (working tree at authoring); companion edits in `model_maintenance.md`, `sources.md`, `models.md`, `timeseries.md`, `diagnostics.md`

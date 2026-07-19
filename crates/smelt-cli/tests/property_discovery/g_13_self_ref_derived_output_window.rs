@@ -1,6 +1,6 @@
 //! `EXPERIMENTAL(property-discovery): disposable`
 //!
-//! Real-fixture, DuckDB-backed coverage for `docs/specs/batched_models.md`
+//! Real-fixture, DuckDB-backed coverage for `docs/specs/incremental_models.md`
 //! §"Window independence and self-referential models": an `Ordered`
 //! (convergent self-edge) model whose `partition_column` is *derived* and
 //! skews away from its driving date column gets the same Form B write-window
@@ -13,7 +13,7 @@
 //! partition (`bal.session_start_date >= e.session_start_date - INTERVAL '1
 //! day' AND bal.session_start_date < e.session_start_date` —
 //! `window_independence`'s own `Ordered` shape, and — not incidentally — the
-//! exact false-positive skew-anchor shape `docs/specs/batched_models.md`
+//! exact false-positive skew-anchor shape `docs/specs/incremental_models.md`
 //! warns about, since the self-referenced column shares the model's own
 //! `partition_column` name) AND accumulates the current partition's events.
 //! Separately, a genuine Form B relation

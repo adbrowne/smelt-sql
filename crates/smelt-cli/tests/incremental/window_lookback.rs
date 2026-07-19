@@ -1,6 +1,6 @@
 //! Real-fixture equivalence for the B2 bounded-`RANGE` cross-partition
 //! window admission (`docs/plans/20260704-model-updates-group-b.md` Phase B2,
-//! `docs/specs/batched_models.md` §"Window functions and the partition_column").
+//! `docs/specs/incremental_models.md` §"Safety checks" — the window-functions admission row).
 //!
 //! A `LAG(...) OVER (PARTITION BY user_id ORDER BY transaction_timestamp
 //! RANGE BETWEEN INTERVAL '1 day' PRECEDING AND CURRENT ROW)` window is

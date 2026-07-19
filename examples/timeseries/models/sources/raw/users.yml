@@ -8,7 +8,20 @@ columns:
   type: DATE
 # A dimension: rows may be renamed/corrected in place after creation. Declared
 # explicitly (not the fail-closed default) so `daily_events_enriched`'s
-# `UpstreamMutation` cell derives (`maintenance_plan.md` §"Per-cell
+# `UpstreamMutation` cell derives (`incremental_models.md` §"Per-cell
 # admission"; MP11's fact+dimension column-scoped-MERGE story).
 mutation_profile:
   kind: mutable_snapshot
+# `user_id` is this dimension's own row identity (`sources.md` §"Row
+# identity") — licenses the one-to-one conjunct (3) of P1 skeleton-source
+# closure (`model_properties.md` §"Skeleton-source closure") for
+# `daily_events_enriched.sql`'s bare inner join.
+unique_key: [user_id]
+# The referential-integrity world-fact (`sources.md` §"Referential
+# integrity"): every `user_id` a consuming model's equi-join reads is
+# guaranteed present in this dimension — no fact row can be dropped by the
+# inner join. Licenses P1's row-preservation conjunct (4) for an inner-join
+# enrichment (in place of a `LEFT JOIN`), paired with the count-preservation
+# tripwire every consuming run that relies on it re-checks
+# (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase F5).
+referential_integrity: [user_id]

@@ -177,7 +177,7 @@ Every `refresh: incremental` model with a declared `grain:` derives a maintenanc
 
 An unclocked source's delta dirties the whole downstream model for every consumer sensitive to it — never a silent no-op, since that cell was only ever admitted under an explicit full-scan acceptance. A source address may be given as a bare name (`bronze`), with its `sources.` breadcrumb (`sources.bronze`), or with the full `smelt.` prefix (`smelt.sources.bronze`) — all three resolve identically.
 
-`--source` also accepts an **upstream maintained model** as the delta origin — a model's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp `smelt explain` reports for it), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op.
+`--source` accepts any **clocked provider** as the delta origin — a declared source, or an upstream maintained model, whether ordinary (`grain: partition`/`key_per_partition`) or a **locality-admitted composed model** (`grain: key` plus an admitted `timeseries:` block — see [the composed shape](../guide/incremental-models.md#the-composed-shape-key-time)). A model origin's landed delta is the output window a completed run wrote for it. The delta reflects through that model's downstream edges exactly as a source delta does (the model-to-model edge is derived from the same scan clamp `smelt explain` reports for it — a composed origin's edge carries its admitted route's own margin), and the origin model itself is never re-run. The address is resolved against the workspace: an address that is neither a declared source nor a maintained model is a named error, not a silent no-op. A **bare** keyed model (no admitted `timeseries:`) still refuses fail-loud as a `--source` origin, the same as anywhere else in the propagation graph — it has no partition axis for interval dirt to propagate over.
 
 ```bash
 # silver.events_parsed finished a run over Jan 3; propagate that landed
@@ -186,7 +186,7 @@ smelt run --since-upstream \
   --source silver.events_parsed --landed 2026-01-03..2026-01-04
 ```
 
-A model whose dependency graph contains a cycle, a self-reference, or a keyed-grain node (no partition axis for interval dirt) refuses the whole `--since-upstream` invocation with a named error rather than guessing.
+A model whose dependency graph contains a cycle, a self-reference, or a **bare** keyed-grain node (no admitted time axis, so no partition axis for interval dirt to propagate over) refuses the whole `--since-upstream` invocation with a named error rather than guessing. A locality-admitted composed node is not refused — it participates in propagation like any other clocked node, both as an intermediate stage and as the `--source` origin itself.
 
 ```bash
 # Two sources landed data since the last propagation; run exactly the
@@ -923,9 +923,43 @@ With a `MODEL_NAME`, `smelt explain` instead prints that model's **maintenance p
 cell (trigger, corner, technique), the `ledger_catch_up` flag (whether the cell routes through
 the [reconciliation ledger](../guide/incremental-models.md#the-reconciliation-ledger)), the
 derived per-source scan clamps, each source's partition-locality verdict, any admission refusals,
-and the model's inbound edges. This only applies to incremental models (`refresh: incremental`
-with a `grain:` declared)
-— other models print a one-line notice instead.
+the model's own **Relation Contract** (its clock, identity, and derived `grain` label), and one
+contract block per **inbound edge**. This only applies to incremental models (`refresh:
+incremental` with a `grain:` declared) — other models print a one-line notice instead.
+
+A `ColumnScopedMerge` cell's block additionally prints an `observed-delta recording:` line —
+the only technique family recording is wired for today (`KeyedFold` and the staged-candidate
+write family do not record yet, so their cells print no such line at all). The line still says
+`yes` or `no`: recording only actually fires when the cell's matched arm can suppress the write
+for unchanged rows, which needs a proven per-row identity (`region key:` must be `Key(...)`,
+never `WholeRow`) over columns all proven comparable across runs — a cell that fails either
+check falls back to an unconditional rewrite at runtime and has nothing to record, so its line
+reads `no`. For a composed (key + time)
+model, the `Key temporal locality:` block prints an `observed-delta projection:` line alongside
+its route and settle bound: `exact (key-embedded)` / `exact (key-determined)` for locality
+routes 1–2, `` widened by `r` + margins `` for route 3, since a key's stored partition can move
+under that route. A bare keyed model (no established locality) prints no `Key temporal
+locality:` block and no projection line — see [Observed deltas and no-op
+cascades](../guide/incremental-models.md#observed-deltas-and-no-op-cascades). Both lines are
+static facts about the derived plan, not about a specific past run: `smelt explain` never opens
+a backend connection, so it reports what a cell's technique *would* record and how its route
+*would* project.
+
+Every cell also prints an `admissible write patterns:` line — the physical addressing patterns
+(`region`, `keyed`, `column`, `update`, `full_rebuild`, and any backend-contributed pattern) the
+cell's own declared facts and target backend admit — and a `write pin:` line showing the
+[`maintenance.cells[].write` pin](smelt-yml.md#cellswrite--the-physical-addressing-pin), if one is
+set (`(none)` otherwise). A `ColumnScopedMerge`/`KeyedFold` cell additionally prints a
+`write variant:` line naming whether that cell's matched arm resolves suppressed or unconditional
+and why — `preference` (the structural steady-state-vs-first-build default), `first-build posture`,
+or a `technique:`/`prefer:` pin's own name — see [Steering: prefer /
+technique](../guide/incremental-models.md#steering-prefer--technique).
+
+An inbound edge is either a declared source (`sources.*`) or an upstream maintained model —
+both render through the identical `clock:` / `identity:` / `derived grain:` rows, labelled
+`(source)` or `(model)` so it's clear which provider filled them. A row prints `(none)` when
+that provider declares neither fact — a source with no `timeseries:` and no `unique_key:` is
+legal and simply has nothing to summarize, never an error.
 
 Add `--show-sql` to also print, after each cell's block, the maintenance statements that cell
 executes — the output of the same pure emitters a run executes. Each cell's SELECT body is
@@ -947,6 +981,14 @@ directly off an ephemeral ref (e.g. `SUM(rate)` where `rate` comes straight from
 ephemeral model) casts to the `BIGINT` default rather than its real type — this is a compile-order
 limitation in the shared compiler that a real run hits identically, so `--show-sql` still matches
 what a run executes, casting quirk included. See `docs/specs/cli.md` Known Divergences.
+
+A second, currently wider divergence: for a `ColumnScopedMerge`/`KeyedFold` cell whose write is
+[conditionally suppressed](../guide/incremental-models.md#conditional-writes) at run time, `--show-sql`
+always renders the unconditional matched arm (`WHEN MATCHED THEN UPDATE SET *`/the plain fold), never
+the `IS DISTINCT FROM`-guarded suppressed form the live run actually executes — the report hasn't been
+wired to the same suppression check yet. The cell's `region key:` row (`WholeRow` vs. a named key) is
+still a reliable signal for one half of the admission rule: a `WholeRow` region key means that cell
+never suppresses, regardless of what `--show-sql` prints.
 
 **Examples:**
 
@@ -996,7 +1038,16 @@ Cells (2):
 
 Refusals: (none)
 
-Inbound edges: (none)
+Relation contract:
+  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+  identity: (none)
+  derived grain: partition
+
+Inbound edges: sources.raw.events
+  - sources.raw.events (source)
+      clock:    (none)
+      identity: event_id
+      derived grain: key
 ```
 
 ---
