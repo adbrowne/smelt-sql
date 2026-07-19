@@ -993,10 +993,28 @@ pub fn emit_fingerprint_digest_select(
 /// "Digest" — "the collision-soundness invariant").
 ///
 /// `sidecar_table` is already fully qualified (`schema.table`);
-/// `source_address`/`projection_identity` are plain string values, escaped
-/// here (this emitter, like every other, does its own literal quoting —
-/// see `emit_delete_insert_delta_restricted`'s `delta_keys` handling for
-/// the same pattern).
+/// `source_address`/`projection_identity`/`stamp` are plain string values,
+/// escaped here (this emitter, like every other, does its own literal
+/// quoting — see `emit_delete_insert_delta_restricted`'s `delta_keys`
+/// handling for the same pattern).
+///
+/// `stamp` (Phase F4,
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` —
+/// "Sidecar invalidation") is the freshly computed identity stamp
+/// (`smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp`
+/// — digest-construction version, this same `projection_identity`, and the
+/// consuming model's own SQL provenance combined). The sidecar-side
+/// subquery filters on `stamp = '...'` in addition to `source_address`/
+/// `projection_identity`: a stored row whose stamp does not match is
+/// excluded from the comparison entirely, so it never joins against the
+/// current source content — structurally identical to that key having no
+/// sidecar row at all. This is the mechanism that makes an invalidated
+/// partition (a model-definition edit, a P4 projection change reusing the
+/// same identity text is impossible by construction, or a digest-version
+/// bump) degrade to exactly the same whole-table delta an absent sidecar
+/// already produces above — never a narrower, partially-trusted
+/// comparison, and never a silent skip.
+#[allow(clippy::too_many_arguments)]
 pub fn emit_fingerprint_sidecar_diff(
     source_table: &str,
     source_key: &[String],
@@ -1004,17 +1022,20 @@ pub fn emit_fingerprint_sidecar_diff(
     sidecar_table: &str,
     source_address: &str,
     projection_identity: &str,
+    stamp: &str,
     dialect: MaintenanceDialect,
 ) -> String {
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, digest_columns, dialect);
     let source_address_lit = source_address.replace('\'', "''");
     let projection_identity_lit = projection_identity.replace('\'', "''");
+    let stamp_lit = stamp.replace('\'', "''");
     format!(
         "SELECT COALESCE(__smelt_src.delta_key, __smelt_sidecar.source_key) AS delta_key \
          FROM ({digest_select}) AS __smelt_src \
          FULL OUTER JOIN (SELECT source_key, digest FROM {sidecar_table} \
-         WHERE source_address = '{source_address_lit}' AND projection_identity = '{projection_identity_lit}') \
+         WHERE source_address = '{source_address_lit}' AND projection_identity = '{projection_identity_lit}' \
+         AND stamp = '{stamp_lit}') \
          AS __smelt_sidecar ON __smelt_src.delta_key = __smelt_sidecar.source_key \
          WHERE __smelt_sidecar.source_key IS NULL \
          OR __smelt_src.delta_key IS NULL \
@@ -1323,12 +1344,14 @@ mod fingerprint_sidecar_tests {
             "main._smelt_fingerprint_sidecar",
             "smelt.sources.dim_users",
             "cols:name,tier",
+            "v1:cols:name,tier:sha256:deadbeef",
             MaintenanceDialect::DuckDb,
         );
         assert!(sql.contains("FULL OUTER JOIN"));
         assert!(sql.contains("FROM main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
         assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("stamp = 'v1:cols:name,tier:sha256:deadbeef'"));
         assert!(sql.contains("__smelt_src.delta_digest IS DISTINCT FROM __smelt_sidecar.digest"));
         assert!(sql.contains("__smelt_sidecar.source_key IS NULL"));
         assert!(sql.contains("__smelt_src.delta_key IS NULL"));
@@ -1349,9 +1372,37 @@ mod fingerprint_sidecar_tests {
             "main._smelt_fingerprint_sidecar",
             "smelt.sources.dim's_users",
             "cols:name",
+            "stamp's",
             MaintenanceDialect::DuckDb,
         );
         assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("stamp = 'stamp''s'"));
+    }
+
+    /// Phase F4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// — "Sidecar invalidation"): a stale-stamped row must never be joined
+    /// against the current source content — the `stamp = '...'` filter
+    /// excludes it from the sidecar-side subquery regardless of
+    /// `source_address`/`projection_identity` matching, structurally
+    /// identical to that key having no sidecar row at all.
+    #[test]
+    fn sidecar_diff_stamp_filter_excludes_mismatched_rows_from_the_comparison() {
+        let sql = emit_fingerprint_sidecar_diff(
+            "raw.dim_users",
+            &["user_id".to_string()],
+            &["name".to_string()],
+            "main._smelt_fingerprint_sidecar",
+            "smelt.sources.dim_users",
+            "cols:name",
+            "v2:cols:name:sha256:newhash",
+            MaintenanceDialect::DuckDb,
+        );
+        // The sidecar-side subquery must filter on the CURRENT stamp only —
+        // a row stamped under any other value is never a candidate match.
+        assert!(sql.contains(
+            "WHERE source_address = 'smelt.sources.dim_users' AND projection_identity = \
+             'cols:name' AND stamp = 'v2:cols:name:sha256:newhash'"
+        ));
     }
 }
 

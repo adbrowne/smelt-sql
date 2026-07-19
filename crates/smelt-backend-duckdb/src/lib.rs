@@ -1545,6 +1545,7 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name",
+            "v1:cols:name:sha256:deadbeef",
             digest_select,
         );
         let gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
@@ -1600,6 +1601,7 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name",
+            "v1:cols:name:sha256:deadbeef",
             digest_select,
         );
         let gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(

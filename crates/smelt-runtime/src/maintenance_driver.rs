@@ -1144,6 +1144,61 @@ pub fn resolve_fingerprint_digest_columns(
     }
 }
 
+// ── F4: fingerprint sidecar invalidation ────────────────────────────────
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase F4
+// — "Sidecar invalidation"; `docs/specs/sources.md` §"The fingerprint
+// sidecar")
+//
+// A sidecar partition's stored digests are only trustworthy comparanda for
+// a diff if nothing that could change what "the same row" or "the same
+// digest" means has changed underneath it since the last refresh. Three
+// independent things can invalidate that trust, any one of which must widen
+// the next diff to "everything in the source is changed" — never a
+// narrower, partially-trusted comparison, and never a silent skip:
+//
+// - the digest-construction version (`FINGERPRINT_SIDECAR_DIGEST_VERSION`)
+//   — bumped only when `emit_fingerprint_digest_select`'s own hashing
+//   scheme changes shape;
+// - the P4 fingerprint projection's identity (already the sidecar's own
+//   partition key — a projection change lands in a fresh, unpopulated
+//   partition by construction, no extra mechanism needed);
+// - the consuming model's own SQL definition, hashed the same way
+//   `IntervalStore::get_or_create` invalidates covered intervals on a
+//   model edit (`smelt_state::intervals::compute_model_hash`) — this is
+//   the one trigger that can go stale WITHOUT a fresh partition, since two
+//   different model SQL texts can resolve the identical P4 projection.
+
+/// Digest-construction version for the fingerprint sidecar's stored digests
+/// (`emit_fingerprint_digest_select`'s `sha256(...)` shape). Part of every
+/// partition's identity stamp — bump this only when that construction
+/// changes in a way that makes a previously stored digest no longer
+/// comparable to a freshly computed one, so every stamp stored under the
+/// old scheme is detected as mismatched (never silently trusted) on the
+/// next diff.
+const FINGERPRINT_SIDECAR_DIGEST_VERSION: &str = "v1";
+
+/// Compute the fingerprint sidecar's identity stamp for one `(model,
+/// external source)` pair — the combined value invalidation compares the
+/// freshly computed one against on every run, mirroring
+/// `IntervalStore::get_or_create`'s `model_hash != model_hash`
+/// invalidation-on-mismatch precedent (`smelt_state::intervals`). Combines:
+/// - [`FINGERPRINT_SIDECAR_DIGEST_VERSION`] (the digest-algorithm version);
+/// - `projection_identity` (the caller's already-resolved P4 projection
+///   identity — `smelt_logical::analysis::fingerprint::projection_identity`);
+/// - a hash of `model_sql` (the consuming model's own SQL text), via
+///   [`smelt_state::intervals::compute_model_hash`] — the same hash
+///   `IntervalStore` uses to invalidate covered intervals on a model edit.
+///
+/// Any one of the three inputs changing produces a different stamp — this
+/// is deliberately coarse (a model edit unrelated to this source still
+/// invalidates the sidecar for it) rather than attempting to prove the edit
+/// was irrelevant: the fail-loud/widen-never-narrow posture this codebase
+/// takes everywhere else in the maintenance layer.
+pub fn compute_fingerprint_sidecar_stamp(projection_identity: &str, model_sql: &str) -> String {
+    let model_hash = smelt_state::intervals::compute_model_hash(model_sql);
+    format!("{FINGERPRINT_SIDECAR_DIGEST_VERSION}:{projection_identity}:{model_hash}")
+}
+
 /// Read-side: the synthesized changed-key set the fingerprint sidecar
 /// derives for `(source_address, source_table)` under `projection` (the
 /// caller's already-resolved P4 fingerprint projection;
@@ -1166,6 +1221,18 @@ pub fn resolve_fingerprint_digest_columns(
 /// here fails loudly (`docs/specs/sources.md` §"The fingerprint sidecar" —
 /// "DuckDB-scoped today ... a non-DuckDB target fails loud rather than
 /// silently skipping the sidecar").
+///
+/// `model_sql` is the consuming model's own SQL text — folded into the
+/// partition's identity stamp ([`compute_fingerprint_sidecar_stamp`]) so a
+/// model-definition edit invalidates this partition even when it leaves
+/// the P4 projection's column set (and therefore `identity`) unchanged.
+/// Before running the diff, this checks whether any stored row's stamp no
+/// longer matches the freshly computed one and, if so, logs a `tracing::
+/// warn!` — the diff itself always structurally excludes a mismatched row
+/// from the comparison (`emit_fingerprint_sidecar_diff`'s own `stamp =
+/// '...'` filter), so this check changes no behaviour, it only makes an
+/// invalidation loud rather than silent.
+#[allow(clippy::too_many_arguments)]
 pub async fn diff_fingerprint_sidecar_changed_keys(
     backend: &dyn Backend,
     schema: &str,
@@ -1174,6 +1241,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
     source_key: &[String],
     projection: &FingerprintProjection,
     all_source_columns: &[String],
+    model_sql: &str,
 ) -> std::result::Result<Vec<String>, BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
         return Err(BackendError::unsupported(
@@ -1186,6 +1254,25 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
 
     let digest_columns = resolve_fingerprint_digest_columns(projection, all_source_columns);
     let identity = fingerprint::projection_identity(projection);
+    let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
+
+    let stale_check_sql = ddl_duckdb::generate_fingerprint_sidecar_stale_check_sql(
+        schema,
+        source_address,
+        &identity,
+        &stamp,
+    );
+    let stale_rows = backend.execute_sql(&stale_check_sql).await?;
+    if stale_rows.iter().any(|batch| batch.num_rows() > 0) {
+        tracing::warn!(
+            source_address,
+            projection_identity = %identity,
+            "fingerprint sidecar stamp mismatch detected (model definition, P4 projection, or \
+             digest version changed — or the stored stamp was corrupted); treating the stale \
+             partition as absent and rebuilding via the whole-table delta"
+        );
+    }
+
     let sidecar_table = format!("{schema}.{}", ddl_duckdb::FINGERPRINT_SIDECAR_TABLE_NAME);
     let dialect = maintenance_dialect(backend.dialect());
     let diff_sql = emit_fingerprint_sidecar_diff(
@@ -1195,6 +1282,7 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
         &sidecar_table,
         source_address,
         &identity,
+        &stamp,
         dialect,
     );
     let batches = backend.execute_sql(&diff_sql).await?;
@@ -1228,6 +1316,15 @@ pub async fn diff_fingerprint_sidecar_changed_keys(
 /// DuckDB-only, matching [`diff_fingerprint_sidecar_changed_keys`]'s own
 /// posture; a non-DuckDB backend fails loudly rather than being handed
 /// DuckDB-flavored SQL it cannot run.
+///
+/// `model_sql` must be the SAME consuming-model SQL text passed to the
+/// paired [`diff_fingerprint_sidecar_changed_keys`] call this refresh
+/// follows — it is folded into every refreshed row's stamp
+/// ([`compute_fingerprint_sidecar_stamp`]), which is what "self-heals" a
+/// stale partition: this upsert runs over every currently-observed key
+/// (not just a changed subset), so it unconditionally re-stamps every
+/// still-existing row with the current stamp, matching
+/// `generate_fingerprint_sidecar_refresh_sql`'s own doc comment.
 #[allow(clippy::too_many_arguments)]
 pub async fn refresh_fingerprint_sidecar(
     backend: &dyn Backend,
@@ -1237,6 +1334,7 @@ pub async fn refresh_fingerprint_sidecar(
     source_key: &[String],
     projection: &FingerprintProjection,
     all_source_columns: &[String],
+    model_sql: &str,
     write_group: &StatementGroup,
 ) -> std::result::Result<(), BackendError> {
     if backend.dialect() != SqlDialect::DuckDB {
@@ -1248,6 +1346,7 @@ pub async fn refresh_fingerprint_sidecar(
     let ensure_sql = ddl_duckdb::generate_fingerprint_sidecar_table_ddl(schema);
     let digest_columns = resolve_fingerprint_digest_columns(projection, all_source_columns);
     let identity = fingerprint::projection_identity(projection);
+    let stamp = compute_fingerprint_sidecar_stamp(&identity, model_sql);
     let dialect = maintenance_dialect(backend.dialect());
     let digest_select =
         emit_fingerprint_digest_select(source_table, source_key, &digest_columns, dialect);
@@ -1255,6 +1354,7 @@ pub async fn refresh_fingerprint_sidecar(
         schema,
         source_address,
         &identity,
+        &stamp,
         &digest_select,
     );
     let gc_sql = ddl_duckdb::generate_fingerprint_sidecar_gc_sql(

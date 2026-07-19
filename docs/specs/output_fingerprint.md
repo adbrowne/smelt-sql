@@ -125,9 +125,12 @@ persistence is not an exception to this spec's "never persisted" principle below
 *different quantity* (last-seen external row content) for a *different purpose* (cross-run change
 detection over data smelt does not control), where this spec's fingerprint persists nothing
 because both sides of its comparison — two versions of smelt-owned, always-recompilable SQL — are
-always available to recompute. A sidecar schema-versioning strategy, so the persisted digest
-format itself can evolve without silently comparing against a stale-format row, is that spec's
-open question to answer, not this one's.
+always available to recompute. The sidecar's own schema-versioning strategy — so the persisted
+digest format itself can evolve without silently comparing against a stale-format row — is that
+spec's answer to give, not this one's: it stamps every stored row with a digest-construction
+version alongside a projection identity and a model-definition hash, and treats any stored row
+whose stamp does not match the freshly computed one as absent rather than comparing against it
+(`sources.md` §"The fingerprint sidecar" — "Invalidation").
 
 **The fingerprint is an ephemeral comparison function, not a stored artifact.** Equivalence is computed by fingerprinting *both* sides with the *current* compiler at decision time; the digest is never persisted. This frees the canonicalisation algorithm to change between releases with zero migration obligation and no version-stable-form contract — the comparison is always apples-to-apples. The persisted artifact is the expanded logical SQL (see `run_state.md`), not the hash. Rationale: research §5.6 and Open Question 15.
 

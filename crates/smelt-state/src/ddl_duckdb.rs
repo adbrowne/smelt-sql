@@ -575,6 +575,21 @@ pub const FINGERPRINT_SIDECAR_TABLE_NAME: &str = "_smelt_fingerprint_sidecar";
 
 /// DDL creating the fingerprint sidecar table if it does not already
 /// exist. Idempotent — safe to run before every diff/refresh.
+///
+/// The `stamp` column (Phase F4,
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md`) carries
+/// each row's identity stamp
+/// (`smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp`
+/// — digest-construction version, P4 projection identity, and the
+/// consuming model's own SQL provenance combined). It is a plain value
+/// column, not part of the primary key: the partition key stays
+/// `(source_address, projection_identity, source_key)`, but a row's stamp
+/// can go stale in place (a model-definition edit that leaves the
+/// projection's column set unchanged still changes the stamp) — the diff
+/// query filters on it (`smelt_logical::maintenance::emit::
+/// emit_fingerprint_sidecar_diff`) so a stale-stamped row is excluded from
+/// the comparison entirely, structurally identical to an absent sidecar,
+/// never trusted as a valid prior digest.
 pub fn generate_fingerprint_sidecar_table_ddl(schema: &str) -> String {
     format!(
         "CREATE TABLE IF NOT EXISTS {}.{} (\
@@ -582,6 +597,7 @@ pub fn generate_fingerprint_sidecar_table_ddl(schema: &str) -> String {
          projection_identity VARCHAR NOT NULL, \
          source_key VARCHAR NOT NULL, \
          digest VARCHAR NOT NULL, \
+         stamp VARCHAR NOT NULL, \
          PRIMARY KEY (source_address, projection_identity, source_key))",
         quote_identifier(schema),
         FINGERPRINT_SIDECAR_TABLE_NAME,
@@ -592,11 +608,20 @@ pub fn generate_fingerprint_sidecar_table_ddl(schema: &str) -> String {
 /// `digest_select_sql` projects
 /// (`smelt_logical::maintenance::emit::emit_fingerprint_digest_select`'s
 /// output — `delta_key`/`delta_digest` columns) into the sidecar partition
-/// named by `(source_address, projection_identity)`. Idempotent: an
+/// named by `(source_address, projection_identity)`, stamping every row
+/// with `stamp` (Phase F4's identity stamp — see
+/// `generate_fingerprint_sidecar_table_ddl`'s doc comment). Idempotent: an
 /// unchanged key's digest is overwritten with the identical value it
 /// already held (`ON CONFLICT ... DO UPDATE`), never duplicated — the same
 /// "re-running a window is a REPLACE, never a duplicate" shape
-/// [`generate_observed_delta_upsert_sql`] uses above.
+/// [`generate_observed_delta_upsert_sql`] uses above. Because this upsert
+/// runs over EVERY currently-observed key (not just a changed subset), it
+/// also self-heals a stale stamp: any row for a still-existing key is
+/// unconditionally re-stamped with the current `stamp` on every refresh, so
+/// invalidation never needs a separate "clear the stale partition" write —
+/// the read side's stamp filter is what makes the stale window (between an
+/// invalidating edit and the next refresh) always degrade to the
+/// unconditional whole-table path, never a silent skip.
 ///
 /// A source key absent from the sidecar before this call is, by
 /// construction, new — this upsert is what "populates the sidecar as a
@@ -607,19 +632,50 @@ pub fn generate_fingerprint_sidecar_refresh_sql(
     schema: &str,
     source_address: &str,
     projection_identity: &str,
+    stamp: &str,
     digest_select_sql: &str,
 ) -> String {
     format!(
-        "INSERT INTO {schema}.{table} (source_address, projection_identity, source_key, digest) \
-         SELECT '{source_address}', '{projection_identity}', __smelt_digest.delta_key, \
-         __smelt_digest.delta_digest FROM ({digest_select_sql}) AS __smelt_digest \
+        "INSERT INTO {schema}.{table} (source_address, projection_identity, source_key, digest, \
+         stamp) SELECT '{source_address}', '{projection_identity}', __smelt_digest.delta_key, \
+         __smelt_digest.delta_digest, '{stamp}' FROM ({digest_select_sql}) AS __smelt_digest \
          ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET \
-         digest = excluded.digest",
+         digest = excluded.digest, stamp = excluded.stamp",
         schema = quote_identifier(schema),
         table = FINGERPRINT_SIDECAR_TABLE_NAME,
         source_address = escape_sql_literal(source_address),
         projection_identity = escape_sql_literal(projection_identity),
+        stamp = escape_sql_literal(stamp),
         digest_select_sql = digest_select_sql,
+    )
+}
+
+/// Read-side existence check for a stale-stamped row in the sidecar's
+/// `(source_address, projection_identity)` partition (Phase F4): a
+/// non-empty result means at least one stored row's stamp no longer
+/// matches the freshly computed `stamp` — a model-definition edit, a
+/// digest-version bump, or a hand-corrupted stamp value. The diff query
+/// itself (`smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff`)
+/// already excludes every such row from its comparison unconditionally (its
+/// own `stamp = '...'` filter), so this query changes no behaviour — it
+/// exists purely so the caller
+/// (`smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys`)
+/// can log loudly that an invalidation happened, rather than degrading to
+/// the whole-table path in silence.
+pub fn generate_fingerprint_sidecar_stale_check_sql(
+    schema: &str,
+    source_address: &str,
+    projection_identity: &str,
+    stamp: &str,
+) -> String {
+    format!(
+        "SELECT 1 FROM {schema}.{table} WHERE source_address = '{source_address}' AND \
+         projection_identity = '{projection_identity}' AND stamp <> '{stamp}' LIMIT 1",
+        schema = quote_identifier(schema),
+        table = FINGERPRINT_SIDECAR_TABLE_NAME,
+        source_address = escape_sql_literal(source_address),
+        projection_identity = escape_sql_literal(projection_identity),
+        stamp = escape_sql_literal(stamp),
     )
 }
 
@@ -1261,6 +1317,7 @@ mod tests {
         assert!(ddl.contains("projection_identity VARCHAR NOT NULL"));
         assert!(ddl.contains("source_key VARCHAR NOT NULL"));
         assert!(ddl.contains("digest VARCHAR NOT NULL"));
+        assert!(ddl.contains("stamp VARCHAR NOT NULL"));
         assert!(ddl.contains("PRIMARY KEY (source_address, projection_identity, source_key)"));
     }
 
@@ -1270,14 +1327,17 @@ mod tests {
             "main",
             "smelt.sources.dim_users",
             "cols:name,tier",
+            "v1:cols:name,tier:sha256:deadbeef",
             "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
         );
         assert!(sql.contains("INSERT INTO main._smelt_fingerprint_sidecar"));
         assert!(sql.contains("'smelt.sources.dim_users'"));
         assert!(sql.contains("'cols:name,tier'"));
+        assert!(sql.contains("'v1:cols:name,tier:sha256:deadbeef'"));
         assert!(sql.contains(
             "ON CONFLICT (source_address, projection_identity, source_key) DO UPDATE SET"
         ));
+        assert!(sql.contains("digest = excluded.digest, stamp = excluded.stamp"));
         assert!(sql.contains("SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users"));
     }
 
@@ -1287,9 +1347,37 @@ mod tests {
             "main",
             "smelt.sources.dim's_users",
             "cols:name",
+            "stamp's",
             "SELECT id AS delta_key, 'abc' AS delta_digest FROM raw.dim_users",
         );
         assert!(sql.contains("'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("'stamp''s'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_stale_check_sql_detects_a_stamp_mismatch() {
+        let sql = generate_fingerprint_sidecar_stale_check_sql(
+            "main",
+            "smelt.sources.dim_users",
+            "cols:name,tier",
+            "v1:cols:name,tier:sha256:deadbeef",
+        );
+        assert!(sql.contains("SELECT 1 FROM main._smelt_fingerprint_sidecar"));
+        assert!(sql.contains("source_address = 'smelt.sources.dim_users'"));
+        assert!(sql.contains("projection_identity = 'cols:name,tier'"));
+        assert!(sql.contains("stamp <> 'v1:cols:name,tier:sha256:deadbeef'"));
+    }
+
+    #[test]
+    fn fingerprint_sidecar_stale_check_sql_escapes_single_quotes() {
+        let sql = generate_fingerprint_sidecar_stale_check_sql(
+            "main",
+            "smelt.sources.dim's_users",
+            "cols:name",
+            "stamp's",
+        );
+        assert!(sql.contains("source_address = 'smelt.sources.dim''s_users'"));
+        assert!(sql.contains("stamp <> 'stamp''s'"));
     }
 
     #[test]

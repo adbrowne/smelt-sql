@@ -2258,10 +2258,15 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
     (§Known Divergences "Observed-delta recording is built…"); the fingerprint-sidecar half is
     built for DuckDB (table DDL, digest-refresh upsert, and the emitter-authored diff query —
     `sources.md` §"Known Divergences" — "The fingerprint sidecar is built for DuckDB"), as a
-    standalone, independently-tested capability — a non-DuckDB target fails loudly. Wiring the
-    sidecar's synthesized changed-key set into a live run's own trigger/technique selection (so a
-    maintained model actually consumes it instead of the whole-table fallback) is separate
-    follow-on work.
+    standalone, independently-tested capability — a non-DuckDB target fails loudly. Invalidation is
+    live: a stored row's identity stamp (digest-construction version, P4 projection identity, and
+    a hash of the consuming model's SQL) is checked against a freshly computed one on every diff,
+    and any mismatch — a projection change, a model-definition edit, or a corrupted stamp —
+    degrades that partition to the same whole-table delta an absent sidecar produces, logged
+    loudly, never silently trusted or silently skipped (`sources.md` §"The fingerprint sidecar" —
+    "Invalidation"). Wiring the sidecar's synthesized changed-key set into a live run's own
+    trigger/technique selection (so a maintained model actually consumes it instead of the
+    whole-table fallback) is separate follow-on work.
   Each mechanism needs its own spec diff before it is surface: P1–P4 proofs in
   `model_properties.md` (P1–P4 landed — P4, fingerprint projection, §"Fingerprint projection"),
   T1–T5 transform variants in

@@ -2520,6 +2520,9 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "tier".to_string(),
         "notes".to_string(),
     ];
+    // Phase F4 — the consuming model's SQL text, folded into the sidecar's
+    // identity stamp (`compute_fingerprint_sidecar_stamp`).
+    let model_sql = "SELECT id, name, tier FROM smelt.sources.dim_users";
 
     // Run 1: absent sidecar — every source row is "changed" (whole-table
     // delta), and this diff also creates the sidecar table.
@@ -2531,6 +2534,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &source_key,
         &projection,
         &all_source_columns,
+        model_sql,
     )
     .await
     .expect("first diff against an absent sidecar");
@@ -2545,6 +2549,8 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
     // The executed diff SQL must be byte-identical to a direct emitter call
     // over the same resolved inputs.
     let identity = smelt_logical::analysis::fingerprint::projection_identity(&projection);
+    let stamp =
+        smelt_runtime::maintenance_driver::compute_fingerprint_sidecar_stamp(&identity, model_sql);
     let expected_diff_sql = smelt_logical::maintenance::emit::emit_fingerprint_sidecar_diff(
         "main.dim_users",
         &source_key,
@@ -2552,6 +2558,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main._smelt_fingerprint_sidecar",
         "smelt.sources.dim_users",
         &identity,
+        &stamp,
         MaintenanceDialect::DuckDb,
     );
     let recorded_sql = backend.recorded_sql();
@@ -2576,6 +2583,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &source_key,
         &projection,
         &all_source_columns,
+        model_sql,
         &empty_write_group,
     )
     .await
@@ -2591,6 +2599,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         "main",
         "smelt.sources.dim_users",
         &identity,
+        &stamp,
         &expected_digest_select,
     );
     let expected_gc_sql = smelt_state::ddl_duckdb::generate_fingerprint_sidecar_gc_sql(
@@ -2629,6 +2638,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
             &source_key,
             &projection,
             &all_source_columns,
+            model_sql,
         )
         .await
         .expect("second diff after a targeted edit");
@@ -2650,6 +2660,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
         &source_key,
         &projection,
         &all_source_columns,
+        model_sql,
         &empty_write_group,
     )
     .await
@@ -2667,6 +2678,7 @@ async fn fingerprint_sidecar_diff_and_refresh_statements_come_from_the_emitter()
             &source_key,
             &projection,
             &all_source_columns,
+            model_sql,
         )
         .await
         .expect("third diff after an out-of-projection edit");

@@ -1,6 +1,6 @@
 //! T4 — the fingerprint sidecar build + synthesized external change feed
-//! (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
-//! F3; `docs/specs/sources.md` §"The fingerprint sidecar").
+//! (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phases
+//! F3–F4; `docs/specs/sources.md` §"The fingerprint sidecar").
 //!
 //! For a `mutable_snapshot` external source with no native change feed,
 //! `smelt_runtime::maintenance_driver::diff_fingerprint_sidecar_changed_keys`
@@ -23,7 +23,14 @@
 //!   GC'd from the sidecar on refresh;
 //! - the sidecar refresh commits atomically with the write it rides with —
 //!   a failed write leaves the sidecar exactly as it was, so a re-run
-//!   recomputes the identical changed-key set (no half-committed digest).
+//!   recomputes the identical changed-key set (no half-committed digest);
+//! - (Phase F4) a projection change, a source column entering the
+//!   projection, a model-definition edit (holding the projection fixed),
+//!   and a hand-corrupted stamp all invalidate the affected partition —
+//!   degrading to the SAME whole-table delta an absent sidecar produces,
+//!   never a narrower comparison and never a silent skip — and a
+//!   mid-sequence invalidation still matches the full-refresh oracle on
+//!   every subsequent step.
 
 use smelt_backend::{Backend, BackendError, StatementGroup};
 use smelt_backend_duckdb::DuckDbBackend;
@@ -31,9 +38,25 @@ use smelt_logical::analysis::fingerprint::Projection;
 use smelt_runtime::maintenance_driver::{
     diff_fingerprint_sidecar_changed_keys, refresh_fingerprint_sidecar,
 };
+use std::sync::{Arc, Mutex};
+use tracing_subscriber::layer::SubscriberExt;
 
 const SOURCE_ADDRESS: &str = "smelt.sources.dim_users";
 const SOURCE_TABLE: &str = "main.dim_users";
+
+/// A placeholder "consuming model's SQL text" — these tests aren't about
+/// any real model body, just a stable value threaded through as
+/// `model_sql` (`compute_fingerprint_sidecar_stamp`'s model-definition-
+/// provenance component) for every diff/refresh that isn't specifically
+/// exercising a model-definition edit.
+const MODEL_SQL: &str = "SELECT id, name, tier FROM smelt.sources.dim_users";
+
+/// A second, distinct model SQL text — used by the invalidation tests below
+/// to simulate a model-definition edit that leaves the P4 projection
+/// unchanged (so `projection_identity` alone cannot detect it; only the
+/// stamp's model-hash component can).
+const EDITED_MODEL_SQL: &str =
+    "SELECT id, name, tier FROM smelt.sources.dim_users WHERE tier IS NOT NULL";
 
 fn projection() -> Projection {
     Projection::Columns(
@@ -78,7 +101,11 @@ fn single_column_projection() -> Projection {
     Projection::Columns(["tier".to_string()].into_iter().collect())
 }
 
-async fn diff_with_projection(backend: &DuckDbBackend, projection: &Projection) -> Vec<String> {
+async fn diff_with_projection_and_model(
+    backend: &DuckDbBackend,
+    projection: &Projection,
+    model_sql: &str,
+) -> Vec<String> {
     diff_fingerprint_sidecar_changed_keys(
         backend,
         "main",
@@ -87,18 +114,24 @@ async fn diff_with_projection(backend: &DuckDbBackend, projection: &Projection) 
         &["id".to_string()],
         projection,
         &all_columns(),
+        model_sql,
     )
     .await
     .expect("diff")
+}
+
+async fn diff_with_projection(backend: &DuckDbBackend, projection: &Projection) -> Vec<String> {
+    diff_with_projection_and_model(backend, projection, MODEL_SQL).await
 }
 
 async fn diff(backend: &DuckDbBackend) -> Vec<String> {
     diff_with_projection(backend, &projection()).await
 }
 
-async fn refresh_with_projection(
+async fn refresh_with_projection_and_model(
     backend: &DuckDbBackend,
     projection: &Projection,
+    model_sql: &str,
     write_group: &StatementGroup,
 ) -> Result<(), BackendError> {
     refresh_fingerprint_sidecar(
@@ -109,9 +142,18 @@ async fn refresh_with_projection(
         &["id".to_string()],
         projection,
         &all_columns(),
+        model_sql,
         write_group,
     )
     .await
+}
+
+async fn refresh_with_projection(
+    backend: &DuckDbBackend,
+    projection: &Projection,
+    write_group: &StatementGroup,
+) -> Result<(), BackendError> {
+    refresh_with_projection_and_model(backend, projection, MODEL_SQL, write_group).await
 }
 
 async fn refresh(
@@ -715,6 +757,390 @@ async fn single_column_projection_survives_a_null_transition_and_matches_the_ora
         &maintained_select,
         oracle_sql,
         "after restoring a real value",
+    )
+    .await;
+}
+
+// ── Phase F4: sidecar invalidation ──────────────────────────────────────
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase F4
+// — "Sidecar invalidation")
+//
+// A stale-stamped partition must always degrade to the SAME whole-table
+// delta an absent sidecar produces above — never a narrower, partially-
+// trusted comparison, and never a silent skip. The tests below drive every
+// invalidation trigger `compute_fingerprint_sidecar_stamp` covers
+// (projection identity, a source column entering/not entering the
+// projection, model-definition provenance, and a hand-corrupted stamp) and
+// assert the degradation target directly: the changed-key set widens to
+// cover every currently-existing source row, exactly like a first run
+// against a never-populated sidecar.
+
+/// A minimal `tracing_subscriber::Layer` capturing every WARN-level event's
+/// formatted `message` field into a shared buffer — used only by the
+/// corrupted-stamp test below to prove the mismatch is logged loudly
+/// (`tracing::warn!`), never silently swallowed.
+struct CapturingLayer {
+    messages: Arc<Mutex<Vec<String>>>,
+}
+
+impl<S> tracing_subscriber::Layer<S> for CapturingLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        if *event.metadata().level() != tracing::Level::WARN {
+            return;
+        }
+        struct MessageVisitor<'a>(&'a mut String);
+        impl tracing::field::Visit for MessageVisitor<'_> {
+            fn record_debug(&mut self, field: &tracing::field::Field, value: &dyn std::fmt::Debug) {
+                if field.name() == "message" {
+                    use std::fmt::Write;
+                    let _ = write!(self.0, "{value:?}");
+                }
+            }
+        }
+        let mut message = String::new();
+        event.record(&mut MessageVisitor(&mut message));
+        self.messages
+            .lock()
+            .expect("capture mutex poisoned")
+            .push(message);
+    }
+}
+
+#[tokio::test]
+async fn changing_the_projection_yields_a_fresh_partition_and_a_whole_table_delta() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 50).await;
+
+    // Establish a baseline under the original 2-column projection.
+    diff(&backend).await;
+    refresh(&backend, &empty_write_group())
+        .await
+        .expect("populate baseline sidecar partition");
+    let changed_unchanged_projection = diff(&backend).await;
+    assert!(
+        changed_unchanged_projection.is_empty(),
+        "an unchanged source under the SAME projection must report no changes: \
+         {changed_unchanged_projection:?}"
+    );
+
+    // A projection change (the model now digests only `tier`, dropping
+    // `name`) lands in a fresh, unpopulated partition by construction — the
+    // next diff under the NEW projection must see every row as changed,
+    // exactly like the very first diff against an absent sidecar.
+    let new_projection = single_column_projection();
+    let changed_new_projection = diff_with_projection(&backend, &new_projection).await;
+    assert_eq!(
+        changed_new_projection.len(),
+        50,
+        "a projection change must yield the whole-table delta under the new projection's \
+         fresh partition, never a partial or empty comparison against the old partition's data"
+    );
+
+    refresh_with_projection(&backend, &new_projection, &empty_write_group())
+        .await
+        .expect("the sidecar rebuilds under the new projection");
+    let changed_after_rebuild = diff_with_projection(&backend, &new_projection).await;
+    assert!(
+        changed_after_rebuild.is_empty(),
+        "once rebuilt under the new projection, an unchanged source reports no changes: \
+         {changed_after_rebuild:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_source_column_entering_the_projection_invalidates_one_that_doesnt_does_not() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 20).await;
+    diff(&backend).await;
+    refresh(&backend, &empty_write_group())
+        .await
+        .expect("populate baseline sidecar partition (name, tier)");
+
+    // A projection widened to also cover `notes` (previously OUTSIDE the
+    // projection) is a different `projection_identity` — a fresh partition,
+    // whole-table delta.
+    let widened_projection = Projection::Columns(
+        ["name".to_string(), "tier".to_string(), "notes".to_string()]
+            .into_iter()
+            .collect(),
+    );
+    let changed_widened = diff_with_projection(&backend, &widened_projection).await;
+    assert_eq!(
+        changed_widened.len(),
+        20,
+        "a source column entering the P4 projection must invalidate: the widened projection's \
+         fresh partition reports every row as changed"
+    );
+
+    // A projection that does NOT change at all must still report no
+    // changes against the unmodified baseline partition — proving the
+    // widened-projection result above is really about the projection
+    // change, not some unconditional every-diff-is-a-miss bug.
+    let changed_same_projection = diff(&backend).await;
+    assert!(
+        changed_same_projection.is_empty(),
+        "a projection that did not change must not invalidate: {changed_same_projection:?}"
+    );
+}
+
+/// The trigger that CANNOT be detected by `projection_identity` alone: two
+/// different model SQL texts can resolve to the identical P4 projection
+/// (the P4 derivation over `MODEL_SQL` and `EDITED_MODEL_SQL` — both select
+/// `name`/`tier` — is not re-run by this test; it stands in for "the P4
+/// derivation happened to land on the same column set both times"). Only
+/// the stamp's model-hash component
+/// (`compute_fingerprint_sidecar_stamp`) can catch this — proving the
+/// model-definition-provenance component is load-bearing, not decorative.
+#[tokio::test]
+async fn a_model_definition_edit_holding_the_projection_fixed_invalidates_the_whole_partition() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 40).await;
+
+    // Baseline under MODEL_SQL.
+    diff_with_projection_and_model(&backend, &projection(), MODEL_SQL).await;
+    refresh_with_projection_and_model(&backend, &projection(), MODEL_SQL, &empty_write_group())
+        .await
+        .expect("populate baseline sidecar partition under MODEL_SQL");
+    let changed_same_model =
+        diff_with_projection_and_model(&backend, &projection(), MODEL_SQL).await;
+    assert!(
+        changed_same_model.is_empty(),
+        "an unchanged source under the SAME model definition must report no changes: \
+         {changed_same_model:?}"
+    );
+
+    // The model recipe is edited — the SAME projection identity
+    // (`cols:name,tier`), but a different model SQL text. Not a single
+    // source row's content changed, yet the diff must report EVERY row as
+    // changed: a stale partition never narrows to "just the rows I can
+    // prove are affected", it always widens to everything.
+    let changed_after_edit =
+        diff_with_projection_and_model(&backend, &projection(), EDITED_MODEL_SQL).await;
+    assert_eq!(
+        changed_after_edit.len(),
+        40,
+        "a model-definition edit holding the projection fixed must invalidate the WHOLE \
+         partition (widen-never-narrow), even though no source content changed: \
+         {changed_after_edit:?}"
+    );
+
+    // Refreshing under the edited model SQL re-stamps every row, so a
+    // subsequent diff under the SAME edited model reports no changes.
+    refresh_with_projection_and_model(
+        &backend,
+        &projection(),
+        EDITED_MODEL_SQL,
+        &empty_write_group(),
+    )
+    .await
+    .expect("the sidecar self-heals under the edited model definition");
+    let changed_after_rebuild =
+        diff_with_projection_and_model(&backend, &projection(), EDITED_MODEL_SQL).await;
+    assert!(
+        changed_after_rebuild.is_empty(),
+        "once rebuilt under the edited model definition, an unchanged source reports no \
+         changes: {changed_after_rebuild:?}"
+    );
+}
+
+/// A hand-corrupted stamp (simulating on-disk corruption, or a stamp
+/// written by a build with a different `FINGERPRINT_SIDECAR_DIGEST_VERSION`)
+/// must never be trusted: the diff treats the corrupted rows as absent
+/// (whole-table delta) and logs loudly — `tracing::warn!`, never a silent
+/// skip, never a `println!` (the workspace's `no_println_in_libraries`
+/// gate would catch a `println!` in production code, but the "loud, not
+/// silent" contract itself is asserted here, directly).
+#[tokio::test]
+async fn a_hand_corrupted_stamp_is_detected_treated_as_absent_and_logged_loudly() {
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 15).await;
+    diff(&backend).await;
+    refresh(&backend, &empty_write_group())
+        .await
+        .expect("populate baseline sidecar partition");
+
+    // Hand-corrupt every stored stamp directly — simulating disk
+    // corruption or a stamp written under a stale digest-version/model
+    // hash, bypassing the normal refresh path entirely.
+    backend
+        .execute_sql("UPDATE main._smelt_fingerprint_sidecar SET stamp = 'corrupted-garbage-stamp'")
+        .await
+        .expect("hand-corrupt the stored stamp");
+
+    let messages = Arc::new(Mutex::new(Vec::<String>::new()));
+    let layer = CapturingLayer {
+        messages: messages.clone(),
+    };
+    let subscriber = tracing_subscriber::registry().with(layer);
+    let _guard = tracing::subscriber::set_default(subscriber);
+
+    let changed = diff(&backend).await;
+
+    drop(_guard);
+    let captured = messages.lock().expect("capture mutex poisoned").clone();
+
+    assert_eq!(
+        changed.len(),
+        15,
+        "a corrupted stamp must be treated as absent: the diff must report every current \
+         source row as changed, the SAME whole-table delta an absent sidecar produces — never \
+         a narrower comparison and never a silent skip: {changed:?}"
+    );
+    assert!(
+        captured
+            .iter()
+            .any(|m| m.contains("stamp mismatch") || m.contains("stamp")),
+        "a corrupted/mismatched stamp must be logged loudly (tracing::warn!), never silently \
+         trusted or silently skipped; captured WARN messages: {captured:?}"
+    );
+}
+
+/// The conformance leg the Phase F4 TDD list names explicitly: "an
+/// invalidation mid-run-sequence (recipe edit) still matches the
+/// full-refresh oracle on every subsequent step." Mirrors the multi-run
+/// conformance shape above, but inserts a model-definition edit mid-
+/// sequence (holding the projection fixed) — the changed-key set widens to
+/// the whole table at that step, and applying it (even though it is a
+/// strict superset of what actually changed) must still leave the
+/// maintained table multiset-equal to the from-scratch oracle.
+#[tokio::test]
+async fn sidecar_fed_run_sequence_survives_a_mid_sequence_model_recipe_edit_and_matches_the_oracle()
+{
+    let temp_dir = tempfile::TempDir::new().unwrap();
+    let backend = DuckDbBackend::new(&temp_dir.path().join("test.duckdb"), "main")
+        .await
+        .unwrap();
+    create_source(&backend, 25).await;
+
+    let maintained = "main.maintained_users_recipe_edit";
+    let maintained_select = format!("SELECT * FROM {maintained}");
+    let oracle_sql = "SELECT id, name, tier FROM main.dim_users";
+    let key_column = "id";
+
+    // Run 0: absent sidecar ⇒ whole-table delta ⇒ from-scratch build, under
+    // MODEL_SQL.
+    let changed = diff_with_projection_and_model(&backend, &projection(), MODEL_SQL).await;
+    assert_eq!(
+        changed.len(),
+        25,
+        "run 0: every row must be seen as changed"
+    );
+    backend
+        .execute_sql(&format!("CREATE TABLE {maintained} AS {oracle_sql}"))
+        .await
+        .expect("run 0: initial full build of the maintained table");
+    refresh_with_projection_and_model(&backend, &projection(), MODEL_SQL, &empty_write_group())
+        .await
+        .expect("run 0: populate sidecar baseline");
+    assert_multiset_equal(
+        &backend,
+        &maintained_select,
+        oracle_sql,
+        "after run 0 (initial build)",
+    )
+    .await;
+
+    // Run 1: an ordinary in-projection edit, still under MODEL_SQL.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'platinum' WHERE id IN (2, 7)")
+        .await
+        .expect("run 1: apply edit");
+    let changed = diff_with_projection_and_model(&backend, &projection(), MODEL_SQL).await;
+    let mut sorted = changed.clone();
+    sorted.sort();
+    assert_eq!(
+        sorted,
+        vec!["2".to_string(), "7".to_string()],
+        "run 1: an ordinary edit under an unchanged recipe must detect exactly the edited keys"
+    );
+    apply_changed_keys(&backend, maintained, key_column, oracle_sql, &changed).await;
+    refresh_with_projection_and_model(&backend, &projection(), MODEL_SQL, &empty_write_group())
+        .await
+        .expect("run 1: refresh sidecar");
+    assert_multiset_equal(
+        &backend,
+        &maintained_select,
+        oracle_sql,
+        "after run 1 (ordinary edit)",
+    )
+    .await;
+
+    // Run 2 — THE recipe-edit step: the model definition changes (holding
+    // the projection fixed), no source content changes at all. The
+    // widen-never-narrow diff must report EVERY row as changed; applying
+    // that (a strict superset of the empty real delta) must still leave
+    // the maintained table exactly equal to the oracle.
+    let changed = diff_with_projection_and_model(&backend, &projection(), EDITED_MODEL_SQL).await;
+    assert_eq!(
+        changed.len(),
+        25,
+        "run 2: a mid-sequence model-definition edit must widen to the whole table, even \
+         though no source content changed: {changed:?}"
+    );
+    apply_changed_keys(&backend, maintained, key_column, oracle_sql, &changed).await;
+    refresh_with_projection_and_model(
+        &backend,
+        &projection(),
+        EDITED_MODEL_SQL,
+        &empty_write_group(),
+    )
+    .await
+    .expect("run 2: refresh sidecar under the edited recipe");
+    assert_multiset_equal(
+        &backend,
+        &maintained_select,
+        oracle_sql,
+        "after run 2 (the mid-sequence recipe-edit invalidation step)",
+    )
+    .await;
+
+    // Run 3: back to an ordinary in-projection edit, now under
+    // EDITED_MODEL_SQL — proving the sidecar is fully usable again after
+    // the recipe-edit invalidation, not permanently wedged.
+    backend
+        .execute_sql("UPDATE main.dim_users SET tier = 'silver' WHERE id = 12")
+        .await
+        .expect("run 3: apply edit");
+    let changed = diff_with_projection_and_model(&backend, &projection(), EDITED_MODEL_SQL).await;
+    assert_eq!(
+        changed,
+        vec!["12".to_string()],
+        "run 3: after the recipe-edit invalidation is absorbed, the sidecar must go back to \
+         detecting exactly the edited keys, not the whole table again: {changed:?}"
+    );
+    apply_changed_keys(&backend, maintained, key_column, oracle_sql, &changed).await;
+    refresh_with_projection_and_model(
+        &backend,
+        &projection(),
+        EDITED_MODEL_SQL,
+        &empty_write_group(),
+    )
+    .await
+    .expect("run 3: refresh sidecar");
+    assert_multiset_equal(
+        &backend,
+        &maintained_select,
+        oracle_sql,
+        "after run 3 (back to steady state post-invalidation)",
     )
     .await;
 }
