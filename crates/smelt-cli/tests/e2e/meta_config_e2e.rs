@@ -22,10 +22,11 @@
 //! the same loader evaluation end-to-end on DuckDB without depending on that
 //! orthogonal defect.
 //!
-//! The `examples/meta_config/` workspace itself stays on the `example_builds`
-//! `KNOWN_UNBUILDABLE` allow-list because its `tenants` model demonstrates a
-//! `Map<Text, …>`-schema loader, whose build-path lowering is not yet
-//! implemented (a recorded Known Divergence in `meta_config_loading.md`); this
+//! The `examples/meta_config/` workspace is NOT on the `example_builds`
+//! `KNOWN_UNBUILDABLE` allow-list: its `tenants` model demonstrates a
+//! `Map<Text, …>`-schema loader consumed via the Map API (`.entries()` /
+//! `.keys()` / `.values()`), whose build-path lowering landed in P7d
+//! (commit `ab22f990`) — the workspace builds clean end-to-end. This
 //! hermetic test is the BUG-006 loader regression target for the `List<…>` form.
 
 use std::path::{Path, PathBuf};
