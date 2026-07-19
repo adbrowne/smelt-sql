@@ -105,7 +105,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | E4 | Conformance legs: delta-restricted vs widened-scan equivalence; empty-delta no-op cascade end-to-end | done (2026-07-19) |
 | F1 | Spec diff: fingerprint sidecar (naming, storage, transactionality, invalidation; digest stance vs `output_fingerprint.md`); P4 projection derivation | done (2026-07-19) |
 | F2 | P4 fingerprint-projection derivation (fail-closed: unprojectable ⇒ full-row digest) | done (2026-07-19) |
-| F3 | T4 sidecar DDL/DML via emitters, upserted in the consuming write's transaction; external `mutable_snapshot` delta derivation | pending |
+| F3 | T4 sidecar DDL/DML via emitters, upserted in the consuming write's transaction; external `mutable_snapshot` delta derivation | done (2026-07-19) |
 | F4 | Sidecar invalidation (definition change / schema evolution ⇒ "everything changed", widen-never-narrow) | pending |
 | F5 | T3 over external sources (fixture must fail the closure proof without the RI declaration — the proof must discriminate) | pending |
 | G1 | Conditional variants in per-cell technique choice (first-build admit-not-prefer; bakeoff stays deferred) | pending |
