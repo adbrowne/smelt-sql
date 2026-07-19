@@ -1,8 +1,16 @@
 //! TDD tests for Phase 2: smelt.check diagnostic detection.
 //! - CheckHasTestClause: a smelt.check with PASSING/EXPECT yields a diagnostic
 //! - CteRefOutsideTest: a `#` ref inside a smelt.check body yields CteRefOutsideTest
+//!
+//! Also pins the diagnostic *pairing* (fail-loud discipline, architecture.md
+//! §"Fail-loud discipline") at the two `error`-classified `DataType::Unknown`
+//! census sites: a construction site that degrades to `Unknown` must never
+//! fire without its diagnostic. See `.claude/unknown-census.toml`.
 
-use smelt_db::{file_diagnostics, Database, DiagnosticCode, SourceFile, Workspace};
+use smelt_db::{
+    file_diagnostics, typed_model_schema, Database, DiagnosticCode, SourceFile, Workspace,
+};
+use smelt_types::DataType;
 use std::path::PathBuf;
 
 fn build_db_single(model_path: PathBuf, sql: &str) -> (Database, Workspace, SourceFile) {
@@ -153,5 +161,128 @@ fn well_formed_check_no_diagnostics() {
     assert!(
         bad_diags.is_empty(),
         "well-formed smelt.check should produce no CheckHasTestClause or CteRefOutsideTest; got: {bad_diags:#?}"
+    );
+}
+
+/// Mixed-tz timestamp subtraction (naive `TIMESTAMP` minus tz-aware
+/// `TIMESTAMPTZ`) must degrade the column's inferred type to `Unknown` *and*
+/// emit a `TypeMismatch` diagnostic at the operator — the pairing, not just
+/// each half in isolation. Pins `.claude/unknown-census.toml`'s
+/// `binary.rs` mixed-tz-arithmetic site.
+#[test]
+fn mixed_tz_subtraction_unknown_is_paired_with_type_mismatch() {
+    let model_path = PathBuf::from("/fake/project/models/mixed_tz.sql");
+    let sql = "SELECT (TIMESTAMP '2020-01-01 00:00:00' - TIMESTAMPTZ '2020-01-01 00:00:00+00') AS ts_diff";
+
+    let (db, ws, sf) = build_db_single(model_path, sql);
+
+    let schema = typed_model_schema(&db, ws, sf);
+    let ts_diff = schema
+        .columns
+        .iter()
+        .find(|c| c.name == "ts_diff")
+        .expect("expected a ts_diff column in the inferred schema");
+    let data_type = ts_diff
+        .data_type
+        .as_ref()
+        .map(|tc| tc.data_type.clone())
+        .expect("ts_diff column should have an inferred type");
+    assert!(
+        matches!(data_type, DataType::Unknown(_)),
+        "expected mixed-tz timestamp subtraction to infer as Unknown, got: {data_type:?}"
+    );
+
+    let diags = file_diagnostics(&db, ws, sf);
+    let type_mismatch = diags
+        .iter()
+        .find(|d| d.code == Some(DiagnosticCode::TypeMismatch));
+    assert!(
+        type_mismatch.is_some(),
+        "expected a TypeMismatch diagnostic paired with the Unknown inference for mixed-tz \
+         timestamp subtraction; got: {diags:#?}"
+    );
+
+    // The diagnostic must land on the offending `-` operator, not just
+    // anywhere in the file — the range is the single-character operator
+    // token span (`check_mixed_tz_arithmetic_diagnostics` uses
+    // `BinaryExpr::operator_token_range`).
+    let op_offset = sql
+        .find(" - ")
+        .expect("fixture SQL should contain the mixed-tz subtraction operator")
+        + 1;
+    let range = type_mismatch.expect("checked above").range;
+    let expected_start: u32 = op_offset as u32;
+    assert_eq!(
+        u32::from(range.start()),
+        expected_start,
+        "expected TypeMismatch diagnostic range to start at the `-` operator (offset \
+         {expected_start}), got range {range:?} in SQL: {sql}"
+    );
+    assert_eq!(
+        u32::from(range.end()),
+        expected_start + 1,
+        "expected TypeMismatch diagnostic range to span exactly the `-` operator token, got \
+         range {range:?} in SQL: {sql}"
+    );
+}
+
+/// A non-binary `COLLATE` (e.g. `COLLATE NOCASE`) must degrade the operand's
+/// inferred type to `Unknown` *and* emit a `NonPortableCollation` diagnostic
+/// on the `COLLATE` clause — the pairing, not just each half in isolation.
+/// Pins `.claude/unknown-census.toml`'s `collation.rs` non-binary-collate site.
+#[test]
+fn non_binary_collate_unknown_is_paired_with_non_portable_collation() {
+    let model_path = PathBuf::from("/fake/project/models/bad_collation.sql");
+    let sql = "SELECT 'foo' COLLATE NOCASE AS bad_collation";
+
+    let (db, ws, sf) = build_db_single(model_path, sql);
+
+    let schema = typed_model_schema(&db, ws, sf);
+    let col = schema
+        .columns
+        .iter()
+        .find(|c| c.name == "bad_collation")
+        .expect("expected a bad_collation column in the inferred schema");
+    let data_type = col
+        .data_type
+        .as_ref()
+        .map(|tc| tc.data_type.clone())
+        .expect("bad_collation column should have an inferred type");
+    assert!(
+        matches!(data_type, DataType::Unknown(_)),
+        "expected non-binary COLLATE to infer as Unknown, got: {data_type:?}"
+    );
+
+    let diags = file_diagnostics(&db, ws, sf);
+    let non_portable = diags
+        .iter()
+        .find(|d| d.code == Some(DiagnosticCode::NonPortableCollation));
+    assert!(
+        non_portable.is_some(),
+        "expected a NonPortableCollation diagnostic paired with the Unknown inference for \
+         non-binary COLLATE; got: {diags:#?}"
+    );
+
+    // The diagnostic must land on the `COLLATE` clause span
+    // (`check_collation_diagnostics` uses `CollateExpr::syntax().text_range()`,
+    // covering the whole `<expr> COLLATE <name>` clause), not just anywhere
+    // in the file.
+    let clause = "'foo' COLLATE NOCASE";
+    let clause_start = sql
+        .find(clause)
+        .expect("fixture SQL should contain the COLLATE clause") as u32;
+    let clause_end = clause_start + clause.len() as u32;
+    let range = non_portable.expect("checked above").range;
+    assert_eq!(
+        u32::from(range.start()),
+        clause_start,
+        "expected NonPortableCollation diagnostic range to start at the COLLATE clause \
+         (offset {clause_start}), got range {range:?} in SQL: {sql}"
+    );
+    assert_eq!(
+        u32::from(range.end()),
+        clause_end,
+        "expected NonPortableCollation diagnostic range to end at the COLLATE clause \
+         (offset {clause_end}), got range {range:?} in SQL: {sql}"
     );
 }
