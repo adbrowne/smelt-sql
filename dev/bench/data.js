@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784455963471,
+  "lastUpdate": 1784455966162,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -94,6 +94,37 @@ window.BENCHMARK_DATA = {
             "name": "Parser / Batch (1000)",
             "value": 14.568247,
             "unit": "ms"
+          }
+        ]
+      }
+    ],
+    "Smelt Throughput Benchmarks": [
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "noreply@github.com",
+            "name": "GitHub",
+            "username": "web-flow"
+          },
+          "distinct": true,
+          "id": "a3e4dadd263d1b59f8ace77e87814a5bea4149ad",
+          "message": "Merge pull request #163 from adbrowne/spec-incremental-models-consolidation\n\nConsolidate maintenance_plan/batched/keyed/versioned specs into incremental_models.md",
+          "timestamp": "2026-07-19T20:08:01+10:00",
+          "tree_id": "e5116b01c604321477892f46887add01531ca9d5",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/a3e4dadd263d1b59f8ace77e87814a5bea4149ad"
+        },
+        "date": 1784455965461,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 23.662833283922218,
+            "unit": "MB/s"
           }
         ]
       }
