@@ -53,7 +53,9 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
   env interpolation is a W4 dependency) → W4 (Spark) → W3 (adoption surface) → W5 (release
   engineering) → W6 (docs, documents W2/W3 surfaces — blocked-not-speculative if a surface
   hasn't landed) → W7 (`smelt bakeoff`; builds on W2's `ExecuteRequest`/per-target state
-  rewrite, so it must not start before W2 is done — its execution prompt enforces this).
+  rewrite, so it must not start before W2 is done — its execution prompt enforces this) →
+  W8 (composed-axes follow-up debt; needs only the D2 pre-flight merge, registered last as
+  lowest-priority).
 - Standing gates every phase keeps green: `execute_parity`, `statement_parity`,
   `maintenance_conformance`, `walk_coverage`, the hardening/census/registry ratchets, and the
   parser/type conformance suites. Never lowered without a reviewer sign-off note.
@@ -71,6 +73,7 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 | [`docs/plans/20260719-prod-w5-release-eng.md`](20260719-prod-w5-release-eng.md) | **W5 Release engineering** — UI hardening (localhost-default bind, CORS), CHANGELOG + RELEASING checklist, SECURITY.md, macOS-Intel wheel claim fix, Docker image, Homebrew formula, crates-publishing decision brief + `publish = false` markers. | pending |
 | [`docs/plans/20260719-prod-w6-docs.md`](20260719-prod-w6-docs.md) | **W6 Production docs** — deployment guide, orchestration (cron/Airflow) guide, state & recovery reference, per-command CLI reference, getting-started refresh around `smelt init`. Documents W2/W3 surfaces; phases block rather than speculate. | pending |
 | [`docs/plans/20260719-prod-w7-bakeoff.md`](20260719-prod-w7-bakeoff.md) | **W7 `smelt bakeoff`** — un-defers ROADMAP §10: wire the choice ladder into the runtime (frontmatter `technique:` pins honoured at execution), `ExecuteRequest.technique_overrides` + scratch-as-synthetic-target seam, the measurement CLI over replayed real-data windows, emit-only `--pin`. Decisions B1–B4 recorded in the sub-plan. **Runs after W2** (builds on per-target state + the rewritten `execute.rs`); registered last so the loop reaches it post-W6. | pending |
+| [`docs/plans/20260719-prod-w8-composed-axes-followups.md`](20260719-prod-w8-composed-axes-followups.md) | **W8 Composed-axes follow-ups** — the deferred-item sweep from `20260715-composed-axes-conditional-maintenance.md`: `batched:` sub-block retirement (top-level `safety_overrides:`, fix-it refusal, pre-cut spelling rename), the generative suppressed-MERGE conformance leg (the C4 deferred item), and the recursive composed-driving-source case in `build_forward_graph` (its decision 9). Remaining source-plan deferrals are recorded there with tracked homes. **Requires PR #163 merged (D2 pre-flight)**; independent of W2–W7, registered last as lower-priority debt. | pending |
 
 ## Scaffolding queue (human-gated — NOT registered until scaffolded)
 
