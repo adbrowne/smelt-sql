@@ -65,7 +65,7 @@ since 2026-07-09.
 | 6     | done    | refactor(planner): consume smelt-logical analysis modules, delete duplicated copies (part 1) | 2026-07-19 |
 | 7     | done    | refactor(planner): consume smelt-logical rules/graph/lowering, delete duplicated copies (part 2) | 2026-07-19 |
 | 8     | done    | perf(bench): profile cold-Salsa 2000-model regression; findings + decision brief | 2026-07-19 |
-| 9     | pending |        |      |
+| 9     | blocked | (see Blocked phases) | 2026-07-19 |
 
 ---
 
@@ -343,6 +343,56 @@ if it documents the flag (timeless wording).
 ## Blocked phases
 
 (Append dated entries here; never stop-the-line.)
+
+**2026-07-19 — Phase 9.** Blocked: the phase's premise is stale on this branch and
+implementing it as literally written requires a new, unspecified design decision.
+
+- **Part (a)** (`smelt build --verbose` should show compiled SQL, "today: no extra
+  output") is already fully implemented and pinned by tests: `CliReporter::model_compiled`
+  (`crates/smelt-cli/src/reporter.rs:68-80`) prints compiled SQL to stdout when `--verbose`
+  is set, wired through `RunReporter` (`crates/smelt-runtime/src/reporter.rs:52,74`) from
+  `execute.rs` (call sites at lines 381, 403, 405, 1311, 1604). Pinned by
+  `crates/smelt-cli/tests/e2e/verbose_flag.rs` (3 passing tests). This was shipped by an
+  earlier, unrelated plan (`docs/plans/20260502-smelt-loop-findings.md` Phase 4 / TB-1),
+  an ancestor of this branch's HEAD. Re-verified empirically: `smelt build --verbose`
+  against `examples/timeseries` and `examples/retail_analytics` prints compiled SQL per
+  model. Nothing to do here.
+- **Part (b)**'s literal target — "`materialization: test` files with a boolean-SELECT
+  body" being silently skipped — no longer exists as a reachable code path.
+  `materialization: test` was removed and is now a hard parse error
+  (`crates/smelt-core/src/config.rs:168-188`, message: "'test' has been removed — use
+  `smelt.test` declarations instead"), per the later architectural decision recorded in
+  `docs/specs/testing.md:239` ("Modelling a test as a `materialization` value ... was
+  rejected") and `docs/plans/20260620-w8-config.md` P2. The plan phrase describes the
+  pre-migration legacy convention that Phase 9 itself post-dates.
+  - The `warn!` site the plan's wording evokes (`crates/smelt-cli/src/commands/test.rs:503-507`,
+    "SKIP ... (no smelt.test declarations found)") is unreachable dead code: it only runs
+    inside a loop over `test_models`, which is pre-filtered by `ModelFile::is_test()`
+    (`crates/smelt-core/src/discovery.rs:66-73`, true iff a `smelt.test` AST node is
+    present) — so the inner re-check can never observe zero declarations.
+  - The actual silent-skip site is earlier, at `crates/smelt-cli/src/commands/test.rs:76`:
+    a file with a plain boolean-SELECT body and no `smelt.test`/`smelt.check` declaration
+    fails both `is_test()` and `is_check()`, falls into `regular_models`, and is built as
+    an ordinary model with zero mention in `smelt test` output.
+  - **Design decision not answered by the plan or spec**: implementing a "discovered but
+    skipped" notice here requires inventing a detection heuristic for "this file looks
+    like a legacy boolean-SELECT test" (e.g. exactly one boolean-typed top-level output
+    column, file located under a `tests/` path, absence of any `smelt.test`/`smelt.check`
+    declaration) — no such classifier exists anywhere in the codebase today, and
+    `docs/specs/testing.md` does not define one (by design, since the convention was
+    rejected). Candidate options for a human to pick between:
+    1. Implement the heuristic as sketched above and add the stdout notice at
+       `test.rs:76`, scoped to files under a `tests/` directory only (avoids false
+       positives on ordinary boolean-column models elsewhere in the project).
+    2. Drop 9(b) entirely — the legacy convention is gone, so "silently skipped" is
+       arguably no longer a real footgun (the file just builds as a normal model, which
+       is correct default behavior for anything outside `tests/`), and the dead `warn!`
+       at `test.rs:503-507` can be deleted as unreachable cleanup instead.
+    3. Narrow the notice to a different, still-live silent-skip case if one exists
+       (needs a fresh scan — not confirmed during this phase's pre-flight).
+  - Recommendation: option 2 (drop 9(b), delete the dead `warn!`) unless a human confirms
+    the "boolean-SELECT file under `tests/`" heuristic is worth the false-positive risk.
+  - Part (a) needs no further action; this block is solely about 9(b)'s scope.
 
 ## Bench findings
 
