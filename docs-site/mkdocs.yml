@@ -122,6 +122,7 @@ nav:
     - Sources Configuration: reference/sources-yml.md
     - Timeseries: reference/timeseries.md
     - Key-Grain Patterns: reference/cumulative-aggregate.md
+    - State & Recovery: reference/state.md
     - Language Spec: reference/language.md
   - Developing smelt:
     - Architecture: developing/architecture.md
