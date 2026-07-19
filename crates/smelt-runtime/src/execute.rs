@@ -18,6 +18,7 @@ use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, Utc};
+use futures::stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
@@ -87,6 +88,192 @@ pub trait BackendFactory: Send + Sync {
         target_config: &'a smelt_core::config::Target,
         project_dir: &'a Path,
     ) -> BackendFuture<'a>;
+}
+
+/// Per-model result of one execution unit dispatched by the Phase 5
+/// wavefront scheduler in [`execute_project`]. `Completed` carries every
+/// piece of run-level state the pre-Phase-5 sequential loop mutated
+/// in-place (`manifest`, `check_results`, `skip_set`, row count) so the
+/// scheduler can merge it deterministically once this model's turn comes up
+/// in `execution_order` sequence.
+enum ModelOutcome {
+    Completed(ModelSuccess),
+    Cancelled,
+}
+
+struct ModelSuccess {
+    manifest_entries: HashMap<String, ModelRunRecord>,
+    check_results: Vec<CheckOutcome>,
+    skip_set: HashSet<String>,
+    rows: usize,
+}
+
+/// A single buffered [`RunReporter`] callback, recorded by [`EventSink`]
+/// during one model's (possibly concurrent) execution and replayed onto the
+/// real reporter later, strictly in `execution_order` sequence
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 5: "Buffer per-model
+/// reporter events and flush in `execution_order` sequence").
+enum ReporterEvent {
+    ModelStarted {
+        model_index: usize,
+        models_total: usize,
+    },
+    ModelCompiled {
+        sql: String,
+    },
+    MaintenanceStatements {
+        chunk: Option<crate::reporter::ChunkInfo>,
+        group: smelt_logical::maintenance::emit::StatementGroup,
+    },
+    BatchCompleted {
+        batch_index: usize,
+        batches_total: usize,
+        row_count: usize,
+        duration: StdDuration,
+    },
+    ModelCompleted {
+        row_count: usize,
+        duration: StdDuration,
+    },
+    CheckResult {
+        check: String,
+        status: String,
+        row_count: usize,
+    },
+}
+
+/// Records [`RunReporter`] callbacks made during one model's execution
+/// instead of forwarding them immediately — the wavefront scheduler may run
+/// several models' execution units concurrently, and forwarding callbacks
+/// as they happen would interleave them nondeterministically. Implements
+/// [`RunReporter`] itself so the (otherwise unmodified) per-model execution
+/// logic can call it under the shadowed name `reporter` with no rewriting.
+#[derive(Default)]
+struct EventSink {
+    events: std::sync::Mutex<Vec<ReporterEvent>>,
+}
+
+impl EventSink {
+    /// Replay every buffered event onto `reporter`, in the order recorded.
+    fn replay(&self, reporter: &dyn RunReporter, run_id: &str, model: &str) {
+        for event in self.events.lock().expect("EventSink mutex poisoned").iter() {
+            match event {
+                ReporterEvent::ModelStarted {
+                    model_index,
+                    models_total,
+                } => reporter.model_started(run_id, model, *model_index, *models_total),
+                ReporterEvent::ModelCompiled { sql } => reporter.model_compiled(run_id, model, sql),
+                ReporterEvent::MaintenanceStatements { chunk, group } => {
+                    reporter.maintenance_statements(run_id, model, chunk.as_ref(), group)
+                }
+                ReporterEvent::BatchCompleted {
+                    batch_index,
+                    batches_total,
+                    row_count,
+                    duration,
+                } => reporter.batch_completed(
+                    run_id,
+                    model,
+                    *batch_index,
+                    *batches_total,
+                    *row_count,
+                    *duration,
+                ),
+                ReporterEvent::ModelCompleted {
+                    row_count,
+                    duration,
+                } => reporter.model_completed(run_id, model, *row_count, *duration),
+                ReporterEvent::CheckResult {
+                    check,
+                    status,
+                    row_count,
+                } => reporter.check_result(run_id, check, status, *row_count),
+            }
+        }
+    }
+}
+
+impl RunReporter for EventSink {
+    fn model_started(&self, _run_id: &str, _model: &str, model_index: usize, models_total: usize) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(ReporterEvent::ModelStarted {
+                model_index,
+                models_total,
+            });
+    }
+
+    fn model_compiled(&self, _run_id: &str, _model: &str, sql: &str) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(ReporterEvent::ModelCompiled {
+                sql: sql.to_string(),
+            });
+    }
+
+    fn maintenance_statements(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        chunk: Option<&crate::reporter::ChunkInfo>,
+        group: &smelt_logical::maintenance::emit::StatementGroup,
+    ) {
+        self.events.lock().expect("EventSink mutex poisoned").push(
+            ReporterEvent::MaintenanceStatements {
+                chunk: chunk.cloned(),
+                group: group.clone(),
+            },
+        );
+    }
+
+    fn batch_completed(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        batch_index: usize,
+        batches_total: usize,
+        row_count: usize,
+        duration: StdDuration,
+    ) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(ReporterEvent::BatchCompleted {
+                batch_index,
+                batches_total,
+                row_count,
+                duration,
+            });
+    }
+
+    fn model_completed(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        row_count: usize,
+        duration: StdDuration,
+    ) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(ReporterEvent::ModelCompleted {
+                row_count,
+                duration,
+            });
+    }
+
+    fn check_result(&self, _run_id: &str, check: &str, status: &str, row_count: usize) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(ReporterEvent::CheckResult {
+                check: check.to_string(),
+                status: status.to_string(),
+                row_count,
+            });
+    }
 }
 
 /// Run the project end-to-end.
@@ -753,27 +940,97 @@ pub async fn execute_project(
     };
 
     let mut total_rows_overall: usize = 0;
+    let models_total = model_plans.len();
 
-    for (model_idx, plan) in model_plans.iter().enumerate() {
+    // Serializes the shared, whole-store-per-write `file_store` sections
+    // (interval store / landed-delta store / reconciliation ledger — each a
+    // single JSON blob covering every model) across concurrently executing
+    // models. Without this, two models completing in the same wave could
+    // each load-modify-save the SAME file and lose one write (a
+    // load-modify-save race, not covered by `_state_lock` — that lock is
+    // single-writer-per-*process*, not single-writer-per-in-process-task).
+    // The backend call itself is NOT covered by this lock — only the cheap
+    // local file I/O is, so it does not serialize the expensive part of a
+    // model's work.
+    let state_io_lock = tokio::sync::Mutex::new(());
+
+    // Every non-`Copy` piece of context the per-model execution unit below
+    // needs is rebound here as a reference so the `move` closure — called
+    // once per model, potentially many times concurrently in flight — can
+    // capture each one BY VALUE as a cheap `Copy` reference instead of
+    // moving the underlying owned data (which would make the closure
+    // `FnOnce`, callable only once). The per-model body keeps referring to
+    // these under their original names (`backends`, `config`, `run_id`,
+    // …) unmodified — only this rebinding needed to change.
+    let cancel = &cancel;
+    let request = &request;
+    let run_id = run_id.as_str();
+    let checks_by_model = &checks_by_model;
+    let upstream_map = &upstream_map;
+    let selected = &selected;
+    let file_store = &file_store;
+    let config = &config;
+    let target_assignments = &target_assignments;
+    let backends = &backends;
+    let compilers = &compilers;
+    let ephemeral_resolvers = &ephemeral_resolvers;
+    let source_infos = &source_infos;
+    let model_by_addr = &model_by_addr;
+    let source_timeseries = &source_timeseries;
+    let source_key_recurrence = &source_key_recurrence;
+    let upstream_schemas_for_bootstrap = &upstream_schemas_for_bootstrap;
+    let db = &db;
+    let state_io_lock = &state_io_lock;
+    let model_plans = &model_plans;
+
+    // ── Per-model execution unit ──────────────────────────────────────────
+    // Runs one model to completion (or cancellation, or failure) and returns
+    // its outcome instead of mutating shared run-level state directly —
+    // the wavefront scheduler below runs many of these concurrently (bounded
+    // by `request.jobs`) and merges outcomes back into `manifest`/
+    // `check_results`/`skip_set`/`total_rows_overall` strictly in
+    // `execution_order` sequence, one model at a time, so a concurrent
+    // scheduling never produces a nondeterministic manifest or reporter
+    // stream (`docs/plans/20260719-prod-w2-operability.md` Phase 5).
+    //
+    // `already_skip` is a snapshot of the run-level `skip_set` taken when
+    // this model's wave started — safe because a wave's members share no
+    // dependency edge with each other, and `skip_set` only ever gains
+    // entries for a check's *downstream* models (`upstream_map`-derived),
+    // so no same-wave sibling can skip-mark another.
+    let execute_one_model = move |model_idx: usize, already_skip: bool| {
+        let plan = &model_plans[model_idx];
+        async move {
+            // `sink` buffers every reporter callback this model's execution
+            // produces; the scheduler replays them onto the real `reporter` only
+            // once this model's turn comes up in `execution_order` sequence.
+            // Shadowing the outer `reporter` binding means the (unmodified)
+            // per-model logic below — inherited from the pre-Phase-5 sequential
+            // loop — calls `sink` under the name `reporter` with no further
+            // rewriting needed. The block's own `?` operator now short-circuits
+            // just THIS model's execution (returning `Err` from this async
+            // block) rather than the whole run — the scheduler treats any `Err`
+            // the same way the pre-Phase-5 loop treated a `return Err(e)`: this
+            // model failed, attributed to its own name.
+            let sink = EventSink::default();
+            let reporter: &dyn RunReporter = &sink;
+            let mut manifest_entries: HashMap<String, ModelRunRecord> = HashMap::new();
+            let mut check_results: Vec<CheckOutcome> = Vec::new();
+            let mut skip_set: HashSet<String> = HashSet::new();
+            let mut total_rows_overall: usize = 0;
+
+            let outcome: Result<ModelOutcome> = async {
         if cancel.is_cancelled() {
-            reporter.run_cancelled(&run_id);
-            return Ok(build_outcome(
-                &run_id,
-                run_start,
-                None,
-                manifest,
-                0,
-                check_results,
-            ));
+            return Ok(ModelOutcome::Cancelled);
         }
 
         // ── Skip set: skip models downstream of a failed error check ─────
-        if request.run_checks && skip_set.contains(&plan.name) {
+        if request.run_checks && already_skip {
             tracing::info!(
                 "Skipping model '{}' — downstream of a failed error-severity check",
                 plan.name
             );
-            manifest.models.insert(
+            manifest_entries.insert(
                 plan.name.clone(),
                 smelt_state::ModelRunRecord {
                     strategy: "skipped_failed_check".to_string(),
@@ -784,11 +1041,16 @@ pub async fn execute_project(
                     batch_safety: Some("skipped".to_string()),
                 },
             );
-            reporter.model_completed(&run_id, &plan.name, 0, std::time::Duration::ZERO);
-            continue;
+            reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: 0,
+            }));
         }
 
-        reporter.model_started(&run_id, &plan.name, model_idx, model_plans.len());
+        reporter.model_started(run_id, &plan.name, model_idx, models_total);
 
         let model_start = Instant::now();
         let mut total_rows = 0usize;
@@ -841,7 +1103,7 @@ pub async fn execute_project(
                             ddl_backend_for_dialect(backend.dialect(), table_format, None);
                         match check_and_migrate(
                             backend,
-                            &file_store,
+                            file_store,
                             &db_table_name,
                             &plan.sql,
                             schema,
@@ -864,11 +1126,6 @@ pub async fn execute_project(
                                 ) {
                                     Ok(should_refresh) => force_full_refresh = should_refresh,
                                     Err(e) => {
-                                        reporter.run_failed(
-                                            &run_id,
-                                            Some(&plan.name),
-                                            &e.to_string(),
-                                        );
                                         return Err(e);
                                     }
                                 }
@@ -908,14 +1165,14 @@ pub async fn execute_project(
                     crate::cumulative::execute_cumulative_aggregate(
                         backend,
                         &plan.model_file,
-                        &compilers,
+                        compilers,
                         resolver,
                         model_target,
                         schema,
                         &db_table_name,
                         &time_range,
-                        &source_timeseries,
-                        &source_key_recurrence,
+                        source_timeseries,
+                        source_key_recurrence,
                         false,
                     )
                     .await
@@ -941,7 +1198,7 @@ pub async fn execute_project(
                     crate::cumulative::classify_cumulative_sql(
                         &plan.name,
                         &clean_sql,
-                        &source_timeseries,
+                        source_timeseries,
                         model_has_timeseries,
                     )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
@@ -978,14 +1235,13 @@ pub async fn execute_project(
             let exec_result = match exec_result {
                 Ok(r) => r,
                 Err(e) => {
-                    reporter.run_failed(&run_id, Some(&plan.name), &e.to_string());
                     return Err(e);
                 }
             };
 
             total_rows = exec_result.row_count;
             total_rows_overall += exec_result.row_count;
-            manifest.models.insert(
+            manifest_entries.insert(
                 plan.name.clone(),
                 ModelRunRecord {
                     strategy: "cumulative_aggregate".to_string(),
@@ -1002,27 +1258,32 @@ pub async fn execute_project(
                     batch_safety: Some("cumulative".to_string()),
                 },
             );
-            reporter.model_completed(&run_id, &plan.name, total_rows, model_start.elapsed());
+            reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
             // ── Check seam A: cumulative arm ─────────────────────────────────
             if request.run_checks {
                 let (outcomes, to_skip) = run_model_checks(
                     &plan.name,
-                    &checks_by_model,
-                    &compilers,
-                    &backends,
-                    &target_assignments,
-                    &ephemeral_resolvers,
+                    checks_by_model,
+                    compilers,
+                    backends,
+                    target_assignments,
+                    ephemeral_resolvers,
                     config.as_ref(),
-                    &upstream_map,
-                    &selected,
+                    upstream_map,
+                    selected,
                     reporter,
-                    &run_id,
+                    run_id,
                 )
                 .await;
                 check_results.extend(outcomes);
                 skip_set.extend(to_skip);
             }
-            continue;
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: total_rows,
+            }));
         }
 
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
@@ -1149,7 +1410,7 @@ pub async fn execute_project(
                 // model's own row identity is not a single column — the
                 // batch loop below then always takes the ordinary widened
                 // scan, unchanged from before this phase.
-                let model_edges = model_edges_for(&plan.model_file, &model_by_addr);
+                let model_edges = model_edges_for(&plan.model_file, model_by_addr);
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {
@@ -1337,9 +1598,9 @@ pub async fn execute_project(
                             schema,
                             &plan.model_file,
                             &plan.name,
-                            &upstream_schemas_for_bootstrap,
+                            upstream_schemas_for_bootstrap,
                             reporter,
-                            &run_id,
+                            run_id,
                         )
                         .await?;
                     }
@@ -1347,15 +1608,7 @@ pub async fn execute_project(
 
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
-                        reporter.run_cancelled(&run_id);
-                        return Ok(build_outcome(
-                            &run_id,
-                            run_start,
-                            None,
-                            manifest,
-                            total_rows_overall,
-                            vec![],
-                        ));
+                        return Ok(ModelOutcome::Cancelled);
                     }
 
                     let batch_start_time = Instant::now();
@@ -1424,7 +1677,7 @@ pub async fn execute_project(
                         &filtered_sql,
                         resolver,
                     )?;
-                    reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
+                    reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
@@ -1593,7 +1846,7 @@ pub async fn execute_project(
                             start: partition.start.clone(),
                             end: partition.end.clone(),
                         };
-                        reporter.maintenance_statements(&run_id, &plan.name, Some(&chunk), &group);
+                        reporter.maintenance_statements(run_id, &plan.name, Some(&chunk), &group);
                         let row_count = backend
                             .get_row_count(schema, &plan.model_file.db_name_owned())
                             .await
@@ -1649,7 +1902,7 @@ pub async fn execute_project(
                                 end: partition.end.clone(),
                             };
                             reporter.maintenance_statements(
-                                &run_id,
+                                run_id,
                                 &plan.name,
                                 Some(&chunk),
                                 &group,
@@ -1680,7 +1933,7 @@ pub async fn execute_project(
 
                     let batch_duration = batch_start_time.elapsed();
                     reporter.batch_completed(
-                        &run_id,
+                        run_id,
                         &plan.name,
                         batch_idx,
                         inc_plan.batches.len(),
@@ -1702,7 +1955,7 @@ pub async fn execute_project(
                 } else {
                     format!("{:?}", resolved_strategy).to_lowercase()
                 };
-                manifest.models.insert(
+                manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
                         strategy: strategy_label,
@@ -1724,11 +1977,20 @@ pub async fn execute_project(
                 // DELETE+INSERT batch would have used) — only the physical
                 // write technique differs, so the interval store's record
                 // stays accurate regardless of which technique wrote it.
-                if let Ok(mut interval_store) = file_store.load_intervals() {
-                    let model_hash = compute_model_hash(&plan.sql);
-                    let intervals = interval_store.get_or_create(&plan.name, &model_hash);
-                    intervals.record_interval(&start_str, &end_str);
-                    let _ = file_store.save_intervals(&interval_store);
+                {
+                    // Whole-store load-modify-save critical section
+                    // (`state_io_lock`, declared before the wavefront
+                    // scheduler) — `intervals.json` is one JSON blob
+                    // covering every model, so two models finishing in the
+                    // same wave must not race a save that silently drops
+                    // the other's write.
+                    let _io_guard = state_io_lock.lock().await;
+                    if let Ok(mut interval_store) = file_store.load_intervals() {
+                        let model_hash = compute_model_hash(&plan.sql);
+                        let intervals = interval_store.get_or_create(&plan.name, &model_hash);
+                        intervals.record_interval(&start_str, &end_str);
+                        let _ = file_store.save_intervals(&interval_store);
+                    }
                 }
 
                 // Per-source landed-delta recording (P10 v1: `docs/specs/sources.md`
@@ -1746,6 +2008,9 @@ pub async fn execute_project(
                 // `LandedDelta::WholeTable` — never a silent no-op
                 // (`incremental_models.md` §"Forward propagation").
                 if !start_str.is_empty() && !end_str.is_empty() {
+                    // Same whole-store critical section rationale as the
+                    // interval store above — `landed_deltas.json`.
+                    let _io_guard = state_io_lock.lock().await;
                     if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
                         for sf in &maint_source_facts {
                             let posture = if sf.partition_col.is_none() {
@@ -1792,6 +2057,9 @@ pub async fn execute_project(
                 // the column-scoped-merge technique is MP12's job
                 // (`incremental_models.md` §"The reconciliation ledger").
                 if !start_str.is_empty() && !end_str.is_empty() {
+                    // Same whole-store critical section rationale as the
+                    // interval store above — `reconciliation.json`.
+                    let _io_guard = state_io_lock.lock().await;
                     if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
                         let region = Region::new(start_str.clone(), end_str.clone());
                         let mut read = std::collections::BTreeMap::new();
@@ -1818,7 +2086,7 @@ pub async fn execute_project(
                     &clean_sql,
                     resolver,
                 )?;
-                reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
+                reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
@@ -1865,9 +2133,9 @@ pub async fn execute_project(
                         schema,
                         &plan.model_file,
                         &plan.name,
-                        &upstream_schemas_for_bootstrap,
+                        upstream_schemas_for_bootstrap,
                         reporter,
-                        &run_id,
+                        run_id,
                     )
                     .await?;
 
@@ -1922,7 +2190,7 @@ pub async fn execute_project(
                             .flatten()
                             .map(|s| s.version);
                         if let Err(e) = crate::schema_evolution::save_deployed_schema(
-                            &file_store,
+                            file_store,
                             &db_table_name,
                             &plan.sql,
                             &inferred_columns,
@@ -1937,7 +2205,7 @@ pub async fn execute_project(
                     }
                 }
 
-                manifest.models.insert(
+                manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
                         strategy: "full_refresh".to_string(),
@@ -1953,10 +2221,7 @@ pub async fn execute_project(
             }
         };
 
-        if let Err(e) = result {
-            reporter.run_failed(&run_id, Some(&plan.name), &e.to_string());
-            return Err(e);
-        }
+        result?;
 
         // ── First-deployment schema baseline (incremental models) ────────
         // The schema-evolution gate above can only diff against a stored
@@ -1982,7 +2247,7 @@ pub async fn execute_project(
                 };
                 if !inferred_columns.is_empty() {
                     if let Err(e) = crate::schema_evolution::save_deployed_schema(
-                        &file_store,
+                        file_store,
                         &db_table_name,
                         &plan.sql,
                         &inferred_columns,
@@ -1995,26 +2260,170 @@ pub async fn execute_project(
         }
 
         let model_duration = model_start.elapsed();
-        reporter.model_completed(&run_id, &plan.name, total_rows, model_duration);
+        reporter.model_completed(run_id, &plan.name, total_rows, model_duration);
         // ── Check seam B: incremental / full-refresh arm ─────────────────────
         if request.run_checks {
             let (outcomes, to_skip) = run_model_checks(
                 &plan.name,
-                &checks_by_model,
-                &compilers,
-                &backends,
-                &target_assignments,
-                &ephemeral_resolvers,
+                checks_by_model,
+                compilers,
+                backends,
+                target_assignments,
+                ephemeral_resolvers,
                 config.as_ref(),
-                &upstream_map,
-                &selected,
+                upstream_map,
+                selected,
                 reporter,
-                &run_id,
+                run_id,
             )
             .await;
             check_results.extend(outcomes);
             skip_set.extend(to_skip);
         }
+
+        Ok(ModelOutcome::Completed(ModelSuccess {
+            manifest_entries,
+            check_results,
+            skip_set,
+            rows: total_rows,
+        }))
+        }
+        .await;
+            (sink, outcome)
+        }
+    };
+
+    // ── Wavefront scheduler ─────────────────────────────────────────────
+    // `jobs` bounds how many models may be IN FLIGHT concurrently; `waves`
+    // (topological layers over the selected set,
+    // `DependencyGraph::execution_waves`) bounds WHICH models may start
+    // concurrently — a model never starts until every selected upstream
+    // dependency's wave has fully drained. Reporter events and manifest
+    // entries are buffered per model (`EventSink`) and flushed strictly in
+    // `execution_order` (`model_plans`) index sequence via `next_flush`, so
+    // the observable output is identical regardless of `jobs` or actual
+    // completion order (`docs/plans/20260719-prod-w2-operability.md` Phase
+    // 5).
+    let jobs: usize = request
+        .jobs
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
+        .max(1);
+
+    let selected_names: HashSet<String> = model_plans.iter().map(|p| p.name.clone()).collect();
+    let waves: Vec<Vec<String>> = {
+        let graph_lock_waves = graph.lock().await;
+        graph_lock_waves.execution_waves(&selected_names)?
+    };
+    let index_of: HashMap<&str, usize> = model_plans
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.name.as_str(), i))
+        .collect();
+
+    let semaphore = tokio::sync::Semaphore::new(jobs);
+    let mut pending: HashMap<usize, (EventSink, Result<ModelOutcome>)> = HashMap::new();
+    let mut next_flush: usize = 0;
+    let mut cancelled = false;
+    let mut aborted: Option<(String, anyhow::Error)> = None;
+
+    macro_rules! flush_ready {
+        () => {
+            while let Some((sink, result)) = pending.remove(&next_flush) {
+                let model_name = &model_plans[next_flush].name;
+                sink.replay(reporter, &run_id, model_name);
+                match result {
+                    Ok(ModelOutcome::Completed(success)) => {
+                        manifest.models.extend(success.manifest_entries);
+                        check_results.extend(success.check_results);
+                        skip_set.extend(success.skip_set);
+                        total_rows_overall += success.rows;
+                    }
+                    Ok(ModelOutcome::Cancelled) => {
+                        cancelled = true;
+                    }
+                    Err(e) => {
+                        if aborted.is_none() {
+                            aborted = Some((model_name.clone(), e));
+                        }
+                    }
+                }
+                next_flush += 1;
+            }
+        };
+    }
+
+    'waves: for wave in &waves {
+        if cancelled || aborted.is_some() {
+            break 'waves;
+        }
+        let mut in_flight = futures::stream::FuturesUnordered::new();
+        for name in wave {
+            let idx = index_of[name.as_str()];
+            let already_skip = request.run_checks && skip_set.contains(name);
+            let sem = &semaphore;
+            let task = execute_one_model(idx, already_skip);
+            in_flight.push(async move {
+                let _permit = sem.acquire().await.expect("semaphore is never closed");
+                let (sink, outcome) = task.await;
+                (idx, sink, outcome)
+            });
+        }
+        while let Some((idx, sink, outcome)) = in_flight.next().await {
+            pending.insert(idx, (sink, outcome));
+        }
+        flush_ready!();
+    }
+    // Final catch-up flush: an aborted/cancelled run may leave a later
+    // wave's already-completed results sitting behind an index whose model
+    // never started (its wave was never scheduled) — still record every
+    // outcome that DID complete
+    // (`docs/plans/20260719-prod-w2-operability.md` Phase 5: "in-flight
+    // models drain; all outcomes recorded").
+    {
+        let mut remaining: Vec<usize> = pending.keys().copied().collect();
+        remaining.sort_unstable();
+        for idx in remaining {
+            if let Some((sink, result)) = pending.remove(&idx) {
+                let model_name = &model_plans[idx].name;
+                sink.replay(reporter, run_id, model_name);
+                match result {
+                    Ok(ModelOutcome::Completed(success)) => {
+                        manifest.models.extend(success.manifest_entries);
+                        check_results.extend(success.check_results);
+                        skip_set.extend(success.skip_set);
+                        total_rows_overall += success.rows;
+                    }
+                    Ok(ModelOutcome::Cancelled) => {
+                        cancelled = true;
+                    }
+                    Err(e) => {
+                        if aborted.is_none() {
+                            aborted = Some((model_name.clone(), e));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    if cancelled {
+        reporter.run_cancelled(run_id);
+        return Ok(build_outcome(
+            run_id,
+            run_start,
+            None,
+            manifest,
+            total_rows_overall,
+            vec![],
+        ));
+    }
+    if let Some((model, error)) = aborted {
+        reporter.run_failed(run_id, Some(&model), &error.to_string());
+        return Err(error);
     }
 
     manifest.completed_at = Some(Utc::now());
@@ -2042,10 +2451,10 @@ pub async fn execute_project(
     }
 
     let total_duration: StdDuration = execution_start.elapsed();
-    reporter.run_completed(&run_id, total_rows_overall, total_duration);
+    reporter.run_completed(run_id, total_rows_overall, total_duration);
 
     Ok(build_outcome(
-        &run_id,
+        run_id,
         run_start,
         Some(Utc::now()),
         manifest,

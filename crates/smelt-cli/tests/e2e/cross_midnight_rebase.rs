@@ -231,6 +231,7 @@ async fn run_single_day_window(
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
     };
 
     execute_project(
@@ -1365,6 +1366,7 @@ async fn chained_run_is_refused_or_ordered_never_parallel() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
     };
 
     let reporter = SqlCapturingReporter::new();

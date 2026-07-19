@@ -174,6 +174,14 @@ struct RunArgs {
     /// (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`.
     #[arg(long = "landed", requires = "since_upstream")]
     since_upstream_landed: Vec<String>,
+
+    /// Maximum number of models to execute concurrently. Defaults to the
+    /// host's available parallelism. `--jobs 1` forces strictly serial
+    /// execution, one model at a time — a dependency edge always keeps the
+    /// upstream model's completion before its downstream's start
+    /// regardless of this value.
+    #[arg(long = "jobs", short = 'j')]
+    jobs: Option<usize>,
 }
 
 #[derive(Parser)]

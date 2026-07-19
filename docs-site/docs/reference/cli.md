@@ -164,6 +164,19 @@ smelt run [OPTIONS]
 | `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
 | `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
+| `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with---jobs). |
+
+### Parallel execution with `--jobs`
+
+The run engine (shared by `smelt run`, `smelt build`, and `smelt backbuild`) dispatches models as a topological **wavefront**: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. `smelt run --jobs` bounds how many models are in flight at once:
+
+- Omitted (the default) — resolves to the host's available parallelism (`std::thread::available_parallelism()`), typically the number of logical CPUs.
+- `--jobs 1` — strictly serial: one model at a time, in `execution_order`. This is the pre-`--jobs` behavior and remains available as an explicit opt-out.
+- `--jobs N` (`N > 1`) — up to `N` models run concurrently, always subject to the dependency graph: an edge `A -> B` guarantees `A` fully completes (including any `smelt.check`s in a `smelt build`) before `B` starts, regardless of `N`.
+
+Progress output, the per-run manifest, and every other run-report artifact are identical regardless of `--jobs` — the run engine buffers each model's progress events internally and replays them in the same deterministic `execution_order` sequence a `--jobs 1` run would have produced, whichever models actually finished first. A failure stops the scheduler from starting further models; any already in flight are allowed to finish, and every model that completed (successfully or not) before the run stopped is still recorded in the manifest.
+
+Concurrency helps most when a project's DAG is wide (many independent models per layer) and when a meaningful share of a run's wall-clock time is spent on work other than the backend query itself (SQL compilation, schema-evolution checks, `smelt.check` execution) — a single-connection backend (e.g. DuckDB) still serializes concurrent query execution against that one connection, so `--jobs` primarily shortens a run by overlapping that surrounding work, and by overlapping models assigned to *different* targets.
 
 **Selector syntax:**
 

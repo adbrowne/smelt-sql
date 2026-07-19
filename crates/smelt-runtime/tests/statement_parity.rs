@@ -412,6 +412,7 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
     }
 }
 
@@ -1401,6 +1402,7 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
     }
 }
 

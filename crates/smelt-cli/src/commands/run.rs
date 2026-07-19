@@ -212,6 +212,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ephemeral_seed_ctes,
         run_checks: false,
         checks: vec![],
+        jobs: args.jobs,
     };
 
     let run_id = generate_run_id();
@@ -400,6 +401,7 @@ async fn run_since_upstream(
             ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
             run_checks: false,
             checks: Vec::new(),
+            jobs: args.jobs,
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

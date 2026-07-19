@@ -4,6 +4,7 @@ use smelt_backend::{Backend, SqlDialect};
 use smelt_core::config::TableFormat;
 use smelt_core::metadata::ModelMetadata;
 use smelt_dialect::BackendCapabilities;
+use smelt_logical::maintenance::emit::{MaintenanceStatement, StatementGroup};
 use smelt_state::ddl_spark::SparkTableFormat;
 use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
@@ -217,31 +218,31 @@ pub async fn check_and_migrate(
             // Execute ALTER TABLE statements
             let use_transaction = backend.capabilities().supports_transactional_ddl;
 
-            if use_transaction {
-                backend
-                    .execute_sql("BEGIN TRANSACTION")
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to begin transaction: {}", e))?;
-            }
-
-            for stmt in &statements {
-                if let Err(e) = backend.execute_sql(stmt).await {
-                    if use_transaction {
-                        let _ = backend.execute_sql("ROLLBACK").await;
-                    }
-                    return Err(anyhow::anyhow!(
-                        "Schema migration failed on '{}': {}",
-                        stmt,
-                        e
-                    ));
-                }
-            }
-
-            if use_transaction {
-                backend
-                    .execute_sql("COMMIT")
-                    .await
-                    .map_err(|e| anyhow::anyhow!("Failed to commit transaction: {}", e))?;
+            // Run every ALTER TABLE statement as one `StatementGroup` via
+            // `Backend::execute_statement_group` rather than issuing
+            // "BEGIN TRANSACTION" / each statement / "COMMIT"/"ROLLBACK" as
+            // separate `execute_sql` calls. Each `execute_sql` call only
+            // holds the backend's connection lock for its own duration
+            // (`crates/smelt-backend-duckdb/CLAUDE.md` — one
+            // `spawn_blocking` per call); under DAG-parallel model
+            // execution (`--jobs`), a concurrently-running model's
+            // statements could interleave into the gaps between this
+            // model's BEGIN/ALTER/COMMIT, corrupting the shared DuckDB
+            // connection's transaction state ("cannot start a transaction
+            // within a transaction" / "current transaction is aborted").
+            // `execute_statement_group` is the same single choke point
+            // every other maintenance statement group already routes
+            // through, and the DuckDB backend's override holds the
+            // connection mutex for the statement group's full duration.
+            let group = StatementGroup {
+                statements: statements
+                    .iter()
+                    .map(|s| MaintenanceStatement { sql: s.clone() })
+                    .collect(),
+                transactional: use_transaction,
+            };
+            if let Err(e) = backend.execute_statement_group(&group).await {
+                return Err(anyhow::anyhow!("Schema migration failed: {}", e));
             }
 
             // Save updated schema

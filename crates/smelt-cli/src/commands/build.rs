@@ -176,6 +176,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         ephemeral_seed_ctes,
         run_checks: true,
         checks: check_files,
+        jobs: None,
     };
 
     let run_id = generate_run_id();
@@ -397,6 +398,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
             run_checks: false,
             checks: Vec::new(),
+            jobs: None,
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

@@ -1381,6 +1381,7 @@ mod column_scoped_merge_e2e {
             ephemeral_seed_ctes: vec![],
             run_checks: false,
             checks: vec![],
+            jobs: None,
         }
     }
 

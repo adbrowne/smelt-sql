@@ -109,6 +109,16 @@ pub struct ExecuteRequest {
     /// Skipped during serde: `ModelFile` is a runtime type, not a wire type.
     #[serde(skip)]
     pub checks: Vec<ModelFile>,
+
+    /// Maximum number of models to execute concurrently. `None` (the
+    /// default) resolves to the host's available parallelism at run time;
+    /// `Some(1)` forces strictly serial execution, one model at a time, in
+    /// `execution_order` — the pre-Phase-5 behaviour. A DAG-independent
+    /// (unrelated) pair of models may run concurrently whenever `jobs > 1`;
+    /// a dependency edge always keeps the upstream model's completion
+    /// strictly before its downstream's start regardless of `jobs`.
+    #[serde(default)]
+    pub jobs: Option<usize>,
 }
 
 fn default_true() -> bool {

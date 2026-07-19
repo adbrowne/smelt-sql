@@ -73,3 +73,4 @@ proptest = "1.4"
 csv = "1.3"
 # Line-index for TextSize ↔ (line, column) conversion at diagnostic boundaries
 line-index = "0.1.2"
+futures = "0.3"

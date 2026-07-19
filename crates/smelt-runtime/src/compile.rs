@@ -843,7 +843,7 @@ impl UpstreamSchemas {
             // well inside the cap — but "not expected" is exactly what a
             // guard is for; the cap is a safety bound, not a proof.
             let mut converged = false;
-            const MAX_ROUNDS: usize = 5;
+            const MAX_ROUNDS: usize = 20;
             for _ in 0..MAX_ROUNDS {
                 let provider = StaticRefSchemaProvider {
                     models: &model_schemas,

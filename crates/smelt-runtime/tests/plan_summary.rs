@@ -141,6 +141,7 @@ fn dry_run_request(target: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
     }
 }
 

@@ -179,6 +179,7 @@ fn to_runtime_request(request: RunExecuteRequest) -> smelt_runtime::ExecuteReque
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
     }
 }
 
