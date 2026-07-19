@@ -58,7 +58,7 @@ Research basis: `docs/research/20260719-production-release-review.md` (blocker #
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
 | 1     | done    | (this commit) | 2026-07-19 |
-| 2     | pending |        |      |
+| 2     | done    | (this commit) | 2026-07-19 |
 | 3     | pending |        |      |
 | 4     | pending |        |      |
 
