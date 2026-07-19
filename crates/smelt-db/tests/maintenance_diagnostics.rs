@@ -3,7 +3,7 @@
 //! admission refusals, plus the `maintenance.cells[]` column-group-span
 //! check, into `file_diagnostics()`.
 //!
-//! Spec: `docs/specs/maintenance_plan.md` §Diagnostics, §Semantics
+//! Spec: `docs/specs/incremental_models.md` §Diagnostics, §Semantics
 //! "Partition-local maintenance (the K8 guardrail)"; `docs/specs/models.md`
 //! "Declared grain contradicted by the derived plan" (Constraint violations
 //! table).
@@ -250,5 +250,79 @@ JOIN smelt.sources.shipments s ON p.order_id = s.order_id
         violations.len(),
         1,
         "expected exactly one cells[].columns-spans-groups violation, got {diags:?}"
+    );
+}
+
+/// The web-analytics tracer's flagship shape (Blocked-phases entry, W1,
+/// 2026-07-18): a `grain: key` + `timeseries:` event-grain dedupe whose
+/// `partition_column` is populated by an extremal fold (`MIN(...)`) over a
+/// `GROUP BY event_id`. Before the grouped-extremal nullability rule, `MIN`
+/// inferred nullable unconditionally, so the derived `partition_column`
+/// could never satisfy `timeseries.md`'s NOT-NULL precondition —
+/// `MalformedTimeseries` fired unconditionally, and the plan derivation
+/// refused with `MaintenanceNoAdmissibleTechnique` as a downstream
+/// consequence of the same failed fold classification. Both must be gone
+/// now that `MIN(event_date)` under `GROUP BY event_id` infers NOT NULL.
+#[test]
+fn grouped_extremal_fold_partition_column_satisfies_timeseries_not_null() {
+    let events_source = r#"
+description: Raw events, append-only, redelivery-prone.
+mutation_profile:
+  kind: append_only
+  key_recurrence:
+    key: [event_id]
+    window: '1 day'
+columns:
+  - { name: event_id, type: INTEGER, nullable: false }
+  - { name: device_id, type: VARCHAR, nullable: true }
+  - { name: user_id, type: INTEGER, nullable: true }
+  - { name: event_time, type: TIMESTAMP, nullable: false }
+  - { name: event_date, type: DATE, nullable: false }
+  - { name: utm_campaign, type: VARCHAR, nullable: true }
+  - { name: payload, type: VARCHAR, nullable: true }
+"#;
+    let model = r#"---
+materialization: table
+refresh: incremental
+grain: key
+timeseries:
+  event_time_column: first_seen_date
+  partition_column: first_seen_date
+  granularity: day
+---
+SELECT
+    event_id,
+    MIN(device_id) AS device_id,
+    MIN(user_id) AS user_id,
+    MIN(CAST(event_time AS TIMESTAMP)) AS event_ts,
+    MIN(CAST(event_date AS DATE)) AS first_seen_date,
+    MIN(utm_campaign) AS utm_campaign,
+    MIN(payload) AS payload
+FROM smelt.sources.raw.events
+GROUP BY event_id
+"#;
+
+    let diags = diagnostics_for(
+        &[
+            ("smelt.yml", SMELT_YML),
+            ("models/sources/raw/events.yml", events_source),
+            ("models/events_deduped.sql", model),
+        ],
+        "events_deduped",
+    );
+
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::MalformedTimeseries)),
+        "grouped MIN(event_date) partition_column must satisfy the timeseries \
+         NOT-NULL precondition; got {diags:?}"
+    );
+    assert!(
+        diags
+            .iter()
+            .all(|d| d.code != Some(DiagnosticCode::MaintenanceNoAdmissibleTechnique)),
+        "the fold classification must succeed now that the extremal-fold \
+         partition_column is NOT NULL; got {diags:?}"
     );
 }

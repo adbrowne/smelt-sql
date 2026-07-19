@@ -1,4 +1,4 @@
-//! Per-cell admission obligations 2 and 3 (`maintenance_plan.md`
+//! Per-cell admission obligations 2 and 3 (`incremental_models.md`
 //! §"Per-cell admission") for the keyed-fold family: the faithful-fold
 //! obligation composes two INDEPENDENT conditions — source posture (does the
 //! delta stream partition the input, i.e. is it retraction-free) and
@@ -49,8 +49,7 @@ fn inputs(combiner: SqlFunction, mutation: MutationProfile) -> (ModelInputs<'sta
             mutation_sensitivity: set(&["payments"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner,
+            add_columns: vec![("lifetime_spend".to_string(), combiner)],
         }),
         column_add_proof: None,
     };
@@ -151,4 +150,100 @@ fn retractions_also_refuse_an_invertible_monoid() {
         &plan.refusals[..],
         [Refusal::NoAdmissibleTechnique { .. }]
     ));
+}
+
+fn multi_column_inputs(
+    add_columns: Vec<(&str, SqlFunction)>,
+    mutation: MutationProfile,
+) -> (ModelInputs<'static>, Trigger) {
+    let inputs = ModelInputs {
+        sql: "SELECT user_id, COUNT(*) AS n, MIN(event_ts) AS first_seen, \
+              MAX(event_ts) AS last_seen FROM smelt.sources.payments GROUP BY user_id",
+        output: OutputSpec {
+            table: "user_activity".to_string(),
+            grain: Grain::Key {
+                unique_key: strings(&["user_id"]),
+            },
+            skeleton_columns: set(&["user_id"]),
+        },
+        sources: vec![source(mutation)],
+        column_groups: vec![ColumnGroup {
+            columns: add_columns.iter().map(|(c, _)| c.to_string()).collect(),
+            mutation_sensitivity: set(&["payments"]),
+        }],
+        fold: Some(FoldSpec {
+            add_columns: add_columns
+                .into_iter()
+                .map(|(c, combiner)| (c.to_string(), combiner))
+                .collect(),
+        }),
+        column_add_proof: None,
+    };
+    let trigger = Trigger::NewData {
+        source: "payments".to_string(),
+    };
+    (inputs, trigger)
+}
+
+/// A multi-column fold, each column carrying its **own** combiner
+/// (`COUNT`→`SUM`, `MIN`→`MIN`, `MAX`→`MAX`), admits a single `KeyedFold`
+/// cell over an append-only source — the multi-column shape this phase
+/// (W0b) unblocks, mirroring `device_user_edges.sql`'s hand-written
+/// composition.
+#[test]
+fn multi_column_mixed_combiners_admit_one_keyed_fold_cell() {
+    let (inputs, trigger) = multi_column_inputs(
+        vec![
+            ("n", SqlFunction::Sum),
+            ("first_seen", SqlFunction::Min),
+            ("last_seen", SqlFunction::Max),
+        ],
+        MutationProfile::AppendOnly,
+    );
+    let plan = derive_maintenance_plan(&inputs, &[trigger]);
+    assert!(
+        plan.refusals.is_empty(),
+        "expected no refusals, got {:?}",
+        plan.refusals
+    );
+    assert_eq!(
+        plan.cells.len(),
+        1,
+        "expected exactly one cell, got {:?}",
+        plan.cells
+    );
+    assert_eq!(plan.cells[0].group, "{n, first_seen, last_seen}");
+}
+
+/// Fail-closed: a mixed-combiner fold where ONE column's combiner is
+/// holistic/non-monoid refuses the **whole** cell — a monoid combiner on
+/// the other columns does not admit a partial fold.
+#[test]
+fn multi_column_one_non_monoid_combiner_refuses_the_whole_cell() {
+    let (inputs, trigger) = multi_column_inputs(
+        vec![
+            ("n", SqlFunction::Sum),
+            ("typical", SqlFunction::Median),
+            ("last_seen", SqlFunction::Max),
+        ],
+        MutationProfile::AppendOnly,
+    );
+    let plan = derive_maintenance_plan(&inputs, &[trigger]);
+    assert!(
+        plan.cells.is_empty(),
+        "expected no KeyedFold cell — a non-monoid combiner on any one column must refuse the \
+         whole cell, got {:?}",
+        plan.cells
+    );
+    assert!(matches!(
+        &plan.refusals[..],
+        [Refusal::NoAdmissibleTechnique { .. }]
+    ));
+    let Refusal::NoAdmissibleTechnique { why, .. } = &plan.refusals[0] else {
+        unreachable!()
+    };
+    assert!(
+        why.contains("typical") && why.contains("Median"),
+        "refusal should name the offending column and combiner, got: {why}"
+    );
 }

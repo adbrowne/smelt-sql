@@ -1,15 +1,15 @@
-//! Declared-granularity **checking** (`maintenance_plan.md` §"The graph
+//! Declared-granularity **checking** (`incremental_models.md` §"The graph
 //! layer": "the classifier only *checks* the declaration, e.g. against a
 //! `date_trunc` grouping"): a leaf classifier over a model's own single
 //! top-level `SELECT`, in the same family as `grouping.rs`/`skeleton.rs`.
 //!
 //! The graph layer's edge grain is the **declared** `timeseries.granularity`
 //! — never derived from the SQL, per the ratified P3 decision
-//! (`maintenance_plan.md` §Design "Grain is declared"). What P3 does license
+//! (`incremental_models.md` §Design "Grain is declared"). What P3 does license
 //! is a *check*: is the declaration a **narrowing** of what the model's own
 //! `partition_column` projection actually derives?
 //!
-//! **Directional, per widen-never-narrow** (`maintenance_plan.md` §Design
+//! **Directional, per widen-never-narrow** (`incremental_models.md` §Design
 //! "Widen-never-narrow": "Widening costs compute; narrowing costs
 //! correctness silently"). `Granularity`'s `Ord` is increasing coarseness
 //! (`Hour` finest … `Year` coarsest); a declaration **coarser than or equal

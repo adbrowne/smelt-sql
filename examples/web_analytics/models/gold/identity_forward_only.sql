@@ -24,7 +24,7 @@ timeseries:
 -- session_start_date is the incremental partition_column; it appears in
 -- both the SELECT list and the GROUP BY.
 --
--- Form B date filter: the WHERE clause constrains events_parsed to the
+-- Form B date filter: the WHERE clause constrains events_deduped to the
 -- 1-day window around session_start_date so the planner can derive the
 -- lookback bound automatically and the driver only needs to pass a
 -- single-day [D, D+1) window per iteration.  A signed-in event that
@@ -35,11 +35,11 @@ SELECT
     s.session_start_date,
     'u:' || CAST(arg_max(e.user_id, e.event_ts) FILTER (WHERE e.user_id IS NOT NULL) AS VARCHAR) AS forward_only_amplitude_id
 FROM smelt.silver.sessions s
-JOIN smelt.silver.events_parsed e
+JOIN smelt.silver.events_deduped e
     ON e.device_id = s.device_id
    AND e.event_ts >= s.session_start
    AND e.event_ts <= s.session_end
-WHERE e.event_date
+WHERE e.first_seen_date
     BETWEEN s.session_start_date - INTERVAL '1 day'
         AND s.session_start_date + INTERVAL '1 day'
 GROUP BY s.session_id, s.session_start_date

@@ -354,7 +354,7 @@ fn build_physical_section(
 }
 
 /// `smelt explain <model>` — the maintenance-plan report
-/// (`maintenance_plan.md` §Surface "CLI"). Read-only: consumes
+/// (`incremental_models.md` §Surface "CLI"). Read-only: consumes
 /// `smelt_db::maintenance_plan_report` (itself a thin wrapper over the pure
 /// derivation in `smelt-logical`) rather than re-deriving admission,
 /// locality, or ledger logic (maintenance-plan-purity invariant,
@@ -424,7 +424,31 @@ async fn explain_maintenance_plan(
         .with_context(|| "Failed to build dependency graph")?;
     let upstream = graph.get_upstream(&canonical);
 
-    let report = build_maintenance_plan_report(&canonical, &result, &upstream);
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+    let (own_contract, edges) =
+        smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+
+    let maintenance_cfg = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.maintenance.as_ref());
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
+        maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
+    let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+    let report = build_maintenance_plan_report(
+        &canonical,
+        &result,
+        &own_contract,
+        &edges,
+        cells_cfg,
+        defaults_cfg,
+    )
+    .with_context(|| {
+        format!(
+            "Failed to build maintenance plan report for `{}`",
+            canonical
+        )
+    })?;
 
     if !args.show_sql {
         println!("{}", report);
@@ -433,7 +457,7 @@ async fn explain_maintenance_plan(
 
     // `--show-sql`: print, after the report, the maintenance statements
     // each cell executes — built from the same pure emitters a run
-    // executes (`docs/specs/maintenance_plan.md` §"Statement emission
+    // executes (`docs/specs/incremental_models.md` §"Statement emission
     // (single owner)"). Never connects to a backend: `CompilerRegistry`
     // only needs `smelt.yml` target metadata, not a live connection.
     let default_target = config.targets.keys().next().cloned().unwrap_or_default();
@@ -503,7 +527,6 @@ async fn explain_maintenance_plan(
         .map(|b| b.unique_key.clone())
         .unwrap_or_default();
 
-    let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
     let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);
 
     let region = match &args.period {
@@ -555,6 +578,8 @@ async fn explain_maintenance_plan(
             &canonical,
             &result.plan.cells,
             &statements,
+            own_contract.clone(),
+            edges.clone(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());

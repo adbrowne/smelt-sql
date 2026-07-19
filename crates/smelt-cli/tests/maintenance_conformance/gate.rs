@@ -6,6 +6,10 @@
 use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
+use smelt_backend::Backend;
+use smelt_backend_duckdb::DuckDbBackend;
+use smelt_logical::maintenance::choice::WriteSuppression;
+use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{Technique, Trigger};
 use smelt_maintenance_testkit::feed::{self, FeedSourcePosture};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
@@ -14,8 +18,11 @@ use smelt_maintenance_testkit::oracle_modes::{
     keyed_end_state_with_retained_departed_keys, KeyedOracleRow, OracleMode,
 };
 use smelt_maintenance_testkit::recipe::{
-    arb_keyed_combiner, arb_keyed_schedule, arb_recipe, ConstructKind, KeyedCombiner, KeyedRecipe,
-    KeyedSchedule, ModelEdit, ModelRecipe, MutableEnrichedRecipe, RecipePool,
+    arb_composed_route, arb_composed_route3_schedule, arb_enrichment_edge_recipe,
+    arb_enrichment_edge_schedule, arb_keyed_combiner, arb_keyed_schedule, arb_recipe,
+    ComposedKeyedRecipe, ComposedRoute, ComposedRoute3Schedule, ConstructKind, EnrichmentJoinKind,
+    KeyedCombiner, KeyedRecipe, KeyedSchedule, ModelEdit, ModelRecipe, MutableEnrichedRecipe,
+    RecipePool,
 };
 use smelt_maintenance_testkit::render;
 use smelt_maintenance_testkit::s_tracker::STracker;
@@ -25,6 +32,11 @@ use smelt_maintenance_testkit::schedule_gen::{
     ConformanceSchedule, ConformanceStep, GenRow, MixedSchedule, MixedStep,
 };
 use smelt_maintenance_testkit::verdict::{classify, Verdict};
+use smelt_planner::{
+    AggregatorColumn, CrossPartitionCombiner, CumulativeClassification, DrivingSource,
+};
+use smelt_runtime::check_runner::batches_to_rows;
+use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_maintenance};
 
 /// Default deterministic case count for
 /// `append_only_partition_pool_upholds_equivalence` — small enough to stay
@@ -751,7 +763,7 @@ pub fn classify_keyed(
 }
 
 /// The end-state equivalence assertion for a [`KeyedRecipe`] (design §6
-/// "Keyed-grain carve-outs"; `keyed_models.md` §"End-state equivalence"):
+/// "Keyed-grain carve-outs"; `incremental_models.md` §"End-state equivalence"):
 /// materialize `S_k` (the union, across every run so far, of that run's own
 /// window's rows — exactly [`STracker::s_at`]'s definition, which coincides
 /// with "every delta row a window-forward keyed run has folded so far" since
@@ -861,17 +873,17 @@ fn keyed_pool_upholds_end_state_equivalence() {
 
 /// `retained_departed_keys_adjusts_the_oracle` (plan Phase 5 TDD list):
 /// snapshot-reconcile schedules generating deletes compare against oracle
-/// rows ∪ retained departed keys (`keyed_models.md` §"End-state
+/// rows ∪ retained departed keys (`incremental_models.md` §"End-state
 /// equivalence"). Two halves: (1) today's real contract — an unclocked
 /// (zero-clocked-driving-source) keyed model selects the snapshot-reconcile
-/// run shape (`keyed_models.md` §"The two run shapes"), and the *targeted*
+/// run shape (`incremental_models.md` §"The two run shapes"), and the *targeted*
 /// keyed-fold cell for it is refused fail-loud
 /// (`Refusal::NoAdmissibleTechnique`/`Refusal::ScanUnbounded`, named on the
 /// plan itself — `maintenance-plan purity`: consumed, not re-derived) rather
 /// than silently treated as window-forward, since the snapshot-reconcile
-/// executor is unbuilt (`keyed_models.md` Known Divergences); the universal
+/// executor is unbuilt (`incremental_models.md` §Known Divergences "The key grain"); the universal
 /// `Trigger::Backfill`/whole-table-recompute cell every model admits
-/// (`maintenance_plan.md` §"Per-cell admission" — "a recompute is the
+/// (`incremental_models.md` §"Per-cell admission" — "a recompute is the
 /// universal ground-truth reset") stays available as the escape hatch, but
 /// no `Trigger::NewData` cell is ever admitted for this source; (2) the pure
 /// oracle adjustment that refusal defers to is independently pinned as data
@@ -1163,7 +1175,7 @@ fn boundary_rows_within_reach_are_reflected() {
 // Phase 8: the `SimulatedChangeFeed` step family — recompute-only
 // admission for `change_feed`-declared sources
 // (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 8;
-// `maintenance_plan.md` §Known Divergences' `change_feed`-scoping entry).
+// `incremental_models.md` §Known Divergences' `change_feed`-scoping entry).
 // ---------------------------------------------------------------------
 
 /// Default deterministic case count for `change_feed_source_admits_recompute_only`.
@@ -1178,7 +1190,7 @@ fn feed_admission_case_count() -> usize {
 
 /// `change_feed_source_admits_recompute_only` (plan Phase 8 TDD list): a
 /// `change_feed`-declared source's admitted cells are all full-input
-/// re-derivation, never a fold (`maintenance_plan.md` §Known Divergences:
+/// re-derivation, never a fold (`incremental_models.md` §Known Divergences:
 /// "no live fold machinery consumes a change feed's delta shape yet" —
 /// mirrors `crates/smelt-logical/tests/maintenance_coverage_matrix.rs`'s
 /// `ex14_change_feed_sum_recompute_only`/`ex26_change_feed_latest_writer_recompute_only`,
@@ -1230,7 +1242,7 @@ fn change_feed_source_admits_recompute_only() {
                 Trigger::NewData { source } if source == &recipe.source.name
             )),
             "case {i}: a change_feed source must never admit a targeted NewData fold cell \
-             today (maintenance_plan.md §Known Divergences' change_feed-scoping entry): \
+             today (incremental_models.md §Known Divergences' change_feed-scoping entry): \
              {plan:#?}"
         );
         checked += 1;
@@ -1281,7 +1293,7 @@ fn restrict_to_day(sql: &str, day: chrono::NaiveDate, day_col: &str) -> String {
 /// refused), so it can never actually be driven through `execute_project`
 /// — only the classify-level admission surface is checkable there. The
 /// mixed shape builds cleanly (no `UpstreamMutation` cell is EVER
-/// constructed for a `change_feed`-declared dimension — `maintenance_plan.md`
+/// constructed for a `change_feed`-declared dimension — `incremental_models.md`
 /// §Known Divergences' `change_feed`-scoping entry — so there is nothing to
 /// refuse).
 ///
@@ -1298,7 +1310,7 @@ fn restrict_to_day(sql: &str, day: chrono::NaiveDate, day_col: &str) -> String {
 /// the documented staleness itself — the FIRST window, once materialized,
 /// is provably never revisited by any later incremental run (the
 /// `change_feed`-scoping divergence), so it diverges from a live recompute
-/// after the schedule's mutations land, exactly the `maintenance_plan.md`
+/// after the schedule's mutations land, exactly the `incremental_models.md`
 /// §Known Divergences contract. A final `full_refresh: true` run must then
 /// settle the WHOLE table back to equivalence — that is the "via recompute"
 /// half of this test's name, now actually exercised after a real
@@ -1449,7 +1461,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 );
             }
 
-            // Documented current behavior (`maintenance_plan.md` §Known
+            // Documented current behavior (`incremental_models.md` §Known
             // Divergences, `change_feed`-scoping entry): no incremental run
             // ever revisits day0 once materialized, so it stays frozen at
             // its original computation-time snapshot even though the
@@ -1507,7 +1519,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
 // ---------------------------------------------------------------------
 // Phase 9: definition-change steps — `ConformanceStep::RewriteModel`
 // (`docs/plans/20260712-generative-maintenance-conformance.md` Phase 9;
-// `maintenance_plan.md` §"The definition-change trigger"). Asserts TODAY's
+// `incremental_models.md` §"The definition-change trigger"). Asserts TODAY's
 // contract only: whatever technique executes for a window always compiles
 // and runs the model's CURRENT on-disk SQL (`link_c_harness::LinkCProject`'s
 // per-run re-discovery), so a rewrite followed by a re-run of the affected
@@ -1666,7 +1678,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
     assert_equivalence(&project, &recipe, &tracker, k0).expect("pre-rewrite equivalence");
 
     // Rewrite: add the source's row-key column into the GROUP BY — a
-    // grain/skeleton change, `maintenance_plan.md`'s `SkeletonAdd`
+    // grain/skeleton change, `incremental_models.md`'s `SkeletonAdd`
     // territory.
     std::fs::write(
         project
@@ -1713,4 +1725,1481 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
             );
         }
     }
+}
+
+// ---------------------------------------------------------------------
+// Phase A6: the composed (`grain: key` + `timeseries:`) recipe family,
+// covering all three key-temporal-locality routes
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6;
+// `incremental_models.md` §"Key temporal locality").
+//
+// Route 1 (key-embedded) is driven through the real `execute_project`
+// pipeline, exactly like the keyed pool above. Routes 2 (key-determined)
+// and 3 (recurrence-bounded, declared) are admitted by the real
+// `establish_locality` gate over real staged frontmatter/YAML
+// (`classify_composed_full`), but drive their actual merge mechanics
+// through `run_windowed_keyed_maintenance` directly against a real
+// `DuckDbBackend` — the documented, pre-existing workaround
+// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs` already
+// uses (see `ComposedKeyedRecipe`'s own doc comment for why).
+// ---------------------------------------------------------------------
+
+/// Default deterministic case count for `composed_keyed_pool_upholds_equivalence`.
+const COMPOSED_DEFAULT_CASES: usize = 6;
+
+fn composed_case_count() -> usize {
+    std::env::var("SMELT_CONFORMANCE_COMPOSED_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(COMPOSED_DEFAULT_CASES)
+}
+
+/// Classify a staged [`ComposedKeyedRecipe`] through the real maintenance
+/// derivation — the composed-pool counterpart of `classify_keyed_full`.
+/// Returns the derived plan (possibly with zero cells / a locality refusal)
+/// plus every diagnostic on the target model.
+pub fn classify_composed_full(
+    project: &LinkCProject,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<(
+    Option<smelt_logical::maintenance::MaintenancePlan>,
+    Vec<smelt_db::Diagnostic>,
+)> {
+    let config = smelt_core::config::Config::load(&project.project_dir)?;
+    let discovery =
+        smelt_core::ModelDiscovery::new(project.project_dir.clone(), config.paths.clone());
+    let sql_models = discovery.discover_models()?;
+    let target_path = project
+        .project_dir
+        .join(format!("models/{}.sql", recipe.model_name));
+
+    let mut db = smelt_db::Database::default();
+    let project_input = db.set_project_input(project.project_dir.clone(), String::new());
+    let mut target: Option<smelt_db::SourceFile> = None;
+    let source_files: Vec<_> = sql_models
+        .iter()
+        .map(|m| {
+            let file = db.set_source_file(
+                m.path.clone(),
+                m.content.clone(),
+                project.project_dir.clone(),
+            );
+            if m.path == target_path {
+                target = Some(file);
+            }
+            file
+        })
+        .collect();
+    db.set_workspace(source_files, vec![project_input]);
+    let workspace = db.workspace();
+
+    let target = target.ok_or_else(|| {
+        anyhow::anyhow!(
+            "staged composed-pool model {:?} (expected at {}) not found among discovered models",
+            recipe.model_name,
+            target_path.display()
+        )
+    })?;
+    let diagnostics = smelt_db::file_diagnostics(&db, workspace, target);
+    let plan_result = smelt_db::maintenance_plan_report(&db, workspace, target);
+    Ok((plan_result.map(|r| r.plan), diagnostics))
+}
+
+/// Assert `recipe`'s plan clears the locality gate with the expected
+/// [`LocalitySlice`] shape for its own [`ComposedRoute`] — the single
+/// per-case admission check every drive path below relies on having
+/// already passed.
+fn assert_composed_admitted_with_expected_route(
+    recipe: &ComposedKeyedRecipe,
+    plan: &smelt_logical::maintenance::MaintenancePlan,
+) -> anyhow::Result<()> {
+    if plan.refusals.iter().any(|r| {
+        matches!(
+            r,
+            smelt_logical::maintenance::Refusal::LocalityNotEstablished { .. }
+        )
+    }) {
+        anyhow::bail!(
+            "composed recipe {:?} (route {:?}) was refused by the locality gate: {:?}",
+            recipe.model_name,
+            recipe.route,
+            plan.refusals
+        );
+    }
+    let Some(key_locality) = plan.key_locality.as_ref() else {
+        anyhow::bail!(
+            "composed recipe {:?} (route {:?}) admitted a plan with no key_locality",
+            recipe.model_name,
+            recipe.route
+        );
+    };
+    match (recipe.route, &key_locality.slice) {
+        (ComposedRoute::KeyEmbedded, LocalitySlice::Window { .. }) => Ok(()),
+        (ComposedRoute::KeyDetermined, LocalitySlice::DeltaValues { .. }) => Ok(()),
+        (ComposedRoute::RecurrenceBounded, LocalitySlice::RecurrenceBounded { .. }) => Ok(()),
+        (route, slice) => {
+            anyhow::bail!(
+                "composed recipe {:?}: route {:?} admitted an unexpected slice shape: {:?}",
+                recipe.model_name,
+                route,
+                slice
+            )
+        }
+    }
+}
+
+// ---- Route 1 (key-embedded): full `execute_project` drive -----------
+
+fn insert_composed_row(
+    project: &LinkCProject,
+    recipe: &ComposedKeyedRecipe,
+    row: &GenRow,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    conn.execute(
+        &format!(
+            "INSERT INTO main.sources_{} VALUES (DATE '{}', {}, {})",
+            recipe.source.name,
+            row.d.format("%Y-%m-%d"),
+            row.id,
+            row.val,
+        ),
+        [],
+    )?;
+    Ok(())
+}
+
+/// Whole-table equivalence for route 1: the maintained output equals the
+/// model body evaluated over the full, currently-inserted source table —
+/// route 1's schedule never reprocesses a window, so no `STracker`
+/// S-restriction is needed.
+fn assert_composed_route1_equivalence(
+    project: &LinkCProject,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let oracle_sql = render::render_composed_oracle_sql(recipe);
+    if !multiset_equal(&conn, &maintained_sql, &oracle_sql) {
+        anyhow::bail!(
+            "composed route-1 equivalence violated for {:?}: maintained ({maintained_sql:?}) != \
+             oracle ({oracle_sql:?})",
+            recipe.model_name
+        );
+    }
+    Ok(())
+}
+
+/// Per-slice equivalence for route 1 (`incremental_models.md` §"Per-slice
+/// equivalence"): the stored rows of one output slice (`d = slice_date`)
+/// equal the model SQL evaluated over the source rows within that slice's
+/// derived reach — zero margin here (`SIMPLE_SQL`-shaped, no lookback), so
+/// the reach is exactly the source rows sharing that same date.
+fn assert_composed_route1_per_slice(
+    project: &LinkCProject,
+    recipe: &ComposedKeyedRecipe,
+    slice_date: chrono::NaiveDate,
+) -> anyhow::Result<()> {
+    let conn = project.connect()?;
+    let d = slice_date.format("%Y-%m-%d");
+    let maintained_sql = format!(
+        "SELECT * FROM main.{} WHERE d = DATE '{d}'",
+        recipe.model_name
+    );
+    let oracle_body = render::render_composed_oracle_sql(recipe);
+    let oracle_sql = format!("SELECT * FROM ({oracle_body}) t WHERE d = DATE '{d}'");
+    if !multiset_equal(&conn, &maintained_sql, &oracle_sql) {
+        anyhow::bail!(
+            "composed route-1 per-slice equivalence violated for {:?} at slice {d}: maintained \
+             ({maintained_sql:?}) != model SQL over the slice's derived reach ({oracle_sql:?})",
+            recipe.model_name
+        );
+    }
+    Ok(())
+}
+
+async fn drive_composed_route1_and_assert(
+    project: &LinkCProject,
+    recipe: &ComposedKeyedRecipe,
+    schedule: &KeyedSchedule,
+) -> anyhow::Result<()> {
+    for (i, window) in schedule.0.iter().enumerate() {
+        for row in &window.rows {
+            insert_composed_row(project, recipe, row)?;
+        }
+
+        let mut request = base_request("dev");
+        request.start = Some(window.start.format("%Y-%m-%d").to_string());
+        request.end = Some(window.end.format("%Y-%m-%d").to_string());
+        project
+            .run_quiet(&format!("composed-route1-run-{i}"), request)
+            .await?;
+
+        assert_composed_route1_equivalence(project, recipe)?;
+        assert_composed_route1_per_slice(project, recipe, window.start)?;
+    }
+    Ok(())
+}
+
+// ---- Routes 2/3: direct-driver execution against a real DuckDbBackend --
+
+/// The driving source's own `timeseries:` declaration every composed
+/// recipe's classification carries (`event_time_column`/`partition_column`
+/// both `d`, `day` granularity — the fixed `events(d, id, val)` shape).
+fn composed_driving_timeseries() -> smelt_core::config::TimeseriesConfig {
+    smelt_core::config::TimeseriesConfig {
+        event_time_column: "d".to_string(),
+        partition_column: "d".to_string(),
+        granularity: smelt_core::config::Granularity::Day,
+        week_start: None,
+        assert_monotonic: false,
+    }
+}
+
+fn composed_route2_classification(recipe: &ComposedKeyedRecipe) -> CumulativeClassification {
+    CumulativeClassification {
+        unique_key: vec!["id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "total".to_string(),
+            per_partition_agg: "SUM".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::Sum,
+        }],
+        driving_source: DrivingSource {
+            name: format!("smelt.sources.{}", recipe.source.name),
+            timeseries: composed_driving_timeseries(),
+        },
+    }
+}
+
+fn composed_route3_classification(recipe: &ComposedKeyedRecipe) -> CumulativeClassification {
+    CumulativeClassification {
+        unique_key: vec!["id".to_string()],
+        aggregator_columns: vec![AggregatorColumn {
+            output_name: "last_seen".to_string(),
+            per_partition_agg: "MAX".to_string(),
+            cross_partition_combiner: CrossPartitionCombiner::Max,
+        }],
+        driving_source: DrivingSource {
+            name: format!("smelt.sources.{}", recipe.source.name),
+            timeseries: composed_driving_timeseries(),
+        },
+    }
+}
+
+fn composed_route3_slice() -> LocalitySlice {
+    LocalitySlice::RecurrenceBounded {
+        partition_column: "last_seen".to_string(),
+        margin_before: smelt_logical::analysis::source_bounds::Seconds::days(3),
+        margin_after: smelt_logical::analysis::source_bounds::Seconds::ZERO,
+        r: smelt_logical::analysis::source_bounds::Seconds::days(3),
+    }
+}
+
+/// One window's own row list, rendered as a literal `VALUES` relation —
+/// the per-step delta is built directly from the window's own rows rather
+/// than filtered off a physical table by a `d = <date>` predicate, which
+/// would wrongly require a redelivered row's own event-time to equal the
+/// window that delivers it (`ComposedRoute3Window`'s own doc comment names
+/// this as exactly the "out-of-order redelivery" shape the pool must be
+/// able to express).
+fn composed_delta_values_sql(rows: &[GenRow]) -> String {
+    let values: Vec<String> = rows
+        .iter()
+        .map(|r| format!("({}, DATE '{}', {})", r.id, r.d.format("%Y-%m-%d"), r.val))
+        .collect();
+    format!("(VALUES {}) AS t(id, d, val)", values.join(", "))
+}
+
+fn composed_route2_delta_sql(rows: &[GenRow]) -> String {
+    format!(
+        "SELECT id, CAST(d AS DATE) AS pdate, SUM(val) AS total FROM {} GROUP BY id, d",
+        composed_delta_values_sql(rows)
+    )
+}
+
+fn composed_route3_delta_sql(rows: &[GenRow]) -> String {
+    format!(
+        "SELECT id, MAX(d) AS last_seen FROM {} GROUP BY id",
+        composed_delta_values_sql(rows)
+    )
+}
+
+/// The route-2 oracle: `pdate` is write-once (never re-merged — see
+/// `ComposedKeyedRecipe`'s doc comment), so its true end-state value is the
+/// event-time of whichever window *first* delivered that key — the
+/// minimum `d` across all of that key's accumulated rows (every row in
+/// this pool's route-2 schedule carries `d == its own window's run date`,
+/// and windows always run in ascending order).
+fn composed_route2_oracle_sql(source_name: &str) -> String {
+    format!(
+        "SELECT id, CAST(MIN(d) AS DATE) AS pdate, SUM(val) AS total FROM main.sources_{source_name} \
+         GROUP BY id"
+    )
+}
+
+fn composed_route3_oracle_sql(source_name: &str) -> String {
+    format!("SELECT id, MAX(d) AS last_seen FROM main.sources_{source_name} GROUP BY id")
+}
+
+/// Convert a batch of Arrow results into a sorted `Vec` of `(column,
+/// value)` row vectors — a multiset comparator over two such `Vec`s (via
+/// plain `==` after sorting) that does not require a `duckdb::Connection`
+/// (`oracle::multiset_equal`'s own contract), since routes 2/3 query
+/// through a live `DuckDbBackend` instead (mirrors
+/// `crates/smelt-runtime/tests/locality_route3_recurrence_check.rs`'s own
+/// `execute_sql`-only discipline — never open a second, independent
+/// connection to the same DuckDB file while the backend holds one open).
+fn rows_as_sorted_multiset(batches: &[arrow::array::RecordBatch]) -> Vec<Vec<(String, String)>> {
+    let mut rows: Vec<Vec<(String, String)>> = batches_to_rows(batches)
+        .into_iter()
+        .map(|m| m.into_iter().collect())
+        .collect();
+    rows.sort();
+    rows
+}
+
+async fn assert_backend_multiset_equal(
+    backend: &DuckDbBackend,
+    left_sql: &str,
+    right_sql: &str,
+    context: &str,
+) -> anyhow::Result<()> {
+    let left = backend.execute_sql(left_sql).await?;
+    let right = backend.execute_sql(right_sql).await?;
+    let left_rows = rows_as_sorted_multiset(&left);
+    let right_rows = rows_as_sorted_multiset(&right);
+    if left_rows != right_rows {
+        anyhow::bail!(
+            "{context}: multiset mismatch\n  left  ({left_sql:?}): {left_rows:?}\n  right \
+             ({right_sql:?}): {right_rows:?}"
+        );
+    }
+    Ok(())
+}
+
+async fn assert_composed_route2_equivalence(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let oracle_sql = composed_route2_oracle_sql(&recipe.source.name);
+    assert_backend_multiset_equal(
+        backend,
+        &maintained_sql,
+        &oracle_sql,
+        "composed route-2 equivalence",
+    )
+    .await
+}
+
+/// Per-slice equivalence for route 2 (`incremental_models.md` §"Per-slice
+/// equivalence"): route 2 never settles by date — its slice is the
+/// delta's own partition **values**, not a date-range window — so the
+/// natural slice here is one distinct `pdate` value; each such slice must
+/// equal the oracle restricted to that same value.
+async fn assert_composed_route2_per_slice(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let batches = backend
+        .execute_sql(&format!(
+            "SELECT DISTINCT CAST(pdate AS VARCHAR) AS v FROM main.{}",
+            recipe.model_name
+        ))
+        .await?;
+    let values: Vec<String> = batches_to_rows(&batches)
+        .into_iter()
+        .filter_map(|r| r.get("v").cloned())
+        .collect();
+    for v in values {
+        let maintained_sql = format!(
+            "SELECT * FROM main.{} WHERE pdate = DATE '{v}'",
+            recipe.model_name
+        );
+        let oracle_sql = format!(
+            "SELECT * FROM ({}) t WHERE pdate = DATE '{v}'",
+            composed_route2_oracle_sql(&recipe.source.name)
+        );
+        assert_backend_multiset_equal(
+            backend,
+            &maintained_sql,
+            &oracle_sql,
+            "composed route-2 per-slice equivalence",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+async fn assert_composed_route3_equivalence(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
+    let oracle_sql = composed_route3_oracle_sql(&recipe.source.name);
+    assert_backend_multiset_equal(
+        backend,
+        &maintained_sql,
+        &oracle_sql,
+        "composed route-3 equivalence",
+    )
+    .await
+}
+
+/// Per-slice equivalence for route 3: `last_seen` genuinely settles
+/// (`AfterRecurrenceBound`), so each distinct `last_seen` date-value slice
+/// must equal the oracle restricted to that same value.
+async fn assert_composed_route3_per_slice(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+) -> anyhow::Result<()> {
+    let batches = backend
+        .execute_sql(&format!(
+            "SELECT DISTINCT CAST(last_seen AS VARCHAR) AS v FROM main.{}",
+            recipe.model_name
+        ))
+        .await?;
+    let values: Vec<String> = batches_to_rows(&batches)
+        .into_iter()
+        .filter_map(|r| r.get("v").cloned())
+        .collect();
+    for v in values {
+        let maintained_sql = format!(
+            "SELECT * FROM main.{} WHERE last_seen = DATE '{v}'",
+            recipe.model_name
+        );
+        let oracle_sql = format!(
+            "SELECT * FROM ({}) t WHERE last_seen = DATE '{v}'",
+            composed_route3_oracle_sql(&recipe.source.name)
+        );
+        assert_backend_multiset_equal(
+            backend,
+            &maintained_sql,
+            &oracle_sql,
+            "composed route-3 per-slice equivalence",
+        )
+        .await?;
+    }
+    Ok(())
+}
+
+/// Append `rows` to the driving source's accumulation-log table
+/// (`main.sources_<name>`, created by `render::stage_composed`) — used only
+/// as the oracle's own read side for routes 2/3; the direct driver's own
+/// per-step delta never reads this table (`composed_delta_values_sql`'s doc
+/// comment).
+async fn insert_composed_rows_via_backend(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+    rows: &[GenRow],
+) -> anyhow::Result<()> {
+    for row in rows {
+        backend
+            .execute_sql(&format!(
+                "INSERT INTO main.sources_{} VALUES (DATE '{}', {}, {})",
+                recipe.source.name,
+                row.d.format("%Y-%m-%d"),
+                row.id,
+                row.val,
+            ))
+            .await?;
+    }
+    Ok(())
+}
+
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase C6
+/// TDD item 4: the composed pool runs with suppression enabled and must
+/// stay equivalent under redelivery schedules — `total`/`last_seen` are
+/// both registry-backed deterministic aggregates (`SUM`/`MAX`), Comparable
+/// under the P3 change-comparability walk, over the recipe's own proven
+/// `id` key, so a hand-built `Suppressed` verdict here mirrors exactly what
+/// `resolve_write_suppression` would resolve for these fixed classifications
+/// (`crate::cumulative::resolve_cumulative_write_suppression`'s own
+/// production wiring), without re-deriving the walk over generated SQL this
+/// testkit's classifications are never actually parsed from.
+fn composed_route2_suppression() -> WriteSuppression {
+    WriteSuppression::Suppressed {
+        compared_columns: vec!["total".to_string()],
+    }
+}
+
+fn composed_route3_suppression() -> WriteSuppression {
+    WriteSuppression::Suppressed {
+        compared_columns: vec!["last_seen".to_string()],
+    }
+}
+
+async fn drive_composed_route2_and_assert(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+    schedule: &KeyedSchedule,
+) -> anyhow::Result<()> {
+    let classification = composed_route2_classification(recipe);
+    // `Some(&composed_route2_slice())` — the real `DeltaValues` slice a
+    // route-2 model is admitted with — is deliberately **not** passed
+    // here. Doing so renders `emit_keyed_fold`'s `target.<col> IN (SELECT
+    // DISTINCT <col> FROM (<delta_select>))` predicate, and real DuckDB
+    // (confirmed directly against the `duckdb` CLI, v1.5.4/v1.10504)
+    // refuses to bind ANY `MERGE` whose `ON` clause combines a derived
+    // `USING` subquery with that `IN (SELECT DISTINCT … FROM (subquery))`
+    // shape at all — `Invalid Input Error: BindMerge - expected to find an
+    // operator of type LOGICAL_GET but got FILTER` — independently of
+    // whether the delta is a `VALUES` literal or a real table scan. This
+    // is a genuine DuckDB backend limitation for the `DeltaValues`
+    // slice-predicate shape, recorded verbatim in `incremental_models.md`
+    // §Known Divergences under "Key temporal locality" (the paragraph
+    // starting "Route 2's slice-pruned merge … is unexercised against a
+    // real backend") and cross-referenced again in that section's §Tests
+    // bullet — distinct from the already-documented NOT-NULL nullability
+    // blocker. Fixing the emitted
+    // predicate shape is production code in `smelt-logical::maintenance::
+    // emit`, outside this testkit-only phase's Critical files — flagged
+    // here rather than silently worked around. Passing `None` still
+    // exercises the real merge mechanics this test actually asserts
+    // (write-once `pdate`, additive `total`) against real DuckDB; only the
+    // target-scan **pruning** optimisation itself goes unexercised
+    // (`incremental_models.md` §"Key temporal locality": "pruning is not a
+    // write clamp" — every delta row still merges with or without it).
+    let slice: Option<&LocalitySlice> = None;
+
+    for (i, window) in schedule.0.iter().enumerate() {
+        insert_composed_rows_via_backend(backend, recipe, &window.rows).await?;
+
+        let rows = window.rows.clone();
+        let compile_step = move |_step: &smelt_runtime::maintenance_driver::MaintenanceStep| {
+            Ok(composed_route2_delta_sql(&rows))
+        };
+        let steps = driving_steps(
+            &window.start.format("%Y-%m-%d").to_string(),
+            &window.end.format("%Y-%m-%d").to_string(),
+            &smelt_core::config::Granularity::Day,
+        )?;
+        run_windowed_keyed_maintenance(
+            backend,
+            &recipe.model_name,
+            "main",
+            &recipe.model_name,
+            &steps,
+            &classification,
+            slice,
+            &composed_route2_suppression(),
+            compile_step,
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("composed route-2 window {i} merge failed: {e}"))?;
+
+        assert_composed_route2_equivalence(backend, recipe).await?;
+        assert_composed_route2_per_slice(backend, recipe).await?;
+    }
+    Ok(())
+}
+
+async fn drive_composed_route3_and_assert(
+    backend: &DuckDbBackend,
+    recipe: &ComposedKeyedRecipe,
+    schedule: &ComposedRoute3Schedule,
+) -> anyhow::Result<()> {
+    let classification = composed_route3_classification(recipe);
+    let slice = composed_route3_slice();
+
+    for (i, window) in schedule.0.iter().enumerate() {
+        insert_composed_rows_via_backend(backend, recipe, &window.rows).await?;
+
+        let rows = window.rows.clone();
+        let compile_step = move |_step: &smelt_runtime::maintenance_driver::MaintenanceStep| {
+            Ok(composed_route3_delta_sql(&rows))
+        };
+        let run_date_str = window.run_date.format("%Y-%m-%d").to_string();
+        let next_day_str = (window.run_date + chrono::Duration::days(1))
+            .format("%Y-%m-%d")
+            .to_string();
+        let steps = driving_steps(
+            &run_date_str,
+            &next_day_str,
+            &smelt_core::config::Granularity::Day,
+        )?;
+        run_windowed_keyed_maintenance(
+            backend,
+            &recipe.model_name,
+            "main",
+            &recipe.model_name,
+            &steps,
+            &classification,
+            Some(&slice),
+            &composed_route3_suppression(),
+            compile_step,
+        )
+        .await
+        .map_err(|e| {
+            anyhow::anyhow!(
+                "composed route-3 window {i} (in-bound redelivery) unexpectedly refused: {e}"
+            )
+        })?;
+
+        assert_composed_route3_equivalence(backend, recipe).await?;
+        assert_composed_route3_per_slice(backend, recipe).await?;
+    }
+    Ok(())
+}
+
+/// `composed_keyed_pool_upholds_equivalence` (plan Phase A6 TDD list): the
+/// standing proptest gate over the composed pool — deterministic seed,
+/// small N. Each case draws one of the three [`ComposedRoute`]s, stages
+/// it, confirms the real locality gate admits it with the expected slice
+/// shape, then drives its equivalence check (route 1 through real
+/// `execute_project`; routes 2/3 through the direct driver against a real
+/// `DuckDbBackend`) — asserting equivalence, and a per-slice probe, after
+/// **every** step.
+#[test]
+fn composed_keyed_pool_upholds_equivalence() {
+    let n = composed_case_count();
+    let mut runner = TestRunner::deterministic();
+    let route_strat = arb_composed_route();
+    let keyed_schedule_strat = arb_keyed_schedule();
+    let route3_schedule_strat = arb_composed_route3_schedule();
+    let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+
+    let mut admitted_cases = 0;
+    for i in 0..n {
+        let route = route_strat.new_tree(&mut runner).unwrap().current();
+        let recipe = ComposedKeyedRecipe::new(route);
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("db.duckdb");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let project = render::stage_composed(&recipe, &project_dir, &db_path).unwrap_or_else(|e| {
+            panic!("case {i}: composed recipe {recipe:?} failed to stage: {e}")
+        });
+
+        let (plan, diags) = classify_composed_full(&project, &recipe).unwrap_or_else(|e| {
+            panic!("case {i}: composed recipe {recipe:?} classify failed: {e}")
+        });
+        let plan = plan.unwrap_or_else(|| {
+            panic!("case {i}: no plan derived for {recipe:?}: diagnostics={diags:#?}")
+        });
+        assert_composed_admitted_with_expected_route(&recipe, &plan).unwrap_or_else(|e| {
+            panic!("case {i}: {e}");
+        });
+        admitted_cases += 1;
+
+        match route {
+            ComposedRoute::KeyEmbedded => {
+                let schedule = keyed_schedule_strat
+                    .new_tree(&mut runner)
+                    .unwrap()
+                    .current();
+                rt.block_on(drive_composed_route1_and_assert(
+                    &project, &recipe, &schedule,
+                ))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i}: composed route-1 recipe {recipe:?} schedule {schedule:?} \
+                         failed: {e}"
+                    )
+                });
+            }
+            ComposedRoute::KeyDetermined => {
+                let schedule = keyed_schedule_strat
+                    .new_tree(&mut runner)
+                    .unwrap()
+                    .current();
+                let backend = rt.block_on(async {
+                    DuckDbBackend::new(&project.db_path, "main")
+                        .await
+                        .expect("open backend")
+                });
+                rt.block_on(drive_composed_route2_and_assert(
+                    &backend, &recipe, &schedule,
+                ))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i}: composed route-2 recipe {recipe:?} schedule {schedule:?} \
+                         failed: {e}"
+                    )
+                });
+            }
+            ComposedRoute::RecurrenceBounded => {
+                let schedule = route3_schedule_strat
+                    .new_tree(&mut runner)
+                    .unwrap()
+                    .current();
+                let backend = rt.block_on(async {
+                    DuckDbBackend::new(&project.db_path, "main")
+                        .await
+                        .expect("open backend")
+                });
+                rt.block_on(drive_composed_route3_and_assert(
+                    &backend, &recipe, &schedule,
+                ))
+                .unwrap_or_else(|e| {
+                    panic!(
+                        "case {i}: composed route-3 recipe {recipe:?} schedule {schedule:?} \
+                         failed: {e}"
+                    )
+                });
+            }
+        }
+    }
+
+    assert!(
+        admitted_cases > 0,
+        "N={n} deterministic composed sample admitted zero cases — generator/derivation \
+         regression"
+    );
+}
+
+/// `composed_keyed_admission_rate_stays_above_floor` (plan Phase A6 TDD
+/// list): generator health — every generated composed recipe is
+/// deliberately constructed to admit exactly its own route (unlike the
+/// append-only-partition pool's randomly-drawn constructs, this pool has
+/// no randomised refusal branch), so the floor is high: a regression that
+/// silently breaks one route's admission must fail this test rather than
+/// hollow out the standing gate above unnoticed.
+#[test]
+fn composed_keyed_admission_rate_stays_above_floor() {
+    const N: usize = 30;
+    let mut runner = TestRunner::deterministic();
+    let route_strat = arb_composed_route();
+
+    let mut admitted = 0;
+    for i in 0..N {
+        let route = route_strat.new_tree(&mut runner).unwrap().current();
+        let recipe = ComposedKeyedRecipe::new(route);
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        let db_path = tmp.path().join("db.duckdb");
+        std::fs::create_dir_all(&project_dir).expect("create project dir");
+        let project = render::stage_composed(&recipe, &project_dir, &db_path).unwrap_or_else(|e| {
+            panic!("case {i}: composed recipe {recipe:?} failed to stage: {e}")
+        });
+        let (plan, _diags) = classify_composed_full(&project, &recipe).unwrap_or_else(|e| {
+            panic!("case {i}: composed recipe {recipe:?} classify failed: {e}")
+        });
+        let admitted_here = plan
+            .map(|p| assert_composed_admitted_with_expected_route(&recipe, &p).is_ok())
+            .unwrap_or(false);
+        if admitted_here {
+            admitted += 1;
+        }
+    }
+
+    let rate = admitted as f64 / N as f64;
+    assert!(
+        rate >= 0.90,
+        "composed-pool admission rate {rate:.2} over N={N} fell below the 90% floor \
+         ({admitted}/{N} admitted) — a route-admission regression would silently hollow out the \
+         standing gate"
+    );
+}
+
+// =============================================================================
+// Phase C5 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+// — T1 (change-suppressed keyed-fold MERGE) vs T2 (staged-candidate
+// conditional DELETE+INSERT) vs the full-refresh oracle, over the keyed
+// pool's own shape (a `unique_key`-addressed region), at a fixed processed-
+// input set `S`. The three techniques must be interchangeable
+// (`docs/specs/model_transforms.md` §"Change-suppressed MERGE and the
+// staged-candidate conditional DELETE+INSERT" — "the fixed-`S` bit-equality
+// obligation"): given the identical seed state and the identical candidate
+// delta, all three end states agree.
+// =============================================================================
+
+/// Seed three independently-named tables (T1's MERGE target, T2's staged-
+/// candidate target, and the full-refresh oracle) with identical state, then
+/// drive each to the same fixed `S` via its own technique, asserting all
+/// three end states agree as multisets. `run_marker` proves suppression
+/// actually happened (not merely that the bits match): a row whose fold
+/// result reproduces the stored value keeps its prior marker under both T1
+/// and T2, while a changed or brand-new row picks up the new run's marker.
+#[tokio::test]
+async fn keyed_pool_t1_t2_and_full_refresh_agree_at_fixed_s() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("db.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    for table in ["t1_target", "t2_target", "oracle"] {
+        backend
+            .execute_sql(&format!(
+                "CREATE TABLE main.{table} (device_id BIGINT, event_count BIGINT, run_marker \
+                 VARCHAR)"
+            ))
+            .await
+            .expect("create table");
+        backend
+            .execute_sql(&format!(
+                "INSERT INTO main.{table} VALUES (1, 5, 'run1'), (2, 3, 'run1'), (3, 8, 'run1')"
+            ))
+            .await
+            .expect("seed table");
+    }
+
+    // Fixed `S`: device 1 gets no new events (unchanged-effect re-run);
+    // device 2's delta genuinely changes the combined result; device 3 is
+    // absent from this run's delta entirely (out of the touched region);
+    // device 4 is brand new.
+    let delta_values = "(1, 0, 'run2'), (2, 4, 'run2'), (4, 6, 'run2')";
+    let key = vec!["device_id".to_string()];
+    let compared_columns = vec!["event_count".to_string()];
+
+    // T1: change-suppressed keyed-fold MERGE.
+    let folds = vec![
+        (
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        ),
+        ("run_marker".to_string(), "delta.run_marker".to_string()),
+    ];
+    let t1_group = smelt_logical::maintenance::emit::emit_keyed_fold_suppressed(
+        "main.t1_target",
+        &key,
+        &folds,
+        &format!("SELECT * FROM (VALUES {delta_values}) AS t(device_id, event_count, run_marker)"),
+        None,
+        &compared_columns,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&t1_group)
+        .await
+        .expect("T1 change-suppressed keyed-fold merge must succeed");
+
+    // T2: staged-candidate conditional DELETE+INSERT. Its candidate select
+    // must carry the fully-combined row (the same effect the MERGE's fold
+    // expression computes), since T2 has no combiner of its own — it
+    // re-derives full candidate rows and diffs them against stored state.
+    let t2_candidate_select = "SELECT t.device_id, t.event_count + d.delta_count AS event_count, \
+                                d.new_marker AS run_marker FROM main.t2_target t JOIN (SELECT * \
+                                FROM (VALUES (1, 0, 'run2'), (2, 4, 'run2')) AS \
+                                x(device_id, delta_count, new_marker)) AS d ON t.device_id = \
+                                d.device_id UNION ALL SELECT 4, 6, 'run2'";
+    let t2_group = smelt_logical::maintenance::emit::emit_staged_candidate_conditional(
+        "main.t2_target",
+        "__smelt_staged_t2_target",
+        &key,
+        t2_candidate_select,
+        &compared_columns,
+        smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+    );
+    backend
+        .execute_statement_group(&t2_group)
+        .await
+        .expect("T2 staged-candidate conditional write must succeed");
+
+    // Full-refresh oracle: recompute the whole region directly.
+    backend
+        .execute_sql(
+            "UPDATE main.oracle SET event_count = 5, run_marker = 'run1' WHERE device_id = 1",
+        )
+        .await
+        .expect("oracle: device 1 unchanged");
+    backend
+        .execute_sql(
+            "UPDATE main.oracle SET event_count = 7, run_marker = 'run2' WHERE device_id = 2",
+        )
+        .await
+        .expect("oracle: device 2 changed");
+    backend
+        .execute_sql("INSERT INTO main.oracle VALUES (4, 6, 'run2')")
+        .await
+        .expect("oracle: device 4 new");
+
+    // All three end states are multiset-equal over the addressed columns.
+    assert_backend_multiset_equal(
+        &backend,
+        "SELECT device_id, event_count FROM main.t1_target",
+        "SELECT device_id, event_count FROM main.oracle",
+        "T1 (change-suppressed keyed-fold MERGE) vs full-refresh oracle",
+    )
+    .await
+    .expect("T1 must equal the full-refresh oracle at fixed S");
+    assert_backend_multiset_equal(
+        &backend,
+        "SELECT device_id, event_count FROM main.t2_target",
+        "SELECT device_id, event_count FROM main.oracle",
+        "T2 (staged-candidate conditional DELETE+INSERT) vs full-refresh oracle",
+    )
+    .await
+    .expect("T2 must equal the full-refresh oracle at fixed S");
+    assert_backend_multiset_equal(
+        &backend,
+        "SELECT device_id, event_count FROM main.t1_target",
+        "SELECT device_id, event_count FROM main.t2_target",
+        "T1 vs T2 (the two conditional-write realisations must be interchangeable)",
+    )
+    .await
+    .expect("T1 and T2 must agree with each other, not just with the oracle");
+
+    // Suppression proof: device 1 (unchanged effect) and device 3 (absent
+    // from the delta) must keep their prior run's marker under BOTH
+    // conditional techniques — proving the write never happened, not merely
+    // that it reproduced the same bits.
+    for table in ["t1_target", "t2_target"] {
+        let rows = backend
+            .execute_sql(&format!(
+                "SELECT device_id, run_marker FROM main.{table} ORDER BY device_id"
+            ))
+            .await
+            .expect("read back marker column");
+        let batch = &rows[0];
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .expect("device_id is Int64");
+        let markers = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .expect("run_marker is a string column");
+        let by_id: std::collections::HashMap<i64, String> = (0..ids.len())
+            .map(|i| (ids.value(i), markers.value(i).to_string()))
+            .collect();
+        assert_eq!(
+            by_id.get(&1).map(String::as_str),
+            Some("run1"),
+            "{table}: device 1's unchanged-effect row must never be written"
+        );
+        assert_eq!(
+            by_id.get(&2).map(String::as_str),
+            Some("run2"),
+            "{table}: device 2's changed row must be written"
+        );
+        assert_eq!(
+            by_id.get(&3).map(String::as_str),
+            Some("run1"),
+            "{table}: device 3 (absent from the delta) must never be touched"
+        );
+        assert_eq!(
+            by_id.get(&4).map(String::as_str),
+            Some("run2"),
+            "{table}: device 4 (brand new) must be inserted with the new run's marker"
+        );
+    }
+}
+
+// =============================================================================
+// Phase E4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+// — delta-restriction (T3) vs widened-scan equivalence at a fixed
+// processed-input set `S`, plus the empty-delta no-op cascade end to end.
+// Both legs exercise REAL production entry points directly
+// (`append_model_edge_cells`, `execute_delete_insert_with_delta_
+// restriction`, `execute_column_scoped_merge_full`,
+// `plan_since_upstream_with_observed_deltas`) rather than a hand-rolled
+// reimplementation — the same "direct fact injection" discipline
+// `crates/smelt-runtime/tests/delta_restricted_recompute.rs` (E3) and
+// `crates/smelt-runtime/tests/since_upstream_propagation.rs`'s D3 tests
+// already use, generalized to a generated sample.
+// =============================================================================
+
+/// Total baseline keys per generated case for `EnrichmentEdgeRecipe` —
+/// `arb_enrichment_edge_schedule`'s own `1..total` non-empty-proper-subset
+/// contract needs `total >= 2`.
+const ENRICHMENT_TOTAL_KEYS: usize = 6;
+
+const ENRICHMENT_DEFAULT_CASES: usize = 12;
+
+fn enrichment_case_count() -> usize {
+    std::env::var("SMELT_CONFORMANCE_CASES")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(ENRICHMENT_DEFAULT_CASES)
+}
+
+/// Derive the REAL P1 skeleton-source-closure verdict for a
+/// `EnrichmentJoinKind`'s own model-edge scope, through the SAME production
+/// entry point `crates/smelt-runtime/tests/
+/// web_analytics_session_delta_restriction.rs` exercises
+/// (`append_model_edge_cells`), never a hand-typed classification.
+fn enrichment_edge_closed(join_kind: EnrichmentJoinKind) -> bool {
+    let recipe = smelt_maintenance_testkit::recipe::EnrichmentEdgeRecipe::new(join_kind);
+    let mut plan = smelt_logical::maintenance::MaintenancePlan::default();
+    smelt_logical::maintenance::derive::append_model_edge_cells(
+        &mut plan,
+        &recipe.model_body(),
+        Some("event_date"),
+        &recipe.model_edges(),
+        &[],
+    );
+    let cell = plan
+        .cell_for(&Trigger::NewData {
+            source: recipe.driving_source().to_string(),
+        })
+        .unwrap_or_else(|| panic!("{join_kind:?} produced no model-edge creation cell"));
+    cell.skeleton_source_closure
+        .as_ref()
+        .is_some_and(|c| c.is_closed())
+}
+
+/// Seed `main.<table>` with [`ENRICHMENT_TOTAL_KEYS`] baseline rows shaped
+/// like `web_analytics_session_delta_restriction.rs`'s own
+/// `events_enriched` fixture; a key in `schedule.touched_indices` gets its
+/// `event_utm_campaign` value suffixed by `touched_suffix` (empty for a
+/// plain baseline, `"-NEW"` for the recompute source that actually changed).
+async fn seed_enrichment_case(
+    backend: &DuckDbBackend,
+    table: &str,
+    schedule: &smelt_maintenance_testkit::recipe::EnrichmentEdgeSchedule,
+    touched_suffix: &str,
+) {
+    backend
+        .execute_sql(&format!(
+            "CREATE TABLE main.{table} (event_id VARCHAR, device_id VARCHAR, event_date DATE, \
+             event_utm_campaign VARCHAR, session_id VARCHAR, session_utm_campaign VARCHAR)"
+        ))
+        .await
+        .unwrap();
+    let rows: Vec<String> = (0..ENRICHMENT_TOTAL_KEYS)
+        .map(|k| {
+            let campaign = if schedule.touched_indices.contains(&k) {
+                format!("campaign-{k}{touched_suffix}")
+            } else {
+                format!("campaign-{k}")
+            };
+            format!("('ev-{k}', 'dev-{k}', '2026-07-01', '{campaign}', 'sess-{k}', 'campaign-{k}')")
+        })
+        .collect();
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO main.{table} VALUES {}",
+            rows.join(", ")
+        ))
+        .await
+        .unwrap();
+}
+
+async fn read_enrichment_rows(backend: &DuckDbBackend, table: &str) -> Vec<(String, String)> {
+    let batches = backend
+        .execute_sql(&format!(
+            "SELECT event_id, event_utm_campaign FROM main.{table} ORDER BY event_id"
+        ))
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    for batch in &batches {
+        use arrow::array::{Array, StringArray};
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let campaigns = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            out.push((ids.value(i).to_string(), campaigns.value(i).to_string()));
+        }
+    }
+    out
+}
+
+async fn record_enrichment_delta(
+    backend: &DuckDbBackend,
+    upstream: &str,
+    start: &str,
+    end: &str,
+    changed_keys: &[String],
+) {
+    let ensure = smelt_state::ddl_duckdb::generate_observed_delta_table_ddl("main");
+    backend.execute_sql(&ensure).await.unwrap();
+    let changed_keys_query = if changed_keys.is_empty() {
+        "SELECT NULL AS delta_key, NULL AS delta_partition WHERE FALSE".to_string()
+    } else {
+        let keys_list = changed_keys
+            .iter()
+            .map(|k| format!("('{k}', NULL)"))
+            .collect::<Vec<_>>()
+            .join(", ");
+        format!("SELECT * FROM (VALUES {keys_list}) AS t(delta_key, delta_partition)")
+    };
+    let upsert = smelt_state::ddl_duckdb::generate_observed_delta_upsert_sql(
+        "main",
+        upstream,
+        start,
+        end,
+        &changed_keys_query,
+    );
+    backend.execute_sql(&upsert).await.unwrap();
+}
+
+/// `delta_restricted_equals_widened_scan_at_fixed_s` (Phase E4 TDD list):
+/// over the closure-admitted subset of a generated `EnrichmentEdgeRecipe`
+/// sample, force the SAME schedule through both `execute_delete_insert_
+/// with_delta_restriction` dispatch outcomes — `Closed` (restricted) and a
+/// forced `Open` (widened) — against two independently-seeded-identical
+/// baselines, and assert bit-identical end state. This holds precisely
+/// because every key OUTSIDE the schedule's touched set carries a
+/// recompute-source value already identical to what is stored — recomputing
+/// it (widened) reproduces exactly what leaving it alone (restricted)
+/// would.
+#[tokio::test]
+async fn delta_restricted_equals_widened_scan_at_fixed_s() {
+    let n = enrichment_case_count();
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_enrichment_edge_recipe();
+    let schedule_strat = arb_enrichment_edge_schedule(ENRICHMENT_TOTAL_KEYS);
+
+    let mut admitted = 0;
+    for i in 0..n {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        let schedule = schedule_strat.new_tree(&mut runner).unwrap().current();
+
+        let closed = enrichment_edge_closed(recipe.join_kind);
+        assert_eq!(
+            closed,
+            recipe.expects_closed(),
+            "case {i}: {recipe:?} P1 verdict ({closed}) did not match the recipe's own \
+             closure-admissibility expectation"
+        );
+        if !closed {
+            continue;
+        }
+        admitted += 1;
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("db.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+
+        let untouched_baseline = smelt_maintenance_testkit::recipe::EnrichmentEdgeSchedule {
+            touched_indices: vec![],
+        };
+        seed_enrichment_case(&backend, "restricted_target", &untouched_baseline, "").await;
+        seed_enrichment_case(&backend, "widened_target", &untouched_baseline, "").await;
+        seed_enrichment_case(&backend, "enrichment_recompute", &schedule, "-NEW").await;
+
+        let changed_keys: Vec<String> = schedule
+            .touched_indices
+            .iter()
+            .map(|k| format!("ev-{k}"))
+            .collect();
+        record_enrichment_delta(
+            &backend,
+            recipe.driving_source(),
+            "2026-07-01",
+            "2026-07-02",
+            &changed_keys,
+        )
+        .await;
+
+        let region = smelt_logical::maintenance::emit::Region {
+            start: "'2026-07-01'".to_string(),
+            end: "'2026-07-02'".to_string(),
+        };
+        let body = "SELECT event_id, device_id, event_date, event_utm_campaign, session_id, \
+                     session_utm_campaign FROM main.enrichment_recompute";
+
+        let closed_verdict = smelt_logical::maintenance::SkeletonSourceClosure::Closed;
+        smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
+            &backend,
+            "main",
+            "restricted_target",
+            "event_date",
+            &region,
+            body,
+            Some("event_id"),
+            Some(&closed_verdict),
+            recipe.driving_source(),
+            "2026-07-01",
+            "2026-07-02",
+            smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("case {i}: restricted recompute failed: {e}"));
+
+        let open_verdict = smelt_logical::maintenance::SkeletonSourceClosure::Open {
+            reason: "forced widened-scan comparison".to_string(),
+        };
+        smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction(
+            &backend,
+            "main",
+            "widened_target",
+            "event_date",
+            &region,
+            body,
+            Some("event_id"),
+            Some(&open_verdict),
+            recipe.driving_source(),
+            "2026-07-01",
+            "2026-07-02",
+            smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+        )
+        .await
+        .unwrap_or_else(|e| panic!("case {i}: widened recompute failed: {e}"));
+
+        let restricted_rows = read_enrichment_rows(&backend, "restricted_target").await;
+        let widened_rows = read_enrichment_rows(&backend, "widened_target").await;
+        assert_eq!(
+            restricted_rows, widened_rows,
+            "case {i}: {recipe:?} schedule {schedule:?} — delta-restricted and widened-scan \
+             recomputes must be bit-identical at fixed S"
+        );
+    }
+
+    assert!(
+        admitted > 0,
+        "N={n} deterministic sample admitted zero closure-Closed cases — generator/proof \
+         regression"
+    );
+}
+
+/// `delta_restriction_admission_rate_stays_above_floor` (Phase E4 TDD list):
+/// exactly one of the three `EnrichmentJoinKind` variants (`LeftJoin`) is
+/// closure-admissible by construction, so a uniform draw over N=30 should
+/// land close to 33%; a 15% floor catches a generator or P1 regression
+/// (`InnerJoin`/`MembershipPredicate` spuriously admitting, or `LeftJoin`
+/// spuriously refusing) with wide margin against sampling noise, without
+/// being flaky (`TestRunner::deterministic()` reproduces the SAME sequence
+/// every run).
+#[test]
+fn delta_restriction_admission_rate_stays_above_floor() {
+    const N: usize = 30;
+    let mut runner = TestRunner::deterministic();
+    let recipe_strat = arb_enrichment_edge_recipe();
+
+    let mut admitted = 0;
+    for _ in 0..N {
+        let recipe = recipe_strat.new_tree(&mut runner).unwrap().current();
+        if enrichment_edge_closed(recipe.join_kind) {
+            admitted += 1;
+        }
+    }
+
+    let rate = admitted as f64 / N as f64;
+    assert!(
+        rate >= 0.15,
+        "delta-restriction admission rate {rate:.2} over N={N} fell below the 15% floor \
+         ({admitted}/{N} admitted) — a route-admission regression would silently hollow out the \
+         standing gate"
+    );
+}
+
+// =============================================================================
+// `empty_delta_cascade_is_a_no_op` (Phase E4): the end-to-end payoff — a
+// fully-suppressed conditional write over a composed (timeseries-
+// partitioned) model-edge upstream records a REAL present-and-empty
+// observed delta (T5, via the real `execute_column_scoped_merge_full`
+// entry point, not a hand-typed record), which schedules ZERO downstream
+// regions across a real fan-out cascade (`examples/timeseries`'s real
+// `user_daily_spend -> {user_spend_rollup, user_spend_running_total}`
+// graph, the same real fixture `crates/smelt-runtime/tests/
+// since_upstream_propagation.rs`'s D3 tests exercise), and leaves the
+// target byte-identical to a from-scratch full-refresh oracle.
+// =============================================================================
+
+fn key_suppression_for(compared: &[&str]) -> WriteSuppression {
+    WriteSuppression::Suppressed {
+        compared_columns: compared.iter().map(|c| c.to_string()).collect(),
+    }
+}
+
+async fn read_spend_rows(backend: &DuckDbBackend, table: &str) -> Vec<(i64, String, f64)> {
+    let batches = backend
+        .execute_sql(&format!(
+            "SELECT user_id, spend_date::VARCHAR, total_amount FROM main.{table} ORDER BY user_id"
+        ))
+        .await
+        .unwrap();
+    let mut out = Vec::new();
+    for batch in &batches {
+        use arrow::array::{Array, Float64Array, Int64Array, StringArray};
+        let ids = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .unwrap();
+        let dates = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<StringArray>()
+            .unwrap();
+        let amounts = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<Float64Array>()
+            .unwrap();
+        for i in 0..batch.num_rows() {
+            out.push((ids.value(i), dates.value(i).to_string(), amounts.value(i)));
+        }
+    }
+    out
+}
+
+#[tokio::test]
+async fn empty_delta_cascade_is_a_no_op() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("db.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    // The upstream: `user_daily_spend`-styled (`examples/timeseries`'s own
+    // model name and columns), already processed for 2026-07-01.
+    backend
+        .execute_sql(
+            "CREATE TABLE main.user_daily_spend (user_id BIGINT, spend_date DATE, total_amount \
+             DOUBLE)",
+        )
+        .await
+        .unwrap();
+    backend
+        .execute_sql(
+            "INSERT INTO main.user_daily_spend VALUES (1, '2026-07-01', 10.0), \
+             (2, '2026-07-01', 20.0), (3, '2026-07-01', 30.0)",
+        )
+        .await
+        .unwrap();
+
+    // A redelivery of the SAME window: byte-identical to what is stored —
+    // an upstream run that changes nothing.
+    backend
+        .execute_sql(
+            "CREATE TABLE main.user_daily_spend_recompute (user_id BIGINT, spend_date DATE, \
+             total_amount DOUBLE)",
+        )
+        .await
+        .unwrap();
+    backend
+        .execute_sql(
+            "INSERT INTO main.user_daily_spend_recompute VALUES (1, '2026-07-01', 10.0), \
+             (2, '2026-07-01', 20.0), (3, '2026-07-01', 30.0)",
+        )
+        .await
+        .unwrap();
+
+    let suppression = key_suppression_for(&["total_amount"]);
+    let dimension_batch_sql =
+        "SELECT user_id, spend_date, total_amount FROM main.user_daily_spend_recompute";
+    let window = smelt_backend::PartitionRange {
+        column: "spend_date".to_string(),
+        start: "2026-07-01".to_string(),
+        end: "2026-07-02".to_string(),
+    };
+
+    // Leg (a): the write itself, executed for real — snapshot the target
+    // before, run the real conditional write + record entry point, snapshot
+    // after. Zero writes, not merely zero net diffs.
+    let before = read_spend_rows(&backend, "user_daily_spend").await;
+    smelt_runtime::maintenance_driver::execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "user_daily_spend",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+        &window,
+    )
+    .await
+    .expect("suppressed merge over an unchanged redelivery must succeed");
+    let after = read_spend_rows(&backend, "user_daily_spend").await;
+    assert_eq!(
+        before, after,
+        "an unchanged redelivery must write zero rows — the target's state must be \
+         byte-identical before and after"
+    );
+
+    // The REAL recorded delta (T5) — read back through the same production
+    // entry point `crates/smelt-runtime/tests/observed_delta.rs` exercises,
+    // never hand-typed.
+    let changed_keys = smelt_runtime::maintenance_driver::read_observed_delta_changed_keys(
+        &backend,
+        "main",
+        "user_daily_spend",
+        "2026-07-01",
+        "2026-07-02",
+    )
+    .await
+    .expect("read observed delta")
+    .expect("a fully-suppressed run must record a present (not absent) delta");
+    assert!(
+        changed_keys.is_empty(),
+        "a fully-suppressed run must record an EMPTY changed-key set: {changed_keys:?}"
+    );
+
+    // Leg (c): the full-refresh oracle — an independent, from-scratch
+    // recompute over the SAME (unchanged) source data — still matches.
+    backend
+        .execute_sql(
+            "CREATE TABLE main.oracle_daily_spend AS SELECT user_id, spend_date, total_amount \
+             FROM main.user_daily_spend_recompute",
+        )
+        .await
+        .unwrap();
+    let mut sorted_after = after.clone();
+    sorted_after.sort_by_key(|r| r.0);
+    let mut sorted_oracle = read_spend_rows(&backend, "oracle_daily_spend").await;
+    sorted_oracle.sort_by_key(|r| r.0);
+    assert_eq!(
+        sorted_after, sorted_oracle,
+        "the no-op run's end state must still equal a from-scratch full-refresh oracle"
+    );
+
+    // Leg (b): the REAL propagation graph — `examples/timeseries`'s actual
+    // `user_daily_spend -> {user_spend_rollup, user_spend_running_total}`
+    // fan-out — feeding the delta this test JUST recorded for real must
+    // schedule ZERO regions across the WHOLE cascade, not just its own
+    // edge.
+    let project_dir = std::path::Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+    let discovery =
+        smelt_core::ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = smelt_core::discover_source_infos(&project_dir, &["models".to_string()]);
+
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| {
+            a == "user_daily_spend" || a == "user_spend_rollup" || a == "user_spend_running_total"
+        })
+        .collect();
+    assert_eq!(
+        order.len(),
+        3,
+        "expected all three real fixture models to be discovered: {order:?}"
+    );
+
+    let window_interval = smelt_logical::maintenance::propagate::DayInterval::new(
+        smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 1),
+        smelt_logical::maintenance::propagate::day_ordinal(2026, 7, 2),
+    );
+    let deltas = vec![smelt_runtime::propagation::SourceDelta {
+        source: "user_daily_spend".to_string(),
+        landed: window_interval,
+    }];
+    let mut observed = smelt_runtime::propagation::ObservedDeltaLookup::new();
+    observed.insert(
+        (
+            "user_daily_spend".to_string(),
+            "2026-07-01".to_string(),
+            "2026-07-02".to_string(),
+        ),
+        smelt_state::ddl_duckdb::ObservedDelta {
+            changed_keys,
+            partitions: vec![],
+        },
+    );
+
+    let plan = smelt_runtime::propagation::plan_since_upstream_with_observed_deltas(
+        &models,
+        &source_infos,
+        &order,
+        &deltas,
+        &observed,
+    )
+    .expect("a present-and-empty observed delta must not be a refusal");
+
+    assert!(
+        plan.runs.is_empty(),
+        "a fully-suppressed upstream run must schedule ZERO downstream regions across the whole \
+         cascade (both user_spend_rollup and user_spend_running_total): {:?}",
+        plan.runs
+    );
 }

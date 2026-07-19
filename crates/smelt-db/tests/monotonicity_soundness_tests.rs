@@ -1,9 +1,9 @@
 //! Generative smelt-sql soundness oracle for the event-time monotonicity
 //! trace (`smelt_logical::trace_event_time`).
 //!
-//! Spec: `docs/specs/incremental_models.md` §"Event-time monotonicity
-//! trace", Constraint 12. Plan: `docs/plans/20260702-monotonicity-primitive-tested.md`
-//! Phase 2.
+//! Spec: `docs/specs/model_properties.md` §"Event-time monotonicity trace"
+//! (and the column-nullability-gate row).
+//! Plan: `docs/plans/20260702-monotonicity-primitive-tested.md` Phase 2.
 //!
 //! Fixture-style unit tests (in `crates/smelt-logical/src/analysis/monotonicity.rs`)
 //! only prove the primitive classifies ~15 *known* scenarios correctly. The

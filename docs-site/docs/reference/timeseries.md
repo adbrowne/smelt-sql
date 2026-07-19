@@ -82,7 +82,7 @@ Frontmatter wins over `smelt.yml` when both set the same field. The two sources 
 | `view` | Yes |
 | `table`, `refresh: full` | Yes |
 | `table`, `refresh: incremental`, `grain: partition` | **Required** |
-| `table`, `refresh: incremental`, `grain: key` | **Forbidden** — the keyed output has no partition column; the rule reads partition shape from the driving source (`KeyedForbidsTimeseries`) |
+| `table`, `refresh: incremental`, `grain: key` | **Optional** — the [composed shape](#interaction-with-grain-key): admitted iff [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) is established, refused otherwise (`KeyedForbidsTimeseries`, naming the missing route) |
 | `table`, `refresh: incremental`, `grain: key_per_partition` | **Required** — the partition axis is half the grain |
 | `table`, `refresh: materialized_view` | No — `MaterializedViewForbidsTimeseries` |
 | `ephemeral` | No — `MalformedTimeseries` |
@@ -96,6 +96,16 @@ A `refresh: incremental` model must also declare `timeseries:` whenever its `gra
 - `refresh: incremental` + `grain:` opts the model into the derived maintenance plan; the `batched:` block carries per-model preference keys (`unique_key`, `safety_overrides`) layered on top.
 
 Declaring `refresh: incremental` + `grain: partition` without `timeseries:` is a validation error. See the [incremental models guide](../guide/incremental-models.md).
+
+## Interaction with `grain: key`
+
+The key axis (identity, via `unique_key:`) and the time axis (clock, via `timeseries:`) are independent — a model can declare either, both, or neither. Declaring both is the **composed shape**: a keyed output (one merged row per key) that is also time-partitioned. It is not the default for a `grain: key` model — by default a keyed output has no partition column at all — and it is not automatic: admitting a `timeseries:` block on a keyed output additionally requires **key temporal locality**, a proof or a checked declaration that every duplicate delivery of one key stays within a bounded window of itself on the event axis. Three routes establish it:
+
+1. **Key-embedded** — `partition_column` is itself a `unique_key` column.
+2. **Key-determined** — `partition_column` is proven a per-key constant by a declared `functional_dependencies:` entry naming it.
+3. **Recurrence-bounded** — a `key_recurrence` window declared on the driving source's `mutation_profile:` (see [Declaring how a source mutates](../guide/sources.md#declaring-how-a-source-mutates) and the [source YAML reference](../reference/sources-yml.md#mutation-profile)), checked transactionally at merge time rather than trusted.
+
+A `grain: key` model whose `timeseries:` block satisfies none of the three routes is refused (`KeyedForbidsTimeseries`, naming all three routes and the nearest missing fact) rather than silently falling back to a bare keyed output. See [the composed shape](../guide/incremental-models.md#the-composed-shape-key-time) for the full walkthrough, and the [deduplication tutorial](../examples/web-analytics/deduplication.md) for a worked example using the recurrence-bounded route.
 
 ## Diagnostic codes
 

@@ -479,7 +479,7 @@ impl Backend for SparkBackend {
     /// (`catalog.schema.table`) — the generic default in `smelt-backend`
     /// only sees `schema`/`name` and cannot know Spark's catalog. The text
     /// itself still comes from `emit_delete_insert`
-    /// (`docs/specs/maintenance_plan.md` §"Statement emission (single
+    /// (`docs/specs/incremental_models.md` §"Statement emission (single
     /// owner)"); this crate builds no `DELETE`/`INSERT` string of its own.
     /// No native multi-statement transaction here (same precedent as the
     /// pre-Phase-1 default) — statements execute sequentially via
@@ -511,7 +511,7 @@ impl Backend for SparkBackend {
     // maintenance::emit::emit_column_scoped_merge`, then
     // `execute_statement_group`) routes through `execute_sql` per statement,
     // matching this backend's shape exactly (single statement, no native
-    // transaction). `docs/specs/maintenance_plan.md` §"Statement emission
+    // transaction). `docs/specs/incremental_models.md` §"Statement emission
     // (single owner)" — Spark statement parity is asserted at the emitter
     // level; the live Spark leg is gated CI, not this default routing.
 

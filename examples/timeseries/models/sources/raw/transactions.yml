@@ -15,3 +15,9 @@ columns:
 - name: transaction_type
   type: VARCHAR
   description: Type of transaction (purchase, refund, etc.)
+timeseries:
+  event_time_column: transaction_timestamp
+  partition_column: transaction_timestamp
+  granularity: day
+mutation_profile:
+  kind: append_only

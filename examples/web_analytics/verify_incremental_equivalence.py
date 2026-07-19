@@ -167,7 +167,7 @@ def pipeline_b_day_by_day(start: date, end_exclusive: date) -> None:
     window (`[D-1, D+1)`) per iteration. That schedule predates
     `silver.device_user_edges`, an additive-fold keyed model
     (`grain: key`); its transactional merge ledger refuses to re-fold a
-    partition it has already merged (`docs/specs/keyed_models.md`
+    partition it has already merged (`docs/specs/incremental_models.md`
     §"Reprocessing" / §"The transactional merge ledger" —
     `KeyedReprocessedWindow`), and the overlapping schedule would double-fold
     day D on both day D's and day D+1's window. Non-overlapping windows are

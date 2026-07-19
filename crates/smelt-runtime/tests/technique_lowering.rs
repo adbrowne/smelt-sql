@@ -24,6 +24,19 @@
 //! `execute_column_scoped_merge_full`, wired into `execute.rs`'s regular
 //! incremental batch-execution branch — never a direct unit call to
 //! `resolve_cell_technique`/`execute_column_scoped_merge` as above.
+//!
+//! The `write_pattern_registry_pin` module (bottom of this file,
+//! `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase R1)
+//! adds the open write-pattern registry's own end-to-end leg: a valid
+//! `maintenance.cells[].write` pin selects among admissible mechanisms and
+//! actually lowers to the pinned addressing against a real DuckDB backend
+//! (`pinning_region_on_backfill_cell_yields_delete_insert`). Every
+//! `Backend::capabilities().supports_column_scoped_merge` call site in this
+//! file (above and below) is proof by construction that the old
+//! `Backend::supports_column_scoped_merge()` trait method no longer exists —
+//! `crates/smelt-backend/src/lib.rs` deleted it, so a call site written the
+//! old way would not compile; the whole workspace's clean build after that
+//! deletion is the compile-time assertion the phase's TDD list asks for.
 
 use std::path::Path;
 
@@ -32,13 +45,41 @@ use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::CellTechnique;
 use smelt_logical::analysis::join_shape::ContributionVerdict;
 use smelt_logical::analysis::source_bounds::{BoundResult, Seconds};
+use smelt_logical::maintenance::choice::WriteSuppression;
 use smelt_logical::maintenance::{
-    Corner, MaintenancePlan, PartitionLocal, PlanCell, Refusal, ScanClamp, Technique, Trigger,
+    Corner, MaintenancePlan, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict,
+    ScanClamp, Technique, Trigger,
 };
 use smelt_runtime::maintenance_driver::{
-    decide_column_merge_dispatch, execute_column_scoped_merge, resolve_cell_technique,
-    widen_horizon_for_batch, ColumnMergeDispatch, ResolvedTechnique,
+    decide_column_merge_dispatch, execute_column_scoped_merge, execute_column_scoped_merge_full,
+    resolve_cell_technique, resolve_cell_technique_with_write_pin, widen_horizon_for_batch,
+    ColumnMergeDispatch, ResolvedTechnique,
 };
+
+/// These two physical-mechanism tests below exercise `execute_column_scoped_
+/// merge` directly (not through the derived plan's own `WriteSuppression`
+/// resolution, `maintenance_driver::resolve_live_column_scoped_cell`'s job)
+/// — they always pass the unconditional variant so the pre-Phase-C4
+/// `UPDATE SET *` behaviour they assert on is unchanged by C4's suppression
+/// machinery.
+fn unconditional() -> WriteSuppression {
+    WriteSuppression::Unconditional {
+        why: "test exercises the physical mechanism directly, not suppression admission"
+            .to_string(),
+    }
+}
+
+/// A run-window identity for `execute_column_scoped_merge`/`_full`'s
+/// observed-delta record (T5) — these dimension-shape fixtures have no
+/// partition axis, so `column` is empty (the record's `partitions` array is
+/// always empty for this shape).
+fn test_window() -> smelt_backend::PartitionRange {
+    smelt_backend::PartitionRange {
+        column: String::new(),
+        start: "2024-01-01".to_string(),
+        end: "2024-01-02".to_string(),
+    }
+}
 
 /// A plan whose only cell is an admitted `ColumnScopedMerge` for `source`'s
 /// mutation trigger over the `{tier}` column group — the enrichment shape's
@@ -55,8 +96,15 @@ fn admitted_plan(source: &str) -> MaintenancePlan {
             partition_local: PartitionLocal::Yes,
             scans: vec![],
             ledger_catch_up: false,
+            row_identity: RowIdentityVerdict {
+                identity: RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            skeleton_source_closure: None,
+            fingerprint_projections: std::collections::BTreeMap::new(),
         }],
         refusals: vec![],
+        key_locality: None,
     }
 }
 
@@ -69,6 +117,7 @@ fn refused_plan(source: &str) -> MaintenancePlan {
             source: source.to_string(),
             why: "derived scan is unbounded".to_string(),
         }],
+        key_locality: None,
     }
 }
 
@@ -81,7 +130,7 @@ fn unadmitted_cell_never_lowers_targeted_write() {
 
     // Pinning `rederive_columns` names a cell the plan never admitted — a
     // pin bypasses the cost model, never admission
-    // (`maintenance_plan.md` §"Per-cell admission"). This must refuse at
+    // (`incremental_models.md` §"Per-cell admission"). This must refuse at
     // plan-resolution time, not silently execute a targeted write with an
     // unbounded footprint.
     let err = resolve_cell_technique(&plan, &trigger, Some(CellTechnique::RederiveColumns), true)
@@ -184,7 +233,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         .expect("seed dim table (user_id=1 mutated bronze -> gold)");
 
     assert!(
-        backend.supports_column_scoped_merge(),
+        backend.capabilities().supports_column_scoped_merge,
         "DuckDB backend must advertise column-scoped MERGE capability"
     );
 
@@ -215,7 +264,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         &plan,
         &trigger,
         None,
-        backend.supports_column_scoped_merge(),
+        backend.capabilities().supports_column_scoped_merge,
     )
     .expect("admitted cell resolves");
     assert_eq!(resolved, ResolvedTechnique::ColumnScopedMerge);
@@ -230,6 +279,8 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         "d",
         "2024-01-01 12:00:00",
         dimension_batch_sql,
+        &unconditional(),
+        &test_window(),
     )
     .await
     .expect("column-scoped merge must succeed");
@@ -351,6 +402,12 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
             after: Seconds::hours(24),
         }],
         ledger_catch_up: false,
+        row_identity: RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: std::collections::BTreeMap::new(),
     };
 
     let dispatch = decide_column_merge_dispatch(
@@ -390,6 +447,8 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         "d",
         "2024-01-01 00:00:00",
         dimension_batch_sql,
+        &unconditional(),
+        &test_window(),
     )
     .await
     .expect("horizon-clamped column-scoped merge must succeed");
@@ -420,6 +479,523 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         "d=2024-01-03 falls outside [conv_ts - 24h, conv_ts] — the horizon clamp must leave it \
          untouched this run, unlike execute_column_scoped_merge_full's unconditional full merge"
     );
+}
+
+/// Phase C4 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the change-suppressed column-scoped MERGE (T1), real-DuckDB proof: an
+/// unchanged-input re-run writes **zero** rows. `resolve_write_suppression`
+/// is fed a proven `Key` row identity (P2) and an all-`Comparable` P3
+/// verdict for the `{tier}` group — the admission this phase adds — so it
+/// resolves `WriteSuppression::Suppressed`, and `execute_column_scoped_merge_
+/// full` dispatches through `emit_column_scoped_merge_suppressed` instead of
+/// the plain unconditional emitter used by the tests above.
+///
+/// The "zero rows written" proof reads DuckDB's own `Count` column off the
+/// `MERGE`'s query result (`execute_sql`'s returned `RecordBatch`, captured
+/// here directly rather than through `execute_column_scoped_merge_full`'s
+/// `ExecutionResult::row_count`, which only reports the target's total row
+/// count, not the number of rows the statement itself touched) — the same
+/// affected-row semantics DuckDB's own `MERGE`/`UPDATE`/`INSERT` report.
+#[tokio::test]
+async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let db_path = tmp.path().join("test.duckdb");
+    let backend = DuckDbBackend::new(&db_path, "main")
+        .await
+        .expect("open duckdb");
+
+    backend
+        .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create target table");
+    backend
+        .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed target table");
+    backend
+        .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+        .await
+        .expect("create dim table");
+    // Dimension starts out identical to the target — the first run below is
+    // itself an unchanged-input run.
+    backend
+        .execute_sql("INSERT INTO main.sources_users VALUES (1, 'bronze'), (2, 'silver')")
+        .await
+        .expect("seed dim table");
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+
+    // The admission this phase adds: a proven key over a fully comparable
+    // group resolves `Suppressed`, naming exactly the `{tier}` group.
+    let row_identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["user_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let comparability = vec![smelt_logical::analysis::walk::ColumnComparability {
+        output: "tier".to_string(),
+        comparability: smelt_logical::analysis::walk::Comparability::Comparable,
+    }];
+    let suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+        &["tier".to_string()],
+        &comparability,
+        &row_identity,
+    );
+    assert_eq!(
+        suppression,
+        WriteSuppression::Suppressed {
+            compared_columns: vec!["tier".to_string()]
+        },
+        "a proven key over a fully comparable group must admit the conditional variant"
+    );
+
+    // Run 1: dimension unchanged relative to the target — the suppressed
+    // MERGE must match every row but write none of them.
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+        &test_window(),
+    )
+    .await
+    .expect("suppressed column-scoped merge must succeed");
+
+    let affected = merge_affected_row_count(
+        &backend,
+        "main.dim_users",
+        "main.sources_users",
+        &["user_id"],
+        &["tier"],
+    )
+    .await;
+    assert_eq!(
+        affected, 0,
+        "an unchanged-input re-run of the suppressed MERGE must write zero rows"
+    );
+
+    // Mutate the dimension for user 1 — now a real change exists.
+    backend
+        .execute_sql("UPDATE main.sources_users SET tier = 'gold' WHERE user_id = 1")
+        .await
+        .expect("mutate dimension");
+
+    execute_column_scoped_merge_full(
+        &backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &suppression,
+        &test_window(),
+    )
+    .await
+    .expect("suppressed column-scoped merge must succeed after mutation");
+
+    let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+    let tier_1: String = conn
+        .query_row(
+            "SELECT tier FROM main.dim_users WHERE user_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read maintained tier for user 1");
+    assert_eq!(
+        tier_1, "gold",
+        "the suppressed MERGE must still pick up a genuine change"
+    );
+    let tier_2: String = conn
+        .query_row(
+            "SELECT tier FROM main.dim_users WHERE user_id = 2",
+            [],
+            |row| row.get(0),
+        )
+        .expect("read unaffected tier for user 2");
+    assert_eq!(tier_2, "silver", "an unmutated row must be left untouched");
+
+    // Full-refresh oracle: the maintained state must equal a fresh join,
+    // exactly like the unconditional-variant tests above.
+    let oracle_tier_1: String = conn
+        .query_row(
+            "SELECT tier FROM main.sources_users WHERE user_id = 1",
+            [],
+            |row| row.get(0),
+        )
+        .expect("oracle read");
+    assert_eq!(tier_1, oracle_tier_1);
+
+    // Run 3: dimension unchanged again (relative to the now-mutated state)
+    // — zero rows written a second time.
+    let affected_again = merge_affected_row_count(
+        &backend,
+        "main.dim_users",
+        "main.sources_users",
+        &["user_id"],
+        &["tier"],
+    )
+    .await;
+    assert_eq!(
+        affected_again, 0,
+        "a second unchanged-input re-run must also write zero rows"
+    );
+}
+
+/// Issue the exact `emit_column_scoped_merge_suppressed`-shaped statement
+/// directly and read DuckDB's own affected-row `Count` off the query
+/// result — the same probe this test file's e2e proof reads its "zero rows
+/// written" assertion from, kept separate from `execute_column_scoped_merge_
+/// full` (whose `ExecutionResult::row_count` reports the target's total row
+/// count, not the number of rows the statement itself touched).
+async fn merge_affected_row_count(
+    backend: &DuckDbBackend,
+    target: &str,
+    source: &str,
+    key: &[&str],
+    compared: &[&str],
+) -> i64 {
+    use smelt_logical::maintenance::emit::{
+        emit_column_scoped_merge_suppressed, MaintenanceDialect,
+    };
+
+    let key_owned: Vec<String> = key.iter().map(|s| s.to_string()).collect();
+    let compared_owned: Vec<String> = compared.iter().map(|s| s.to_string()).collect();
+    let group = emit_column_scoped_merge_suppressed(
+        target,
+        &key_owned,
+        &format!("SELECT * FROM {source}"),
+        &compared_owned,
+        MaintenanceDialect::DuckDb,
+    );
+    let batches = backend
+        .execute_sql(&group.statements[0].sql)
+        .await
+        .expect("probe merge must succeed");
+    let batch = batches.first().expect("MERGE returns one Count row");
+    let counts = batch
+        .column(0)
+        .as_any()
+        .downcast_ref::<arrow::array::Int64Array>()
+        .expect("Count column is Int64");
+    counts.value(0)
+}
+
+/// Phase G1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the conditional-variant dimension enters `choice.rs`'s override ladder:
+/// `resolve_write_variant` folds the first-build/definition-change-backfill
+/// posture into an already-proven `WriteSuppression::Suppressed` verdict.
+/// This is the interchangeability claim the plan asks for, exercised
+/// end-to-end against a real DuckDB backend: a steady-state trigger
+/// (`Trigger::UpstreamMutation`, no ledger catch-up) *prefers* the
+/// change-suppressed matched arm, while a first-build/backfill trigger
+/// (`Trigger::Backfill`, or a definition-change cell's own
+/// `ledger_catch_up: true`) is *admitted but not preferred* and resolves the
+/// unconditional matched arm instead — bit-identical final state either way
+/// (`incremental_models.md` §"Interchangeability and choice"), never a
+/// difference in which `S` is reflected.
+#[tokio::test]
+async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_state() {
+    use smelt_logical::maintenance::choice::{resolve_write_variant, VariantReason};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+
+    // Two separate real DuckDB databases, seeded identically: a target that
+    // already diverges from its dimension source for user 1 (tier
+    // 'bronze' → 'gold'), unchanged for user 2.
+    async fn seed(path: &Path) -> DuckDbBackend {
+        let backend = DuckDbBackend::new(path, "main").await.expect("open duckdb");
+        backend
+            .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create target table");
+        backend
+            .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+            .await
+            .expect("seed target table");
+        backend
+            .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create dim table");
+        backend
+            .execute_sql("INSERT INTO main.sources_users VALUES (1, 'gold'), (2, 'silver')")
+            .await
+            .expect("seed dim table");
+        backend
+    }
+
+    let steady_db_path = tmp.path().join("steady.duckdb");
+    let backfill_db_path = tmp.path().join("backfill.duckdb");
+    let steady_backend = seed(&steady_db_path).await;
+    let backfill_backend = seed(&backfill_db_path).await;
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let row_identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["user_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let comparability = vec![smelt_logical::analysis::walk::ColumnComparability {
+        output: "tier".to_string(),
+        comparability: smelt_logical::analysis::walk::Comparability::Comparable,
+    }];
+    let proven_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+        &["tier".to_string()],
+        &comparability,
+        &row_identity,
+    );
+    assert_eq!(
+        proven_suppression,
+        WriteSuppression::Suppressed {
+            compared_columns: vec!["tier".to_string()]
+        },
+        "precondition: the compare must actually be admitted for this test to prove anything"
+    );
+
+    // Steady-state trigger: no prior-state gap — the ladder PREFERS
+    // suppression.
+    let steady_trigger = Trigger::UpstreamMutation {
+        source: "sources.users".to_string(),
+    };
+    let (steady_variant, steady_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        false,
+        &smelt_logical::maintenance::choice::EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(steady_reason, VariantReason::SteadyStatePreference);
+    assert!(matches!(
+        steady_variant,
+        WriteSuppression::Suppressed { .. }
+    ));
+
+    // First-build/backfill trigger: admitted, but NOT preferred — resolves
+    // unconditional by default even though the same proof holds.
+    let (backfill_variant, backfill_reason) = resolve_write_variant(
+        &proven_suppression,
+        &Trigger::Backfill,
+        false,
+        &smelt_logical::maintenance::choice::EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(backfill_reason, VariantReason::FirstBuildPosture);
+    assert!(matches!(
+        backfill_variant,
+        WriteSuppression::Unconditional { .. }
+    ));
+
+    // A definition-change backfill cell (`ledger_catch_up: true`) resolves
+    // the same way even on an otherwise-steady-state trigger.
+    let (catch_up_variant, catch_up_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        true,
+        &smelt_logical::maintenance::choice::EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(catch_up_reason, VariantReason::FirstBuildPosture);
+    assert!(matches!(
+        catch_up_variant,
+        WriteSuppression::Unconditional { .. }
+    ));
+
+    // Execute both resolved variants against their own real, identically
+    // seeded target — one via the suppressed matched arm the steady-state
+    // trigger prefers, the other via the unconditional matched arm the
+    // first-build/backfill posture defaults to.
+    execute_column_scoped_merge_full(
+        &steady_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &steady_variant,
+        &test_window(),
+    )
+    .await
+    .expect("steady-state suppressed merge must succeed");
+
+    execute_column_scoped_merge_full(
+        &backfill_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &backfill_variant,
+        &test_window(),
+    )
+    .await
+    .expect("first-build unconditional merge must succeed");
+
+    // Bit-identical final state either way — choice may change which
+    // matched-arm shape ran, never observable bits at a fixed processed-
+    // input set.
+    let steady_conn = duckdb::Connection::open(&steady_db_path).expect("reconnect steady");
+    let backfill_conn = duckdb::Connection::open(&backfill_db_path).expect("reconnect backfill");
+    for user_id in [1_i64, 2_i64] {
+        let steady_tier: String = steady_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read steady tier");
+        let backfill_tier: String = backfill_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read backfill tier");
+        assert_eq!(
+            steady_tier, backfill_tier,
+            "user {user_id}: the suppressed (steady-state-preferred) and unconditional \
+             (first-build-posture) matched arms must produce bit-identical state"
+        );
+    }
+}
+
+/// Phase G1's pin dimension: a `technique: unconditional` pin forces the
+/// plain matched arm on a steady-state trigger that would otherwise prefer
+/// suppression, and a `technique: suppress` pin forces the change-suppressed
+/// matched arm on for a first-build trigger that would otherwise default to
+/// unconditional — exercised end-to-end against a real DuckDB backend,
+/// asserting bit-identical final state against the natural (unpinned)
+/// resolution either way (`incremental_models.md` §"Interchangeability and
+/// choice": a pin may change which matched-arm shape ran, never the bits at
+/// a fixed processed-input set).
+#[tokio::test]
+async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state() {
+    use smelt_core::config::CellTechnique;
+    use smelt_logical::maintenance::choice::{
+        resolve_write_variant, EffectiveOverride, VariantReason,
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+
+    async fn seed(path: &Path) -> DuckDbBackend {
+        let backend = DuckDbBackend::new(path, "main").await.expect("open duckdb");
+        backend
+            .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create target table");
+        backend
+            .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+            .await
+            .expect("seed target table");
+        backend
+            .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create dim table");
+        backend
+            .execute_sql("INSERT INTO main.sources_users VALUES (1, 'gold'), (2, 'silver')")
+            .await
+            .expect("seed dim table");
+        backend
+    }
+
+    let natural_db_path = tmp.path().join("natural.duckdb");
+    let pinned_db_path = tmp.path().join("pinned.duckdb");
+    let natural_backend = seed(&natural_db_path).await;
+    let pinned_backend = seed(&pinned_db_path).await;
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let row_identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["user_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let comparability = vec![smelt_logical::analysis::walk::ColumnComparability {
+        output: "tier".to_string(),
+        comparability: smelt_logical::analysis::walk::Comparability::Comparable,
+    }];
+    let proven_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+        &["tier".to_string()],
+        &comparability,
+        &row_identity,
+    );
+
+    // A steady-state trigger naturally prefers suppression — pin
+    // `technique: unconditional` to force the plain matched arm instead.
+    let steady_trigger = Trigger::UpstreamMutation {
+        source: "sources.users".to_string(),
+    };
+    let (natural_variant, natural_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        false,
+        &EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(natural_reason, VariantReason::SteadyStatePreference);
+    assert!(matches!(
+        natural_variant,
+        WriteSuppression::Suppressed { .. }
+    ));
+
+    let unconditional_pin = EffectiveOverride {
+        prefer: None,
+        technique: Some(CellTechnique::Unconditional),
+    };
+    let (pinned_variant, pinned_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        false,
+        &unconditional_pin,
+    )
+    .expect("`technique: unconditional` is always admissible — never refuses");
+    assert_eq!(pinned_reason, VariantReason::Overridden);
+    assert!(matches!(
+        pinned_variant,
+        WriteSuppression::Unconditional { .. }
+    ));
+
+    execute_column_scoped_merge_full(
+        &natural_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &natural_variant,
+        &test_window(),
+    )
+    .await
+    .expect("natural suppressed merge must succeed");
+
+    execute_column_scoped_merge_full(
+        &pinned_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &pinned_variant,
+        &test_window(),
+    )
+    .await
+    .expect("pinned unconditional merge must succeed");
+
+    let natural_conn = duckdb::Connection::open(&natural_db_path).expect("reconnect natural");
+    let pinned_conn = duckdb::Connection::open(&pinned_db_path).expect("reconnect pinned");
+    for user_id in [1_i64, 2_i64] {
+        let natural_tier: String = natural_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read natural tier");
+        let pinned_tier: String = pinned_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read pinned tier");
+        assert_eq!(
+            natural_tier, pinned_tier,
+            "user {user_id}: the natural (suppressed) and pinned (unconditional) matched \
+             arms must produce bit-identical state — a pin changes which shape ran, never \
+             the bits at a fixed processed-input set"
+        );
+    }
 }
 
 /// Real fixture: `examples/timeseries/models/daily_events_enriched.sql`
@@ -494,6 +1070,8 @@ fn real_fixture_examples_timeseries_admits_column_scoped_merge_cell() {
         &metadata,
         &sources,
         &explicitly_mutable,
+        None,
+        &[],
     )
     .expect("daily_events_enriched has a maintenance plan (refresh: incremental + grain set)");
 
@@ -966,5 +1544,989 @@ mod column_scoped_merge_e2e {
             untouched_user_name, "Bob",
             "an unmutated dimension row's enrichment must be unchanged"
         );
+    }
+}
+
+/// The open write-pattern registry's `write:` pin, end-to-end
+/// (`docs/specs/incremental_models.md` §"Per-cell write addressing" →
+/// "User pins"; `docs/plans/20260715-composed-axes-conditional-
+/// maintenance.md` Phase R1). Unlike an earlier version of this module,
+/// these tests do not call [`resolve_write_pin`] and
+/// `emit_delete_insert`/`resolve_cell_technique_with_write_pin` as two
+/// disconnected function calls that happen to agree by construction — the
+/// resolved [`smelt_logical::maintenance::WritePattern`] returned by
+/// [`resolve_write_pin`] is fed directly into
+/// [`smelt_logical::maintenance::choice::resolve_cell_choice`] (the real
+/// technique-choice resolver `choice.rs` documents as the module a
+/// `write:` pin must constrain) and into
+/// [`resolve_cell_technique_with_write_pin`] (the real runtime driver
+/// resolver `maintenance_driver.rs` documents the same way) — the same two
+/// functions the review flagged as validating-and-discarding the pin. Each
+/// fixture is chosen so the pin changes what these resolvers pick relative
+/// to their own unpinned default: a non-vacuous proof the pin is actually
+/// consulted, not merely accepted.
+mod write_pattern_registry_pin {
+    use smelt_backend::Backend;
+    use smelt_backend_duckdb::DuckDbBackend;
+    use smelt_logical::maintenance::choice::{
+        effective_override, resolve_cell_choice, ChosenTechnique,
+    };
+    use smelt_logical::maintenance::emit::{emit_delete_insert, MaintenanceDialect, Region};
+    use smelt_logical::maintenance::{
+        lookup_write_pattern, resolve_write_pin, BackendWriteCapabilities, Corner, MaintenancePlan,
+        OutputContractFacts, PartitionLocal, PlanCell, RowIdentity, RowIdentityVerdict, Technique,
+        Trigger,
+    };
+
+    use super::{admitted_plan, resolve_cell_technique_with_write_pin, ResolvedTechnique};
+
+    /// A composed model's mutation-trigger cell whose derived plan admits
+    /// `Technique::KeyedFold` (the fold-a-delta corner — `RowIdentity::
+    /// Key`, the shape a `grain: key` + `timeseries:` composed model
+    /// derives for an upstream source mutation) — the default,
+    /// UNPINNED choice this fixture exists to be overridden away from.
+    fn composed_keyed_fold_plan(source: &str) -> MaintenancePlan {
+        MaintenancePlan {
+            cells: vec![PlanCell {
+                group: "{*}".to_string(),
+                trigger: Trigger::UpstreamMutation {
+                    source: source.to_string(),
+                },
+                corner: Corner::FoldDelta,
+                technique: Technique::KeyedFold,
+                partition_local: PartitionLocal::Yes,
+                scans: vec![],
+                ledger_catch_up: false,
+                row_identity: RowIdentityVerdict {
+                    identity: RowIdentity::Key(vec!["id".to_string()]),
+                    proven_mismatch: None,
+                },
+                skeleton_source_closure: None,
+                fingerprint_projections: std::collections::BTreeMap::new(),
+            }],
+            refusals: vec![],
+            key_locality: None,
+        }
+    }
+
+    /// Pinning `write: region` on a composed model's mutation cell —
+    /// admitted by the plan as `KeyedFold`, not `region`'s
+    /// `DeleteInsert`/region-recompute corner — resolves against the open
+    /// registry (the pattern only requires a declared partition axis, which
+    /// a composed key+timeseries output declares) and then, fed into the
+    /// real `resolve_cell_choice`, overrides the cell's own admitted
+    /// technique: the pin changes the resolved choice from `Admitted
+    /// (KeyedFold)` (what an unpinned resolution picks) to
+    /// `RegionRecompute` — proving the pin is actually consulted, not
+    /// merely validated and discarded. The resolved `RegionRecompute`
+    /// choice is then lowered through the SAME `emit_delete_insert` emitter
+    /// `Technique::DeleteInsert` cells use and actually executed against a
+    /// real DuckDB backend, matching a hand-written full-refresh oracle.
+    #[tokio::test]
+    async fn pinning_region_on_composed_mutation_cell_overrides_keyed_fold_to_delete_insert() {
+        let source = "sources.raw_events";
+        let plan = composed_keyed_fold_plan(source);
+        let trigger = Trigger::UpstreamMutation {
+            source: source.to_string(),
+        };
+
+        // 0. Prove the fixture is non-vacuous: absent a write pin, the real
+        //    resolver picks the cell's own admitted `KeyedFold`, not region
+        //    recompute.
+        let unpinned = resolve_cell_choice(
+            &plan,
+            &trigger,
+            &effective_override(None, &[], "unused", &[]),
+            None,
+            true,
+        )
+        .expect("unpinned resolution must not refuse");
+        assert_eq!(
+            unpinned,
+            ChosenTechnique::Admitted(Technique::KeyedFold),
+            "the unpinned default must be the cell's own admitted technique, not region \
+             recompute — otherwise the pin below can't be proven to have changed anything"
+        );
+
+        // 1. Resolve the pin against the registry: a composed (key +
+        //    partition-axis) output admits `region` (it only requires a
+        //    declared partition axis).
+        let facts = OutputContractFacts {
+            has_identity: true,
+            has_partition_axis: true,
+        };
+        let backend_caps = BackendWriteCapabilities {
+            supports_merge: true,
+            supports_column_scoped_merge: true,
+        };
+        let resolved_pattern = resolve_write_pin(
+            "UpstreamMutation",
+            "region",
+            "duckdb",
+            facts,
+            backend_caps,
+            |_pattern| Ok(()),
+        )
+        .expect("a `region` pin on a partition-axis output must resolve");
+        assert_eq!(resolved_pattern.name, "region");
+        // `lookup_write_pattern` is the same registry lookup
+        // `resolve_cell_technique`'s/`resolve_cell_choice`'s production
+        // call sites use to turn a stored `cells[].write: String` back into
+        // a `&'static WritePattern` — exercised here instead of just
+        // reusing `resolved_pattern` directly, so this test also proves the
+        // production lookup path resolves to the identical entry.
+        let looked_up = lookup_write_pattern("region").expect("registered pattern");
+        assert_eq!(looked_up.name, resolved_pattern.name);
+
+        // 2. Feed the resolved, validated pattern into the REAL
+        //    technique-choice resolver — this is the wiring the review
+        //    found missing: the pin must actually change what this
+        //    function picks, not just have been checked upstream.
+        let pinned = resolve_cell_choice(
+            &plan,
+            &trigger,
+            &effective_override(None, &[], "unused", &[]),
+            Some(looked_up),
+            true,
+        )
+        .expect("a region pin on a partition-axis output must resolve, not refuse");
+        assert_eq!(
+            pinned,
+            ChosenTechnique::RegionRecompute,
+            "the write pin must override the cell's own admitted KeyedFold technique"
+        );
+        assert_ne!(
+            pinned, unpinned,
+            "the pin must actually change the outcome relative to the unpinned default — \
+             otherwise it is validated and ignored, not consulted"
+        );
+
+        // 3. `ChosenTechnique::RegionRecompute` lowers to the SAME
+        //    `emit_delete_insert` emitter `Technique::DeleteInsert` cells
+        //    use (`incremental_models.md` §"Statement emission (single
+        //    owner)") — actually executed against a real DuckDB backend and
+        //    checked against a hand-written full-refresh oracle.
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("test.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+
+        backend
+            .execute_sql("CREATE TABLE main.daily_totals (d DATE, total DOUBLE)")
+            .await
+            .expect("create target table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.daily_totals VALUES \
+                 (DATE '2024-01-01', 999.0), \
+                 (DATE '2024-01-02', 20.0)",
+            )
+            .await
+            .expect("seed target table with a stale 2024-01-01 row");
+        backend
+            .execute_sql("CREATE TABLE main.raw_events (d DATE, amount DOUBLE)")
+            .await
+            .expect("create source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.raw_events VALUES \
+                 (DATE '2024-01-01', 5.0), \
+                 (DATE '2024-01-01', 7.0)",
+            )
+            .await
+            .expect("seed source table");
+
+        let region = Region {
+            start: "DATE '2024-01-01'".to_string(),
+            end: "DATE '2024-01-02'".to_string(),
+        };
+        let body =
+            "SELECT d, SUM(amount) AS total FROM main.raw_events WHERE d >= DATE '2024-01-01' \
+             AND d < DATE '2024-01-02' GROUP BY d";
+        let group = match pinned {
+            ChosenTechnique::RegionRecompute => emit_delete_insert(
+                "main.daily_totals",
+                "d",
+                &region,
+                body,
+                MaintenanceDialect::DuckDb,
+            ),
+            ChosenTechnique::Admitted(_) => {
+                panic!("the pin must have resolved to RegionRecompute — asserted above")
+            }
+        };
+        assert_eq!(
+            group.statements.len(),
+            2,
+            "the region pattern's physical mechanism is exactly one DELETE + one INSERT"
+        );
+        assert!(group.statements[0].sql.starts_with("DELETE FROM"));
+        assert!(group.statements[1].sql.starts_with("INSERT INTO"));
+        assert!(group.transactional, "DELETE+INSERT must be one transaction");
+
+        backend
+            .execute_statement_group(&group)
+            .await
+            .expect("DELETE+INSERT region rewrite must succeed");
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+        let recomputed_total: f64 = conn
+            .query_row(
+                "SELECT total FROM main.daily_totals WHERE d = DATE '2024-01-01'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read recomputed total");
+        assert_eq!(
+            recomputed_total, 12.0,
+            "the pinned region rewrite must replace the stale row with the recomputed total \
+             (5.0 + 7.0), matching a full-refresh oracle over the same region"
+        );
+
+        let untouched_total: f64 = conn
+            .query_row(
+                "SELECT total FROM main.daily_totals WHERE d = DATE '2024-01-02'",
+                [],
+                |row| row.get(0),
+            )
+            .expect("read untouched row");
+        assert_eq!(
+            untouched_total, 20.0,
+            "a region-scoped DELETE+INSERT must not touch rows outside the pinned region"
+        );
+    }
+
+    /// A `write: keyed` pin on an identity-free output refuses at
+    /// resolution time — never silently falls back to `region` or any
+    /// other addressing (no substituted technique).
+    #[test]
+    fn pinning_keyed_on_identity_free_output_refuses_never_substitutes() {
+        let facts = OutputContractFacts {
+            has_identity: false,
+            has_partition_axis: true,
+        };
+        let backend_caps = BackendWriteCapabilities {
+            supports_merge: true,
+            supports_column_scoped_merge: true,
+        };
+        let err = resolve_write_pin(
+            "Backfill",
+            "keyed",
+            "duckdb",
+            facts,
+            backend_caps,
+            |_pattern| Ok(()),
+        )
+        .expect_err("keyed must refuse on an identity-free output");
+        assert!(err
+            .to_string()
+            .contains("MaintenanceWriteAddressingRefused"));
+    }
+
+    /// A pin that resolves cleanly against the registry (structural facts +
+    /// backend capability both satisfied) can still be refused one level
+    /// deeper by `resolve_cell_choice`, when the validated pattern's
+    /// selection isn't what THIS cell's derived plan actually admitted —
+    /// e.g. `write: column` validated fine against an identity-bearing
+    /// output, but the cell in hand only ever admitted `KeyedFold`, not
+    /// `ColumnScopedMerge`. Never a silent substitution to whatever WAS
+    /// admitted.
+    #[test]
+    fn pinning_column_on_a_keyed_fold_cell_refuses_at_the_choice_layer() {
+        let source = "sources.raw_events";
+        let plan = composed_keyed_fold_plan(source);
+        let trigger = Trigger::UpstreamMutation {
+            source: source.to_string(),
+        };
+
+        let facts = OutputContractFacts {
+            has_identity: true,
+            has_partition_axis: true,
+        };
+        let backend_caps = BackendWriteCapabilities {
+            supports_merge: true,
+            supports_column_scoped_merge: true,
+        };
+        let resolved_pattern = resolve_write_pin(
+            "UpstreamMutation",
+            "column",
+            "duckdb",
+            facts,
+            backend_caps,
+            |_pattern| Ok(()),
+        )
+        .expect("`column` resolves fine against the registry for an identity-bearing output");
+
+        let err = resolve_cell_choice(
+            &plan,
+            &trigger,
+            &effective_override(None, &[], "unused", &[]),
+            Some(resolved_pattern),
+            true,
+        )
+        .expect_err(
+            "a registry-valid pin whose selection the cell never admitted must still refuse",
+        );
+        assert!(
+            err.to_string().contains("MaintenanceUnboundedFootprint"),
+            "refusal must name the diagnostic family: {err}"
+        );
+    }
+
+    /// The narrower runtime driver resolver
+    /// (`maintenance_driver::resolve_cell_technique_with_write_pin`) — the
+    /// second function the review named — is consulted the same way: a
+    /// `write: region` pin overrides a live `ColumnScopedMerge` cell's own
+    /// default to region recompute, a `write: column` pin reaffirms it, and
+    /// a pin selecting a technique this narrow (`ColumnScopedMerge` vs
+    /// region-only) resolver has no lowering for (`keyed`) refuses rather
+    /// than silently falling back.
+    #[test]
+    fn driver_resolve_cell_technique_consults_the_write_pin() {
+        let plan = admitted_plan("users");
+        let trigger = Trigger::UpstreamMutation {
+            source: "users".to_string(),
+        };
+
+        // Unpinned default: the live, admitted ColumnScopedMerge cell.
+        let unpinned = resolve_cell_technique_with_write_pin(&plan, &trigger, None, None, true)
+            .expect("unpinned resolution must not refuse");
+        assert_eq!(unpinned, ResolvedTechnique::ColumnScopedMerge);
+
+        // `write: region` overrides that default to region recompute — a
+        // real, non-vacuous behaviour change caused by the pin.
+        let region_pattern = lookup_write_pattern("region").expect("registered pattern");
+        let region_pinned = resolve_cell_technique_with_write_pin(
+            &plan,
+            &trigger,
+            None,
+            Some(region_pattern),
+            true,
+        )
+        .expect("a region pin must resolve, not refuse");
+        assert_eq!(region_pinned, ResolvedTechnique::RegionRecompute);
+        assert_ne!(region_pinned, unpinned);
+
+        // `write: column` reaffirms the admitted, live technique.
+        let column_pattern = lookup_write_pattern("column").expect("registered pattern");
+        let column_pinned = resolve_cell_technique_with_write_pin(
+            &plan,
+            &trigger,
+            None,
+            Some(column_pattern),
+            true,
+        )
+        .expect("a column pin on an admitted, live cell must resolve");
+        assert_eq!(column_pinned, ResolvedTechnique::ColumnScopedMerge);
+
+        // `write: keyed` selects a technique (`KeyedFold`) this narrow
+        // resolver has no lowering for — refuses fail-loud rather than
+        // silently substituting a different technique than the one pinned.
+        let keyed_pattern = lookup_write_pattern("keyed").expect("registered pattern");
+        let err =
+            resolve_cell_technique_with_write_pin(&plan, &trigger, None, Some(keyed_pattern), true)
+                .expect_err("a pin selecting a technique this resolver can't lower must refuse");
+        assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+    }
+}
+
+/// T3 over external sources — the point-lookup enrichment recompute
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// F5): `examples/timeseries/models/daily_events_enriched.sql`'s
+/// `raw.users` source now declares `unique_key: [user_id]` +
+/// `referential_integrity: [user_id]`
+/// (`examples/timeseries/models/sources/raw/users.yml`), so its
+/// `{user_name}` `UpstreamMutation` cell's enrichment join now closes P1
+/// (`skeleton_closure_pinned.rs`'s discriminating pair) and the fingerprint
+/// sidecar's synthesized changed-key set (F3/F4) licenses a delta-restricted
+/// recompute (`choice::resolve_recompute_restriction` — the SAME gate E3
+/// built for model edges, unioned onto this external-source cell by
+/// `derive::mutation_enrichment_closure`).
+///
+/// **Known production gap** (documented here, not silently worked around):
+/// this restriction is not yet dispatched live by `execute.rs`'s regular
+/// incremental batch loop — `resolve_live_column_scoped_cell`/
+/// `execute_column_scoped_merge_full`'s call site in `crates/smelt-runtime/
+/// src/execute.rs` is outside this phase's allowed files (only `crates/
+/// smelt-logical/src/maintenance/{derive,choice,emit}.rs` and this test
+/// file are). Mirroring `real_fixture_daily_events_status_would_admit_
+/// partition_local_yes_cell` above and `fingerprint_sidecar.rs`'s own
+/// `apply_changed_keys` doc comment ("this is the minimal per-key delta
+/// application the T3 licence union (Phase F5) will later wire into the
+/// real maintenance driver; here it is test-local scaffolding"), these
+/// tests prove the mechanism — the derived plan cell, the sidecar-derived
+/// exact delta, the licence decision, and the emitted delta-restricted
+/// statement — is correctly engineered end to end against a real DuckDB
+/// backend, driven directly rather than through `execute_project`.
+mod external_source_point_lookup_recompute {
+    use std::collections::BTreeMap;
+    use std::path::Path;
+
+    use smelt_backend::Backend;
+    use smelt_backend_duckdb::DuckDbBackend;
+    use smelt_logical::analysis::fingerprint::Projection;
+    use smelt_logical::maintenance::choice::{
+        enrichment_restrict_column, resolve_recompute_restriction, RecomputeRestriction,
+    };
+    use smelt_logical::maintenance::derive::{
+        derive_maintenance_plan_with_referential_integrity, ModelInputs,
+    };
+    use smelt_logical::maintenance::emit::{
+        emit_count_preservation_probe, emit_delete_insert_delta_restricted, MaintenanceDialect,
+        Region,
+    };
+    use smelt_logical::maintenance::{
+        Grain, MutationProfile, OutputSpec, SkeletonSourceClosure, SourceFacts, Trigger,
+    };
+    use smelt_runtime::maintenance_driver::{
+        diff_fingerprint_sidecar_changed_keys, refresh_fingerprint_sidecar,
+    };
+
+    /// The real fixture's SQL body (frontmatter stripped), read straight off
+    /// disk so this suite can never silently drift from the file
+    /// `skeleton_closure_pinned.rs` also pins.
+    fn model_sql_body() -> (smelt_core::ModelMetadata, String) {
+        let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+        let text = std::fs::read_to_string(project_dir.join("models/daily_events_enriched.sql"))
+            .expect("read daily_events_enriched.sql");
+        let smelt_core::FileMetadata::Single {
+            metadata,
+            sql_offset,
+        } = smelt_core::extract_file_metadata(&text).expect("parse frontmatter")
+        else {
+            panic!("daily_events_enriched.sql must be a single-model file");
+        };
+        (*metadata, text[sql_offset..].to_string())
+    }
+
+    /// `raw.users`' declared `unique_key: [user_id]` doubles as
+    /// `SourceFacts::unique_key` (P1 conjunct 3's one-to-one fact) — a
+    /// SourceFacts list built by hand, not `smelt-db::build_source_facts`
+    /// (which does not populate `unique_key` yet, per `execute.rs`'s own
+    /// documented gap), matching `real_fixture_daily_events_status_would_
+    /// admit_partition_local_yes_cell`'s established pattern above.
+    fn source_facts() -> Vec<SourceFacts> {
+        vec![
+            SourceFacts {
+                name: "raw.events".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: None,
+                unique_key: vec!["event_id".to_string()],
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "raw.users".to_string(),
+                mutation: MutationProfile::MutableSnapshot,
+                partition_col: None,
+                unique_key: vec!["user_id".to_string()],
+                allow_full_scan: true,
+            },
+        ]
+    }
+
+    /// Derive the plan and return the `{user_name}` `UpstreamMutation`
+    /// cell's own `skeleton_source_closure` verdict — the P1 wiring this
+    /// phase's `derive::mutation_enrichment_closure` adds.
+    fn user_name_cell_closure() -> Option<SkeletonSourceClosure> {
+        let (metadata, sql_body) = model_sql_body();
+        let sources = source_facts();
+        let partition_col = metadata
+            .timeseries
+            .as_ref()
+            .map(|t| t.partition_column.clone());
+        let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+            &sql_body,
+            &[],
+            partition_col.as_deref(),
+        );
+        let grouping = smelt_logical::maintenance::grouping::derive_column_groups(
+            &sql_body, &sources, &skeleton,
+        );
+        assert!(
+            grouping.degenerate.is_empty(),
+            "expected no degenerate column-group collapses: {:?}",
+            grouping.degenerate
+        );
+
+        let inputs = ModelInputs {
+            sql: &sql_body,
+            output: OutputSpec {
+                table: "daily_events_enriched".to_string(),
+                grain: Grain::Partition {
+                    partition_col: partition_col.unwrap_or_default(),
+                },
+                skeleton_columns: skeleton,
+            },
+            sources,
+            column_groups: grouping.groups,
+            fold: None,
+            column_add_proof: None,
+        };
+
+        let mut source_ri = BTreeMap::new();
+        source_ri.insert("raw.users".to_string(), vec!["user_id".to_string()]);
+
+        let trigger = Trigger::UpstreamMutation {
+            source: "raw.users".to_string(),
+        };
+        let plan = derive_maintenance_plan_with_referential_integrity(
+            &inputs,
+            std::slice::from_ref(&trigger),
+            &source_ri,
+        );
+        assert!(
+            plan.refusals.is_empty(),
+            "expected no admission refusals: {:?}",
+            plan.refusals
+        );
+        let cell = plan
+            .cell_for(&trigger)
+            .unwrap_or_else(|| panic!("no cell admitted for {trigger:?}: {plan:#?}"));
+        cell.skeleton_source_closure.clone()
+    }
+
+    /// The declared-facts variant of the real fixture's `{user_name}` cell
+    /// closes P1 through `derive_maintenance_plan_with_referential_
+    /// integrity` — the same verdict `skeleton_closure_pinned.rs` proves
+    /// directly against `skeleton_source_closure`, now reached through the
+    /// full plan-derivation path (`ModelInputs` → `derive_mutation` →
+    /// `mutation_enrichment_closure`) a real caller would use.
+    #[test]
+    fn closure_admits_and_restrict_column_resolves() {
+        let closure = user_name_cell_closure();
+        assert_eq!(closure, Some(SkeletonSourceClosure::Closed));
+
+        let dimension_key = ["user_id".to_string()];
+        let restrict_column = enrichment_restrict_column(&dimension_key);
+        assert_eq!(restrict_column, Some("user_id"));
+
+        // Absent an RI fact (`derive_maintenance_plan`'s own default path),
+        // the SAME cell shape must still carry no closure verdict at all —
+        // proving the opt-in wiring is additive, never a default-on change.
+        let (metadata, sql_body) = model_sql_body();
+        let sources = source_facts();
+        let partition_col = metadata
+            .timeseries
+            .as_ref()
+            .map(|t| t.partition_column.clone());
+        let skeleton = smelt_logical::maintenance::skeleton::skeleton_columns(
+            &sql_body,
+            &[],
+            partition_col.as_deref(),
+        );
+        let grouping = smelt_logical::maintenance::grouping::derive_column_groups(
+            &sql_body, &sources, &skeleton,
+        );
+        let inputs = ModelInputs {
+            sql: &sql_body,
+            output: OutputSpec {
+                table: "daily_events_enriched".to_string(),
+                grain: Grain::Partition {
+                    partition_col: partition_col.unwrap_or_default(),
+                },
+                skeleton_columns: skeleton,
+            },
+            sources,
+            column_groups: grouping.groups,
+            fold: None,
+            column_add_proof: None,
+        };
+        let trigger = Trigger::UpstreamMutation {
+            source: "raw.users".to_string(),
+        };
+        let default_plan = smelt_logical::maintenance::derive::derive_maintenance_plan(
+            &inputs,
+            std::slice::from_ref(&trigger),
+        );
+        let default_cell = default_plan.cell_for(&trigger).expect("cell admitted");
+        assert_eq!(
+            default_cell.skeleton_source_closure, None,
+            "derive_maintenance_plan (no RI facts supplied) must stay byte-identical to its \
+             pre-F5 behaviour — None, never an attempted-and-open verdict"
+        );
+    }
+
+    /// The digest columns (`user_name` only, per `analysis::fingerprint::
+    /// fingerprint_projection`'s P4 derivation) a fingerprint sidecar
+    /// digests over `raw.users` for this model.
+    fn projection() -> Projection {
+        Projection::Columns(["user_name".to_string()].into_iter().collect())
+    }
+
+    fn all_users_columns() -> Vec<String> {
+        vec![
+            "user_id".to_string(),
+            "user_name".to_string(),
+            "signup_date".to_string(),
+        ]
+    }
+
+    fn empty_write_group() -> smelt_backend::StatementGroup {
+        smelt_backend::StatementGroup {
+            statements: vec![],
+            transactional: false,
+        }
+    }
+
+    async fn seed(backend: &DuckDbBackend) {
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_events (event_id INTEGER, user_id INTEGER, \
+                 event_type VARCHAR, event_timestamp TIMESTAMP)",
+            )
+            .await
+            .expect("create events source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_events VALUES \
+                 (1, 1, 'login', TIMESTAMP '2025-01-10 08:00:00'), \
+                 (2, 1, 'click', TIMESTAMP '2025-01-10 09:00:00'), \
+                 (3, 2, 'login', TIMESTAMP '2025-01-10 10:00:00'), \
+                 (4, 2, 'click', TIMESTAMP '2025-01-10 11:00:00'), \
+                 (5, 3, 'login', TIMESTAMP '2025-01-10 12:00:00'), \
+                 (6, 3, 'click', TIMESTAMP '2025-01-10 13:00:00')",
+            )
+            .await
+            .expect("seed events");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                 signup_date DATE)",
+            )
+            .await
+            .expect("create users source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_users VALUES \
+                 (1, 'Alice', DATE '2025-01-01'), \
+                 (2, 'Bob', DATE '2025-01-02'), \
+                 (3, 'Carol', DATE '2025-01-03')",
+            )
+            .await
+            .expect("seed users");
+    }
+
+    fn enrichment_select(events_table: &str, users_table: &str) -> String {
+        format!(
+            "SELECT e.event_id, CAST(e.event_timestamp AS DATE) AS event_date, e.user_id, \
+             e.event_type, u.user_name FROM {events_table} e JOIN {users_table} u ON \
+             e.user_id = u.user_id"
+        )
+    }
+
+    async fn user_names(backend: &DuckDbBackend) -> Vec<(i64, String)> {
+        let batches = backend
+            .execute_sql(
+                "SELECT user_id, user_name FROM main.daily_events_enriched ORDER BY user_id, \
+                 event_id",
+            )
+            .await
+            .expect("read maintained table");
+        let mut out = Vec::new();
+        for batch in &batches {
+            use arrow::array::{Array, Int32Array, StringArray};
+            let ids = batch
+                .column(0)
+                .as_any()
+                .downcast_ref::<Int32Array>()
+                .expect("user_id is INTEGER");
+            let names = batch
+                .column(1)
+                .as_any()
+                .downcast_ref::<StringArray>()
+                .expect("user_name is VARCHAR");
+            for i in 0..batch.num_rows() {
+                out.push((ids.value(i) as i64, names.value(i).to_string()));
+            }
+        }
+        out
+    }
+
+    async fn except_all_count(backend: &DuckDbBackend, left: &str, right: &str) -> i64 {
+        let sql = format!("SELECT count(*) FROM (({left}) EXCEPT ALL ({right})) AS d");
+        let batches = backend.execute_sql(&sql).await.expect("except all query");
+        use arrow::array::Int64Array;
+        let batch = &batches[0];
+        let col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("COUNT(*) is BIGINT");
+        col.value(0)
+    }
+
+    /// One renamed user out of three: the delta-restricted recompute's
+    /// emitted statements carry the semi-join predicate on `user_id`, touch
+    /// only that user's 2 fact rows, leave the other 4 rows byte-identical,
+    /// and the maintained table still matches a from-scratch full-refresh
+    /// oracle over the source's current state. The count-preservation
+    /// tripwire also passes (clean data, no dangling `user_id`).
+    #[tokio::test]
+    async fn point_lookup_recompute_touches_only_the_renamed_users_rows() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("point_lookup.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        seed(&backend).await;
+
+        let body = enrichment_select("main.sources_raw_events", "main.sources_raw_users");
+        backend
+            .execute_sql(&format!(
+                "CREATE TABLE main.daily_events_enriched AS {body}"
+            ))
+            .await
+            .expect("baseline full refresh");
+
+        // Populate the sidecar against the ORIGINAL (pre-rename) content —
+        // the baseline every subsequent diff compares against.
+        let (_, sql_body) = model_sql_body();
+        refresh_fingerprint_sidecar(
+            &backend,
+            "main",
+            "smelt.sources.raw.users",
+            "main.sources_raw_users",
+            &["user_id".to_string()],
+            &projection(),
+            &all_users_columns(),
+            &sql_body,
+            &empty_write_group(),
+        )
+        .await
+        .expect("populate baseline sidecar");
+
+        // Rename user 1 — the ONLY declared-projection column that changed.
+        backend
+            .execute_sql("UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1")
+            .await
+            .expect("rename user 1");
+
+        let changed_keys = diff_fingerprint_sidecar_changed_keys(
+            &backend,
+            "main",
+            "smelt.sources.raw.users",
+            "main.sources_raw_users",
+            &["user_id".to_string()],
+            &projection(),
+            &all_users_columns(),
+            &sql_body,
+        )
+        .await
+        .expect("diff sidecar");
+        assert_eq!(
+            changed_keys,
+            vec!["1".to_string()],
+            "renaming exactly 1 of 3 users must synthesize exactly that user's changed-key set"
+        );
+
+        let closure = user_name_cell_closure();
+        let restriction = resolve_recompute_restriction(closure.as_ref(), Some(&changed_keys));
+        let RecomputeRestriction::Restricted { delta_keys } = restriction else {
+            panic!("expected Restricted, got {restriction:?}");
+        };
+        let dimension_key = ["user_id".to_string()];
+        let restrict_column =
+            enrichment_restrict_column(&dimension_key).expect("single-column key");
+
+        let region = Region {
+            start: "'2025-01-10'".to_string(),
+            end: "'2025-01-11'".to_string(),
+        };
+        let group = emit_delete_insert_delta_restricted(
+            "main.daily_events_enriched",
+            "event_date",
+            &region,
+            &body,
+            restrict_column,
+            &delta_keys,
+            MaintenanceDialect::DuckDb,
+        );
+        assert!(
+            group.statements[0].sql.contains("user_id IN ('1')"),
+            "DELETE must carry the semi-join predicate: {}",
+            group.statements[0].sql
+        );
+        assert!(
+            group.statements[1].sql.contains("user_id IN ('1')"),
+            "INSERT must carry the semi-join predicate: {}",
+            group.statements[1].sql
+        );
+
+        backend
+            .execute_statement_group(&group)
+            .await
+            .expect("execute delta-restricted recompute");
+
+        let names = user_names(&backend).await;
+        assert_eq!(
+            names,
+            vec![
+                (1, "Alicia".to_string()),
+                (1, "Alicia".to_string()),
+                (2, "Bob".to_string()),
+                (2, "Bob".to_string()),
+                (3, "Carol".to_string()),
+                (3, "Carol".to_string()),
+            ],
+            "only user 1's 2 rows change; users 2 and 3's rows are untouched"
+        );
+
+        // End state equals a from-scratch full refresh of the CURRENT
+        // source state — the row-count-preserving semi-join restriction
+        // did not silently under- or over-write.
+        let oracle = enrichment_select("main.sources_raw_events", "main.sources_raw_users");
+        let maintained = "SELECT * FROM main.daily_events_enriched".to_string();
+        let left_only = except_all_count(&backend, &maintained, &oracle).await;
+        let right_only = except_all_count(&backend, &oracle, &maintained).await;
+        assert_eq!(
+            (left_only, right_only),
+            (0, 0),
+            "the delta-restricted recompute must match a full-refresh oracle exactly"
+        );
+
+        // The RI count-preservation tripwire: clean data (every fact
+        // user_id has a matching dimension row) — no violation.
+        let driving_select = "SELECT event_id FROM main.sources_raw_events WHERE CAST(\
+             event_timestamp AS DATE) >= '2025-01-10' AND CAST(event_timestamp AS DATE) < \
+             '2025-01-11'"
+            .to_string();
+        let enriched_select = format!(
+            "{} WHERE CAST(e.event_timestamp AS DATE) >= '2025-01-10' AND CAST(\
+             e.event_timestamp AS DATE) < '2025-01-11'",
+            enrichment_select("main.sources_raw_events", "main.sources_raw_users")
+        );
+        let probe = emit_count_preservation_probe(&driving_select, &enriched_select);
+        let (driving_count, enriched_count) = run_count_preservation_probe(&backend, &probe).await;
+        assert_eq!(
+            driving_count, enriched_count,
+            "clean data: the count-preservation tripwire must not fire"
+        );
+    }
+
+    /// Execute an [`emit_count_preservation_probe`] statement and read back
+    /// its `(driving_count, enriched_count)` pair.
+    async fn run_count_preservation_probe(
+        backend: &DuckDbBackend,
+        probe: &smelt_logical::maintenance::emit::MaintenanceStatement,
+    ) -> (i64, i64) {
+        let batches = backend
+            .execute_sql(&probe.sql)
+            .await
+            .expect("execute count-preservation probe");
+        use arrow::array::Int64Array;
+        let batch = &batches[0];
+        let driving = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("driving_count is BIGINT")
+            .value(0);
+        let enriched = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<Int64Array>()
+            .expect("enriched_count is BIGINT")
+            .value(0);
+        (driving, enriched)
+    }
+
+    /// The count-preservation tripwire's negative leg: a dangling fact key
+    /// (an event whose `user_id` has no matching dimension row) makes the
+    /// inner-join enrichment's row count fall short of the driving side's —
+    /// the declared `referential_integrity` is disproven, and the check
+    /// (mirroring the not-yet-wired `SourceCountPreservationViolated`
+    /// runtime failure — see this module's own doc comment) fails loudly
+    /// rather than silently trusting a violated declaration.
+    #[tokio::test]
+    async fn violated_referential_integrity_fails_the_tripwire_loudly() {
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let db_path = tmp.path().join("violated_ri.duckdb");
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("open duckdb");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_events (event_id INTEGER, user_id INTEGER, \
+                 event_type VARCHAR, event_timestamp TIMESTAMP)",
+            )
+            .await
+            .expect("create events source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_events VALUES \
+                 (1, 1, 'login', TIMESTAMP '2025-01-10 08:00:00'), \
+                 (2, 99, 'login', TIMESTAMP '2025-01-10 09:00:00')",
+            )
+            .await
+            .expect("seed events (event 2 has a dangling user_id 99)");
+        backend
+            .execute_sql(
+                "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                 signup_date DATE)",
+            )
+            .await
+            .expect("create users source table");
+        backend
+            .execute_sql(
+                "INSERT INTO main.sources_raw_users VALUES (1, 'Alice', DATE '2025-01-01')",
+            )
+            .await
+            .expect(
+                "seed users (no row for user 99 — the declared referential_integrity is false)",
+            );
+
+        let driving_select =
+            "SELECT event_id FROM main.sources_raw_events WHERE CAST(event_timestamp AS DATE) \
+             >= '2025-01-10' AND CAST(event_timestamp AS DATE) < '2025-01-11'"
+                .to_string();
+        let enriched_select = format!(
+            "{} WHERE CAST(e.event_timestamp AS DATE) >= '2025-01-10' AND CAST(\
+             e.event_timestamp AS DATE) < '2025-01-11'",
+            enrichment_select("main.sources_raw_events", "main.sources_raw_users")
+        );
+        let probe = emit_count_preservation_probe(&driving_select, &enriched_select);
+        let (driving_count, enriched_count) = run_count_preservation_probe(&backend, &probe).await;
+
+        assert_eq!(driving_count, 2, "both events are the driving side");
+        assert_eq!(
+            enriched_count, 1,
+            "the inner join drops event 2 — its user_id 99 has no dimension row"
+        );
+
+        let result = check_count_preservation(driving_count, enriched_count, "raw.users");
+        assert!(
+            result.is_err(),
+            "a violated referential_integrity must fail the tripwire, not pass it silently"
+        );
+        assert!(result
+            .unwrap_err()
+            .contains("SourceCountPreservationViolated"));
+    }
+
+    /// Test-local scaffolding for the not-yet-wired runtime consumer of
+    /// [`emit_count_preservation_probe`]'s result (`docs/specs/sources.md`
+    /// §"Referential integrity" — the tripwire "fails the run loudly,
+    /// transactionally"). `crates/smelt-runtime/src/maintenance_driver.rs`
+    /// is outside this phase's allowed files (see this module's own doc
+    /// comment); this mirrors exactly what that future call site must do.
+    fn check_count_preservation(
+        driving_count: i64,
+        enriched_count: i64,
+        source: &str,
+    ) -> Result<(), String> {
+        if enriched_count < driving_count {
+            Err(format!(
+                "SourceCountPreservationViolated: '{source}' declares referential_integrity, but \
+                 an enrichment join over the touched region returned {enriched_count} row(s) \
+                 against {driving_count} driving row(s) — some driving row's join key has no \
+                 match in the dimension"
+            ))
+        } else {
+            Ok(())
+        }
     }
 }

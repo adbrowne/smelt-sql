@@ -1,7 +1,7 @@
 //! F14 — targeted column backfill equivalence fixture.
 //!
 //! Proves the SQL emitted by `smelt_runtime::targeted_column_backfill`
-//! satisfies the `maintenance_plan.md` §"The equivalence invariant" oracle:
+//! satisfies the `incremental_models.md` §"The equivalence invariant" oracle:
 //! running the emitted `UPDATE ... FROM (...) AS src` against a table with
 //! pre-existing rows produces exactly the same result — row for row, on the
 //! added column's values — as a full rebuild (`CREATE OR REPLACE TABLE ...

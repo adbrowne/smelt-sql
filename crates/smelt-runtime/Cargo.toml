@@ -38,6 +38,7 @@ tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }
 async-trait = "0.1"
 arrow.workspace = true
 duckdb = { workspace = true }
+tracing-subscriber.workspace = true
 
 [features]
 python = ["smelt-core/python", "smelt-planner/python", "pyo3"]

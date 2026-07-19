@@ -4,7 +4,7 @@
 //! appended from `G-08`).
 //!
 //! Construct: the SAME self-referential running-balance model as `G-08`, but
-//! using the DIRECT self-join form `docs/specs/batched_models.md`'s own
+//! using the DIRECT self-join form `docs/specs/incremental_models.md`'s own
 //! "Window independence and self-referential models" section documents and
 //! `window_independence`'s own unit tests exercise — a JOIN of the driving
 //! source to `smelt.<self>`, both exposing the model's own output/partition
@@ -79,7 +79,7 @@ fn seed_sources(db_path: &std::path::Path) {
 }
 
 /// GREEN (post-fix): the direct self-join form — the exact shape
-/// `docs/specs/batched_models.md` documents and `window_independence`'s own
+/// `docs/specs/incremental_models.md` documents and `window_independence`'s own
 /// unit tests use — executes under the F1 subquery-wrapped output clamp,
 /// and the produced window is correct. Pre-fix this failed on the very
 /// first run with DuckDB's ambiguous-column binder error, because the

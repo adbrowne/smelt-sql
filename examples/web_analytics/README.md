@@ -64,7 +64,7 @@ concerns land in one model:
   CAST(arrival_time AS DATE) - INTERVAL '3 days' AND CAST(arrival_time AS
   DATE)` — a Form B filter the planner reads as a genuine 3-day lookback on
   the `bronze.raw_events` source, *derived* from the SQL rather than
-  declared in YAML (`docs/specs/batched_models.md` §"Derive lookback from
+  declared in YAML (`docs/specs/incremental_models.md` §"Derive lookback from
   the model's SQL, not from frontmatter"). Run `smelt explain
   silver.events_parsed --json` (whole-project form, not the single-model
   report) to see it surfaced: `source_bounds.bronze.raw_events` reports
@@ -321,7 +321,7 @@ queryable.
 
 `smelt explain silver.events_enriched` shows one creation cell per model
 upstream, each carrying the clamp derived from that edge
-(`docs/specs/maintenance_plan.md` §"Upstream model edges"):
+(`docs/specs/incremental_models.md` §"Upstream model edges"):
 
 ```
   - group {*} on trigger NewData { source: "silver.events_parsed" }

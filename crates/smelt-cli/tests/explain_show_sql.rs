@@ -4,7 +4,7 @@
 //! Oracle: `docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
 //! report" — `--show-sql` prints, after each cell's block, the maintenance
 //! statements that cell executes: the output of the same pure emitters a
-//! run executes (`docs/specs/maintenance_plan.md` §"Statement emission
+//! run executes (`docs/specs/incremental_models.md` §"Statement emission
 //! (single owner)"). Region literals come from `--period <start>..<end>`
 //! when given; without `--period` the symbolic placeholders
 //! `{{window_start}}`/`{{window_end}}` stand in. `--show-sql` never
@@ -435,5 +435,55 @@ fn show_sql_wires_real_ephemeral_resolver_and_upstream_schemas() {
         !stdout.contains("CAST(total AS BIGINT)"),
         "must not fall through to the BIGINT default cast for a fractional aggregate \
          over a real upstream model ref: {stdout}"
+    );
+}
+
+/// The observed-delta recording/projection report rows
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase D4)
+/// are additions to the report section only — `--show-sql`'s statement
+/// section for a `Technique::ColumnScopedMerge` cell must render unchanged
+/// alongside them (`daily_events_enriched` in `examples/timeseries` is the
+/// real fixture with one such cell).
+#[test]
+fn show_sql_statements_unaffected_by_observed_delta_report_rows() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    let output = Command::new(env!("CARGO_BIN_EXE_smelt"))
+        .arg("explain")
+        .arg("daily_events_enriched")
+        .arg("--show-sql")
+        .arg("--project-dir")
+        .arg(&project_dir)
+        .output()
+        .expect("spawn smelt explain daily_events_enriched --show-sql");
+
+    assert!(
+        output.status.success(),
+        "smelt explain daily_events_enriched --show-sql failed: stderr={}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+    let stdout = String::from_utf8_lossy(&output.stdout);
+
+    // `daily_events_enriched`'s `ColumnScopedMerge` cell has `WholeRow` row
+    // identity (`batched.unique_key:` does not feed P2 row-identity
+    // derivation for a `Grain::Partition` model — see
+    // `explain_model.rs::explain_prints_observed_delta_recording_status_for_a_conditional_cell`),
+    // so it must print the negative recording row, never "yes". This test
+    // only cares that the report-section row exists alongside an unchanged
+    // statement section, not which verdict it names.
+    assert!(
+        stdout.contains("observed-delta recording: no"),
+        "expected the recording-status row in the report section: {stdout}"
+    );
+    assert!(
+        stdout.contains("technique: ColumnScopedMerge"),
+        "expected the ColumnScopedMerge cell still reported: {stdout}"
+    );
+    assert!(
+        stdout.contains("UPDATE") || stdout.contains("MERGE INTO"),
+        "expected the column-scoped write's own statement still emitted after the report: {stdout}"
     );
 }

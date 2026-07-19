@@ -1,7 +1,7 @@
 #![cfg(feature = "duckdb")]
 //! Real-fixture coverage for `batched.nondeterministic_columns`
-//! (docs/specs/batched_models.md §"Non-determinism and the equivalence
-//! contract"; Constraint 13).
+//! (docs/specs/incremental_models.md §"Non-determinism and the payload
+//! rule"; §"Partition-grain constraints" #12).
 //!
 //! Exercises `examples/incremental_nondeterministic_columns` — an incremental
 //! model that stamps every row with `NOW()` into an `inserted_at` column

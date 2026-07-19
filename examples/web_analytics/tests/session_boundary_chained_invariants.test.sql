@@ -7,7 +7,7 @@
 -- §"CTE isolation" — a full-query reference cannot distinguish the model
 -- under test from the self-reference inside it, since both share the same
 -- `smelt.<path>` text) and PASSING mocks its two external deps: the source
--- (silver.events_parsed) and its own prior output (silver.sessions_chained,
+-- (silver.events_deduped) and its own prior output (silver.sessions_chained,
 -- the self-reference).
 --
 -- Devices 1-4 mirror `session_boundary_invariants.test.sql` exactly (same
@@ -35,7 +35,7 @@ smelt.test test_session_boundary_chained_invariants AS (
     SELECT device_id, session_start, event_count, platform
     FROM smelt.silver.sessions_chained#aggregated
 )
-PASSING silver.events_parsed AS (
+PASSING silver.events_deduped AS (
     -- device 1: gap boundary (35 minutes) → 2 sessions
     {device_id: 1, event_ts: '2026-04-01 10:00:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},
     {device_id: 1, event_ts: '2026-04-01 10:35:00', event_date: '2026-04-01', platform: 'web', utm_campaign: NULL},

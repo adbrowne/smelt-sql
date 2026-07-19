@@ -3,7 +3,7 @@
 //! Cell `G-08` (`docs/research/20260705-property-discovery-loop.md` §4).
 //!
 //! Construct: a **self-referential batched model** maintaining a running
-//! balance (`docs/specs/batched_models.md` §"Window independence and
+//! balance (`docs/specs/incremental_models.md` §"Window independence and
 //! self-referential models") — `running_balance.d` reads its own prior
 //! partition (`bal.d >= t.d - INTERVAL '1 day' AND bal.d < t.d`,
 //! `window_independence`'s own `Ordered` shape) and folds in the current
@@ -84,7 +84,7 @@ fn seed_sources(db_path: &Path) {
 /// Same fixture as [`seed_sources`], but WITHOUT pre-creating the
 /// self-referential model's own target table
 /// (`main.running_balance`) — proves the framework bootstraps it
-/// (`docs/specs/batched_models.md` §"First-run and backfill" —
+/// (`docs/specs/incremental_models.md` §"First-run and backfill" —
 /// "First-run bootstrap for a self-referential model"), not the test
 /// fixture.
 fn seed_sources_no_target_table(db_path: &Path) {
@@ -224,7 +224,7 @@ async fn late_transaction_into_an_already_processed_partition_requires_a_downstr
     assert_eq!(maintained_balance(&conn, "2024-01-03"), 116.0);
 }
 
-/// Framework bootstrap (`docs/specs/batched_models.md` §"First-run and
+/// Framework bootstrap (`docs/specs/incremental_models.md` §"First-run and
 /// backfill" — "First-run bootstrap for a self-referential model"): a
 /// self-referential model builds from scratch with NO pre-seeded target
 /// table — `main.running_balance` does not exist before the first `smelt

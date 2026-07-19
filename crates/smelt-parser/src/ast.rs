@@ -3409,6 +3409,10 @@ impl GroupByClause {
         }
     }
 
+    pub fn syntax(&self) -> &SyntaxNode {
+        &self.0
+    }
+
     /// Get the expressions in the GROUP BY clause
     pub fn expressions(&self) -> impl Iterator<Item = Expr> + '_ {
         self.0.children().filter_map(Expr::cast)

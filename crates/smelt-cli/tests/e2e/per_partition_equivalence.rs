@@ -427,7 +427,7 @@ const END_DATE_EXCLUSIVE: &str = "2026-03-26"; // 7 days
 /// window_end) passed to `smelt run`. Windows are non-overlapping — the
 /// workspace includes `silver.device_user_edges`, an additive-fold keyed
 /// model (`grain: key`), and the transactional merge ledger refuses to
-/// re-fold a partition it has already merged (`docs/specs/keyed_models.md`
+/// re-fold a partition it has already merged (`docs/specs/incremental_models.md`
 /// §"Reprocessing" / §"The transactional merge ledger" —
 /// `KeyedReprocessedWindow`). The Python driver's superseded 1-day-lookback
 /// schedule predates that model and would double-fold day D on both day D's
@@ -1252,7 +1252,7 @@ fn web_analytics_session_attribution_matches_full_rebuild() {
 // `silver/events_enriched` joins `silver.events_parsed` and `silver.sessions`
 // (two maintained-model upstreams) back onto the event grain, `grain:
 // partition` on `event_date`. Its creation cells are clamped by each
-// upstream's own derived reach (`docs/specs/maintenance_plan.md` §"Upstream
+// upstream's own derived reach (`docs/specs/incremental_models.md` §"Upstream
 // model edges") — see `crates/smelt-cli/tests/explain_model.rs
 // ::events_enriched_shows_creation_cells_for_both_model_upstreams` for the
 // static evidence. These tests exercise the *dynamic* consequence on a real

@@ -4,8 +4,9 @@
 //! visibility into column nullability (it lives below `smelt-db`). A
 //! `Traceable` verdict whose leaf source column can be `NULL` is unsound to
 //! push down: a full refresh keeps NULL-event-time rows, but a pushed window
-//! filter silently drops them (docs/specs/incremental_models.md §"Event-time
-//! monotonicity trace", Constraint 12; audit §2.5/P3 in column form).
+//! filter silently drops them (docs/specs/model_properties.md §"Event-time
+//! monotonicity trace" and the column-nullability-gate row; audit §2.5/P3 in
+//! column form).
 //!
 //! This module is the "thin Salsa wrapper composes inputs, calls the pure
 //! function" pattern (architecture.md §"Salsa purity rule"): [`gate_nullable_leaf`]

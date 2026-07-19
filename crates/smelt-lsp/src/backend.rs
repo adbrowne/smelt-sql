@@ -451,9 +451,15 @@ impl Backend {
                 DbCode::PipeStageMalformed => "pipe-stage-malformed",
                 DbCode::GrainRequiredForIncremental => "grain-required-for-incremental",
                 DbCode::GrainRequiresIncremental => "grain-requires-incremental",
+                DbCode::GrainAssertionMismatch => "grain-assertion-mismatch",
                 DbCode::MaintenanceNoAdmissibleTechnique => "maintenance-no-admissible-technique",
                 DbCode::MaintenanceScanUnbounded => "maintenance-scan-unbounded",
                 DbCode::MaintenanceGranularityMismatch => "maintenance-granularity-mismatch",
+                DbCode::MaintenanceUnsupportedGrain => "maintenance-unsupported-grain",
+                DbCode::MaintenanceWritePatternUnavailable => {
+                    "maintenance-write-pattern-unavailable"
+                }
+                DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
             };
             NumberOrString::String(code_str.to_string())
         });

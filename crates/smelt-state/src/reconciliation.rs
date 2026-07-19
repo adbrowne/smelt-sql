@@ -1,4 +1,4 @@
-//! The reconciliation ledger (`docs/specs/maintenance_plan.md` §"The
+//! The reconciliation ledger (`docs/specs/incremental_models.md` §"The
 //! reconciliation ledger"): the maintenance plan's bookkeeping of what has
 //! already been folded into a model's stored output, keyed
 //! `(output-region × column-group)`.
@@ -23,7 +23,7 @@
 //! delta that does not advance that watermark.
 //!
 //! **Two operations.** *Fold* consults the entry's processed state and
-//! refuses a delta already reflected in it (`docs/specs/maintenance_plan.md`
+//! refuses a delta already reflected in it (`docs/specs/incremental_models.md`
 //! §"Constraints & Invariants" — "Never fold a delta already reflected in
 //! the state"); otherwise it combines and extends. *Recompute-reset*
 //! replaces every ledger entry whose region intersects a region recompute

@@ -194,8 +194,7 @@ fn described_technique_matches_execution_keyed_fold() {
             mutation_sensitivity: set(&["payments"]),
         }],
         fold: Some(FoldSpec {
-            add_columns: strings(&["lifetime_spend"]),
-            combiner: SqlFunction::Sum,
+            add_columns: vec![("lifetime_spend".to_string(), SqlFunction::Sum)],
         }),
         column_add_proof: None,
     };
@@ -225,6 +224,7 @@ fn described_technique_matches_execution_keyed_fold() {
             "SELECT user_id, SUM(amount) AS lifetime_spend FROM payments \
              WHERE pay_date >= DATE '2026-01-02' AND pay_date < DATE '2026-01-03' \
              GROUP BY user_id",
+            None,
             MaintenanceDialect::DuckDb,
         ),
     );
@@ -377,7 +377,7 @@ fn batch_group(conn: &Connection, group: &StatementGroup) {
 /// (`smelt-runtime/src/transformer.rs`): the new single-owner emitter
 /// contract requires the caller to fold the region predicate into the body
 /// it hands `emit_delete_insert` — the emitter itself no longer adds one
-/// (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)").
+/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)").
 fn clamped(body: &str, col: &str, region: &Region) -> String {
     format!(
         "SELECT * FROM ({body}) WHERE {col} >= {start} AND {col} < {end}",
@@ -606,7 +606,7 @@ const MATRIX: &[(&str, [Cell; 7])] = &[
         ],
     ),
     // Not a row of the research catalogue's own matrix table — added by this
-    // phase (`maintenance_plan.md` §Known Divergences "INTERSECT/EXCEPT are
+    // phase (`incremental_models.md` §Known Divergences "INTERSECT/EXCEPT are
     // unclassified set operations") to give the set-op classification gap a
     // named cell rather than leaving it matrix-invisible. The collapse this
     // pins is source-property-agnostic (grouping fails closed the same way

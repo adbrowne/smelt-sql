@@ -1,7 +1,7 @@
 //! Horizon-ceiling declaration — the modeller's *warning ceiling* on the
 //! maintained window.
 //!
-//! See `docs/specs/maintenance_plan.md` §"Windowed maintenance and the
+//! See `docs/specs/incremental_models.md` §"Windowed maintenance and the
 //! horizon": the horizon is **derived** from the model's own reach (its
 //! lookback, window frames, and join contribution — `model_properties.md`),
 //! never trusted from a declaration, because a declared horizon smaller than

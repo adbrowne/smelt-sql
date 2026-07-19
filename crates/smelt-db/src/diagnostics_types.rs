@@ -669,6 +669,11 @@ pub enum DiagnosticCode {
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "GrainRequiresIncremental: model declares `grain:` but is not `refresh: incremental` — add `refresh: incremental` or remove the `grain:` key"
     GrainRequiresIncremental,
+    /// A written `grain:` check-only assertion disagrees with the label
+    /// derived from the declared shape-defining facts (`timeseries:` /
+    /// `unique_key:`). Anchored at the top of the file (line 0, column 0).
+    /// Message: "GrainAssertionMismatch: declared `grain: {asserted}` disagrees with the grain derived from the declared shape facts (`grain: {derived}`) — fix the `grain:` assertion or the facts it derives from"
+    GrainAssertionMismatch,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or
@@ -711,7 +716,7 @@ pub enum DiagnosticCode {
     KeyedForbidsNondeterministic,
     /// Interim not-yet-supported refusal: a `refresh: keyed` model has no
     /// clocked driving source and the snapshot-reconcile executor is unbuilt
-    /// (`docs/specs/keyed_models.md` §Known Divergences).
+    /// (`docs/specs/incremental_models.md` §Known Divergences "The key grain").
     KeyedSnapshotPostureUnsupported,
     /// Multiple timeseries-tagged sources in a `refresh: keyed` model's FROM
     /// (v1 supports exactly one driving source).
@@ -833,7 +838,7 @@ pub enum DiagnosticCode {
     /// Anchored at the stage span.
     PipeStageMalformed,
     /// Emitted when no maintenance technique survives a plan cell's
-    /// admission (`maintenance_plan.md` §"Per-cell admission"). Names the
+    /// admission (`incremental_models.md` §"Per-cell admission"). Names the
     /// cell's trigger and why every candidate technique was refused —
     /// includes the `maintenance.cells[]` two-group column-span error (a
     /// cell whose declared `columns` span more than one derived column
@@ -842,7 +847,7 @@ pub enum DiagnosticCode {
     MaintenanceNoAdmissibleTechnique,
     /// Emitted (the K8 guardrail) when a derived scan or write footprint
     /// cannot be partition-bounded and no `allow_full_scan` acceptance was
-    /// declared for that source (`maintenance_plan.md` §"Partition-local
+    /// declared for that source (`incremental_models.md` §"Partition-local
     /// maintenance (the K8 guardrail)"). Anchored at the model SQL body
     /// start.
     MaintenanceScanUnbounded,
@@ -850,11 +855,36 @@ pub enum DiagnosticCode {
     /// disagrees with the truncation/grid unit its own `partition_column`
     /// SELECT-list projection actually derives to (e.g. declaring `day`
     /// while the SQL groups on `date_trunc('hour', …)`) —
-    /// (`maintenance_plan.md` §Design "Grain is declared": the graph
+    /// (`incremental_models.md` §Design "Grain is declared": the graph
     /// layer's edge grain is the declaration, never derived, but the
     /// classifier checks the declaration against the SQL's own grouping).
     /// Anchored at the model SQL body start.
     MaintenanceGranularityMismatch,
+    /// Emitted (Error) when a model declares `refresh: incremental` with a
+    /// `grain:` maintenance-plan derivation does not yet support (currently
+    /// `key_per_partition`) — refused fail-loud rather than silently
+    /// collapsed into an ordinary keyed plan with an empty `unique_key`
+    /// (`incremental_models.md` §Known Divergences). Names the grain and the
+    /// plan tracking the missing support. Anchored at the model SQL body
+    /// start.
+    MaintenanceUnsupportedGrain,
+    /// Emitted (Error) when a `maintenance.cells[].write` pin names a write
+    /// pattern the open registry does not recognise, or one the target
+    /// backend's write-pattern capability does not provide
+    /// (`incremental_models.md` §"Per-cell write addressing" → "User
+    /// pins"). Names the pattern and the backend; never a silent
+    /// downgrade to a different addressing. Anchored at the model SQL body
+    /// start.
+    MaintenanceWritePatternUnavailable,
+    /// Emitted (Error) when a `maintenance.cells[].write` pin names a
+    /// write pattern the registry recognises and the target backend can
+    /// execute, but the pinned cell's own facts cannot uphold that
+    /// pattern's equivalence obligation (e.g. `write: keyed` on an output
+    /// with no declared identity) — `incremental_models.md` §"Per-cell
+    /// write addressing" → "User pins". Names the cell and the refused
+    /// pattern; the pin never silently resolves to a substituted
+    /// technique. Anchored at the model SQL body start.
+    MaintenanceWriteAddressingRefused,
 }
 
 /// Structured metadata attached to diagnostics for code actions

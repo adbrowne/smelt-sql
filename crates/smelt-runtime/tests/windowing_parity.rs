@@ -667,7 +667,7 @@ fn test_per_partition_only_yields_one_partition_per_iteration() {
 #[test]
 fn test_not_derivable_source_bound_is_a_hard_refusal_not_an_approximate_chunk() {
     // A bare LAG(...) OVER (...) with no RANGE clause is NotDerivable
-    // (fail-closed, `batched_models.md` Constraint 10). The auto chunk-size
+    // (fail-closed, `incremental_models.md` §"Partition-grain constraints" #10). The auto chunk-size
     // path must surface this as `Err`, never silently fall back to an
     // approximate chunk shape (e.g. FullyBatchSafe or a default BoundedSafe).
     let sql = "SELECT d, LAG(amount) OVER (ORDER BY d) FROM smelt.silver.events";

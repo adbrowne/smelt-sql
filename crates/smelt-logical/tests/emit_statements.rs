@@ -1,5 +1,5 @@
 //! Correctness oracle for `smelt_logical::maintenance::emit`
-//! (`docs/specs/maintenance_plan.md` §"Statement emission (single owner)"):
+//! (`docs/specs/incremental_models.md` §"Statement emission (single owner)"):
 //! the emitters are the *single author* of every maintenance statement a
 //! run executes. This file asserts each emitter's output shape directly
 //! (byte-parity against production text is asserted from the execution side
@@ -7,7 +7,7 @@
 
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_create_table_as, emit_delete_insert, emit_keyed_fold,
-    MaintenanceDialect, Region,
+    emit_recurrence_bound_probe, MaintenanceDialect, Region,
 };
 
 #[test]
@@ -113,6 +113,7 @@ fn keyed_fold_renders_combiners_and_insert_star() {
         ],
         "SELECT device_id, user_id, COUNT(*) AS event_count, MIN(event_ts) AS first_seen, \
          MAX(event_ts) AS last_seen FROM events GROUP BY 1, 2",
+        None,
         MaintenanceDialect::DuckDb,
     );
 
@@ -127,6 +128,98 @@ fn keyed_fold_renders_combiners_and_insert_star() {
          first_seen = LEAST(target.first_seen, delta.first_seen), \
          last_seen = GREATEST(target.last_seen, delta.last_seen) \
          WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// A locality-admitted keyed fold (`docs/specs/incremental_models.md`
+/// §"Key temporal locality") carries an extra target-side partition
+/// predicate on the `ON` condition — restricting which target rows the
+/// `MERGE` scans/matches without changing which delta rows merge (every
+/// row in `delta_select` still merges, per "Pruning is not a write
+/// clamp").
+#[test]
+fn keyed_fold_with_slice_carries_target_partition_predicate() {
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate::Range {
+        partition_column: "event_date".to_string(),
+        lower: "2026-01-02".to_string(),
+        upper: "2026-01-02".to_string(),
+    };
+    let group = emit_keyed_fold(
+        "main.device_daily",
+        &["device_id".to_string(), "event_date".to_string()],
+        &[(
+            "event_count".to_string(),
+            "target.event_count + delta.event_count".to_string(),
+        )],
+        "SELECT device_id, event_date, COUNT(*) AS event_count FROM events GROUP BY 1, 2",
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO main.device_daily AS target USING (SELECT device_id, event_date, \
+         COUNT(*) AS event_count FROM events GROUP BY 1, 2) AS delta \
+         ON target.device_id = delta.device_id AND target.event_date = delta.event_date \
+         AND target.event_date BETWEEN '2026-01-02' AND '2026-01-02' \
+         WHEN MATCHED THEN UPDATE SET event_count = target.event_count + delta.event_count \
+         WHEN NOT MATCHED THEN INSERT *"
+    );
+}
+
+/// A quote in a slice bound is escaped, matching every other emitter in
+/// this module (`delete_insert_escapes_quoted_literal_region_boundaries`).
+#[test]
+fn keyed_fold_slice_escapes_quoted_literal_bounds() {
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate::Range {
+        partition_column: "name".to_string(),
+        lower: "O'Brien".to_string(),
+        upper: "Z".to_string(),
+    };
+    let group = emit_keyed_fold(
+        "main.t",
+        &["id".to_string()],
+        &[],
+        "SELECT id, name FROM events",
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert!(
+        group.statements[0]
+            .sql
+            .contains("AND target.name BETWEEN 'O''Brien' AND 'Z'"),
+        "expected escaped slice bound: {}",
+        group.statements[0].sql
+    );
+}
+
+/// Route 2 (key-determined) locality slices the target scan by the delta's
+/// own partition values (`docs/specs/incremental_models.md` §"Key temporal
+/// locality", route 2), rendered as an `IN (SELECT DISTINCT … FROM
+/// (<delta>))` predicate rather than route 1's literal `BETWEEN` range —
+/// no widening, no caller-precomputed bounds.
+#[test]
+fn keyed_fold_with_delta_values_slice_carries_in_subquery_predicate() {
+    let delta_select = "SELECT event_id, MIN(event_date) AS first_seen_date FROM events GROUP BY 1";
+    let slice = smelt_logical::maintenance::emit::TargetSlicePredicate::DeltaValues {
+        partition_column: "first_seen_date".to_string(),
+        delta_select: delta_select.to_string(),
+    };
+    let group = emit_keyed_fold(
+        "main.events_deduped",
+        &["event_id".to_string()],
+        &[],
+        delta_select,
+        Some(&slice),
+        MaintenanceDialect::DuckDb,
+    );
+    assert_eq!(
+        group.statements[0].sql,
+        "MERGE INTO main.events_deduped AS target USING (SELECT event_id, MIN(event_date) AS \
+         first_seen_date FROM events GROUP BY 1) AS delta ON target.event_id = delta.event_id \
+         AND target.first_seen_date IN (SELECT DISTINCT first_seen_date FROM (SELECT event_id, \
+         MIN(event_date) AS first_seen_date FROM events GROUP BY 1) AS __locality_delta_values) \
+         WHEN MATCHED THEN UPDATE SET  WHEN NOT MATCHED THEN INSERT *"
     );
 }
 
@@ -228,4 +321,77 @@ fn column_scoped_merge_dialect_invariant_shape() {
         MaintenanceDialect::Spark,
     );
     assert_eq!(duckdb, spark);
+}
+
+/// The route-3 (recurrence-bounded, declared `r`) out-of-slice match probe
+/// (`docs/specs/incremental_models.md` §"Key temporal locality", route 3):
+/// a single read-only `SELECT` counting keys the delta shares with a
+/// stored target row whose partition column lies before the slice's lower
+/// bound, plus up to 5 sample violating keys.
+#[test]
+fn recurrence_bound_probe_matches_production_shape() {
+    let delta_select = "SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10'";
+    let stmt = emit_recurrence_bound_probe(
+        "main.events_last_seen",
+        &["event_id".to_string()],
+        "last_seen_date",
+        delta_select,
+        "2026-01-07",
+    );
+    assert_eq!(
+        stmt.sql,
+        "WITH __recurrence_violations AS (SELECT DISTINCT CAST(target.event_id AS VARCHAR) AS \
+         violation_key FROM main.events_last_seen AS target JOIN (SELECT DISTINCT event_id FROM \
+         (SELECT event_id, event_date FROM events WHERE event_date = '2026-01-10')) AS delta ON \
+         target.event_id = delta.event_id WHERE target.last_seen_date < '2026-01-07') SELECT \
+         COUNT(*) AS violation_count, (SELECT STRING_AGG(violation_key, ', ') FROM (SELECT \
+         violation_key FROM __recurrence_violations LIMIT 5) AS __sample) AS sample_keys FROM \
+         __recurrence_violations"
+    );
+}
+
+/// A composite key concatenates every key column into one violation-key
+/// string (`k1 || '|' || k2 || ...`), and the join condition ANDs every
+/// key column — mirroring `emit_keyed_fold`'s own composite-key handling.
+#[test]
+fn recurrence_bound_probe_composite_key_concatenates_and_ands() {
+    let delta_select = "SELECT tenant_id, event_id, event_date FROM events";
+    let stmt = emit_recurrence_bound_probe(
+        "main.t",
+        &["tenant_id".to_string(), "event_id".to_string()],
+        "last_seen_date",
+        delta_select,
+        "2026-01-01",
+    );
+    assert!(
+        stmt.sql.contains(
+            "CAST(target.tenant_id AS VARCHAR) || '|' || CAST(target.event_id AS VARCHAR)"
+        ),
+        "expected composite key concatenation in: {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql
+            .contains("target.tenant_id = delta.tenant_id AND target.event_id = delta.event_id"),
+        "expected ANDed composite join condition in: {}",
+        stmt.sql
+    );
+}
+
+/// A single-quote in the slice-lower literal is escaped, matching every
+/// other emitter's literal-escaping convention in this module.
+#[test]
+fn recurrence_bound_probe_escapes_quoted_slice_lower() {
+    let stmt = emit_recurrence_bound_probe(
+        "main.t",
+        &["event_id".to_string()],
+        "last_seen_date",
+        "SELECT event_id, event_date FROM events",
+        "2026-01-0'7",
+    );
+    assert!(
+        stmt.sql.contains("< '2026-01-0''7'"),
+        "expected escaped literal in: {}",
+        stmt.sql
+    );
 }

@@ -60,7 +60,7 @@ WITH sessionized AS (
         session_start_ts,
         CAST(session_start_ts AS DATE) AS session_start_date
     FROM smelt.functions.sessionize(
-        source => smelt.silver.events_parsed,
+        source => smelt.silver.events_deduped,
         partition_col => device_id,
         ts_col => event_ts,
         platform_col => platform
@@ -138,7 +138,7 @@ BEGIN
   ) AS _smelt_output_clamp WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-11'
 COMMIT
 
--- trigger: NewData { source: "silver.events_parsed" }
+-- trigger: NewData { source: "silver.events_deduped" }
 BEGIN
   DELETE FROM main.silver_sessions WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-11'
   INSERT INTO main.silver_sessions SELECT * FROM (
@@ -178,7 +178,7 @@ COMMIT
                       PARTITION BY device_id ORDER BY event_ts
                       RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW  -- max_lookback
                   ) AS _prev_platform
-              FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-07' AND event_date < '2026-04-12') AS source
+              FROM (SELECT * FROM main.silver_events_deduped WHERE first_seen_date >= '2026-04-07' AND first_seen_date < '2026-04-11') AS source
           ),
           _bounded AS (
               SELECT
@@ -219,7 +219,7 @@ COMMIT
                   ELSE MIN(event_ts) OVER (PARTITION BY device_id, CAST(event_ts AS DATE))
               END AS session_start_ts
           FROM _deadlined
-      )) AS __smelt_t2528)
+      )) AS __smelt_t2529)
       SELECT
           CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
           device_id,
@@ -243,7 +243,7 @@ COMMIT
       ) AS _smelt_output_clamp WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-11'
     COMMIT
     
-    -- trigger: NewData { source: "silver.events_parsed" }
+    -- trigger: NewData { source: "silver.events_deduped" }
     BEGIN
       DELETE FROM main.silver_sessions WHERE session_start_date >= '2026-04-09' AND session_start_date < '2026-04-11'
       INSERT INTO main.silver_sessions SELECT * FROM (
@@ -269,7 +269,7 @@ COMMIT
                       PARTITION BY device_id ORDER BY event_ts
                       RANGE BETWEEN INTERVAL '2 days' PRECEDING AND CURRENT ROW  -- max_lookback
                   ) AS _prev_platform
-              FROM (SELECT * FROM main.silver_events_parsed WHERE event_date >= '2026-04-07' AND event_date < '2026-04-12') AS source
+              FROM (SELECT * FROM main.silver_events_deduped WHERE first_seen_date >= '2026-04-07' AND first_seen_date < '2026-04-11') AS source
           ),
           _bounded AS (
               SELECT
@@ -310,7 +310,7 @@ COMMIT
                   ELSE MIN(event_ts) OVER (PARTITION BY device_id, CAST(event_ts AS DATE))
               END AS session_start_ts
           FROM _deadlined
-      )) AS __smelt_t2528)
+      )) AS __smelt_t2529)
       SELECT
           CONCAT(CAST(device_id AS VARCHAR), '-', CAST(session_start_ts AS VARCHAR)) AS session_id,
           device_id,
@@ -362,7 +362,7 @@ BEGIN
   ) AS _smelt_output_clamp WHERE session_start_date >= '2026-05-03' AND session_start_date < '2026-05-05'
 COMMIT
 
--- trigger: NewData { source: "silver.events_parsed" }
+-- trigger: NewData { source: "silver.events_deduped" }
 BEGIN
   DELETE FROM main.silver_sessions WHERE session_start_date >= '2026-05-03' AND session_start_date < '2026-05-05'
   INSERT INTO main.silver_sessions SELECT * FROM (

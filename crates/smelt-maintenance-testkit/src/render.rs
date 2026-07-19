@@ -6,7 +6,7 @@
 //! and by [`render_oracle_sql`] (source refs swapped for physical table
 //! names) — the model SQL and the oracle SQL are, by construction, the exact
 //! same text apart from that one substitution, which is the equivalence
-//! invariant's own statement (`maintenance_plan.md` §"The equivalence
+//! invariant's own statement (`incremental_models.md` §"The equivalence
 //! invariant": same SQL body, full inputs).
 //!
 //! No execution-path code lives here — Phase 1's scope stops at "stages
@@ -17,7 +17,10 @@
 
 use std::path::Path;
 
-use crate::recipe::{BodyConstruct, KeyedRecipe, ModelEdit, ModelRecipe, SourcePosture};
+use crate::recipe::{
+    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, KeyedRecipe, ModelEdit, ModelRecipe,
+    SourcePosture,
+};
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
 /// derives the incremental filter; `model_shapes.rs`'s documented
@@ -182,7 +185,7 @@ pub fn render_model_file(recipe: &ModelRecipe) -> String {
     )
 }
 
-/// The oracle query (`maintenance_plan.md` §"The equivalence invariant";
+/// The oracle query (`incremental_models.md` §"The equivalence invariant";
 /// design §6 "Oracle query"): the model body with `smelt.sources.<x>`
 /// replaced by its physical table name (`main.sources_<x>`), evaluated
 /// directly on a `duckdb::Connection` — independent of smelt's own
@@ -324,8 +327,8 @@ pub fn render_keyed_model_body(recipe: &KeyedRecipe) -> String {
 }
 
 /// The full `grain: key` model file: `refresh: incremental` + `grain: key`
-/// frontmatter — deliberately no `timeseries:` block (`keyed_models.md`
-/// Known Divergences: "every `timeseries:` block on a keyed model is refused
+/// frontmatter — deliberately no `timeseries:` block (`incremental_models.md`
+/// §Known Divergences "The key grain": "every `timeseries:` block on a keyed model is refused
 /// unconditionally") and no `batched.unique_key` (keyed output has no
 /// partition column) — followed by [`render_keyed_model_body`].
 pub fn render_keyed_model_file(recipe: &KeyedRecipe) -> String {
@@ -398,7 +401,7 @@ pub fn stage_keyed(
 }
 
 /// Every `DiagnosticCode` variant in the `Maintenance*` family
-/// (`maintenance_plan.md` §Diagnostics) — permitted on a staged recipe's
+/// (`incremental_models.md` §Diagnostics) — permitted on a staged recipe's
 /// diagnostics, since Phase 1 does not yet constrain which techniques a
 /// recipe's cell admits. Any other diagnostic on a valid-by-construction
 /// recipe is a generator bug.
@@ -411,6 +414,113 @@ fn is_maintenance_family(code: Option<smelt_db::DiagnosticCode>) -> bool {
                 | smelt_db::DiagnosticCode::MaintenanceGranularityMismatch
         )
     )
+}
+
+// ---------------------------------------------------------------------
+// Phase A6: the composed (`grain: key` + `timeseries:`) recipe family
+// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase A6).
+// ---------------------------------------------------------------------
+
+/// [`ComposedKeyedRecipe`]'s model `SELECT` body — see that type's own doc
+/// comment for the per-route shape and why `KeyDetermined`'s body is not
+/// itself valid, executable DuckDB SQL (it exists only to exercise the
+/// real key-temporal-locality gate's admission over real staged
+/// frontmatter/YAML; the gate's own executable-mechanics coverage drives a
+/// separately hand-written per-step query, `gate.rs`'s own
+/// `compile_step`-shaped helpers).
+pub fn render_composed_model_body(recipe: &ComposedKeyedRecipe) -> String {
+    let src = format!("smelt.sources.{}", recipe.source.name);
+    let d = &recipe.source.clock_column;
+    let id = &recipe.source.key_column;
+    let val = &recipe.source.payload_column;
+    match recipe.route {
+        ComposedRoute::KeyEmbedded => {
+            format!("SELECT {id}, {d}, SUM({val}) AS total FROM {src} GROUP BY {id}, {d}")
+        }
+        ComposedRoute::KeyDetermined => {
+            format!(
+                "SELECT {id}, CAST({d} AS DATE) AS pdate, SUM({val}) AS total FROM {src} \
+                 GROUP BY {id}"
+            )
+        }
+        ComposedRoute::RecurrenceBounded => {
+            format!("SELECT {id}, MAX({d}) AS last_seen FROM {src} GROUP BY {id}")
+        }
+    }
+}
+
+/// The full composed model file: frontmatter (`timeseries:` +
+/// `refresh: incremental` + `grain: key`, plus a `functional_dependencies:`
+/// entry for [`ComposedRoute::KeyDetermined`]) followed by
+/// [`render_composed_model_body`]. Deliberately no `batched.unique_key` —
+/// like [`render_keyed_model_file`], a keyed output's `unique_key` is
+/// derived from its own `GROUP BY`, never declared.
+pub fn render_composed_model_file(recipe: &ComposedKeyedRecipe) -> String {
+    let partition_column = recipe.partition_column();
+    let fd_block = match recipe.functional_dependency() {
+        Some((key, determines)) => format!(
+            "functional_dependencies:\n  - key: [{}]\n    determines: {}\n",
+            key.join(", "),
+            determines,
+        ),
+        None => String::new(),
+    };
+    format!(
+        "---\ntimeseries:\n  event_time_column: {pc}\n  partition_column: {pc}\n  granularity: day\nrefresh: incremental\ngrain: key\n{fd_block}---\n{body}\n",
+        pc = partition_column,
+        body = render_composed_model_body(recipe),
+    )
+}
+
+/// The oracle query for [`ComposedRoute::KeyEmbedded`] (the only route this
+/// text-substitution oracle is valid for — see [`render_composed_model_body`]'s
+/// doc comment for why routes 2/3 need their own hand-written oracle
+/// queries, `gate.rs`'s own `composed_route2_oracle_sql`): the model body
+/// with `smelt.sources.<x>` replaced by its physical table name.
+pub fn render_composed_oracle_sql(recipe: &ComposedKeyedRecipe) -> String {
+    render_composed_model_body(recipe).replace(
+        &format!("smelt.sources.{}", recipe.source.name),
+        &format!("main.sources_{}", recipe.source.name),
+    )
+}
+
+/// Stage a [`ComposedKeyedRecipe`] into a fresh project dir + DuckDB file:
+/// writes the model file, the driving source's YAML
+/// ([`crate::recipe::SourceRecipe::source_yaml`], carrying `key_recurrence`
+/// for [`ComposedRoute::RecurrenceBounded`]), `smelt.yml`, and creates the
+/// physical source table — the composed-pool counterpart of [`stage`]/
+/// [`stage_keyed`]. The returned [`crate::link_c_harness::LinkCProject`]'s
+/// `db_path` is reused by `gate.rs` to open a direct `DuckDbBackend` for
+/// routes 2/3's own execution path (see [`ComposedKeyedRecipe`]'s doc
+/// comment).
+pub fn stage_composed(
+    recipe: &ComposedKeyedRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    std::fs::create_dir_all(project_dir.join("models/sources"))?;
+    std::fs::write(
+        project_dir.join(format!("models/{}.sql", recipe.model_name)),
+        render_composed_model_file(recipe),
+    )?;
+    std::fs::write(
+        project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+        recipe.source.source_yaml(),
+    )?;
+    std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
+
+    let conn = duckdb::Connection::open(db_path)?;
+    conn.execute_batch(&format!(
+        "CREATE SCHEMA IF NOT EXISTS main; \
+         CREATE TABLE main.sources_{name} ({d} DATE, {id} INTEGER, {val} INTEGER);",
+        name = recipe.source.name,
+        d = recipe.source.clock_column,
+        id = recipe.source.key_column,
+        val = recipe.source.payload_column,
+    ))?;
+    drop(conn);
+
+    crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
 
 #[cfg(test)]

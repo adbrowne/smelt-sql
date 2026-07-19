@@ -7,7 +7,7 @@ owners: [andrew]
 
 # Types
 
-> **What this is.** Normative spec for smelt's type system. Covers the concrete `DataType` vocabulary, the strict-by-default doctrine, type constraints, fragment sorts (`Expr<T>`, `TableExpr`, …), promotion rules, and how all of this applies equally to model schemas and `smelt.define` function signatures. Adjacent: `architecture.md`, `batched_models.md`.
+> **What this is.** Normative spec for smelt's type system. Covers the concrete `DataType` vocabulary, the strict-by-default doctrine, type constraints, fragment sorts (`Expr<T>`, `TableExpr`, …), promotion rules, and how all of this applies equally to model schemas and `smelt.define` function signatures. Adjacent: `architecture.md`, `incremental_models.md`.
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -163,7 +163,7 @@ Built-in SQL function return types are taken from the canonical registry in `cra
 - `SUM(Double | Float) → Double`
 - `SUM(Decimal(p, s)) → Decimal(38, s)` — scale preserved; precision widened to the maximum within the 38-digit limit. ByDesign divergence from Spark (see §15).
 - `AVG(any numeric) → Double`
-- `MIN(T) → T`, `MAX(T) → T` for any `T: Ordered` (input type preserved; nullability §11 applies — empty group returns `NULL`).
+- `MIN(T) → T`, `MAX(T) → T` for any `T: Ordered` (input type preserved; nullability §11 applies — grouped extremal folds over a NOT NULL argument are non-nullable; ungrouped or nullable-argument folds stay nullable, since an empty group returns `NULL`).
 - `COUNT(*) → BigInt` (non-nullable — guaranteed by SQL semantics).
 - `COUNT(expr) → BigInt` (non-nullable).
 - `CEIL(Double) → Double`, `CEIL(Decimal(p,_)) → Decimal(p, 0)`
@@ -242,8 +242,8 @@ Columns carry `nullable: bool` in `TypedColumn`.
 
 **Sound-upper-bound contract.** `nullable: false` is a guarantee: the column cannot contain `NULL` in any row, for any input data satisfying the declared source schemas. `nullable: true` means only "may contain NULL". When inference cannot establish the guarantee, it must answer `nullable: true`. Claiming `nullable: false` for a column that can hold NULL is a soundness defect; claiming `nullable: true` for a column that provably cannot is acceptable imprecision. Because the contract is one-sided, the rules below enumerate the **only** ways an inferred column or expression may be non-nullable; anything not covered defaults to nullable.
 
-- **Non-nullable origins:** non-NULL literals; source/seed columns declared `nullable: false`; `COUNT(*)` and `COUNT(expr)`; `EXISTS`; struct/array literals (the container itself); `COALESCE(…)` with at least one non-nullable argument; `CASE … ELSE …` when all result branches are non-nullable; registry-declared non-nullable nullary built-ins (`NOW()`, `CURRENT_TIMESTAMP` — see §16); `CAST` preserves the input's nullability. Scalar operators and functions that are NULL-propagating may claim non-nullable only when every operand is non-nullable.
-- **Always nullable (overrides non-nullable inputs):** `SUM`, `AVG`, `MIN`, `MAX` (empty groups → NULL); scalar subqueries; `IN (subquery)`; array subscript (out-of-bounds → NULL); struct field access (conservative); `TRY_CAST`; `NULLIF`; `CASE` without `ELSE`; `LAG`/`LEAD` without an explicit default.
+- **Non-nullable origins:** non-NULL literals; source/seed columns declared `nullable: false`; `COUNT(*)` and `COUNT(expr)`; `EXISTS`; struct/array literals (the container itself); `COALESCE(…)` with at least one non-nullable argument; `CASE … ELSE …` when all result branches are non-nullable; registry-declared non-nullable nullary built-ins (`NOW()`, `CURRENT_TIMESTAMP` — see §16); `CAST` preserves the input's nullability; a **grouped extremal fold** (`MIN(x)`/`MAX(x)` under a plain `GROUP BY`, including `GROUP BY ALL` when at least one select item is non-aggregate) whose argument `x` is non-nullable — every group is guaranteed at least one row, so the fold cannot collapse to `NULL`. Scalar operators and functions that are NULL-propagating may claim non-nullable only when every operand is non-nullable.
+- **Always nullable (overrides non-nullable inputs):** `SUM`, `AVG` (empty groups → NULL); `MIN`/`MAX` outside the grouped-extremal case above — ungrouped; a nullable argument (an empty ungrouped input still folds to one `NULL` row); a `FILTER (WHERE …)` clause (every row in a group can fail the predicate, folding that group to `NULL`); used as a window function (a bounded frame, e.g. `ROWS BETWEEN 2 PRECEDING AND 1 PRECEDING`, can be empty at a partition boundary); under `GROUPING SETS`/`ROLLUP`/`CUBE` (these always include an empty/grand-total grouping, the same empty-input hazard as no `GROUP BY`); or under `GROUP BY ALL` with an aggregate-only select list (zero grouping keys — degenerates to the ungrouped case); scalar subqueries; `IN (subquery)`; array subscript (out-of-bounds → NULL); struct field access (conservative); `TRY_CAST`; `NULLIF`; `CASE` without `ELSE`; `LAG`/`LEAD` without an explicit default.
 - **Outer joins.** Columns sourced from the null-supplying side(s) of an outer join are nullable in the join's output scope, regardless of declared or upstream-inferred nullability: `LEFT JOIN` — all right-side columns; `RIGHT JOIN` — all left-side columns; `FULL JOIN` — both sides. `INNER` and `CROSS` joins preserve input nullability.
 - **Set operations.** A `UNION` / `INTERSECT` / `EXCEPT` output column is non-nullable only if the corresponding column is non-nullable in **every** branch.
 
@@ -446,7 +446,7 @@ This section captures the load-bearing rationale behind the type system's shape 
   - `docs/plans/20260613-collation-axis.md`
 - **Related specs**:
   - `docs/specs/architecture.md` — system-level pipeline; this spec sits inside its Analyze stage.
-  - `docs/specs/batched_models.md` — downstream consumer of `ModelSchema`.
+  - `docs/specs/incremental_models.md` — downstream consumer of `ModelSchema`.
   - `docs/specs/meta_language.md` — `List<T>` fragment-sort surface and semantics; `ModelDef` field rules, generator-file body semantics, and construction restrictions; this spec registers the type vocabulary entries, the meta-language spec owns the rules.
   - `docs/specs/function_schema_inference.md` — how `smelt.functions.*` calls contribute columns/types to a caller's schema; owns the `ColumnTypeUnresolved` schema-propagation rules; this spec owns the `Unknown` reason-discriminant and the no-silent-`Unknown` doctrine it consumes.
 

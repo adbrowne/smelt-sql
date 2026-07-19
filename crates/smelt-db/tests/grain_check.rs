@@ -1,4 +1,4 @@
-//! Declared-granularity checking (`maintenance_plan.md` §Design "Grain is
+//! Declared-granularity checking (`incremental_models.md` §Design "Grain is
 //! declared"; §"The graph layer" — "the classifier only *checks* the
 //! declaration, e.g. against a `date_trunc` grouping"): a model's declared
 //! `timeseries.granularity` must agree with the truncation/grid unit its own
@@ -70,7 +70,7 @@ columns:
 /// A model declares `granularity: hour` but its own `partition_column`
 /// projection only truncates on `date_trunc('day', …)` — the declaration
 /// **narrows** past what the SQL's own grouping can actually distinguish
-/// (per widen-never-narrow, `maintenance_plan.md` §Design) and must error,
+/// (per widen-never-narrow, `incremental_models.md` §Design) and must error,
 /// never silently keep the mismatched declaration (`docs/specs/models.md`:
 /// declared-grain contradictions are hard errors, never silent).
 #[test]
@@ -115,7 +115,7 @@ GROUP BY 1
 
 /// A model whose declared granularity is **coarser** than its own
 /// `date_trunc` grouping is a safe widen, never an error
-/// (`maintenance_plan.md` §Design "Widen-never-narrow").
+/// (`incremental_models.md` §Design "Widen-never-narrow").
 #[test]
 fn declared_granularity_coarser_than_grouping_is_a_safe_widen() {
     let model = r#"---

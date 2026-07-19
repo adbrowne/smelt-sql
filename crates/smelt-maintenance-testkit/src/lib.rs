@@ -1,5 +1,5 @@
 //! Dev-only Link-C schedule/oracle harness + model-shape catalogue for
-//! maintenance-plan equivalence testing (`docs/specs/maintenance_plan.md`
+//! maintenance-plan equivalence testing (`docs/specs/incremental_models.md`
 //! §References → Tests).
 //!
 //! This crate is **not** a production dependency of anything — `publish =

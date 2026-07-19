@@ -15,7 +15,7 @@
 //! drives the real end-to-end pipeline (`execute_project` on a real DuckDB
 //! backend) and asserts the derived plan/filter itself is correct, not just
 //! that a strategy executes correctly once handed one. See
-//! `docs/specs/maintenance_plan.md` §References → Tests for how the two
+//! `docs/specs/incremental_models.md` §References → Tests for how the two
 //! suites divide the space.
 
 mod backfill;

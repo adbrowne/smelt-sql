@@ -80,6 +80,7 @@ static CATALOGUE: &[(&str, &[DeclarationKind])] = &[
     ("state", &[DeclarationKind::Model]),
     ("refresh", &[DeclarationKind::Model]),
     ("grain", &[DeclarationKind::Model]),
+    ("unique_key", &[DeclarationKind::Model]),
     ("functional_dependencies", &[DeclarationKind::Model]),
     ("bounded_domain", &[DeclarationKind::Model]),
     ("horizon_ceiling", &[DeclarationKind::Model]),

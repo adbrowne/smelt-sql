@@ -271,7 +271,7 @@ fn report_check_results(results: &[CheckOutcome]) -> Result<()> {
 }
 
 /// `smelt build <model> --period <start>..<end> --include-upstreams` —
-/// backward resolution (`maintenance_plan.md` §CLI, §"Backward resolution —
+/// backward resolution (`incremental_models.md` §CLI, §"Backward resolution —
 /// what must exist"). Argument parsing + reporter wiring only (per the Run
 /// Pipeline Parity invariant): `smelt_runtime::propagation::
 /// resolve_build_plan` computes the real per-workspace required-slices plan

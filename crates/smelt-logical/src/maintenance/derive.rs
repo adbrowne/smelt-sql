@@ -6,20 +6,96 @@
 //! classifiers that do not exist yet (column groups, skeleton roles) — see
 //! the module doc in [`super`].
 
-use std::collections::{BTreeSet, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 
 use smelt_types::SqlFunction;
 
 use super::{
-    ColumnGroup, Corner, Grain, MaintenancePlan, MutationProfile, OutputSpec, PartitionLocal,
-    PlanCell, Refusal, ScanClamp, SourceFacts, Technique, Trigger,
+    ColumnGroup, Corner, FingerprintProjection, Grain, MaintenancePlan, MutationProfile,
+    OutputSpec, PartitionLocal, PlanCell, Refusal, RowIdentity, RowIdentityVerdict, ScanClamp,
+    SourceFacts, Technique, Trigger,
 };
 use crate::analysis::discriminants::combiner_discriminants;
+use crate::analysis::fingerprint::fingerprint_projection;
 use crate::analysis::input_delta::{
     input_delta_discovery, InputDeltaKind, MutationProfile as DeltaMutationProfile, SourceShape,
 };
+use crate::analysis::join_shape::JoinContext;
 use crate::analysis::model_diff::ModelDiff;
 use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundResult, Seconds};
+use crate::analysis::walk::model_property_vector;
+
+/// Derive the region row identity (P2, `model_properties.md` §"Region row
+/// identity") for a model: the declared `unique_key` off the output's own
+/// `Grain::Key` when present, else the proven grain key the composition walk
+/// establishes over `sql` (`analysis::walk::PropertyVector::grain`), else the
+/// identity-free `WholeRow` fallback.
+///
+/// Fail-closed: a proven key is only trusted when the walk also proves no
+/// input join fans the output out (`PropertyVector::has_fan_out_join`) — a
+/// key that does not cover every output row is never used, not even as a
+/// partial key. `declared_unique_key` and a differing proven key may both be
+/// present at once; declared wins the precedence, but the disagreement is
+/// carried in [`RowIdentityVerdict::proven_mismatch`] rather than silently
+/// dropped.
+pub fn row_identity(declared_unique_key: &[String], sql: &str) -> RowIdentityVerdict {
+    row_identity_with_context(declared_unique_key, sql, &JoinContext::new())
+}
+
+/// [`row_identity`], but folding an explicit [`JoinContext`] into the walk's
+/// fan-out check instead of an always-empty one. Used by
+/// [`append_model_edge_cells`] (T3, `docs/plans/20260715-composed-axes-
+/// conditional-maintenance.md` Phase E3) so a model-edge cell's row-identity
+/// proof can trust a proven grain key across an enrichment join whose
+/// partner's row-uniqueness is already an established fact — the SAME
+/// per-edge declared `unique_key` fact [`model_edge_enrichment_closure`]'s
+/// P1 proof already folds into its own `ctx` for the identical join, never a
+/// second, independent guess at the partner's uniqueness. Every other caller
+/// (via [`row_identity`]) is unaffected — an empty `ctx` reproduces exactly
+/// the pre-existing fail-closed behaviour (any join is untrusted absent an
+/// external fact).
+pub fn row_identity_with_context(
+    declared_unique_key: &[String],
+    sql: &str,
+    ctx: &JoinContext,
+) -> RowIdentityVerdict {
+    let proven_key = model_property_vector(sql, ctx).and_then(|vector| {
+        if vector.has_fan_out_join {
+            None
+        } else {
+            vector.grain.keys.into_iter().next()
+        }
+    });
+
+    if !declared_unique_key.is_empty() {
+        let declared = declared_unique_key.to_vec();
+        let proven_mismatch = proven_key.filter(|proven| !same_key_set(proven, &declared));
+        return RowIdentityVerdict {
+            identity: RowIdentity::Key(declared),
+            proven_mismatch,
+        };
+    }
+
+    match proven_key {
+        Some(key) => RowIdentityVerdict {
+            identity: RowIdentity::Key(key),
+            proven_mismatch: None,
+        },
+        None => RowIdentityVerdict {
+            identity: RowIdentity::WholeRow,
+            proven_mismatch: None,
+        },
+    }
+}
+
+/// Order-independent, case-insensitive key-set equality — the same
+/// convention `Grain::has_subset_key` and the key-temporal-locality route's
+/// `unique_key` comparison use.
+fn same_key_set(a: &[String], b: &[String]) -> bool {
+    let a: BTreeSet<String> = a.iter().map(|c| c.to_ascii_lowercase()).collect();
+    let b: BTreeSet<String> = b.iter().map(|c| c.to_ascii_lowercase()).collect();
+    a == b
+}
 
 /// The [`SourceShape`] [`input_delta_discovery`] reads for `facts`: a
 /// clocked source's own partition column stands in for
@@ -29,7 +105,7 @@ use crate::analysis::source_bounds::{derive_model_bounds, BoundContext, BoundRes
 /// `ChangeFeed` source in the plan layer yet — `sources.md`'s structured
 /// `mutation_profile` kind is consumed at the `MutationProfile::AppendOnly`/
 /// `MutableSnapshot` granularity here; a `change_feed` source is out of scope
-/// for this phase, per `maintenance_plan.md` §Known Divergences).
+/// for this phase, per `incremental_models.md` §Known Divergences).
 fn source_shape(facts: &SourceFacts) -> SourceShape {
     SourceShape {
         has_clock: facts.partition_col.is_some(),
@@ -40,16 +116,18 @@ fn source_shape(facts: &SourceFacts) -> SourceShape {
     }
 }
 
-/// Caller-supplied fold admission input for a keyed-grain model: which key
-/// the fold addresses and which columns fold additively under `combiner`.
-/// Checked against the combiner-algebra classifier — never trusted bare.
+/// Caller-supplied fold admission input for a keyed-grain model: which
+/// columns fold additively, each under its **own** combiner (a mixed fold —
+/// e.g. `COUNT`→`SUM`, `MIN`→`MIN`, `MAX`→`MAX` composed over the same
+/// key — is the common shape, not a single shared combiner across every
+/// column). Checked against the combiner-algebra classifier per column —
+/// never trusted bare.
 #[derive(Debug, Clone)]
 pub struct FoldSpec {
-    pub add_columns: Vec<String>,
-    pub combiner: SqlFunction,
+    pub add_columns: Vec<(String, SqlFunction)>,
 }
 
-/// One upstream **maintained-model** edge (`maintenance_plan.md` §"Upstream
+/// One upstream **maintained-model** edge (`incremental_models.md` §"Upstream
 /// model edges"): a downstream maintained model's ref to another maintained
 /// model in the same project. Built by the caller from the upstream's own
 /// already-validated metadata — the derivation never re-resolves the ref.
@@ -64,10 +142,19 @@ pub struct ModelEdge {
     /// recorded [`Refusal::ReachNotDerivable`] naming the edge, never a
     /// silent drop.
     pub clock_col: Option<String>,
+    /// The upstream's own declared top-level `unique_key:`
+    /// (`docs/specs/models.md` §"The Relation Contract"), when any. Empty
+    /// when the upstream declares none — this edge then contributes no
+    /// [`crate::analysis::join_shape::JoinContext`] fact and a join against
+    /// it cannot be proven one-to-one, so P1 skeleton-source closure
+    /// (T3, `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+    /// Phase E3) stays `Open` for it rather than optimistically assuming
+    /// uniqueness.
+    pub unique_key: Vec<String>,
 }
 
 /// Append the creation-trigger cells (and refusals) for `model_edges` to an
-/// already-derived `plan` (`maintenance_plan.md` §"Upstream model edges").
+/// already-derived `plan` (`incremental_models.md` §"Upstream model edges").
 ///
 /// Kept separate from [`derive_maintenance_plan`] so every existing
 /// source-only caller is unaffected: the assembler calls both and merges the
@@ -80,15 +167,30 @@ pub struct ModelEdge {
 /// contribute to a **partition-addressed** downstream (`output_partition_col`
 /// is `Some`); a key-addressed downstream's model-edge creation is a keyed
 /// fold, out of scope here.
+///
+/// `declared_unique_key` is the downstream's own declared `unique_key:`
+/// (`docs/specs/models.md` §"Refresh axis"), threaded into the same
+/// [`row_identity`] derivation `derive_maintenance_plan` uses for this
+/// model's other cells, so a model-edge creation cell carries the identical
+/// row-identity verdict as every other cell of the same output.
 pub fn append_model_edge_cells(
     plan: &mut MaintenancePlan,
     sql: &str,
     output_partition_col: Option<&str>,
     model_edges: &[ModelEdge],
+    declared_unique_key: &[String],
 ) {
     if model_edges.is_empty() {
         return;
     }
+    // The `JoinContext` built from every joined edge's own declared
+    // `unique_key` (see `model_edges_join_context`'s doc comment) — shared
+    // by the row-identity proof below AND `model_edge_enrichment_closure`'s
+    // P1 proof, so both properties of this SAME model-edge cell see the
+    // SAME declared facts rather than the row-identity proof working from a
+    // second, independent (and always-empty) context.
+    let join_ctx = model_edges_join_context(sql, model_edges);
+    let identity = row_identity_with_context(declared_unique_key, sql, &join_ctx);
     // A key-addressed downstream has no partition axis to clamp a creation
     // cell to; its model-edge creation would be a keyed fold, deferred.
     let Some(output_partition_col) = output_partition_col else {
@@ -104,6 +206,21 @@ pub fn append_model_edge_cells(
         }
     }
     let bounds = derive_model_bounds(sql, &ctx);
+
+    // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
+    // closure"; T3, `docs/plans/20260715-composed-axes-conditional-
+    // maintenance.md` Phase E3): whether every OTHER model edge this SQL
+    // joins in (relative to whichever edge is this loop's own driving
+    // trigger) provably preserves the driving side's row skeleton. This is a
+    // property of the model's own query shape, not of which edge happened to
+    // trigger the recompute, so it is derived once and shared by every
+    // edge's cell below — an edge that is itself the `FROM`-clause driving
+    // table (never found by `enrichment_join_alias`, since it is not the
+    // target of a join) contributes no conjunct of its own; only edges
+    // actually joined in are checked. `None` when no model edge is joined in
+    // at all (a single-edge model with no enrichment join to close over,
+    // matching `PlanCell::skeleton_source_closure`'s documented `None` case).
+    let enrichment_closure = model_edge_enrichment_closure(sql, model_edges, &join_ctx);
 
     for edge in model_edges {
         let Some(clock) = &edge.clock_col else {
@@ -158,8 +275,146 @@ pub fn append_model_edge_cells(
             partition_local,
             scans,
             ledger_catch_up: false,
+            row_identity: identity.clone(),
+            skeleton_source_closure: enrichment_closure.clone(),
+            // P4 is defined over external sources, not upstream maintained
+            // models — a model-edge cell carries no fingerprint-projection
+            // verdicts (`PlanCell::fingerprint_projections`'s documented
+            // empty case).
+            fingerprint_projections: BTreeMap::new(),
         });
     }
+}
+
+/// Build the [`JoinContext`] `analysis::join_shape::fan_out`'s one-to-one
+/// conjunct needs from every one of `model_edges` that is actually joined in
+/// `sql` (resolved via `analysis::skeleton_closure::enrichment_join_alias`,
+/// never guessed), keyed by each joined edge's own declared `unique_key`.
+/// Shared by [`model_edge_enrichment_closure`]'s P1 proof and
+/// [`append_model_edge_cells`]'s P2 row-identity proof — both properties of
+/// the SAME model-edge cell see the SAME declared-unique-key facts. An edge
+/// whose `unique_key` is undeclared, or whose alias this resolves to `None`
+/// for (it is not actually joined in this scope, e.g. it is the
+/// `FROM`-clause driving table), contributes no key fact — a join against it
+/// fails closed exactly as it would with no `JoinContext` entry at all.
+fn model_edges_join_context(sql: &str, model_edges: &[ModelEdge]) -> JoinContext {
+    use crate::analysis::skeleton_closure::enrichment_join_alias;
+
+    let mut ctx = JoinContext::new();
+    for edge in model_edges {
+        let Some(alias) = enrichment_join_alias(sql, &edge.name) else {
+            continue;
+        };
+        if !edge.unique_key.is_empty() {
+            let cols: Vec<&str> = edge.unique_key.iter().map(String::as_str).collect();
+            ctx = ctx.with_composite_unique_key(&alias, &cols);
+        }
+    }
+    ctx
+}
+
+/// Derive the shared P1 skeleton-source-closure verdict for a model's
+/// upstream model edges (see [`append_model_edge_cells`]'s call site doc
+/// comment for why this is one derivation shared across every edge's cell,
+/// not a per-edge one). `join_ctx` is [`model_edges_join_context`]'s output
+/// — the same one the caller also feeds to the row-identity proof, never a
+/// second, independently-built context.
+fn model_edge_enrichment_closure(
+    sql: &str,
+    model_edges: &[ModelEdge],
+    join_ctx: &JoinContext,
+) -> Option<crate::analysis::skeleton_closure::SkeletonSourceClosure> {
+    use crate::analysis::skeleton_closure::{enrichment_join_alias, skeleton_source_closure};
+
+    let joined_edges: Vec<&ModelEdge> = model_edges
+        .iter()
+        .filter(|edge| enrichment_join_alias(sql, &edge.name).is_some())
+        .collect();
+    if joined_edges.is_empty() {
+        return None;
+    }
+    let mut verdict = crate::analysis::skeleton_closure::SkeletonSourceClosure::Closed;
+    for edge in joined_edges {
+        let v = skeleton_source_closure(sql, &edge.name, None, join_ctx);
+        if !v.is_closed() {
+            verdict = v;
+            break;
+        }
+    }
+    Some(verdict)
+}
+
+/// External-source `referential_integrity:` world-facts (`docs/specs/
+/// sources.md` §"Referential integrity"), keyed by source name (matching
+/// [`SourceFacts::name`]), consumed by [`mutation_enrichment_closure`] for
+/// P1's row-preservation conjunct (4) on an `UpstreamMutation` cell's own
+/// enrichment join (T3 over external sources, `docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` Phase F5). A source
+/// with no entry contributes no row-preservation fact — its enrichment
+/// join's closure proof is never attempted (`None`, not a disproven
+/// `Open`), matching [`derive_maintenance_plan`]'s own always-empty-map
+/// call, which is byte-identical to its pre-F5 behaviour.
+pub type SourceReferentialIntegrity = BTreeMap<String, Vec<String>>;
+
+/// Build the [`JoinContext`] [`mutation_enrichment_closure`]'s one-to-one
+/// conjunct (3) needs from every one of `sources` that is actually joined
+/// in `sql` (resolved via `analysis::skeleton_closure::enrichment_join_
+/// alias`, never guessed), keyed by each joined source's own declared
+/// `unique_key` (`SourceFacts::unique_key`). Mirrors [`model_edges_join_
+/// context`] exactly, generalized from upstream maintained-model edges to
+/// external sources — a source whose `unique_key` is undeclared, or whose
+/// alias this resolves to `None` for (not actually joined in this scope,
+/// e.g. it is the `FROM`-clause driving table), contributes no key fact,
+/// same fail-closed default as the model-edge case.
+fn source_facts_join_context(sql: &str, sources: &[SourceFacts]) -> JoinContext {
+    use crate::analysis::skeleton_closure::enrichment_join_alias;
+
+    let mut ctx = JoinContext::new();
+    for facts in sources {
+        let Some(alias) = enrichment_join_alias(sql, &facts.name) else {
+            continue;
+        };
+        if !facts.unique_key.is_empty() {
+            let cols: Vec<&str> = facts.unique_key.iter().map(String::as_str).collect();
+            ctx = ctx.with_composite_unique_key(&alias, &cols);
+        }
+    }
+    ctx
+}
+
+/// Derive the P1 skeleton-source-closure verdict for an `UpstreamMutation`
+/// cell's own enrichment join against `source` — the external-source
+/// analogue of [`model_edge_enrichment_closure`] (T3 over external sources,
+/// `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// F5): the SAME [`skeleton_source_closure`] proof, fed the source's
+/// declared `referential_integrity` world-fact instead of a model edge's
+/// always-`None` one (an external source has no upstream `unique_key`
+/// analogue to license row preservation on its own — only its own declared
+/// `referential_integrity` can).
+///
+/// `None` when `source_referential_integrity` carries no entry for
+/// `source` — the caller opted out of the closure proof entirely for this
+/// source, exactly matching every `UpstreamMutation` cell's behaviour
+/// before this map existed (`derive_maintenance_plan`'s own call always
+/// passes an empty map). When an entry *is* present, a declared
+/// `referential_integrity` alone does not guarantee `Closed`:
+/// [`skeleton_source_closure`] still independently checks every conjunct
+/// (including one-to-one join contribution via [`source_facts_join_
+/// context`]'s declared-`unique_key` facts, and the v1 aggregation-scope
+/// restriction), so a caller that declares `referential_integrity` without
+/// a matching `unique_key`, or over a fan-out join, still correctly sees
+/// `Open`.
+fn mutation_enrichment_closure(
+    sql: &str,
+    source: &str,
+    sources: &[SourceFacts],
+    source_referential_integrity: &SourceReferentialIntegrity,
+) -> Option<crate::analysis::skeleton_closure::SkeletonSourceClosure> {
+    use crate::analysis::skeleton_closure::skeleton_source_closure;
+
+    let ri = source_referential_integrity.get(source)?;
+    let join_ctx = source_facts_join_context(sql, sources);
+    Some(skeleton_source_closure(sql, source, Some(ri), &join_ctx))
 }
 
 /// Everything the v0 derivation reads. `column_groups` and
@@ -199,6 +454,17 @@ impl ModelInputs<'_> {
         match &self.output.grain {
             Grain::Partition { partition_col } => Some(partition_col),
             Grain::Key { .. } => None,
+        }
+    }
+
+    /// The declared identity off the output's own grain (P2, `row_identity`):
+    /// `Grain::Key`'s `unique_key`, or nothing for `Grain::Partition` — a
+    /// partition-grain output declares no row-level identity through
+    /// `Grain` itself.
+    fn declared_unique_key(&self) -> &[String] {
+        match &self.output.grain {
+            Grain::Key { unique_key } => unique_key,
+            Grain::Partition { .. } => &[],
         }
     }
 }
@@ -262,23 +528,96 @@ fn link_source(
 }
 
 /// Derive the plan cells (and refusals) for `triggers` against `inputs`.
+///
+/// Every `UpstreamMutation` cell's `skeleton_source_closure` is `None` —
+/// this entry point never attempts the P1 proof for an external source's
+/// enrichment join (byte-identical to this function's pre-Phase-F5
+/// behaviour). Use [`derive_maintenance_plan_with_referential_integrity`]
+/// to opt an external source's declared `referential_integrity` world-fact
+/// into the same proof [`append_model_edge_cells`] already runs for model
+/// edges.
 pub fn derive_maintenance_plan(inputs: &ModelInputs, triggers: &[Trigger]) -> MaintenancePlan {
+    derive_maintenance_plan_impl(inputs, triggers, &SourceReferentialIntegrity::new())
+}
+
+/// [`derive_maintenance_plan`], additionally threading `source_referential_
+/// integrity` world-facts (`docs/specs/sources.md` §"Referential
+/// integrity") into every `UpstreamMutation` cell's P1 skeleton-source-
+/// closure proof (T3 over external sources, `docs/plans/
+/// 20260715-composed-axes-conditional-maintenance.md` Phase F5) — the
+/// licence union with [`append_model_edge_cells`]'s already-landed model-
+/// edge proof: the SAME [`crate::analysis::skeleton_closure::
+/// skeleton_source_closure`] function, the SAME [`super::choice::
+/// resolve_recompute_restriction`] gate downstream, no new mechanism.
+///
+/// A source absent from `source_referential_integrity` behaves exactly as
+/// under [`derive_maintenance_plan`] (`skeleton_source_closure: None`) —
+/// this function only *adds* closure attempts for the sources the caller
+/// names, never removes or alters anything else `derive_maintenance_plan`
+/// would have derived.
+pub fn derive_maintenance_plan_with_referential_integrity(
+    inputs: &ModelInputs,
+    triggers: &[Trigger],
+    source_referential_integrity: &SourceReferentialIntegrity,
+) -> MaintenancePlan {
+    derive_maintenance_plan_impl(inputs, triggers, source_referential_integrity)
+}
+
+fn derive_maintenance_plan_impl(
+    inputs: &ModelInputs,
+    triggers: &[Trigger],
+    source_referential_integrity: &SourceReferentialIntegrity,
+) -> MaintenancePlan {
     let mut plan = MaintenancePlan::default();
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
+    let identity = row_identity(inputs.declared_unique_key(), inputs.sql);
 
     for trigger in triggers {
         match trigger {
-            Trigger::NewData { source } => derive_new_data(inputs, &bounds, source, &mut plan),
-            Trigger::UpstreamMutation { source } => {
-                derive_mutation(inputs, &bounds, source, &mut plan)
+            Trigger::NewData { source } => {
+                derive_new_data(inputs, &bounds, source, &identity, &mut plan)
             }
+            Trigger::UpstreamMutation { source } => derive_mutation(
+                inputs,
+                &bounds,
+                source,
+                &identity,
+                source_referential_integrity,
+                &mut plan,
+            ),
             Trigger::ColumnAdded { columns } => {
-                derive_column_added(inputs, &bounds, columns, &mut plan)
+                derive_column_added(inputs, &bounds, columns, &identity, &mut plan)
             }
-            Trigger::Backfill => derive_backfill(inputs, &bounds, &mut plan),
+            Trigger::Backfill => derive_backfill(inputs, &bounds, &identity, &mut plan),
         }
     }
+
+    // P4 fingerprint projection (`model_properties.md` §"Fingerprint
+    // projection"): a property of the model's own SQL against each
+    // declared source, not of any one trigger/technique — derived once and
+    // shared across every cell this model produced, mirroring how
+    // `identity` above is one row-identity verdict shared by every cell.
+    let projections = model_fingerprint_projections(inputs);
+    if !projections.is_empty() {
+        for cell in &mut plan.cells {
+            cell.fingerprint_projections = projections.clone();
+        }
+    }
+
     plan
+}
+
+/// Derive the P4 fingerprint-projection verdict (`model_properties.md`
+/// §"Fingerprint projection") of `inputs.sql` against every one of
+/// `inputs.sources` — the column set a row-content fingerprint sidecar
+/// would digest for each. Pure data; no sidecar/digest machinery here
+/// (that is F3's scope).
+fn model_fingerprint_projections(inputs: &ModelInputs) -> BTreeMap<String, FingerprintProjection> {
+    inputs
+        .sources
+        .iter()
+        .map(|s| (s.name.clone(), fingerprint_projection(inputs.sql, &s.name)))
+        .collect()
 }
 
 /// Creation: new rows in the driving source. Partition grain recomputes the
@@ -290,6 +629,7 @@ fn derive_new_data(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     source: &str,
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::NewData {
@@ -306,6 +646,9 @@ fn derive_new_data(
                 partition_local,
                 scans,
                 ledger_catch_up: false,
+                row_identity: identity.clone(),
+                skeleton_source_closure: None,
+                fingerprint_projections: BTreeMap::new(),
             });
         }
         Grain::Key { .. } => {
@@ -323,7 +666,7 @@ fn derive_new_data(
                 });
                 return;
             };
-            // Per-cell admission obligation 2 (`maintenance_plan.md`
+            // Per-cell admission obligation 2 (`incremental_models.md`
             // §"Per-cell admission"): the faithful fold's two INDEPENDENT
             // conditions — source posture (does the delta stream partition
             // the input, i.e. is it retraction-free) and combiner algebra
@@ -337,8 +680,10 @@ fn derive_new_data(
             // `derive_backfill`/a declared `full` refresh is that family's
             // representative today; wiring the fallback as an alternate
             // technique inside the same cell is deferred, since v0 admits at
-            // most one technique per cell).
-            let disc = combiner_discriminants(fold.combiner, false);
+            // most one technique per cell). Checked per column below —
+            // obligation 3 is independent per combiner, so a mixed fold
+            // (e.g. `SUM` alongside `MIN`/`MAX`) refuses as a whole the
+            // moment any one column's combiner fails it.
 
             // Obligation 2, source-posture half: `input_delta_discovery` is
             // the SC-2 tripwire's (`docs/research/property-discovery/
@@ -377,10 +722,10 @@ fn derive_new_data(
                              so an in-place update to an already-processed partition would \
                              go entirely unseen by the next run, not merely un-undoable; no \
                              un-fold mechanism exists to undo an already-folded contribution \
-                             either, so this refuses the fold family whether or not combiner \
-                             {:?} is itself a monoid — the two faithful-fold conditions are \
-                             independent and either alone refuses",
-                            fold.combiner
+                             either, so this refuses the fold family whether or not any of the \
+                             fold's combiners ({:?}) are themselves monoids — the two \
+                             faithful-fold conditions are independent and either alone refuses",
+                            fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                         ),
                     });
                 } else {
@@ -391,10 +736,10 @@ fn derive_new_data(
                              condition: the source is not append-only and may carry \
                              retractions (input-delta discovery = {discovery:?}); no un-fold \
                              mechanism exists to undo an already-folded contribution, so this \
-                             refuses the fold family whether or not combiner {:?} is itself a \
-                             monoid — the two faithful-fold conditions are independent and \
-                             either alone refuses",
-                            fold.combiner
+                             refuses the fold family whether or not any of the fold's combiners \
+                             ({:?}) are themselves monoids — the two faithful-fold conditions \
+                             are independent and either alone refuses",
+                            fold.add_columns.iter().map(|(_, c)| *c).collect::<Vec<_>>()
                         ),
                     });
                 }
@@ -402,21 +747,32 @@ fn derive_new_data(
             }
 
             // Obligation 3: combiner algebra class, checked independently of
-            // the (already-passed) source-posture condition above.
-            if !disc.is_monoid {
+            // the (already-passed) source-posture condition above, per
+            // column — a mixed-combiner fold refuses as a whole (fail-closed,
+            // not a partial fold) the moment any one column's combiner is
+            // not a monoid.
+            if let Some((column, combiner)) = fold.add_columns.iter().find_map(|(name, c)| {
+                (!combiner_discriminants(*c, false).is_monoid).then_some((name.clone(), *c))
+            }) {
                 plan.refusals.push(Refusal::NoAdmissibleTechnique {
                     trigger: format!("{trigger:?}"),
                     why: format!(
-                        "combiner {:?} is holistic or unrecognised (not a monoid) — no \
-                         delta+state read exists; only the recompute family (a full \
-                         rebuild) can serve this cell",
-                        fold.combiner
+                        "combiner {combiner:?} for column '{column}' is holistic or \
+                         unrecognised (not a monoid) — no delta+state read exists; only the \
+                         recompute family (a full rebuild) can serve this cell",
                     ),
                 });
                 return;
             }
             plan.cells.push(PlanCell {
-                group: format!("{{{}}}", fold.add_columns.join(", ")),
+                group: format!(
+                    "{{{}}}",
+                    fold.add_columns
+                        .iter()
+                        .map(|(name, _)| name.clone())
+                        .collect::<Vec<_>>()
+                        .join(", ")
+                ),
                 trigger,
                 corner: Corner::FoldDelta,
                 technique: Technique::KeyedFold,
@@ -425,6 +781,9 @@ fn derive_new_data(
                 partition_local: PartitionLocal::Yes,
                 scans: vec![],
                 ledger_catch_up: false,
+                row_identity: identity.clone(),
+                skeleton_source_closure: None,
+                fingerprint_projections: BTreeMap::new(),
             });
         }
     }
@@ -436,10 +795,16 @@ fn derive_new_data(
 /// explicitly linked to the output axis (K8's ratified
 /// `require: partition_local` refuses the unlinked/unclocked case unless the
 /// full scan is declared).
+///
+/// `source_referential_integrity` is [`mutation_enrichment_closure`]'s own
+/// input, threaded straight through — see that function's doc comment for
+/// the `None`-vs-attempted-and-`Open` distinction this preserves.
 fn derive_mutation(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     source: &str,
+    identity: &RowIdentityVerdict,
+    source_referential_integrity: &SourceReferentialIntegrity,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::UpstreamMutation {
@@ -452,6 +817,23 @@ fn derive_mutation(
         });
         return;
     };
+
+    // P1 skeleton-source closure (`model_properties.md` §"Skeleton-source
+    // closure"; T3 over external sources, `docs/plans/20260715-composed-
+    // axes-conditional-maintenance.md` Phase F5): a property of this cell's
+    // own enrichment join against `source`, derived once and shared by
+    // every column-group cell this source drives — mirroring
+    // `append_model_edge_cells`'s `model_edge_enrichment_closure`, the
+    // model-edge analogue this generalizes (the "licence union" the phase
+    // wires: the SAME `skeleton_source_closure` proof and the SAME
+    // `choice::resolve_recompute_restriction` gate now admit an external
+    // mutable-snapshot source's enrichment join, not only a model edge's).
+    let closure = mutation_enrichment_closure(
+        inputs.sql,
+        source,
+        &inputs.sources,
+        source_referential_integrity,
+    );
 
     for group in inputs
         .column_groups
@@ -496,6 +878,9 @@ fn derive_mutation(
             partition_local: locality,
             scans,
             ledger_catch_up: false,
+            row_identity: identity.clone(),
+            skeleton_source_closure: closure.clone(),
+            fingerprint_projections: BTreeMap::new(),
         });
     }
 }
@@ -508,6 +893,7 @@ fn derive_column_added(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
     columns: &[String],
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::ColumnAdded {
@@ -542,6 +928,9 @@ fn derive_column_added(
                     partition_local: PartitionLocal::Yes,
                     scans: vec![],
                     ledger_catch_up: true,
+                    row_identity: identity.clone(),
+                    skeleton_source_closure: None,
+                    fingerprint_projections: BTreeMap::new(),
                 }),
                 Some(ModelDiff::NotAdditive { reason }) => {
                     plan.refusals.push(Refusal::NoAdmissibleTechnique {
@@ -615,6 +1004,9 @@ fn derive_column_added(
             partition_local: locality,
             scans,
             ledger_catch_up: true,
+            row_identity: identity.clone(),
+            skeleton_source_closure: None,
+            fingerprint_projections: BTreeMap::new(),
         });
     }
 }
@@ -624,6 +1016,7 @@ fn derive_column_added(
 fn derive_backfill(
     inputs: &ModelInputs,
     bounds: &HashMap<String, BoundResult>,
+    identity: &RowIdentityVerdict,
     plan: &mut MaintenancePlan,
 ) {
     let (partition_local, scans) = read_locality(inputs, bounds);
@@ -635,6 +1028,9 @@ fn derive_backfill(
         partition_local,
         scans,
         ledger_catch_up: false,
+        row_identity: identity.clone(),
+        skeleton_source_closure: None,
+        fingerprint_projections: BTreeMap::new(),
     });
 }
 

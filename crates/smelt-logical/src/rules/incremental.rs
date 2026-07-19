@@ -126,7 +126,7 @@ pub fn analyze_batch_safety(model: &ModelInfo) -> BatchSafety {
 }
 
 /// Roll F1's unified per-source [`BoundResult`] map into the batched-local
-/// three-class **batch-safety** verdict (`batched_models.md` §"Batch safety
+/// three-class **batch-safety** verdict (`incremental_models.md` §"Batch safety
 /// classification").
 ///
 /// This is the *composition* entry point: everywhere a model's batch-safety
@@ -291,7 +291,7 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     // the partition_column alias in the SELECT list is sufficient, rows are
     // filtered by partition value). Uses the same per-scope
     // `scope_group_by_alignment` signal that licenses HAVING/DISTINCT
-    // admission below (`batched_models.md` §"Safety checks") — judged on
+    // admission below (`incremental_models.md` §"Safety checks") — judged on
     // this scope's own GROUP BY via the AST, not a whole-model text scan
     // (which would misattribute a later UNION branch's GROUP BY to the
     // outer scope).
@@ -343,7 +343,7 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
     // enumerates — CTE bodies, derived tables, and set-operation arms
     // included — using the same AST-pure per-scope classifiers for every
     // scope (`model_properties.md` §"The composition walk";
-    // `batched_models.md` §"Safety checks"). A construct the walk cannot
+    // `incremental_models.md` §"Safety checks"). A construct the walk cannot
     // normalize yields an `Unsupported` violation: the gates cannot prove
     // the absence of an inadmissible scope inside it, so it refuses
     // fail-closed (checked after the per-gate violations so a judged scope
@@ -393,7 +393,7 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
 
     // 2b: HAVING clause — admitted per-scope when that scope's own GROUP BY
     // is a superset of partition_column (`scope_group_by_alignment`,
-    // `batched_models.md` §"Safety checks"): the DELETE+INSERT contract
+    // `incremental_models.md` §"Safety checks"): the DELETE+INSERT contract
     // deletes and re-inserts whole partitions, so a HAVING that only filters
     // groups already scoped to a single partition cannot see a different
     // group composition on a partial (batched) run than on a full refresh.
@@ -453,8 +453,8 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         }
     }
 
-    // 2e: Non-deterministic functions — flow/taint check (batched_models.md
-    // §"Non-determinism and the equivalence contract"): a non-deterministic
+    // 2e: Non-deterministic functions — flow/taint check (incremental_models.md
+    // §"Non-determinism and the payload rule"): a non-deterministic
     // value is admitted only when it flows exclusively into a column listed
     // in `batched.nondeterministic_columns`, and never into the
     // event_time_column/partition_column/unique_key roles or a row-set
@@ -704,8 +704,8 @@ fn collect_over_contents(upper_sql: &str) -> Vec<String> {
 /// nondeterminism taint check, not a scope-alignment admission judgment
 /// (`docs/specs/model_properties.md` §Known Divergences).
 ///
-/// The non-determinism flow/taint check (batched_models.md §"Non-determinism
-/// and the equivalence contract"; Constraint 13).
+/// The non-determinism flow/taint check (incremental_models.md §"Non-determinism
+/// and the payload rule"; §"Partition-grain constraints" #12).
 ///
 /// A non-deterministic function is admitted only when its value flows
 /// exclusively into a column listed in `batched.nondeterministic_columns` — a
@@ -968,7 +968,7 @@ pub fn derive_model_source_bounds(
 
     // Extend the derivation to look inside UNION branches, subquery/CTE
     // bodies, and join inputs (event-time monotonicity trace consumers,
-    // `batched_models.md` §"Event-time monotonicity trace") rather than only
+    // `model_properties.md` §"Event-time monotonicity trace") rather than only
     // the single outer SELECT's FROM clause. `restrict_ctx_for_constructs`
     // narrows `ctx` down to the sources whose pushdown is actually licensed
     // by a `Traceable` verdict for the construct that references them —
@@ -1673,7 +1673,7 @@ mod tests {
 
     /// A `HAVING` whose own scope's `GROUP BY` is a superset of
     /// `partition_column` is group-aligned and must build without an
-    /// override (`batched_models.md` §"Safety checks").
+    /// override (`incremental_models.md` §"Safety checks").
     #[test]
     fn test_detect_admits_group_aligned_having() {
         let m = model(

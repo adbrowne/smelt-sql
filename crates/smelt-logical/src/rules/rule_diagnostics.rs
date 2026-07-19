@@ -101,8 +101,8 @@ pub trait PlannerRule {
 
 /// The `refresh: keyed` classifier as a uniform rule.
 ///
-/// Its rejections refuse the model at planning time (`keyed_models.md`
-/// §"Diagnostic codes"), so every one is `Error` — the build hard-refuses on
+/// Its rejections refuse the model at planning time (`incremental_models.md`
+/// §"Key-grain diagnostic codes"), so every one is `Error` — the build hard-refuses on
 /// them today via `smelt_planner::classify_cumulative`.
 pub struct KeyedRule;
 
@@ -111,7 +111,12 @@ impl PlannerRule for KeyedRule {
         if ctx.materialization != "cumulative_aggregate" {
             return Vec::new();
         }
-        match classify_cumulative(ctx.sql, ctx.refs, ctx.source_timeseries) {
+        match classify_cumulative(
+            ctx.sql,
+            ctx.refs,
+            ctx.source_timeseries,
+            ctx.timeseries_config.is_some(),
+        ) {
             Ok(_) => Vec::new(),
             Err(diags) => diags.iter().map(keyed_to_rule).collect(),
         }
@@ -147,7 +152,7 @@ impl PlannerRule for IncrementalRule {
         }
 
         // Advisory surfacing of the unified bound map's roll-up
-        // (`batched_models.md` §"Batch safety classification"): a
+        // (`incremental_models.md` §"Batch safety classification"): a
         // `NotDerivable` source is flagged here so the editor sees it, but
         // (per `check_batched_bound_derivable`'s doc comment) the actual
         // fail-closed enforcement with the `--allow-downgrade` escape hatch
@@ -185,7 +190,7 @@ impl PlannerRule for IncrementalRule {
 ///
 /// **Advisory, not blocking** — mirrors [`IncrementalRule`]'s existing
 /// severity policy (see its doc comment): the actual fail-closed enforcement
-/// of `batched_models.md` Constraint 10 ("No silent downgrade to
+/// of `incremental_models.md` §"Partition-grain constraints" #10 ("No silent downgrade to
 /// full-refresh") happens at the CLI/runtime layer
 /// (`smelt_runtime::safety::check_bound_derivation`), which hard-refuses by
 /// default and honours the explicit `--allow-downgrade` escape hatch. This
@@ -650,7 +655,7 @@ mod tests {
         // is a SELECT alias and a GROUP BY key), but a LIMIT clause makes it
         // not batch-safe → the incremental safety classifier rejects it.
         // (A group-aligned HAVING here would now be legitimately admitted —
-        // `batched_models.md` §"Safety checks" — so LIMIT, which never
+        // `incremental_models.md` §"Safety checks" — so LIMIT, which never
         // commutes with the partition filter, is used instead.)
         let sql = "SELECT event_date, COUNT(*) AS n FROM smelt.src \
                    GROUP BY event_date LIMIT 10";
@@ -730,7 +735,7 @@ mod tests {
         // proves every branch's projection resolves to a real source's own
         // partition column — the simplest `Traceable` case — so the
         // outer-select injectability check no longer rejects this UNION
-        // (`batched_models.md` §"Event-time monotonicity trace"). Before B1
+        // (`model_properties.md` §"Event-time monotonicity trace"). Before B1
         // wired this trace into the diagnostic, *any* set-operation query
         // with a declared `event_time_column` was unconditionally rejected
         // here, regardless of whether its branches were actually traceable.
