@@ -54,6 +54,13 @@ Pushing the tag triggers `.github/workflows/release.yml`:
    between each for the crates.io index to catch up. Only the crates
    without `publish = false` are included here — confirm the publish
    posture is deliberate (not an oversight) before adding another crate.
+9. **Docker / ghcr.io publish** — every tag (including `-rc`/`-beta`/`-alpha`
+   pre-releases); builds the image from `Dockerfile`, runs the `--version`
+   and `test_workspace build` smoke test, then pushes
+   `ghcr.io/adbrowne/smelt:latest` and `ghcr.io/adbrowne/smelt:X.Y.Z`. A
+   path-gated `docker-build` job in `.github/workflows/test.yml` runs the
+   same build + smoke test (without pushing) on PRs that touch `Dockerfile`,
+   `.dockerignore`, `crates/**`, or `ui/**`.
 
 Nightly/dev builds are handled separately by `.github/workflows/dev-release.yml`
 and are not part of this checklist.
@@ -63,9 +70,9 @@ and are not part of this checklist.
 - **VS Marketplace / Open VSX propagation** — the extension listing can take
   a few minutes to show the new version; confirm both marketplaces show
   `vX.Y.Z` before announcing.
-- **Docker image** — if `Dockerfile` + the ghcr.io publish job are present,
-  confirm the tagged image built and the smoke test passed; `docker pull`
-  it once to sanity-check.
+- **Docker image** — the `docker` job in `release.yml` builds, smoke-tests,
+  and pushes automatically; `docker pull ghcr.io/adbrowne/smelt:X.Y.Z` once
+  to sanity-check after the workflow completes.
 - **Homebrew tap** — bump the formula in the `homebrew-smelt` tap repo (a
   separate repo Andrew owns) to point at the new tag's tarball + updated
   SHA256; this is not driven by `release.yml`.

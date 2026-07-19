@@ -38,6 +38,24 @@ Intel Macs (macOS x86_64) do not have a prebuilt standalone binary; install
 via `pip install smelt-sql` instead, which builds from source using the
 sdist (a Rust toolchain is required).
 
+## Docker
+
+A container image is published to GitHub Container Registry on every release:
+
+```bash
+docker run --rm -v "$PWD":/workspace -w /workspace ghcr.io/adbrowne/smelt:latest build
+```
+
+Pin to a specific version instead of `latest` for reproducible CI runs:
+
+```bash
+docker run --rm ghcr.io/adbrowne/smelt:0.5.0 --version
+```
+
+The image bundles `smelt` and the DuckDB shared library it links against; mount
+your project directory as a volume and run any `smelt` subcommand as the
+container's entrypoint.
+
 ## Build from source
 
 Requires the [Rust toolchain](https://rustup.rs/).

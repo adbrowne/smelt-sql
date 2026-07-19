@@ -147,3 +147,54 @@ jobs:
         run: |
           cd crates/smelt-parser
           cargo +nightly fuzz build
+
+  docker-changes:
+    name: Detect Docker-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      docker: ${{ steps.filter.outputs.docker }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Filter paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before || 'HEAD~1') }}
+          filters: |
+            docker:
+              - 'Dockerfile'
+              - '.dockerignore'
+              - 'crates/**'
+              - 'ui/**'
+              - 'Cargo.toml'
+              - 'Cargo.lock'
+              - '.github/workflows/test.yml'
+
+  docker-build:
+    name: Docker Build Check
+    needs: [docker-changes]
+    if: needs.docker-changes.outputs.docker == 'true'
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          tags: smelt-ci-check:latest
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Smoke test
+        run: |
+          docker run --rm smelt-ci-check:latest --version
+          docker run --rm -v "$PWD/examples/bounded_domain_declared:/w" -w /w smelt-ci-check:latest build

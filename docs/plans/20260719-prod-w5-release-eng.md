@@ -63,7 +63,7 @@ The production-release review found the release plumbing genuinely strong (tag-t
 | 1     | done     | (this commit) | 2026-07-20 |
 | 2     | done     | (this commit) | 2026-07-20 |
 | 3     | done     | (this commit) | 2026-07-20 |
-| 4     | pending  |        |      |
+| 4     | done     | (this commit) | 2026-07-20 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -155,7 +155,7 @@ The production-release review found the release plumbing genuinely strong (tag-t
 **Verification commands (CI-locale; also runnable locally).**
 - `docker build -t smelt-local .` succeeds.
 - `docker run --rm smelt-local --version` prints the workspace version.
-- `docker run --rm -v $PWD/examples/test_workspace:/w -w /w smelt-local build` exits 0 — wire exactly this as the workflow's smoke-test step so it is enforced per release; also add it to a PR-triggered `docker-build` job gated on `Dockerfile`/workflow path changes so image breakage is caught pre-tag.
+- `docker run --rm -v $PWD/examples/bounded_domain_declared:/w -w /w smelt-local build` exits 0 — wire exactly this as the workflow's smoke-test step so it is enforced per release; also add it to a PR-triggered `docker-build` job gated on `Dockerfile`/workflow path changes so image breakage is caught pre-tag. (Substituted for `examples/test_workspace`: that workspace is on the `KNOWN_UNBUILDABLE` allow-list in `crates/smelt-cli/tests/e2e/example_builds.rs` — its `raw_events` model reads an unseeded external source, so `smelt build` fails standalone regardless of the Docker image's correctness. `bounded_domain_declared` is a clean, self-contained workspace with no external sources.)
 
 **Implementation shape.** Pin the DuckDB version to the one in `Cargo.toml` (v1.5.4 per CLAUDE.md setup); fetch `libduckdb-linux-amd64.zip` in the builder stage. Publish `linux/amd64`; add `linux/arm64` via buildx only if it needs no extra plumbing. Tag `latest` + the version. Update `RELEASING.md` and add an "Install via Docker" subsection to `installation.md`.
 
@@ -164,9 +164,9 @@ The production-release review found the release plumbing genuinely strong (tag-t
 **Docs touched.** `installation.md` Docker subsection (timeless).
 
 **Review checklist:**
-- [ ] Smoke test (`--version` + `test_workspace` build) runs in CI, not just documented
-- [ ] Image does not embed the source tree or build cache (multi-stage verified)
-- [ ] ghcr push happens only on tags; PR job builds without pushing
+- [x] Smoke test (`--version` + `bounded_domain_declared` build) runs in CI, not just documented
+- [x] Image does not embed the source tree or build cache (multi-stage verified)
+- [x] ghcr push happens only on tags; PR job builds without pushing
 
 **Commit.** `feat(release): Dockerfile + ghcr.io publish with example-workspace smoke test`
 

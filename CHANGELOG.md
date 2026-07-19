@@ -52,6 +52,8 @@ breaking changes).
 - Spec-driven workflow (`/smelt:spec`, `/smelt:plan`, `/smelt:implement`,
   `/smelt:validate`) and the full `docs/specs/` catalogue as the normative
   reference for every feature.
+- Docker image published to `ghcr.io/adbrowne/smelt` on every tag, with a
+  release-time smoke test and a path-gated PR build check.
 
 ### Changed
 - CLI execute-loop unified onto `smelt-runtime::execute_project`, consumed
