@@ -282,6 +282,12 @@ struct UiArgs {
     /// Host address to bind to
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
+
+    /// Allow binding to a non-loopback host. The UI server has no
+    /// authentication, so binding it to an address reachable from other
+    /// machines requires this explicit opt-in.
+    #[arg(long = "allow-remote")]
+    allow_remote: bool,
 }
 
 #[derive(Parser)]

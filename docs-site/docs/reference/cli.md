@@ -1269,7 +1269,10 @@ smelt ui [OPTIONS]
 |------|------|---------|-------------|
 | `--project-dir` | path | `.` | Path to smelt project root |
 | `--port` | integer | `3000` | Port to serve the UI on |
-| `--host` | string | `127.0.0.1` | Host address to bind to |
+| `--host` | string | `127.0.0.1` | Host address to bind to. Non-loopback addresses require `--allow-remote`. |
+| `--allow-remote` | flag | off | Required to bind `--host` to a non-loopback address |
+
+**Network exposure:** `smelt ui` has no authentication or HTTPS. It is meant to be reached at `http://127.0.0.1:<port>` from the machine running it. Binding to a non-loopback host without `--allow-remote` fails loudly rather than silently binding to loopback instead; with the flag, the server starts and logs a startup warning that it is reachable from other hosts. CORS is restricted to the server's own origin.
 
 **Examples:**
 
@@ -1280,6 +1283,6 @@ smelt ui
 # Start on a custom port
 smelt ui --port 8080
 
-# Bind to all interfaces (for remote access)
-smelt ui --host 0.0.0.0 --port 3000
+# Bind to all interfaces (for remote access) — requires the opt-in
+smelt ui --host 0.0.0.0 --port 3000 --allow-remote
 ```

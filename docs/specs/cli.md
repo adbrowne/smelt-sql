@@ -128,6 +128,16 @@ Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly
 
 **`smelt explain` excludes tests.** `smelt explain` (with or without `--json`) filters out all `smelt.test` declarations from its output via the test-kind predicate applied to every discovered entity. Tests never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
 
+### `smelt ui`
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `127.0.0.1` | Address to bind the UI server to. Loopback addresses (`127.0.0.1`, `::1`, `localhost`) require no further opt-in. |
+| `--port` | `3000` | Port to bind the UI server to. |
+| `--allow-remote` | off | Required to bind `--host` to a non-loopback address. |
+
+`smelt ui` has no authentication and no HTTPS — it is designed to be reached from the machine running it. Binding to a non-loopback host without `--allow-remote` is a hard error naming the flag; smelt never silently falls back to a loopback bind. Passing `--allow-remote` proceeds and logs a startup warning that the server is reachable from other hosts. The CORS policy allows only the server's own origin (`http://{host}:{port}`, plus `http://localhost:{port}` when bound to loopback) — no other origin can read its API responses from a browser.
+
 ### `smelt explain <model>` maintenance-plan report
 
 `smelt explain` accepts an optional positional model-name argument. When given, it prints that
