@@ -55,6 +55,10 @@ enum Commands {
     Test(TestArgs),
     /// Run data-quality checks against the configured target
     Check(CheckArgs),
+    /// List discovered project entities (models, seeds, sources, tests, checks)
+    List(ListArgs),
+    /// Remove build artifacts under target/ (never touches state)
+    Clean(CleanArgs),
     /// Generate documentation
     Docs {
         #[command(subcommand)]
@@ -566,6 +570,32 @@ struct CheckArgs {
     verbose: bool,
 }
 
+#[derive(Parser)]
+struct ListArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Select entities to list (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+
+    /// Exclude entities from the listing (repeatable). Same syntax as --select.
+    #[arg(long = "exclude", short = 'e')]
+    exclude: Vec<String>,
+
+    /// Output format: "text" (default) or "json"
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+#[derive(Parser)]
+struct CleanArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
@@ -582,6 +612,10 @@ async fn main() -> std::process::ExitCode {
     // `smelt_cli::exit_code_for`, since its error type isn't one of the
     // `ProjectError`/`ConfigError` variants that classifier recognizes.
     let is_init = matches!(cli.command, Commands::Init(_));
+    // `smelt list` maps parse errors and unresolvable/ambiguous selectors to
+    // exit 2 (usage error) per `docs/specs/cli.md` §"Exit codes" — a distinct
+    // classifier from the generic one, same pattern as `init` above.
+    let is_list = matches!(cli.command, Commands::List(_));
 
     let result: Result<()> = match cli.command {
         Commands::Init(args) => commands::init::run(args),
@@ -598,6 +632,8 @@ async fn main() -> std::process::ExitCode {
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Check(args) => commands::check::run_checks(args).await,
+        Commands::List(args) => commands::list::list(args, scope).await,
+        Commands::Clean(args) => commands::clean::clean(args).await,
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,
             DocsCommands::List => commands::docs::list(),
@@ -612,6 +648,8 @@ async fn main() -> std::process::ExitCode {
             eprintln!("Error: {err:?}");
             let code = if is_init {
                 commands::init::exit_code_for(&err)
+            } else if is_list {
+                commands::list::exit_code_for(&err)
             } else {
                 smelt_cli::exit_code_for(&err)
             };

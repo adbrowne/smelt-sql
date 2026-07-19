@@ -613,6 +613,68 @@ See the [Testing guide](../guide/testing.md) for how to write checks.
 
 ---
 
+## smelt list
+
+List every entity `smelt` discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical `smelt.<path>` form, alongside its kind and, for models, its materialization. Offline: discovery and parsing only, no database connection.
+
+**Usage:**
+
+```
+smelt list [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--select` / `-s` | string (repeatable) | | Narrow the listed model set. Same selector syntax as `smelt run`/`smelt build` |
+| `--exclude` / `-e` | string (repeatable) | | Exclude models from the listed set. Same syntax as `--select` |
+| `--format` | string | `text` | Output format: `text` or `json` |
+
+**Examples:**
+
+```bash
+# List everything in the project
+smelt list
+
+# Narrow to models under a tag
+smelt list --select tag:staging
+
+# Machine-readable output
+smelt list --format json
+```
+
+Exits `0` on success, including an empty (selector-narrowed) result set. Exits `2` on a parse error or an unresolvable/ambiguous selector.
+
+---
+
+## smelt clean
+
+Remove `target/` — the directory `smelt docs generate` and other artifact-producing commands write to. Never touches `.smelt/` state (run manifests, deployed-schema snapshots) or the configured target database.
+
+**Usage:**
+
+```
+smelt clean [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+
+**Examples:**
+
+```bash
+smelt clean
+```
+
+Exits `0` whether or not `target/` existed to remove. Exits `1` if `target/` exists but cannot be removed.
+
+---
+
 ## smelt diff
 
 Show pending schema changes between model definitions and deployed state. Compares the inferred schema (from SQL parsing and type inference) against the last deployed schema (stored in `.smelt/schemas/`).

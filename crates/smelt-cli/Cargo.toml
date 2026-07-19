@@ -70,6 +70,7 @@ line-index.workspace = true
 
 [dev-dependencies]
 tempfile = "3.8"
+serde_json = "1.0"
 proptest = { workspace = true }
 smelt-maintenance-testkit = { path = "../smelt-maintenance-testkit" }
 async-trait = "0.1"

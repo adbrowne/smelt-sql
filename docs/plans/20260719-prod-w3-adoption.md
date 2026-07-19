@@ -67,7 +67,7 @@ The production-release review found no onboarding path (`smelt init` is hinted a
 | 2     | done     | 8d7935dc | 2026-07-20 |
 | 3     | done     | e1c9a694 | 2026-07-20 |
 | 4     | done     | 3c0db04f | 2026-07-20 |
-| 5     | pending  |        |      |
+| 5     | done     | TBD | 2026-07-20 |
 | 6     | pending  |        |      |
 
 ## Phase detail
@@ -256,6 +256,8 @@ Edits: `docs/specs/cli.md` §Surface gains `smelt init` (non-interactive scaffol
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **Phase 5 (2026-07-20):** `smelt docs generate` (`crates/smelt-cli/src/commands/docs.rs:101,166`) discovers seeds into an unused `_seeds` binding and never calls `graph.add_seeds(&_seeds)` before `DependencyGraph::build`, so any project whose models reference a seed via `smelt.ref()` (e.g. the `smelt init` scaffold's `orders_summary` model referencing the `raw_orders` seed) fails `smelt docs generate` with "references undefined model/source". Pre-existing, unrelated to `smelt list`/`smelt clean` — out of this phase's critical-files scope (`docs.rs` isn't listed). `crates/smelt-cli/tests/list_clean.rs::clean_removes_artifacts_preserves_state` works around it by writing a `target/docs/` fixture directly instead of invoking `smelt docs generate`. Needs its own fix in a future phase/session.
 
 ## Verification
 
