@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+publish = false
 description = "SQL dialect definitions, backend capabilities, and dialect-aware CST printer"
 repository = "https://github.com/adbrowne/smelt-sql"
 
