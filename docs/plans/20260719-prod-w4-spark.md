@@ -65,7 +65,7 @@ The v0.5 release review positions Spark as beta unless promoted (decision D1). T
 | 2     | done    | (this commit) | 2026-07-20 |
 | 3     | done    | (this commit) | 2026-07-20 |
 | 4     | done    | (this commit) | 2026-07-20 |
-| 5     | pending |        |      |
+| 5     | done    | (this commit) | 2026-07-20 |
 | 6     | pending |        |      |
 
 ## Phase detail
@@ -240,6 +240,50 @@ The v0.5 release review positions Spark as beta unless promoted (decision D1). T
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 - Spark twin of the generative `maintenance_conformance` gate — Phase 5 records the gap table here; building it is post-v0.5.
+
+### Phase 5 conformance-gap table
+
+The entire `crates/smelt-cli/tests/maintenance_conformance/` harness is
+`#![cfg(feature = "duckdb")]` (see `main.rs`) — it drives the deterministic-
+seeded `ModelRecipe` pool and the `s_tracker` multiset-equivalence oracle
+exclusively against the DuckDB backend. There is no Spark-feature-gated
+variant of this harness at all, so every leg below is uncovered on Spark by
+construction, not by an individual gap. What Spark *does* have is a set of
+hand-authored fixed-recipe dual-target parity tests exercising one technique
+each (`merge_parity.rs`, `incremental_parity.rs`, `lowering_parity.rs`,
+`schema_evolution_parity.rs`, `materialization_parity.rs`, `seed_parity.rs`,
+`cross_engine_parity.rs`, `cross_engine_types_parity.rs`) — those give
+per-technique smoke coverage but never run the generative recipe pool or the
+S-restricted equivalence oracle Spark-side.
+
+| Leg (`maintenance_conformance/*.rs`) | Covered on Spark? | Why not |
+|---|---|---|
+| `append_only_partition_pool_upholds_equivalence` | No | Generative recipe pool + `s_tracker` oracle only wired to the DuckDB backend |
+| `admission_rate_stays_above_floor` | No | Same — admission-rate statistics computed over the DuckDB-only pool |
+| `mutable_pool_settles_to_full_refresh` | Partial (smoke only) | `incremental_parity.rs` exercises full-refresh-vs-incremental convergence for fixed recipes; the generative mutable-pool sweep is DuckDB-only |
+| `keyed_pool_upholds_end_state_equivalence` | Partial (smoke only) | `merge_parity.rs` covers `KeyedFold`/keyed merge for fixed recipes; no generative keyed-pool sweep on Spark |
+| `retained_departed_keys_adjusts_the_oracle` | No | Oracle-adjustment logic is a DuckDB-harness-only concept (drives the comparison oracle, not the backend under test) |
+| `redelivery_of_processed_window_is_idempotent` | Partial (smoke only) | `incremental_parity.rs` has fixed re-run idempotency cases; no generative redelivery sweep |
+| `full_refresh_interleave_resets_state_correctly` | Partial (smoke only) | `materialization_parity.rs` covers fixed full-refresh/incremental interleave; not generative |
+| `boundary_rows_within_reach_are_reflected` | No | Boundary/lookback-window generative sweep is DuckDB-only |
+| `change_feed_source_admits_recompute_only` | No | No Spark change-feed source fixture exists |
+| `feed_declared_source_upholds_equivalence_via_recompute` | No | Same — feed-declared-source path untested on Spark |
+| `column_add_between_runs_recovers_equivalence` | Partial (smoke only) | `schema_evolution_parity.rs` covers fixed column-add cases; not generative |
+| `skeleton_position_add_is_refused_or_recomputed_never_corrupted` | No | Skeleton-position-add refusal path has no Spark fixture |
+| `composed_keyed_pool_upholds_equivalence` | No | Composed multi-cell keyed pool generative sweep is DuckDB-only |
+| `composed_keyed_admission_rate_stays_above_floor` | No | Same |
+| `delta_restriction_admission_rate_stays_above_floor` | No | Delta-restriction admission generative sweep is DuckDB-only |
+| `chain_since_upstream_dirty_set_suffices` / `diamond_propagation_suffices` / `include_upstreams_resolved_slices_suffice` / `upstream_payload_in_downstream_skeleton_position` / `keyed_grain_node_excluded_from_generated_graph` (`dags.rs`) | No | DAG-propagation generative harness is DuckDB-only |
+| `window_order_permutations_converge` / `probe_skips_are_counted_never_silent` (`probes.rs`) | No | Probe harness is DuckDB-only |
+| `pinned_recipes_reproduce_catalogue_coverage` / `hazard_schedules_are_pinned` (`pinned.rs`) | No | Pinned-recipe catalogue is DuckDB-only |
+| `oracle_flags_a_seeded_divergence` (`harness_self_check.rs`) | N/A | Harness self-test, not a backend-conformance leg |
+
+**Disposition.** Building a Spark-native twin of the generative harness
+(recipe pool + `s_tracker` oracle retargeted at the Spark backend, or a
+dual-execution mode of the existing harness) is the single largest Spark
+conformance gap remaining post-v0.5. It is out of scope for this plan (see
+Explicitly deferred) and is the natural next backlog item once the
+supported-vs-beta label decision (Phase 6) lands.
 
 ## Verification
 

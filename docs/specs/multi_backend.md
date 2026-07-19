@@ -324,6 +324,15 @@ resolves nested widening to a table rewrite.
   confirmed by a 1000-case property soak with zero new unregistered divergences. Per-PR gating on
   Spark-relevant paths (§"CI tiering" above) is in place as of `.github/workflows/compat.yml`'s
   `changes` job.
+- **The generative maintenance-conformance oracle has no Spark twin.** The
+  deterministic-seeded `ModelRecipe` pool and its S-restricted multiset-equivalence oracle
+  (`incremental_models.md` §"The equivalence invariant") run only against the DuckDB backend.
+  Spark's incremental techniques (region-overwrite, keyed fold, column-scoped merge, in-place
+  update) each have hand-authored fixed-recipe dual-target parity coverage, but not the generative
+  sweep, its admission-rate statistics, or DAG-propagation/boundary/redelivery/schema-evolution
+  probes. Building a Spark-native twin (or a dual-execution mode of the existing harness) is
+  tracked as post-v0.5 backlog seeded by the gap table in
+  `docs/plans/20260719-prod-w4-spark.md`.
 
 ## References
 
