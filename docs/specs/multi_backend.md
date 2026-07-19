@@ -315,13 +315,11 @@ resolves nested widening to a table rewrite.
   performance gap, not a correctness one. Deferred.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
-- **Per-PR Spark CI gating and a re-verified divergence ledger are not yet in place.** Today
-  `spark-parity` and `type-property-spark` run only on `schedule` or the `run-docker-tests`
-  label — nightly-gated, not per-PR — so a Spark regression can merge to `main` and sit until
-  the next nightly run surfaces it. The `spark_type` divergence ledger in
+- **The `spark_type` divergence ledger has not been re-verified.** The ledger in
   `crates/smelt-db/tests/prop_helpers/divergences.rs` (21 entries) was written during earlier
   soaks that later proved some entries stale, and has not been re-verified end to end against a
-  live Spark Connect server since. Both the per-PR gate and the ledger re-verification are
+  live Spark Connect server since. Per-PR gating on Spark-relevant paths (§"CI tiering" above)
+  is in place as of `.github/workflows/compat.yml`'s `changes` job; the ledger re-verification is
   tracked in `docs/plans/20260719-prod-w4-spark.md`.
 
 ## References

@@ -13,6 +13,31 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect Spark-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      spark: ${{ steps.filter.outputs.spark }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Filter paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before || 'HEAD~1') }}
+          filters: |
+            spark:
+              - 'crates/smelt-backend-spark/**'
+              - 'crates/smelt-cli/tests/*parity*'
+              - 'crates/smelt-types/src/signatures.rs'
+              - 'crates/smelt-db/src/type_inference*/**'
+              - 'crates/smelt-parser/src/**'
+              - 'python/**'
+              - 'scripts/spark-*.sh'
+              - '.github/workflows/compat.yml'
+
   parse-equivalence:
     name: Parse Equivalence Tests (PG + Spark)
     runs-on: ubuntu-latest
@@ -218,8 +243,11 @@ jobs:
   type-property-spark:
     name: Type Property Tests (DuckDB + Spark)
     runs-on: ubuntu-latest
-    # Only run on schedule (nightly) or when explicitly labeled
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+    needs: changes
+    # Run on schedule (nightly), when explicitly labeled, or when this PR/push
+    # touches Spark-relevant paths (type-inference, signature registry, dialect
+    # surface, backend crate)
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true'
 
     env:
       DUCKDB_LIB_DIR: /usr/local/lib
@@ -267,8 +295,11 @@ jobs:
   spark-parity:
     name: Spark Parity Tests (Delta, Docker)
     runs-on: ubuntu-latest
-    # Only run on schedule (nightly) or when explicitly labeled
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+    needs: changes
+    # Run on schedule (nightly), when explicitly labeled, or when this PR/push
+    # touches Spark-relevant paths (backend crate, parity tests, type
+    # inference, signature registry, dialect surface)
+    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true'
 
     env:
       DUCKDB_LIB_DIR: /usr/local/lib
