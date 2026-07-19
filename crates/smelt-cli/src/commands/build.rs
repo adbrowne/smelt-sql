@@ -39,7 +39,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
     use smelt_cli::{
         argument_resolution::{compute_scope, resolve_selector_args},
         backend_factory::CliBackendFactory,
-        reporter::CliReporter,
+        reporter::{print_failure_summary, CliReporter},
         Config, ModelDiscovery, SourcesConfig,
     };
     use smelt_core::graph::DependencyGraph;
@@ -202,7 +202,14 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         &reporter,
         CancellationToken::new(),
     )
-    .await?;
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            print_failure_summary(&project_dir, &args.target, &run_id);
+            return Err(e);
+        }
+    };
 
     report_check_results(&outcome.check_results)
 }

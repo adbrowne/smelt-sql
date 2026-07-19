@@ -225,13 +225,17 @@ By default, up to 3 attempts are made per write step before the model is reporte
 
 Every `smelt run`/`smelt build`/`smelt backbuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
 
-When independent models fail in the same run — even concurrently, in the same `--jobs`-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, `smelt` prints a failure summary naming every failed model with its first error line:
+When independent models fail in the same run — even concurrently, in the same `--jobs`-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, `smelt` prints a failure summary naming every failed model with its first error line and a one-line hint toward the likely next action:
 
 ```
 smelt: run 20260720-120001-a1b2c3 failed — 2 model(s) failed:
   - bad_a: Conversion Error: Could not convert string 'not_a_number' to INT32
+    hint: re-run with -v for the full backend error, or `smelt run --show-plan` to inspect the plan
   - bad_b: Conversion Error: Could not convert string 'also_not_a_number' to INT32
+    hint: re-run with -v for the full backend error, or `smelt run --show-plan` to inspect the plan
 ```
+
+The hint is chosen from a coarse classification of the error text — a compile-time failure (parse/type/reference resolution) points at the model's SQL; a backend execution failure points at `-v`/`--show-plan`; a check/constraint failure points at `smelt check`. Classification is best-effort text matching, not a structured error code, since the underlying error is already flattened to a string by the time the report captures it.
 
 ### `--resume` — continue after a partial failure
 

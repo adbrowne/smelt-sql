@@ -135,16 +135,66 @@ impl RunReporter for CliReporter {
     }
 }
 
+/// Coarse classification of why a model failed, inferred from its recorded
+/// error text. Nothing upstream of the report currently carries a
+/// structured failure stage (`ModelFailure::error` is a flattened
+/// `anyhow::Error::to_string()` — see `smelt-runtime`'s `execute.rs` abort
+/// path), so this is a best-effort text classifier rather than a match over
+/// a typed error, one leg of the grouped failure summary
+/// (`docs/plans/20260719-prod-w3-adoption.md` Phase 6;
+/// `docs/specs/cli.md` §Semantics "Failure summary").
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FailureCause {
+    /// The model's SQL/functions failed to compile (parse, type, or
+    /// reference resolution).
+    Compile,
+    /// The compiled SQL ran but the backend rejected it (bad cast, DDL/DML
+    /// failure, constraint violation).
+    Execute,
+    /// A `smelt check`/declarative-test failure downstream of a successful
+    /// build.
+    Check,
+}
+
+fn classify_failure_cause(error: &str) -> FailureCause {
+    let lower = error.to_lowercase();
+    if lower.contains("check failed") || lower.contains("constraint") {
+        FailureCause::Check
+    } else if lower.contains("compil")
+        || lower.contains("parse error")
+        || lower.contains("unresolved")
+        || lower.contains("undefined")
+    {
+        FailureCause::Compile
+    } else {
+        FailureCause::Execute
+    }
+}
+
+fn hint_for(cause: FailureCause) -> &'static str {
+    match cause {
+        FailureCause::Compile => {
+            "check the model's SQL — run `smelt build --show-plan <file>` to see the compiled query"
+        }
+        FailureCause::Execute => {
+            "re-run with -v for the full backend error, or `smelt run --show-plan` to inspect the plan"
+        }
+        FailureCause::Check => "run `smelt check` for the full check output",
+    }
+}
+
 /// Print the end-of-run failure summary: one block naming every model that
-/// failed this run, each with its first error line
+/// failed this run, each with its first error line and a one-line hint
 /// (`docs/plans/20260719-prod-w2-operability.md` Phase 8 TDD test
-/// `failure_summary_lists_all_failed_models`). Reads the just-written run
-/// report back from `.smelt/` — the report is the derived, already-summarized
-/// view of the manifest (`docs/specs/run_state.md` §"Run report"), so this
-/// prints from it rather than re-deriving the same summary from the raw
-/// manifest. Silently does nothing if the report can't be read back (e.g. a
-/// stateless project, or a pre-execution failure with no run directory yet)
-/// — `run_failed`'s per-model lines above still ran either way.
+/// `failure_summary_lists_all_failed_models`; extended with hints by
+/// `docs/plans/20260719-prod-w3-adoption.md` Phase 6). Reads the
+/// just-written run report back from `.smelt/` — the report is the derived,
+/// already-summarized view of the manifest (`docs/specs/run_state.md`
+/// §"Run report"), so this prints from it rather than re-deriving the same
+/// summary from the raw manifest. Silently does nothing if the report can't
+/// be read back (e.g. a stateless project, or a pre-execution failure with
+/// no run directory yet) — `run_failed`'s per-model lines above still ran
+/// either way.
 pub fn print_failure_summary(project_dir: &std::path::Path, target: &str, run_id: &str) {
     let file_store = smelt_state::file_store::FileStore::new(project_dir, target);
     let Ok(Some(report)) = file_store.load_report(run_id) else {
@@ -160,7 +210,9 @@ pub fn print_failure_summary(project_dir: &std::path::Path, target: &str, run_id
     );
     for failure in &report.failures {
         let first_line = failure.error.lines().next().unwrap_or(&failure.error);
+        let cause = classify_failure_cause(&failure.error);
         eprintln!("  - {}: {}", failure.model, first_line);
+        eprintln!("    hint: {}", hint_for(cause));
     }
 }
 
@@ -175,5 +227,52 @@ pub fn format_strategy(strategy: &ModelStrategy) -> String {
         ModelStrategy::Keyed => "keyed".to_string(),
         ModelStrategy::Ephemeral => "ephemeral".to_string(),
         ModelStrategy::Skipped { .. } => "skipped".to_string(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn classifies_backend_cast_error_as_execute() {
+        let err = "Conversion Error: Could not convert string 'not_a_number' to INT32";
+        assert_eq!(classify_failure_cause(err), FailureCause::Execute);
+    }
+
+    #[test]
+    fn classifies_keyed_model_ddl_failure_as_execute() {
+        let err = "Failed to create keyed model orders: Binder Error: table already exists";
+        assert_eq!(classify_failure_cause(err), FailureCause::Execute);
+    }
+
+    #[test]
+    fn classifies_constraint_violation_as_check() {
+        let err = "Failed to create keyed model orders: constraint violation";
+        assert_eq!(classify_failure_cause(err), FailureCause::Check);
+    }
+
+    #[test]
+    fn classifies_unresolved_ref_as_compile() {
+        let err = "Model 'orders' failed to compile: unresolved ref smelt.ref(\"missing\")";
+        assert_eq!(classify_failure_cause(err), FailureCause::Compile);
+    }
+
+    #[test]
+    fn classifies_check_failure_as_check() {
+        let err = "Schema evolution check failed: incompatible column type change";
+        assert_eq!(classify_failure_cause(err), FailureCause::Check);
+    }
+
+    #[test]
+    fn every_cause_has_a_distinct_hint() {
+        let hints = [
+            hint_for(FailureCause::Compile),
+            hint_for(FailureCause::Execute),
+            hint_for(FailureCause::Check),
+        ];
+        for pair in hints.windows(2) {
+            assert_ne!(pair[0], pair[1]);
+        }
     }
 }

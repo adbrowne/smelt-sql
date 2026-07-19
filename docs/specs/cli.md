@@ -277,6 +277,18 @@ A single `smelt build` performs these steps, in order:
 
 `smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
 
+### Failure summary
+
+`smelt run` and `smelt build` both print a grouped failure summary to stderr at the end of a failed run, naming every model that failed — not just the first. Independent models that fail in the same `--jobs`-scheduled wave each get their own entry; a second or third failure is never silently downgraded to "skipped" (per `run_state.md` §"Run report"). Each entry carries the model's first error line and a one-line hint toward the likely next action:
+
+```
+smelt: run <run_id> failed — <N> model(s) failed:
+  - <model>: <first line of the recorded error>
+    hint: <next action>
+```
+
+The hint is chosen from a coarse classification of the recorded error text into one of three causes — compile (parse/type/reference resolution failure: points at the model's SQL), execute (the backend rejected the compiled SQL: points at `-v`/`--show-plan`), or check (a constraint/data-quality violation: points at `smelt check`). The classification is a best-effort text match, not a structured error code — nothing upstream of the run report currently tags a failure with its originating stage. A successful run prints no failure block. The failure summary is presentation only: it never changes the run's exit code (`smelt run`/`smelt build` still exit per §"Exit codes").
+
 ### `--dry-run` prints the maintenance statements
 
 `smelt run --dry-run` and `smelt backbuild --dry-run` print, for every model the invocation
