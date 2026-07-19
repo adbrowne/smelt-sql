@@ -130,6 +130,37 @@ When the leaf matches multiple entities (e.g. both `silver.events_parsed` and `b
 
 ---
 
+## smelt init
+
+Non-interactively scaffold a minimal, working smelt project.
+
+**Usage:**
+
+```
+smelt init [DIR]
+```
+
+`smelt init` writes a `smelt.yml`, a `models/` directory containing one example model, one seed CSV, and a `.gitignore` excluding `.smelt/` and the database file, to `DIR` (default `.`, created if it doesn't exist). Every file it writes is a fixed, deterministic template — there are no interactive prompts and no flags that change what gets scaffolded beyond the target directory. The scaffolded project builds successfully against DuckDB with no further edits (`smelt build` inside it exits `0`).
+
+`smelt init` refuses to run against a directory that already contains a `smelt.yml`: it exits `2` with a message naming the conflicting file, rather than overwriting or merging. There is deliberately no `--force` flag to override this — run `smelt init` in a fresh directory, or remove the conflicting `smelt.yml` and re-run.
+
+**Exit codes:**
+
+- Exits `0` on a successful scaffold.
+- Exits `2` if `DIR` already contains a `smelt.yml` (usage error — the fix is a different or empty directory, not a retry).
+
+**Examples:**
+
+```bash
+# Scaffold a new project in ./my-project
+smelt init my-project
+
+# Scaffold into the current directory
+smelt init
+```
+
+---
+
 ## smelt run
 
 Run models and materialize them in the target database. This is the primary command for executing your data pipeline.

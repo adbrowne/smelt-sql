@@ -27,6 +27,8 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
+    /// Non-interactively scaffold a minimal working project
+    Init(InitArgs),
     /// Run models and materialize them in the target database
     Run(RunArgs),
     /// Backbuild: rebuild a target model and all its upstreams for a time range
@@ -73,6 +75,14 @@ enum DocsCommands {
     },
     /// Explain where the embedded docs live
     Path,
+}
+
+#[derive(Parser)]
+struct InitArgs {
+    /// Target directory to scaffold (created if it doesn't exist).
+    /// Defaults to the current directory. Refused (exit 2) if it already
+    /// contains a smelt.yml — there is no --force to override this.
+    dir: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -566,7 +576,15 @@ async fn main() -> std::process::ExitCode {
 
     let scope = cli.scope.as_deref();
 
+    // `smelt init` classifies its own error (the non-empty-dir refusal maps
+    // to exit 2, a usage error per `docs/specs/cli.md`) via
+    // `commands::init::exit_code_for` rather than the generic
+    // `smelt_cli::exit_code_for`, since its error type isn't one of the
+    // `ProjectError`/`ConfigError` variants that classifier recognizes.
+    let is_init = matches!(cli.command, Commands::Init(_));
+
     let result: Result<()> = match cli.command {
+        Commands::Init(args) => commands::init::run(args),
         Commands::Run(args) => commands::run::run(args, scope).await,
         Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
         Commands::Table(args) => commands::table::table(args, scope).await,
@@ -592,7 +610,12 @@ async fn main() -> std::process::ExitCode {
         Ok(()) => std::process::ExitCode::SUCCESS,
         Err(err) => {
             eprintln!("Error: {err:?}");
-            std::process::ExitCode::from(smelt_cli::exit_code_for(&err))
+            let code = if is_init {
+                commands::init::exit_code_for(&err)
+            } else {
+                smelt_cli::exit_code_for(&err)
+            };
+            std::process::ExitCode::from(code)
         }
     }
 }

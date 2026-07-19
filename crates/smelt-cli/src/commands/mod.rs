@@ -5,6 +5,7 @@ pub mod diff;
 pub mod docs;
 pub mod explain;
 pub mod history;
+pub mod init;
 pub mod run;
 mod run_setup;
 pub mod seed;

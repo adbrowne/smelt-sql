@@ -2,13 +2,15 @@
 
 This guide walks you through creating your first smelt project.
 
-## 1. Create a project
+## 1. Scaffold a project
 
 ```bash
-mkdir my-project && cd my-project
+smelt init my-project && cd my-project
 ```
 
-Create a `smelt.yml` configuration file:
+`smelt init` writes a minimal, working project to `my-project/`: a `smelt.yml`, a `models/` directory with one example model (`orders_summary.sql`), a seed CSV (`seeds/raw_orders.csv`), and a `.gitignore` excluding `.smelt/` and the database file. It takes no interactive prompts — every file is a fixed template — and refuses to run (exit code `2`) against a directory that already has a `smelt.yml`, so it's always safe to run in a fresh directory. Run `smelt build` right away and it succeeds with no further edits; the rest of this guide extends that scaffold.
+
+The generated `smelt.yml` looks like this:
 
 ```yaml
 name: my-project
@@ -35,15 +37,9 @@ targets:
 
     Unknown keys produce a warning, not an error. See the [smelt.yml reference](../reference/smelt-yml.md) for the full per-key contract.
 
-## 2. Add seed data
+## 2. Add more seed data
 
-Create a `seeds/` directory with a CSV file:
-
-```bash
-mkdir seeds
-```
-
-Create `seeds/raw_orders.csv`:
+The scaffold already has `seeds/raw_orders.csv`:
 
 ```csv
 order_id,order_date,customer_id,amount
@@ -52,7 +48,7 @@ order_id,order_date,customer_id,amount
 3,2025-01-02,100,19.99
 ```
 
-Create `seeds/raw_customers.csv`:
+Add a second seed, `seeds/raw_customers.csv`:
 
 ```csv
 customer_id,name,country
@@ -62,15 +58,9 @@ customer_id,name,country
 
 Seeds become tables addressed as `smelt.<name>` (e.g. `smelt.raw_orders`, `smelt.raw_customers`). Seeds and SQL models share the same flat namespace — there is no `smelt.models.*` prefix.
 
-## 3. Write a model
+## 3. Write another model
 
-Create a `models/` directory and add your first SQL model:
-
-```bash
-mkdir models
-```
-
-A simple aggregate model:
+The scaffold's `models/orders_summary.sql` is already a simple aggregate model:
 
 ```sql
 -- models/orders_summary.sql
