@@ -2856,11 +2856,12 @@
 <a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="k">SELECT</span>
 <a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a><span class="w">  </span><span class="n">o</span><span class="p">.</span><span class="n">order_id</span><span class="p">,</span>
 <a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a><span class="w">  </span><span class="n">o</span><span class="p">.</span><span class="n">order_date</span><span class="p">,</span>
-<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">  </span><span class="n">o</span><span class="p">.</span><span class="n">amount</span><span class="p">,</span>
-<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">  </span><span class="k">c</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">customer_name</span><span class="p">,</span>
-<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">  </span><span class="k">c</span><span class="p">.</span><span class="n">country</span>
-<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">raw_orders</span><span class="w"> </span><span class="n">o</span>
-<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a><span class="k">LEFT</span><span class="w"> </span><span class="k">JOIN</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">raw_customers</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span>
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a><span class="w">  </span><span class="n">o</span><span class="p">.</span><span class="n">customer_id</span><span class="p">,</span>
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a><span class="w">  </span><span class="n">o</span><span class="p">.</span><span class="n">amount</span><span class="p">,</span>
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a><span class="w">  </span><span class="k">c</span><span class="p">.</span><span class="n">name</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">customer_name</span><span class="p">,</span>
+<a id="__codelineno-5-12" name="__codelineno-5-12" href="#__codelineno-5-12"></a><span class="w">  </span><span class="k">c</span><span class="p">.</span><span class="n">country</span>
+<a id="__codelineno-5-13" name="__codelineno-5-13" href="#__codelineno-5-13"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">raw_orders</span><span class="w"> </span><span class="n">o</span>
+<a id="__codelineno-5-14" name="__codelineno-5-14" href="#__codelineno-5-14"></a><span class="k">LEFT</span><span class="w"> </span><span class="k">JOIN</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">raw_customers</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="k">ON</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span>
 </code></pre></div>
 <p>If a seed column name doesn't match what your model needs, alias it in the model — seed column names are locked to the CSV header row and cannot be renamed in <code>smelt.yml</code>.</p>
 <p>You can also reference SQL models from other models — seeds and models share the same flat <code>smelt.&lt;name&gt;</code> namespace. A mart that rolls up from a staging model looks like this:</p>
@@ -2894,6 +2895,8 @@
 <ul>
 <li><a href="../../concepts/how-it-works/">How smelt Works</a> -- understand the logical/physical separation</li>
 <li><a href="../../guide/incremental-models/">Incremental Models</a> -- process only new data</li>
+<li><a href="../../guide/deployment/">Deployment</a> -- run smelt outside your laptop (CI, containers, scheduled jobs)</li>
+<li><a href="../../guide/orchestration/">Orchestration</a> -- run smelt under cron, Airflow, or another scheduler</li>
 <li><a href="../../reference/cli/">CLI Reference</a> -- full command documentation</li>
 </ul>
 
