@@ -30,6 +30,16 @@ owners: [andrew]
 | `vars` | map of `<name>` → YAML scalar | no | `{}` | Compile-time variable declarations read by `smelt.config.var('<name>')`. The value shape is a flat map of name → scalar (string/number/bool/null); the lookup, YAML-scalar coercion, and per-target overlay semantics are owned by `meta_language.md` §"Compile-time variables". |
 | `state` | object | no | `{ mode: stateless }` | Project state posture. Carries `mode:` (`stateless` \| `intervals` \| `environments`); the posture lattice, reuse semantics, and environment addressing are owned by `virtual_environments.md` §"`state.mode` — the opt-in posture". |
 
+### Environment interpolation
+
+Any string value anywhere in `smelt.yml` may reference an environment variable with `${VAR_NAME}`; the reference is resolved once, at config load, before validation. This is the mechanism for keeping secrets (a Spark `connect_url`, a warehouse credential) out of the checked-in file. A literal `$` that must not trigger a lookup is written `$$`.
+
+| Case | Behaviour |
+|------|-----------|
+| `${VAR}` where `VAR` is set in the process environment | Replaced with the variable's value. |
+| `${VAR}` where `VAR` is unset | Hard configuration error naming `VAR` and the YAML key path it appears under (e.g. `targets.prod.connect_url`); the key **never** silently resolves to an empty string. Every unresolved reference in the file is collected and reported together, not just the first. |
+| `$$` | Literal `$`, no lookup attempted. |
+
 ### `unstable_schema:` gated keys
 
 Setting `unstable_schema: true` unlocks the following feature surfaces. Each is gated because its syntax is being prototyped against real usage and may change before graduating to stable:
@@ -97,6 +107,8 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 
    A user-supplied value for either key is applied verbatim and is **never** overridden — explicit configuration always wins. `threads` is left at DuckDB's default.
 
+10. **Environment interpolation runs once, after parse, before validation.** `${VAR}` references in any string field are resolved against the process environment as a single pass over the deserialised config, before `default_materialization`, `unstable_schema`, or any other validation rule inspects the value. A key holding an unresolved `${VAR}` never reaches validation — resolution either substitutes a value or the load fails. `$$` is unescaped to a literal `$` in the same pass, whether or not the surrounding string also contains a real `${VAR}` reference.
+
 ## Design
 
 **`name` and `version` are decorative because identity is the directory.** Earlier shapes used `name` as a namespace component (e.g. `<name>.<schema>.<table>` qualified paths). That conflated workspace identity with database identity and made renames painful — every downstream model had to update its qualified references. Today the workspace's identity is its filesystem location, the directory containing `smelt.yml`; `name` is informational. This composes with the universal `smelt.<path>` addressing scheme (`architecture.md`) — paths refer to entities by location, not by project name.
@@ -106,6 +118,8 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 **`unknown keys = warning, not error`.** This is the project-level side of the unknown-key doctrine (`architecture.md` §"Constraints & Invariants" §8). The forward-compatibility invariant in Semantics §7 is the load-bearing reason. Strict-rejection of unknown keys forecloses staged rollouts (a new key cannot be authored in the project until every consumer recognises it). Warning-on-unknown lets new fields land in the parser ahead of every consumer recognising them, while still surfacing typos to the user.
 
 **DuckDB defaults bound the host, not just the query.** DuckDB's native `memory_limit` default is a fraction of *total system RAM*, which is the right choice for a dedicated analytics box but antisocial on a developer machine or CI runner shared with other work (editors, language servers, a second build, an agent loop). A single 1-billion-row aggregation will happily grow toward that ~80% ceiling and tip the whole host into memory pressure — on Linux, `systemd-oomd` then reaps a cgroup chosen by pressure, which may be an unrelated session rather than the offending build. Smelt therefore treats *bounded, spilling-by-default* execution as the correct out-of-the-box posture: leave real headroom, and always give DuckDB a temp directory so it spills instead of consuming or failing. We deliberately do **not** override a user who has set these keys — someone who writes `memory_limit: 48GB` has opted into that trade — and we leave `threads` alone because thread count is a throughput/latency choice, not a safety one. The smaller-of-two formula (`50%` vs `RAM − 20 GB`) keeps the absolute headroom generous on large hosts while the percentage keeps it proportional on small ones; the 40%-floor stops the `RAM − 20 GB` term from going to zero (or negative) on a ≤20 GB laptop. The constants are intentionally conservative because the limit governs DuckDB's buffer pool, not process RSS — measured RSS on a real 1-billion-row aggregation ran ~5 GB above the configured limit, so a limit set close to the host would still let RSS approach the OOM wall.
+
+**Environment interpolation keeps secrets out of the checked-in file, fail-loud by construction.** `smelt.yml` is normally committed to version control; a `connect_url` or warehouse credential cannot live there in plaintext. `${VAR}` interpolation lets the file reference a name while the value lives in the environment (a CI secret, a local `.env`-sourced shell). The alternative — silently treating a missing variable as an empty string — would let a project "work" with a blank credential and fail deep inside a backend connection attempt, far from the actual mistake; naming the variable and the YAML key path at load time turns that into an immediate, precise configuration error. `$$` as an escape (rather than, say, forbidding literal `$`) keeps the common case (URLs and paths that never contain `$`) untouched while still giving projects that do need a literal `$` an out.
 
 **Per-feature config lives in feature specs.** `incremental:` shape, function frontmatter keys (`deterministic`, `idempotent`, …), schema-evolution config, and the per-column `tests:` map are owned by their feature specs (`incremental_models.md`, `functions.md`, future `schema_evolution.md`). This spec lists only the top-level shape and the cross-feature precedence rules; otherwise, the page would have to be re-written every time a new key lands.
 
@@ -119,6 +133,8 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 4. `version` is an integer — string values are rejected at parse time.
 5. The `unstable_schema:` gate is read by a separate text-based helper so it remains probeable on otherwise-malformed configs.
 6. Smelt-supplied DuckDB defaults (`memory_limit`, `temp_directory`) are computed by a **pure function** of `(total_ram_bytes, database_parent_dir, user_settings)` so the policy is unit-testable without opening a connection; platform RAM detection is a thin impure shim whose failure mode is "supply no `memory_limit` default" (never panic, never block the connection). A user-provided value for a key suppresses the default for that key.
+7. An unresolved `${VAR}` reference is never coerced to an empty string. Every unresolved reference in a load is collected before the error is raised — a config with two missing variables reports both, not just the first.
+8. Environment interpolation runs exactly once, in the config-load pass, before any other parse-time or semantic validation observes the value.
 
 ## Known Divergences / Open Questions
 
@@ -130,13 +146,15 @@ A typo'd known key (e.g. `default_matrialization`) is reported as an unknown key
 - **`unstable_schema:` discoverability.** There is no `smelt unstable_schema list` or similar way to enumerate the currently-gated keys. Users find them through individual feature docs; a discoverability mechanism is open.
 - **User-extensible top-level keys.** Today the top-level key set is closed (unknown keys warn). A future direction is to let projects register their own top-level keys to carry configuration for custom planner rules. That extensibility is not specified now; the key set in §"Top-level keys" remains the authoritative list, and `vars:` / `state:` point at their owning feature specs for semantics.
 - **Configurable discovery exclusions.** Project-wide discovery skips hidden directories (`.`-prefixed) and the conventional build output `target/`. Whether a project can extend this with an explicit `exclude:` key (to omit, say, a `sandbox/` or `archive/` subtree from discovery) is open; today the skip-list is fixed and conventional. The `paths:` strip-list is a separate concern (it renames addresses, it does not hide files).
+- **Interpolation scope is string values only.** `${VAR}` substitution is specified for string fields (`connect_url`, `database`, `schema`, `vars:` scalar entries that are strings, etc). Whether a numeric or boolean `vars:` entry can itself be sourced from an environment variable (as opposed to only appearing inside an already-string value) is open; today interpolation only ever produces a string.
+- **No nested or recursive interpolation.** A resolved `${VAR}` value is not itself re-scanned for further `${...}` references. Whether that is ever useful (an env var whose value names another env var) is open; today it is a single, non-recursive substitution pass.
 
 ## References
 
 - **Code**: `crates/smelt-core/src/config.rs` — `Config`, `Target`, `ModelConfig`, `Materialization`, `parse_unstable_schema_flag`, `parse_active_backends`, `parse_with_warnings`. The default functions are `default_paths` (for the unified `paths:` list) and `default_materialization`. DuckDB resource defaults live in `crates/smelt-backend-duckdb/src/lib.rs` — the pure `resolve_duckdb_settings` policy function and the `detect_total_ram_bytes` platform shim, applied inside `DuckDbBackend::new_with_settings`.
 - **Tests**: `crates/smelt-core/src/config.rs::tests` — round-trip tests for materialization defaults, version handling, target shape, validation rules.
 - **User docs**: `docs-site/docs/reference/smelt-yml.md` — per-key reference; `docs-site/docs/concepts/project-structure.md` — orientation page.
-- **Plans (history)**: `docs/plans/20260502-smelt-loop-findings.md` — the spec-authoring plan that produced this stub (DG-4 close).
+- **Plans (history)**: `docs/plans/20260502-smelt-loop-findings.md` — the spec-authoring plan that produced this stub (DG-4 close); `docs/plans/20260719-prod-w2-operability.md` — environment interpolation implementation.
 - **Related specs**:
   - `architecture.md` — `smelt.yml` is the workspace marker; discovery is project-wide and `paths:` is the address strip-list (not a scan gate); kind-by-content is owned there.
   - `incremental_models.md` — `incremental:` shape on `models.<name>`.

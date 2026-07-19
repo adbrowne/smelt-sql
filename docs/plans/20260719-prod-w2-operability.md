@@ -55,7 +55,7 @@ The production-release review found that smelt's correctness core is release-gra
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     | (this commit) | 2026-07-19 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
