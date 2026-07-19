@@ -100,6 +100,7 @@ nav:
     - Functions: guide/functions.md
     - Testing: guide/testing.md
     - Targets & Backends: guide/targets.md
+    - Production Deployment: guide/deployment.md
     - Web UI: guide/web-ui.md
     - Editor Setup: guide/editor-setup.md
     - Editor Features: guide/editor-features.md
