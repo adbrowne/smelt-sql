@@ -29,11 +29,14 @@ Available platforms:
 
 - Linux x86_64
 - Linux aarch64
-- macOS x86_64 (Intel)
 - macOS aarch64 (Apple Silicon)
 - Windows x86_64
 
 Extract the archive and add the directory to your `PATH`.
+
+Intel Macs (macOS x86_64) do not have a prebuilt standalone binary; install
+via `pip install smelt-sql` instead, which builds from source using the
+sdist (a Rust toolchain is required).
 
 ## Build from source
 
