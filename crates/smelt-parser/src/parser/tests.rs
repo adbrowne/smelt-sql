@@ -138,6 +138,57 @@ fn test_comma_join_with_aliases() {
 }
 
 #[test]
+fn test_comma_join_from_clause_does_not_swallow_record_literal_field_boundary() {
+    // Regression: the ANSI-89 comma-join FROM-clause loop must not consume a
+    // COMMA that actually separates record-literal fields (e.g. `body: SELECT
+    // * FROM orders` followed by `materialization: 'incremental'` inside a
+    // `ModelDef { … }`). Before the fix, `orders, materialization` parsed as
+    // a two-table comma-join, silently dropping the `materialization` field
+    // (with NO parse error — evaluate_generator just saw two fields instead
+    // of three and defaulted materialization to "view").
+    //
+    // Uses the real generator-file entry point (`parse_meta_expression_from_offset`,
+    // as `smelt-db`'s `parse_file` query dispatches to for `generates: models`
+    // files) rather than the statement-oriented `parse()`, since a bare
+    // `[ModelDef { … }]` list literal is not a valid top-level SQL/define file.
+    let input = "[ModelDef { name: 'us_west', body: SELECT * FROM orders, materialization: 'incremental' }]";
+    let parse = parse_meta_expression_from_offset(input, 0);
+    assert!(
+        parse.errors.is_empty(),
+        "unexpected errors: {:?}",
+        parse.errors
+    );
+    let record_lit = parse
+        .syntax()
+        .descendants()
+        .find(|n| n.kind() == RECORD_LITERAL)
+        .expect("must contain a RECORD_LITERAL node");
+    let fields: Vec<_> = record_lit
+        .children()
+        .filter(|n| n.kind() == RECORD_FIELD)
+        .collect();
+    assert_eq!(
+        fields.len(),
+        3,
+        "RECORD_LITERAL must have three RECORD_FIELD children (name, body, materialization)"
+    );
+
+    // The embedded SELECT's FROM clause must have exactly one table ref
+    // (`orders`) — no comma-join swallowing `materialization`.
+    let select = parse
+        .syntax()
+        .descendants()
+        .find_map(SelectStmt::cast)
+        .expect("should have a SelectStmt");
+    let from = select.from_clause().expect("should have FROM");
+    assert_eq!(
+        from.joins().count(),
+        0,
+        "FROM orders must have no joins — materialization is a separate record field, not a comma-joined table"
+    );
+}
+
+#[test]
 fn test_using_clause() {
     let input = "SELECT * FROM users JOIN orders USING (user_id)";
     let (_, select) = parse_select(input);

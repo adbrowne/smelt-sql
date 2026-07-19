@@ -169,6 +169,25 @@ on loader results; `meta_config` builds clean"). Cross-check `maps.md`,
 
 (Append-only.)
 
+**Post-merge fix, 2026-07-19.** Phase 1's comma-join grammar regressed the
+meta-language's `ModelDef { … }` record literal: `body: SELECT * FROM orders,
+materialization: 'incremental'` (an unquoted raw-SQL `body` field followed by
+a sibling record field) parsed the comma as an ANSI-89 comma-join, treating
+`materialization` as a second FROM table rather than a record-literal field
+separator — `emitted_incremental_model_inherits_frontmatter_incremental_block`
+(`crates/smelt-db/src/queries/project.rs`) caught this on the PR #164 CI run
+(silently dropped field, no diagnostic — `materialization` defaulted to
+`"view"`). Root cause: `parse_from_clause`'s comma-join loop
+(`crates/smelt-parser/src/parser/select.rs`) lacked the same `IDENT COLON`
+lookahead guard already present in `parse_select_list` for exactly this
+ambiguity (see that function's comment). Fixed by adding the identical guard
+to the FROM-clause loop; pinned by
+`test_comma_join_from_clause_does_not_swallow_record_literal_field_boundary`
+in `crates/smelt-parser/src/parser/tests.rs` (fails without the fix, verified
+by temporarily reverting it). Full `smelt-parser` (611 tests) and `smelt-db`
+(537 tests) suites, both DuckDB dialect-conformance gates, and
+`comma_join_semantics`/`join_star_schema` integration tests re-run clean.
+
 ## Verification
 
 - `bash .claude/scripts/verify-phase.sh`

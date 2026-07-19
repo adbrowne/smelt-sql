@@ -409,9 +409,22 @@ impl<'a> super::Parser<'a> {
         // JOIN_CLAUSE node kind — see `JoinClause::is_comma_join`.
         loop {
             self.skip_trivia();
-            if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
+            if self.at(COMMA) {
+                // Peek BEFORE consuming: `IDENT COLON` after the comma marks a
+                // record-literal field boundary (e.g. `materialization: 'x'`
+                // following `body: SELECT * FROM orders, …` inside a
+                // `ModelDef { … }`), not another comma-joined table reference.
+                // Breaking without consuming leaves the COMMA in the stream
+                // for the enclosing record-literal parser — mirrors the same
+                // guard in `parse_select_list`.
+                if self.peek_nth_non_trivia(1) == Some(IDENT)
+                    && self.peek_nth_non_trivia(2) == Some(COLON)
+                {
+                    break;
+                }
+                self.parse_join_clause();
+            } else if self.at_any(&[JOIN_KW, INNER_KW, LEFT_KW, RIGHT_KW, FULL_KW, CROSS_KW])
                 || self.at_contextual_keyword("NATURAL")
-                || self.at(COMMA)
             {
                 self.parse_join_clause();
             } else {
