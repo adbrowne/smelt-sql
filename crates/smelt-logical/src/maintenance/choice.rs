@@ -159,6 +159,12 @@ fn admits(
         CellTechnique::RederiveColumns => {
             admitted == Some(&Technique::ColumnScopedMerge) && backend_supports_column_scoped_merge
         }
+        // Never reached: the caller only calls `admits` after narrowing
+        // `overrides.technique` to a family variant — `Suppress`/
+        // `Unconditional` are the orthogonal write-suppression pin,
+        // resolved by `resolve_write_variant`, not a family pin this
+        // function's resolvable set contains.
+        CellTechnique::Suppress | CellTechnique::Unconditional => false,
     }
 }
 
@@ -261,7 +267,14 @@ pub fn resolve_cell_choice(
         };
     }
 
-    if let Some(pin) = overrides.technique {
+    // `Suppress`/`Unconditional` are the orthogonal write-suppression pin —
+    // never a family pin — so they fall through to the soft `prefer`/
+    // structural default below for FAMILY choice; [`resolve_write_variant`]
+    // is where they actually take effect.
+    if let Some(
+        pin @ (CellTechnique::Fold | CellTechnique::Recompute | CellTechnique::RederiveColumns),
+    ) = overrides.technique
+    {
         return if admits(
             pin,
             admitted_technique,
@@ -277,6 +290,12 @@ pub fn resolve_cell_choice(
                             )
                             .clone(),
                     ))
+                }
+                // The outer `if let` guard already narrowed `pin` to one of
+                // the three arms above — `Suppress`/`Unconditional` never
+                // reach here.
+                CellTechnique::Suppress | CellTechnique::Unconditional => {
+                    unreachable!("narrowed to a family variant by the outer `if let` guard")
                 }
             }
         } else {
@@ -413,6 +432,203 @@ pub fn resolve_write_suppression(
             ),
         }
     }
+}
+
+/// Why a suppressible cell's [`WriteSuppression`] verdict is or isn't
+/// **preferred** once admitted — the conditional-variant dimension the
+/// override ladder ranks alongside family choice
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// G1; `incremental_models.md` §"Windowed maintenance and the horizon"
+/// category 2; `docs/research/20260715-conditional-maintenance-without-cdf.md`
+/// item 7: "suppression is pointless on first build … the plan should
+/// admit-but-not-prefer it there"). `NotAdmitted` mirrors
+/// [`WriteSuppression::Unconditional`]'s own proof failure (P2/P3) — there
+/// is no preference question at all when the conditional variant was never
+/// admitted in the first place.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum VariantReason {
+    /// The write-suppression proof itself refused (P2 `WholeRow` identity,
+    /// an incomparable compared column, or an empty group) — never a
+    /// preference question.
+    NotAdmitted,
+    /// Admitted, but the trigger has no prior stored state on this column
+    /// group to diff against — the compare would be pure overhead, not a
+    /// correctness gain, so the cell resolves the unconditional matched arm
+    /// by default despite the conditional variant being provably safe.
+    FirstBuildPosture,
+    /// Admitted and preferred: a steady-state trigger over prior state
+    /// defaults to the change-suppressed matched arm.
+    SteadyStatePreference,
+    /// An explicit `prefer`/`technique` override on this dimension
+    /// (`TechniquePreference::Suppress`/`Unconditional`,
+    /// `CellTechnique::Suppress`/`Unconditional`) decided this, bypassing
+    /// the structural first-build/steady-state default above — the same
+    /// override-ladder precedence [`resolve_cell_choice`] applies to family
+    /// choice, folded into this orthogonal dimension.
+    Overridden,
+}
+
+/// Whether `trigger`'s cell has any prior stored state on its compared
+/// column group to diff against. [`Trigger::Backfill`] (an explicit
+/// whole-region recompute — a first build with no target table yet routes
+/// through it, since there is nothing stored at all) and a definition-change
+/// cell's ledger catch-up (`PlanCell::ledger_catch_up` — the group's ledger
+/// entries start at `S = ∅` over existing regions, per that field's own doc
+/// comment) both have nothing to compare: every row's "prior" value for this
+/// group is *absent*, not merely stale, so a suppression compare there buys
+/// nothing. A steady-state [`Trigger::NewData`]/[`Trigger::UpstreamMutation`]
+/// trigger over an already-populated group has committed prior state and
+/// stands to gain from suppression.
+///
+/// Both inputs are already-derived `PlanCell` fields — this is a pure
+/// function of data every caller already holds, never a fresh "is this the
+/// first run" check bolted on at the call site.
+pub fn trigger_has_prior_state(trigger: &Trigger, ledger_catch_up: bool) -> bool {
+    !ledger_catch_up && !matches!(trigger, Trigger::Backfill)
+}
+
+/// Fold the first-build/definition-change-backfill posture into an
+/// already-resolved [`WriteSuppression`] verdict: a cell that is admitted
+/// but not preferred resolves to the unconditional matched arm by default —
+/// bit-identical to a genuine proof failure — but the returned
+/// [`VariantReason`] distinguishes the two so a caller (`smelt explain`) can
+/// show *which* happened rather than only ever seeing the safe fallback.
+///
+/// This is the resolver-side rule the plan's Goal names ("the first-build/
+/// backfill posture is a rule in the resolver, not a runtime special case
+/// bolted on in `maintenance_driver.rs`"): `trigger` and `ledger_catch_up`
+/// are both already-derived `PlanCell` fields, so no caller needs its own ad
+/// hoc "is this the first run" check.
+///
+/// `overrides` folds the override ladder's write-suppression dimension in
+/// (`EffectiveOverride`, already narrowed by [`effective_override`]) — the
+/// same `defaults.prefer` → `cells[].prefer` → `cells[].technique` ladder
+/// [`resolve_cell_choice`] applies to family choice, reused here for this
+/// orthogonal dimension via the same struct's `prefer`/`technique` fields
+/// and the `Suppress`/`Unconditional` values those enums carry:
+/// - `overrides.technique == Some(CellTechnique::Suppress)` is a hard pin
+///   forcing the suppressed variant on, bypassing the structural default —
+///   but never bypassing the P2/P3 admission proof: when `suppression` is
+///   already `Unconditional` (the proof itself refused), this refuses with
+///   a [`ChoiceRefusal`], the same "a pin bypasses the cost model, never
+///   admission" rule `resolve_cell_choice` applies to family pins.
+/// - `overrides.technique == Some(CellTechnique::Unconditional)` is a hard
+///   pin forcing the plain unconditional matched arm — always admissible,
+///   so it never refuses.
+/// - `overrides.prefer`'s `Suppress`/`Unconditional` values are the soft
+///   equivalents: they nudge the structural default without refusing,
+///   falling back silently when the preferred variant isn't admitted.
+/// - Any other `overrides.technique`/`prefer` value (a family pin/bias, or
+///   `Auto`/`None`) leaves this dimension to the structural first-build/
+///   steady-state default below, exactly as before this phase.
+pub fn resolve_write_variant(
+    suppression: &WriteSuppression,
+    trigger: &Trigger,
+    ledger_catch_up: bool,
+    overrides: &EffectiveOverride,
+) -> Result<(WriteSuppression, VariantReason), ChoiceRefusal> {
+    // A hard pin on this dimension is consulted first, before the soft
+    // `prefer` bias and before the structural default — mirroring
+    // `resolve_cell_choice`'s own pin-before-prefer-before-default order.
+    match overrides.technique {
+        Some(CellTechnique::Suppress) => {
+            return match suppression {
+                WriteSuppression::Suppressed { compared_columns } => Ok((
+                    WriteSuppression::Suppressed {
+                        compared_columns: compared_columns.clone(),
+                    },
+                    VariantReason::Overridden,
+                )),
+                WriteSuppression::Unconditional { why } => Err(ChoiceRefusal {
+                    trigger: trigger_label(trigger),
+                    pinned: PinnedRequest::Technique(CellTechnique::Suppress),
+                    why: format!(
+                        "`technique: suppress` pins the change-suppressed matched arm on for \
+                         this cell, but the write-suppression proof itself refused ({why}) — a \
+                         pin bypasses the cost model/structural default, never the P2/P3 \
+                         admission proof"
+                    ),
+                }),
+            };
+        }
+        Some(CellTechnique::Unconditional) => {
+            return Ok((
+                WriteSuppression::Unconditional {
+                    why: "pinned via `technique: unconditional` — the matched arm always \
+                          rewrites every matched row regardless of the write-suppression proof \
+                          or trigger posture"
+                        .to_string(),
+                },
+                VariantReason::Overridden,
+            ));
+        }
+        // A family pin (`Fold`/`Recompute`/`RederiveColumns`), `Auto`, or no
+        // pin at all — this dimension falls through to the soft `prefer`
+        // bias, then the structural default.
+        _ => {}
+    }
+
+    // No hard pin on this dimension: a soft `prefer` nudges the structural
+    // default without ever refusing — falling back silently when the
+    // preferred variant isn't admitted, the same "soft" contract
+    // `resolve_cell_choice` documents for family choice.
+    match overrides.prefer {
+        Some(TechniquePreference::Suppress) => {
+            if let WriteSuppression::Suppressed { compared_columns } = suppression {
+                return Ok((
+                    WriteSuppression::Suppressed {
+                        compared_columns: compared_columns.clone(),
+                    },
+                    VariantReason::Overridden,
+                ));
+            }
+        }
+        Some(TechniquePreference::Unconditional) => {
+            return Ok((
+                WriteSuppression::Unconditional {
+                    why: "soft-preferred via `prefer: unconditional`, overriding the \
+                          steady-state default"
+                        .to_string(),
+                },
+                VariantReason::Overridden,
+            ));
+        }
+        // A family bias (`Fold`/`Recompute`), `Auto`, or no bias at all —
+        // falls through to the structural default.
+        _ => {}
+    }
+
+    // No override on this dimension: the structural first-build/
+    // definition-change-backfill posture default.
+    Ok(match suppression {
+        WriteSuppression::Unconditional { why } => (
+            WriteSuppression::Unconditional { why: why.clone() },
+            VariantReason::NotAdmitted,
+        ),
+        WriteSuppression::Suppressed { compared_columns } => {
+            if trigger_has_prior_state(trigger, ledger_catch_up) {
+                (
+                    WriteSuppression::Suppressed {
+                        compared_columns: compared_columns.clone(),
+                    },
+                    VariantReason::SteadyStatePreference,
+                )
+            } else {
+                (
+                    WriteSuppression::Unconditional {
+                        why: "admitted (P2 row identity and P3 column comparability both \
+                              proven) but not preferred: this trigger has no prior stored \
+                              state on the compared column group to diff against (first \
+                              build or a definition-change backfill) — the compare would be \
+                              pure overhead, not a correctness gain, so the cell resolves \
+                              the unconditional matched arm by default"
+                            .to_string(),
+                    },
+                    VariantReason::FirstBuildPosture,
+                )
+            }
+        }
+    })
 }
 
 /// Which physical write mechanism realizes a keyed-fold cell's conditional
@@ -799,6 +1015,212 @@ mod write_suppression_tests {
             }
             other => panic!("expected Unconditional refusal, got {other:?}"),
         }
+    }
+}
+
+#[cfg(test)]
+mod write_variant_tests {
+    use super::*;
+    use crate::maintenance::Trigger;
+
+    fn suppressed() -> WriteSuppression {
+        WriteSuppression::Suppressed {
+            compared_columns: vec!["tier".to_string()],
+        }
+    }
+
+    fn unconditional() -> WriteSuppression {
+        WriteSuppression::Unconditional {
+            why: "column(s) notes are not proven comparable".to_string(),
+        }
+    }
+
+    #[test]
+    fn steady_state_trigger_prefers_suppression_when_admitted() {
+        let trigger = Trigger::UpstreamMutation {
+            source: "sources.users".to_string(),
+        };
+        let (resolved, reason) = resolve_write_variant(
+            &suppressed(),
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert_eq!(resolved, suppressed());
+        assert_eq!(reason, VariantReason::SteadyStatePreference);
+    }
+
+    #[test]
+    fn backfill_trigger_admits_but_does_not_prefer_suppression() {
+        // First build (no prior state) routes through `Trigger::Backfill` —
+        // admitted (the proof still holds) but not preferred: resolves
+        // unconditional by default.
+        let (resolved, reason) = resolve_write_variant(
+            &suppressed(),
+            &Trigger::Backfill,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert!(matches!(resolved, WriteSuppression::Unconditional { .. }));
+        assert_eq!(reason, VariantReason::FirstBuildPosture);
+    }
+
+    #[test]
+    fn ledger_catch_up_admits_but_does_not_prefer_suppression_even_on_steady_state_trigger() {
+        // A definition-change backfill cell (`ledger_catch_up: true`) has no
+        // prior state for this group regardless of trigger kind.
+        let trigger = Trigger::UpstreamMutation {
+            source: "sources.users".to_string(),
+        };
+        let (resolved, reason) =
+            resolve_write_variant(&suppressed(), &trigger, true, &EffectiveOverride::default())
+                .expect("no pin — never refuses");
+        assert!(matches!(resolved, WriteSuppression::Unconditional { .. }));
+        assert_eq!(reason, VariantReason::FirstBuildPosture);
+    }
+
+    #[test]
+    fn not_admitted_passes_through_unchanged_regardless_of_trigger() {
+        let trigger = Trigger::UpstreamMutation {
+            source: "sources.users".to_string(),
+        };
+        let (resolved_steady, reason_steady) = resolve_write_variant(
+            &unconditional(),
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert_eq!(resolved_steady, unconditional());
+        assert_eq!(reason_steady, VariantReason::NotAdmitted);
+
+        let (resolved_backfill, reason_backfill) = resolve_write_variant(
+            &unconditional(),
+            &Trigger::Backfill,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert_eq!(resolved_backfill, unconditional());
+        assert_eq!(reason_backfill, VariantReason::NotAdmitted);
+    }
+
+    #[test]
+    fn new_data_trigger_with_prior_state_prefers_suppression() {
+        let trigger = Trigger::NewData {
+            source: "sources.users".to_string(),
+        };
+        let (resolved, reason) = resolve_write_variant(
+            &suppressed(),
+            &trigger,
+            false,
+            &EffectiveOverride::default(),
+        )
+        .expect("no pin — never refuses");
+        assert_eq!(resolved, suppressed());
+        assert_eq!(reason, VariantReason::SteadyStatePreference);
+    }
+
+    // --- Phase G1: `cells[].technique: suppress|unconditional` pins ---
+    // (docs/plans/20260715-composed-axes-conditional-maintenance.md Phase
+    // G1's required TDD test: "`cells[].technique` pins either way and an
+    // inadmissible pin refuses (never falls back silently)", for the
+    // write-suppression dimension.)
+
+    #[test]
+    fn technique_suppress_pin_forces_suppression_on_for_a_first_build_cell() {
+        // Structurally, a first-build/backfill trigger defaults to
+        // unconditional (`backfill_trigger_admits_but_does_not_prefer_
+        // suppression` above) — a hard `technique: suppress` pin overrides
+        // that default.
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(CellTechnique::Suppress),
+        };
+        let (resolved, reason) =
+            resolve_write_variant(&suppressed(), &Trigger::Backfill, false, &overrides)
+                .expect("suppression is admitted (proof holds) — the pin must be honoured");
+        assert_eq!(resolved, suppressed());
+        assert_eq!(reason, VariantReason::Overridden);
+    }
+
+    #[test]
+    fn technique_unconditional_pin_forces_suppression_off_for_a_steady_state_cell() {
+        // Structurally, a steady-state trigger over prior state prefers
+        // suppression (`steady_state_trigger_prefers_suppression_when_
+        // admitted` above) — a hard `technique: unconditional` pin
+        // overrides that default.
+        let trigger = Trigger::UpstreamMutation {
+            source: "sources.users".to_string(),
+        };
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(CellTechnique::Unconditional),
+        };
+        let (resolved, reason) = resolve_write_variant(&suppressed(), &trigger, false, &overrides)
+            .expect("`unconditional` is always admissible — never refuses");
+        assert!(matches!(resolved, WriteSuppression::Unconditional { .. }));
+        assert_eq!(reason, VariantReason::Overridden);
+    }
+
+    #[test]
+    fn technique_suppress_pin_refuses_when_the_suppression_proof_itself_refused() {
+        // The write-suppression proof (P2/P3) refused for this cell
+        // (`unconditional()` — e.g. an incomparable column) — a
+        // `technique: suppress` pin cannot force suppression on over a
+        // genuine admission failure; it must refuse loudly, never silently
+        // fall back to the unconditional matched arm.
+        let trigger = Trigger::UpstreamMutation {
+            source: "sources.users".to_string(),
+        };
+        let overrides = EffectiveOverride {
+            prefer: None,
+            technique: Some(CellTechnique::Suppress),
+        };
+        let err = resolve_write_variant(&unconditional(), &trigger, false, &overrides)
+            .expect_err("pinning suppression over a refused P2/P3 proof must refuse");
+        assert_eq!(
+            err.pinned,
+            PinnedRequest::Technique(CellTechnique::Suppress)
+        );
+        assert!(err.why.contains("proof itself refused"));
+    }
+
+    #[test]
+    fn prefer_suppress_soft_bias_overrides_first_build_default_without_refusing() {
+        // A soft `prefer: suppress` bias, unlike the hard pin, still never
+        // refuses — but it does override the structural first-build
+        // default when the variant is admitted.
+        let overrides = EffectiveOverride {
+            prefer: Some(TechniquePreference::Suppress),
+            technique: None,
+        };
+        let (resolved, reason) =
+            resolve_write_variant(&suppressed(), &Trigger::Backfill, false, &overrides)
+                .expect("soft bias never refuses");
+        assert_eq!(resolved, suppressed());
+        assert_eq!(reason, VariantReason::Overridden);
+    }
+
+    #[test]
+    fn prefer_suppress_soft_bias_falls_back_silently_when_not_admitted() {
+        // Unlike the hard pin, a soft `prefer: suppress` bias falls back
+        // silently (no refusal) when the write-suppression proof itself
+        // refused — "soft" means it only nudges among what IS resolvable.
+        let trigger = Trigger::UpstreamMutation {
+            source: "sources.users".to_string(),
+        };
+        let overrides = EffectiveOverride {
+            prefer: Some(TechniquePreference::Suppress),
+            technique: None,
+        };
+        let (resolved, reason) =
+            resolve_write_variant(&unconditional(), &trigger, false, &overrides)
+                .expect("soft bias never refuses");
+        assert_eq!(resolved, unconditional());
+        assert_eq!(reason, VariantReason::NotAdmitted);
     }
 }
 

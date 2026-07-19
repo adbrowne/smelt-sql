@@ -72,20 +72,25 @@ fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
     let (own_contract, edges) =
         smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
 
-    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = model
+    let maintenance_cfg = model
         .metadata
         .as_deref()
-        .and_then(|m| m.maintenance.as_ref())
-        .map(|m| m.cells.as_slice())
-        .unwrap_or(&[]);
+        .and_then(|m| m.maintenance.as_ref());
+    let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
+        maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
+    let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
 
-    Some(build_maintenance_plan_report(
-        &canonical,
-        &result,
-        &own_contract,
-        &edges,
-        cells_cfg,
-    ))
+    Some(
+        build_maintenance_plan_report(
+            &canonical,
+            &result,
+            &own_contract,
+            &edges,
+            cells_cfg,
+            defaults_cfg,
+        )
+        .expect("build_maintenance_plan_report"),
+    )
 }
 
 /// `daily_events` in `examples/timeseries` is `refresh: incremental` +

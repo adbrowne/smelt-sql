@@ -318,16 +318,20 @@ pub fn build_relation_contract(
 /// maintained model, rendered through the same contract rows regardless
 /// of which provider filled them. `model_name` is its canonical path.
 /// `cells_cfg` is the model's own `maintenance.cells[]` frontmatter (empty
-/// when the model declares none) — read only to look up each cell's active
+/// when the model declares none) — read to look up each cell's active
 /// `write:` pin, if any (`docs/specs/incremental_models.md` §"Per-cell
-/// write addressing").
+/// write addressing"), and its narrowed `prefer`/`technique` override for
+/// the write-variant row below. `defaults_cfg` is the model's own
+/// `maintenance.defaults` block (the broad end of the same ladder,
+/// `smelt_logical::maintenance::choice::effective_override`).
 pub fn build_maintenance_plan_report(
     model_name: &str,
     result: &smelt_db::queries::maintenance::MaintenancePlanResult,
     own_contract: &RelationContractView,
     edges: &[InboundEdgeContract],
     cells_cfg: &[smelt_core::config::MaintenanceCellConfig],
-) -> String {
+    defaults_cfg: Option<&smelt_core::config::MaintenanceDefaults>,
+) -> Result<String> {
     use smelt_logical::maintenance::PartitionLocal;
     use std::fmt::Write as _;
 
@@ -488,6 +492,142 @@ pub fn build_maintenance_plan_report(
                      falls back to unconditional rewrite, nothing to record)"
                 );
             }
+            // Write variant (`docs/plans/20260715-composed-axes-conditional-
+            // maintenance.md` Phase G1; `incremental_models.md` §"Windowed
+            // maintenance and the horizon" category 2, §"Interchangeability
+            // and choice"): which matched-arm shape the override ladder's
+            // conditional-variant dimension resolves for a suppressible
+            // cell (`Technique::ColumnScopedMerge` or `Technique::KeyedFold`),
+            // and why — pin / preference / default / first-build, mirroring
+            // `choice::VariantReason`. Like the observed-delta recording
+            // line above, this reporting path has no `sql`/`JoinContext`
+            // threaded to redo the P3 comparability walk, so `facts.
+            // has_identity` (the P2 half only) is the best-effort proxy for
+            // "the conditional variant is admitted" in the branches below
+            // that print a preference/pin/default line — the authoritative
+            // check at runtime is `choice::resolve_write_suppression` folded
+            // through `choice::resolve_write_variant`.
+            //
+            // The one case that IS fully decidable without a P3 walk is
+            // `!facts.has_identity` (`RowIdentity::WholeRow`):
+            // `resolve_write_suppression` checks row identity first and
+            // short-circuits to `Unconditional` before ever consulting
+            // comparability or the column group, so a `technique: suppress`
+            // pin over a `WholeRow` cell is genuinely, always inadmissible —
+            // this block calls the real resolvers for that decidable case
+            // and propagates the resulting `ChoiceRefusal` as an actual
+            // `explain` error, rather than the silently-wrong success line a
+            // pre-this-fix version printed unconditionally here regardless
+            // of any pin.
+            if matches!(
+                cell.technique,
+                Technique::ColumnScopedMerge | Technique::KeyedFold
+            ) {
+                // The write-suppression dimension's own narrowed override
+                // (`smelt_logical::maintenance::choice::effective_override`),
+                // matched the same way `matching_write_pin` matches a
+                // `cells[].write` pin: `on:` against this trigger's own
+                // source address, `columns` against any member of the
+                // cell's group. `Trigger::ColumnAdded` (the
+                // definition-change trigger) has no `on:` address of its
+                // own, mirroring `smelt-db`'s own `trigger_on_address`.
+                let trigger_address = match &cell.trigger {
+                    smelt_logical::maintenance::Trigger::NewData { source }
+                    | smelt_logical::maintenance::Trigger::UpstreamMutation { source } => {
+                        Some(source.clone())
+                    }
+                    smelt_logical::maintenance::Trigger::Backfill => Some("backfill".to_string()),
+                    smelt_logical::maintenance::Trigger::ColumnAdded { .. } => None,
+                };
+                let group_columns: Vec<String> = result
+                    .column_groups
+                    .iter()
+                    .find(|g| g.name() == cell.group)
+                    .map(|g| g.columns.clone())
+                    .unwrap_or_default();
+                let overrides = trigger_address
+                    .as_deref()
+                    .map(|addr| {
+                        smelt_logical::maintenance::choice::effective_override(
+                            defaults_cfg,
+                            cells_cfg,
+                            addr,
+                            &group_columns,
+                        )
+                    })
+                    .unwrap_or_default();
+
+                use smelt_core::config::{CellTechnique, TechniquePreference};
+
+                if !facts.has_identity {
+                    // Real (not proxy): a `WholeRow` cell always resolves
+                    // `WriteSuppression::Unconditional` regardless of the
+                    // column group or comparability
+                    // (`resolve_write_suppression`'s own fail-closed first
+                    // check), so calling the real resolvers here with an
+                    // empty compared-column set is exact, not an
+                    // approximation. A hard `technique: suppress` pin over
+                    // this is a genuine `ChoiceRefusal`.
+                    let raw_suppression =
+                        smelt_logical::maintenance::choice::resolve_write_suppression(
+                            &[],
+                            &[],
+                            &cell.row_identity,
+                        );
+                    smelt_logical::maintenance::choice::resolve_write_variant(
+                        &raw_suppression,
+                        &cell.trigger,
+                        cell.ledger_catch_up,
+                        &overrides,
+                    )
+                    .map_err(|refusal| anyhow::anyhow!("{refusal}"))?;
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (default — no proven row identity, \
+                         the conditional variant is never admitted for this cell)"
+                    );
+                } else if let Some(CellTechnique::Suppress) = overrides.technique {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: suppressed (pinned via `technique: suppress`)"
+                    );
+                } else if let Some(CellTechnique::Unconditional) = overrides.technique {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (pinned via `technique: \
+                         unconditional`, overriding whatever the structural default would \
+                         otherwise prefer)"
+                    );
+                } else if matches!(overrides.prefer, Some(TechniquePreference::Suppress)) {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: suppressed (soft-preferred via `prefer: \
+                         suppress`, overriding the structural default)"
+                    );
+                } else if matches!(overrides.prefer, Some(TechniquePreference::Unconditional)) {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (soft-preferred via `prefer: \
+                         unconditional`, overriding the structural default)"
+                    );
+                } else if smelt_logical::maintenance::choice::trigger_has_prior_state(
+                    &cell.trigger,
+                    cell.ledger_catch_up,
+                ) {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: suppressed (preference — steady-state trigger \
+                         over prior state)"
+                    );
+                } else {
+                    let _ = writeln!(
+                        out,
+                        "      write variant: unconditional (first-build posture — this trigger \
+                         has no prior stored state on this column group to diff against; the \
+                         conditional variant is admitted but not preferred here)"
+                    );
+                }
+            }
         }
     }
     let _ = writeln!(out);
@@ -579,7 +719,7 @@ pub fn build_maintenance_plan_report(
         }
     }
 
-    out
+    Ok(out)
 }
 
 /// How a `--show-sql` region's literal bounds are sourced

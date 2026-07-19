@@ -108,7 +108,7 @@ Sequencing follows research §11: locality first (Group A — it is the enabling
 | F3 | T4 sidecar DDL/DML via emitters, upserted in the consuming write's transaction; external `mutable_snapshot` delta derivation | done (2026-07-19) |
 | F4 | Sidecar invalidation (definition change / schema evolution ⇒ "everything changed", widen-never-narrow) | done (2026-07-19) |
 | F5 | T3 over external sources (fixture must fail the closure proof without the RI declaration — the proof must discriminate) | done (2026-07-19) |
-| G1 | Conditional variants in per-cell technique choice (first-build admit-not-prefer; bakeoff stays deferred) | pending |
+| G1 | Conditional variants in per-cell technique choice (first-build admit-not-prefer; bakeoff stays deferred) | done (2026-07-19) |
 | G2 | Docs sweep + `/smelt:validate incremental_models` drift report | pending |
 
 ## Decisions taken while fleshing out the skeleton

@@ -788,11 +788,30 @@ pub struct MaintenanceDefaults {
 /// `cells[].prefer`. `technique:` pins (bypassing the cost model) reuse
 /// [`CellTechnique`] instead, since it additionally admits
 /// `rederive_columns`.
+///
+/// `Suppress`/`Unconditional` are a second, orthogonal bias dimension folded
+/// onto the same `prefer:` key rather than a new declared field: which
+/// matched-arm *variant* a suppressible cell's already-chosen family
+/// (`ColumnScopedMerge`/keyed fold) writes, independent of the `Fold`/
+/// `Recompute` family choice above
+/// (`docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase
+/// G1; `docs/research/20260715-conditional-maintenance-without-cdf.md` item
+/// 8: conditional variants change *which technique serves a cell*,
+/// "steerable via `maintenance:` prefer/pin" — no new declared model
+/// surface). Meaningful only when the resolved family is suppressible; a
+/// value here never changes family choice itself.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TechniquePreference {
     Fold,
     Recompute,
+    /// Soft bias toward the change-suppressed matched-arm variant, e.g. to
+    /// override the first-build/definition-change-backfill posture's
+    /// default of not preferring it.
+    Suppress,
+    /// Soft bias toward the plain unconditional matched arm, overriding the
+    /// steady-state trigger's default preference for suppression.
+    Unconditional,
     /// The cost model decides (the default when `defaults.prefer` is absent).
     Auto,
 }
@@ -837,12 +856,27 @@ pub struct MaintenanceCellConfig {
 /// `maintenance.cells[].technique` — the hard-pin value set (a superset of
 /// [`TechniquePreference`]: `rederive_columns` is only meaningful as an
 /// explicit pin, never a soft bias).
+///
+/// `Suppress`/`Unconditional` mirror [`TechniquePreference`]'s own pair: the
+/// same orthogonal write-suppression dimension, but as a hard pin — never a
+/// family pin (it does not select `Fold`/`Recompute`/`RederiveColumns`).
+/// Forcing `Suppress` on a cell whose write-suppression proof (P2/P3)
+/// itself refused is a hard, fail-loud refusal, exactly like pinning a
+/// family the derived plan never admitted — a pin bypasses the cost model,
+/// never the admission proof. `Unconditional` never refuses: the plain
+/// matched arm is always a safe fallback.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(rename_all = "snake_case")]
 pub enum CellTechnique {
     Fold,
     Recompute,
     RederiveColumns,
+    /// Force the change-suppressed matched-arm variant on, bypassing the
+    /// first-build/definition-change-backfill posture's default.
+    Suppress,
+    /// Force the plain unconditional matched arm, bypassing the
+    /// steady-state trigger's default preference for suppression.
+    Unconditional,
 }
 
 /// The partition-locality guardrail (`incremental_models.md` §Semantics "The

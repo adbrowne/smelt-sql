@@ -27,8 +27,8 @@ use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{
-    resolve_recompute_restriction, resolve_write_suppression, RecomputeRestriction,
-    WriteSuppression,
+    effective_override, resolve_recompute_restriction, resolve_write_suppression,
+    resolve_write_variant, RecomputeRestriction, WriteSuppression,
 };
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
@@ -807,8 +807,55 @@ pub fn resolve_live_column_scoped_cell(
         let comparability = model_property_vector(sql, &JoinContext::new())
             .map(|v| v.comparability)
             .unwrap_or_default();
-        let suppression =
+        let raw_suppression =
             resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
+        // The override ladder's write-suppression dimension
+        // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
+        // Phase G1): `defaults.prefer`/`cells[].prefer`/`cells[].technique`
+        // narrowed to this cell's own trigger + column group, exactly the
+        // same ladder `resolve_cell_choice` narrows for family choice.
+        let overrides = effective_override(
+            metadata
+                .maintenance
+                .as_ref()
+                .and_then(|m| m.defaults.as_ref()),
+            cells_cfg,
+            source,
+            &group_columns,
+        );
+        // Fold the first-build/definition-change-backfill posture (or an
+        // explicit `prefer`/`technique` override on this dimension) into
+        // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
+        // or `Trigger::Backfill` — no prior stored state on this group to
+        // diff against) resolves the unconditional matched arm by default,
+        // exactly as if the P2/P3 proof itself had refused — unless an
+        // explicit pin/preference overrides that default. This is the
+        // resolver's own rule, never a runtime special case here.
+        //
+        // A `technique: suppress` pin forcing suppression on over a genuine
+        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the
+        // `write_pin` dimension just above — where `smelt-db`'s
+        // pre-execution diagnostics (`MaintenanceWritePatternUnavailable`/
+        // `MaintenanceWriteAddressingRefused`) already validate `cells[].write`
+        // pins before a run ever reaches this code, making that `.ok()?`
+        // defensive/unreachable — there is currently NO pre-execution
+        // diagnostic gate for this write-*variant* pin dimension
+        // (`technique`/`prefer: suppress`/`unconditional`). So this `.ok()?`
+        // is a REAL silent fallback: an inadmissible variant pin is not
+        // refused here, it just falls through to the safe region-recompute
+        // batch loop below instead of failing the run loudly. This is a
+        // known gap, not by design; see `docs/specs/incremental_models.md`
+        // §"Known Divergences" and
+        // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
+        // Phase G1 for the tracked follow-up to extend the diagnostic gate
+        // to this dimension.
+        let (suppression, _variant_reason) = resolve_write_variant(
+            &raw_suppression,
+            &cell.trigger,
+            cell.ledger_catch_up,
+            &overrides,
+        )
+        .ok()?;
         Some((source.clone(), cell, suppression))
     })
 }

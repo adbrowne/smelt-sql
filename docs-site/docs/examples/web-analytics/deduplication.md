@@ -158,6 +158,7 @@ Cells (2):
       scan clamps: (none)
       admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
       write pin: (none)
+      write variant: suppressed (preference — steady-state trigger over prior state)
   - group {*} on trigger Backfill
       corner:    RecomputeRegion
       technique: DeleteInsert

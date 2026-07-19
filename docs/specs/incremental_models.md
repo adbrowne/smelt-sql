@@ -148,12 +148,13 @@ maintained model; a model's landed delta is the output window a completed run wr
 ```yaml
 maintenance:
   defaults:
-    prefer: recompute | fold | auto        # per-model soft default (auto = cost model)
+    prefer: recompute | fold | suppress | unconditional | auto   # per-model soft default (auto = cost model)
   cells:
     - columns: [<col>, ...]                # names any member of a derived column group
       on: <source-address> | backfill      # the trigger + changed-input this cell handles
-      prefer: fold | recompute             # soft per-cell bias (cost model still refines)
-      technique: fold | recompute | rederive_columns   # hard per-cell technique pin (bypasses cost model)
+      prefer: fold | recompute | suppress | unconditional   # soft per-cell bias (cost model still refines)
+      technique: fold | recompute | rederive_columns | suppress | unconditional
+                                           # hard per-cell pin (bypasses cost model)
       write: <pattern>                     # hard per-cell addressing pin (optional); OPEN name resolved
                                            #   against the write-pattern registry (e.g. region | keyed |
                                            #   column | update); unknown or backend-unavailable → refused
@@ -168,6 +169,13 @@ maintenance:
 
 - The override ladder is `defaults.prefer` → `cells[].prefer` → `cells[].technique`, narrower
   scope winning; `technique:` alone bypasses the cost model. Almost every model sets none.
+- `suppress`/`unconditional` are an orthogonal dimension from `fold`/`recompute`: they never
+  change which technique family a cell resolves to, only whether a suppressible cell's
+  (`ColumnScopedMerge`/keyed fold) matched arm writes conditionally. `technique: suppress` on a
+  cell whose write-suppression proof did not hold (no proven row identity, or a compared column
+  not proven comparable across runs) is refused the same way a family pin naming an unadmitted
+  technique is; `technique: unconditional` never refuses. §"Interchangeability and choice" names
+  the equivalence this ladder is only ever choosing *between*, never around.
 - `cells[].write` is a **hard per-cell addressing pin**: an **open name** resolved against the
   write-pattern registry, not a sealed keyword set (§"Per-cell write addressing" → "The
   write-pattern set is open"). Every pin is **validated against the equivalence invariant** for its
@@ -1620,6 +1628,28 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   remaining two flags in that section). Design derivation:
   `docs/research/20260716-relation-contract-and-per-cell-addressing.md`; the Relation Contract that
   reframes the declared facts is `models.md` §"The Relation Contract".
+- **An inadmissible write-*variant* pin (`technique`/`prefer: suppress`/`unconditional`) has no
+  pre-execution diagnostic gate, unlike `cells[].write`.** The `cells[].write` pin is validated
+  before a run starts — an invalid pin is refused up front with `MaintenanceWritePatternUnavailable`/
+  `MaintenanceWriteAddressingRefused` (previous bullet). The write-*variant* pin — `defaults.prefer`/
+  `cells[].prefer`/`cells[].technique` forcing `suppress` or `unconditional` on a live
+  column-scoped-merge cell — has no equivalent check: `smelt-db` never inspects this pin before a
+  run executes. When the pin is inadmissible (it forces `suppress` over a cell whose P2/P3
+  change-comparability proof genuinely refuses), the run does not fail loudly today — the resolver
+  silently falls back to full region recompute for that source instead of refusing the run up
+  front. `smelt explain`'s write-variant report surfaces the refusal correctly for the sub-case that
+  is decidable without a P3 walk — a `technique: suppress` pin over a `WholeRow`-identity cell (P2)
+  always refuses, since `resolve_write_suppression` short-circuits on row identity before ever
+  consulting column comparability, and `explain` calls the real resolver for exactly that case and
+  propagates its `ChoiceRefusal` as a real error. `explain` has no `sql`/`JoinContext` threaded to
+  redo the P3 comparability walk for a `Key`-identity cell, so a `technique: suppress` pin that is
+  inadmissible only because of P3 (an incomparable compared column, proven row identity otherwise)
+  is not caught by `explain` either — it still prints the pinned "suppressed" line, matching the
+  same best-effort P2-only proxy the adjacent observed-delta-recording line already documents.
+  Extending the pre-execution diagnostic gate to cover this pin dimension the same way
+  `cells[].write` is covered — closing both the execution-time gap and `explain`'s residual P3
+  reporting gap — is tracked as follow-up in
+  `docs/plans/20260715-composed-axes-conditional-maintenance.md` Phase G1.
 - **Observed-delta recording is built for the change-suppressed column-scoped MERGE family
   (§"The graph layer" — "Observed deltas on model edges"); its key→partition projection into
   forward propagation is built for a composed model edge, and both are surfaced by `smelt
@@ -2092,6 +2122,52 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   doesn't have). Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
+- **The conditional variant now enters the override ladder; `smelt bakeoff` remains unwired.**
+  `resolve_write_suppression`'s `Suppressed` verdict no longer means "always emit the
+  change-suppressed matched arm whenever it's proven" — `maintenance::choice::resolve_write_variant`
+  folds a structural preference rule alongside the already-proven verdict: a steady-state trigger
+  (prior committed state exists for the cell's compared column group) *prefers* suppression, while
+  a trigger with no prior state to diff against — `Trigger::Backfill`, or a definition-change
+  cell's own `ledger_catch_up: true` — is *admitted but not preferred*, resolving the unconditional
+  matched arm by default even though the P2/P3 proof still holds (the compare would be pure
+  overhead there, not a correctness gain). This is squarely the choice the "Interchangeability and
+  choice" rule already licenses: the two variants are proven interchangeable at a fixed processed-
+  input set, so which one runs may change only freshness/cost, never observable bits — asserted
+  end-to-end against a real DuckDB backend
+  (`crates/smelt-runtime/tests/technique_lowering.rs::first_build_posture_and_steady_state_preference_resolve_bit_identical_state`).
+  `smelt-runtime::maintenance_driver::resolve_live_column_scoped_cell` — the one live production
+  call site this rule currently reaches — consults it instead of honouring `Suppressed`
+  unconditionally; `smelt explain` prints the resolved variant and why (`preference` / `first-build
+  posture` / `default` when the proof itself never admitted the variant) alongside each
+  `ColumnScopedMerge`/`KeyedFold` cell. Two things this narrows rather than closes: first, the
+  keyed-fold path's own suppression consumer (`smelt-runtime::cumulative`, the windowed-keyed-
+  maintenance driver behind `refresh: keyed`) still always honours `Suppressed` unconditionally —
+  this rule does not yet reach it. Second, no real fixture today actually *derives* a
+  `ColumnScopedMerge`/`KeyedFold` cell under a first-build/backfill trigger to exercise the new
+  branch live: `derive_backfill` always emits `Technique::DeleteInsert` for `Trigger::Backfill`
+  regardless of grain, and a `Trigger::ColumnAdded` cell is only constructed from an explicit
+  `ModelDiff` input no live caller (`smelt explain`, the regular run loop) supplies yet — so the
+  rule is proven correct at the resolver level and exercised through `smelt explain`'s reporting
+  surface with a hand-built plan cell, not yet through a real workspace's own derivation.
+  `defaults.prefer`/`cells[].prefer`/`cells[].technique` — the same ladder `resolve_cell_choice`
+  narrows for family choice — now also steers this orthogonal write-suppression dimension: both
+  `TechniquePreference` (soft) and `CellTechnique` (hard) gained a `suppress`/`unconditional`
+  pair of values, reusing the existing `prefer:`/`technique:` keys rather than declaring a new
+  block (`resolve_write_variant` consults `EffectiveOverride` before falling through to the
+  structural default above). A `technique: suppress` pin forces the change-suppressed matched
+  arm on even for a first-build/backfill trigger, but never bypasses the P2/P3 admission proof —
+  pinning it over a cell whose write-suppression proof itself refused is a hard, fail-loud
+  refusal, the same "a pin bypasses the cost model, never admission" rule family pins already
+  obey. A `technique: unconditional` pin forces the plain matched arm off suppression even for a
+  steady-state trigger, and never refuses (the plain matched arm is always safe). The soft
+  `prefer: suppress`/`prefer: unconditional` values nudge the same default without ever refusing.
+  `smelt bakeoff`, the statistics-driven cost model the ladder's `prefer: auto`/no-override
+  default ultimately answers to, remains entirely unwired (tracked by
+  `docs/plans/20260707-maintenance-plan-impl.md` MP13), so absent an explicit pin/preference on
+  this dimension, today's default is still the structural rule above, not a measured one.
+  Whether a future cost model needs region-level change-ratio statistics from prior observed
+  deltas (rather than the structural steady-state/first-build rule alone) to refine this choice
+  further is an open question, not scoped work.
 - **User docs describe the trichotomy + grain surface; the plan's own CLI surface is now partly
   covered.** The `docs-site/` pages consistently describe
   `refresh: full | incremental | materialized_view` and `grain: partition | key |

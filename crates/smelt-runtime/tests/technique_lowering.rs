@@ -680,6 +680,324 @@ async fn merge_affected_row_count(
     counts.value(0)
 }
 
+/// Phase G1 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`)
+/// — the conditional-variant dimension enters `choice.rs`'s override ladder:
+/// `resolve_write_variant` folds the first-build/definition-change-backfill
+/// posture into an already-proven `WriteSuppression::Suppressed` verdict.
+/// This is the interchangeability claim the plan asks for, exercised
+/// end-to-end against a real DuckDB backend: a steady-state trigger
+/// (`Trigger::UpstreamMutation`, no ledger catch-up) *prefers* the
+/// change-suppressed matched arm, while a first-build/backfill trigger
+/// (`Trigger::Backfill`, or a definition-change cell's own
+/// `ledger_catch_up: true`) is *admitted but not preferred* and resolves the
+/// unconditional matched arm instead — bit-identical final state either way
+/// (`incremental_models.md` §"Interchangeability and choice"), never a
+/// difference in which `S` is reflected.
+#[tokio::test]
+async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_state() {
+    use smelt_logical::maintenance::choice::{resolve_write_variant, VariantReason};
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+
+    // Two separate real DuckDB databases, seeded identically: a target that
+    // already diverges from its dimension source for user 1 (tier
+    // 'bronze' → 'gold'), unchanged for user 2.
+    async fn seed(path: &Path) -> DuckDbBackend {
+        let backend = DuckDbBackend::new(path, "main").await.expect("open duckdb");
+        backend
+            .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create target table");
+        backend
+            .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+            .await
+            .expect("seed target table");
+        backend
+            .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create dim table");
+        backend
+            .execute_sql("INSERT INTO main.sources_users VALUES (1, 'gold'), (2, 'silver')")
+            .await
+            .expect("seed dim table");
+        backend
+    }
+
+    let steady_db_path = tmp.path().join("steady.duckdb");
+    let backfill_db_path = tmp.path().join("backfill.duckdb");
+    let steady_backend = seed(&steady_db_path).await;
+    let backfill_backend = seed(&backfill_db_path).await;
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let row_identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["user_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let comparability = vec![smelt_logical::analysis::walk::ColumnComparability {
+        output: "tier".to_string(),
+        comparability: smelt_logical::analysis::walk::Comparability::Comparable,
+    }];
+    let proven_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+        &["tier".to_string()],
+        &comparability,
+        &row_identity,
+    );
+    assert_eq!(
+        proven_suppression,
+        WriteSuppression::Suppressed {
+            compared_columns: vec!["tier".to_string()]
+        },
+        "precondition: the compare must actually be admitted for this test to prove anything"
+    );
+
+    // Steady-state trigger: no prior-state gap — the ladder PREFERS
+    // suppression.
+    let steady_trigger = Trigger::UpstreamMutation {
+        source: "sources.users".to_string(),
+    };
+    let (steady_variant, steady_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        false,
+        &smelt_logical::maintenance::choice::EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(steady_reason, VariantReason::SteadyStatePreference);
+    assert!(matches!(
+        steady_variant,
+        WriteSuppression::Suppressed { .. }
+    ));
+
+    // First-build/backfill trigger: admitted, but NOT preferred — resolves
+    // unconditional by default even though the same proof holds.
+    let (backfill_variant, backfill_reason) = resolve_write_variant(
+        &proven_suppression,
+        &Trigger::Backfill,
+        false,
+        &smelt_logical::maintenance::choice::EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(backfill_reason, VariantReason::FirstBuildPosture);
+    assert!(matches!(
+        backfill_variant,
+        WriteSuppression::Unconditional { .. }
+    ));
+
+    // A definition-change backfill cell (`ledger_catch_up: true`) resolves
+    // the same way even on an otherwise-steady-state trigger.
+    let (catch_up_variant, catch_up_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        true,
+        &smelt_logical::maintenance::choice::EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(catch_up_reason, VariantReason::FirstBuildPosture);
+    assert!(matches!(
+        catch_up_variant,
+        WriteSuppression::Unconditional { .. }
+    ));
+
+    // Execute both resolved variants against their own real, identically
+    // seeded target — one via the suppressed matched arm the steady-state
+    // trigger prefers, the other via the unconditional matched arm the
+    // first-build/backfill posture defaults to.
+    execute_column_scoped_merge_full(
+        &steady_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &steady_variant,
+        &test_window(),
+    )
+    .await
+    .expect("steady-state suppressed merge must succeed");
+
+    execute_column_scoped_merge_full(
+        &backfill_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &backfill_variant,
+        &test_window(),
+    )
+    .await
+    .expect("first-build unconditional merge must succeed");
+
+    // Bit-identical final state either way — choice may change which
+    // matched-arm shape ran, never observable bits at a fixed processed-
+    // input set.
+    let steady_conn = duckdb::Connection::open(&steady_db_path).expect("reconnect steady");
+    let backfill_conn = duckdb::Connection::open(&backfill_db_path).expect("reconnect backfill");
+    for user_id in [1_i64, 2_i64] {
+        let steady_tier: String = steady_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read steady tier");
+        let backfill_tier: String = backfill_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read backfill tier");
+        assert_eq!(
+            steady_tier, backfill_tier,
+            "user {user_id}: the suppressed (steady-state-preferred) and unconditional \
+             (first-build-posture) matched arms must produce bit-identical state"
+        );
+    }
+}
+
+/// Phase G1's pin dimension: a `technique: unconditional` pin forces the
+/// plain matched arm on a steady-state trigger that would otherwise prefer
+/// suppression, and a `technique: suppress` pin forces the change-suppressed
+/// matched arm on for a first-build trigger that would otherwise default to
+/// unconditional — exercised end-to-end against a real DuckDB backend,
+/// asserting bit-identical final state against the natural (unpinned)
+/// resolution either way (`incremental_models.md` §"Interchangeability and
+/// choice": a pin may change which matched-arm shape ran, never the bits at
+/// a fixed processed-input set).
+#[tokio::test]
+async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state() {
+    use smelt_core::config::CellTechnique;
+    use smelt_logical::maintenance::choice::{
+        resolve_write_variant, EffectiveOverride, VariantReason,
+    };
+
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+
+    async fn seed(path: &Path) -> DuckDbBackend {
+        let backend = DuckDbBackend::new(path, "main").await.expect("open duckdb");
+        backend
+            .execute_sql("CREATE TABLE main.dim_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create target table");
+        backend
+            .execute_sql("INSERT INTO main.dim_users VALUES (1, 'bronze'), (2, 'silver')")
+            .await
+            .expect("seed target table");
+        backend
+            .execute_sql("CREATE TABLE main.sources_users (user_id BIGINT, tier VARCHAR)")
+            .await
+            .expect("create dim table");
+        backend
+            .execute_sql("INSERT INTO main.sources_users VALUES (1, 'gold'), (2, 'silver')")
+            .await
+            .expect("seed dim table");
+        backend
+    }
+
+    let natural_db_path = tmp.path().join("natural.duckdb");
+    let pinned_db_path = tmp.path().join("pinned.duckdb");
+    let natural_backend = seed(&natural_db_path).await;
+    let pinned_backend = seed(&pinned_db_path).await;
+
+    let dimension_batch_sql = "SELECT u.user_id, u.tier FROM main.sources_users u";
+    let row_identity = RowIdentityVerdict {
+        identity: RowIdentity::Key(vec!["user_id".to_string()]),
+        proven_mismatch: None,
+    };
+    let comparability = vec![smelt_logical::analysis::walk::ColumnComparability {
+        output: "tier".to_string(),
+        comparability: smelt_logical::analysis::walk::Comparability::Comparable,
+    }];
+    let proven_suppression = smelt_logical::maintenance::choice::resolve_write_suppression(
+        &["tier".to_string()],
+        &comparability,
+        &row_identity,
+    );
+
+    // A steady-state trigger naturally prefers suppression — pin
+    // `technique: unconditional` to force the plain matched arm instead.
+    let steady_trigger = Trigger::UpstreamMutation {
+        source: "sources.users".to_string(),
+    };
+    let (natural_variant, natural_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        false,
+        &EffectiveOverride::default(),
+    )
+    .expect("no pin — never refuses");
+    assert_eq!(natural_reason, VariantReason::SteadyStatePreference);
+    assert!(matches!(
+        natural_variant,
+        WriteSuppression::Suppressed { .. }
+    ));
+
+    let unconditional_pin = EffectiveOverride {
+        prefer: None,
+        technique: Some(CellTechnique::Unconditional),
+    };
+    let (pinned_variant, pinned_reason) = resolve_write_variant(
+        &proven_suppression,
+        &steady_trigger,
+        false,
+        &unconditional_pin,
+    )
+    .expect("`technique: unconditional` is always admissible — never refuses");
+    assert_eq!(pinned_reason, VariantReason::Overridden);
+    assert!(matches!(
+        pinned_variant,
+        WriteSuppression::Unconditional { .. }
+    ));
+
+    execute_column_scoped_merge_full(
+        &natural_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &natural_variant,
+        &test_window(),
+    )
+    .await
+    .expect("natural suppressed merge must succeed");
+
+    execute_column_scoped_merge_full(
+        &pinned_backend,
+        "main",
+        "dim_users",
+        &["user_id".to_string()],
+        dimension_batch_sql,
+        &pinned_variant,
+        &test_window(),
+    )
+    .await
+    .expect("pinned unconditional merge must succeed");
+
+    let natural_conn = duckdb::Connection::open(&natural_db_path).expect("reconnect natural");
+    let pinned_conn = duckdb::Connection::open(&pinned_db_path).expect("reconnect pinned");
+    for user_id in [1_i64, 2_i64] {
+        let natural_tier: String = natural_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read natural tier");
+        let pinned_tier: String = pinned_conn
+            .query_row(
+                "SELECT tier FROM main.dim_users WHERE user_id = ?",
+                [user_id],
+                |row| row.get(0),
+            )
+            .expect("read pinned tier");
+        assert_eq!(
+            natural_tier, pinned_tier,
+            "user {user_id}: the natural (suppressed) and pinned (unconditional) matched \
+             arms must produce bit-identical state — a pin changes which shape ran, never \
+             the bits at a fixed processed-input set"
+        );
+    }
+}
+
 /// Real fixture: `examples/timeseries/models/daily_events_enriched.sql`
 /// (fact `raw.events` × dimension `raw.users`, the latter declared
 /// `mutation_profile: mutable_snapshot`) is the MP11 shape wired into the
