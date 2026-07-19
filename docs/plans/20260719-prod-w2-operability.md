@@ -62,7 +62,7 @@ The production-release review found that smelt's correctness core is release-gra
 | 5     | done     | (this commit) | 2026-07-20 |
 | 6     | done     | (this commit) | 2026-07-20 |
 | 7     | done     | f82fe7ef | 2026-07-20 |
-| 8     | blocked  |        |      |
+| 8     | pending  |        |      |
 
 ## Phase detail
 
@@ -261,6 +261,8 @@ The production-release review found that smelt's correctness core is release-gra
 
 **Pre-conditions.** Phase 7 (outcomes exist for every model).
 
+**Unblock decision (2026-07-20, Andrew): Option 2 — extend the schema.** Spec-first: update `docs/specs/run_state.md` §"Run manifest" to add `error: Option<String>` and `retry_count: u32` to the per-model record, and revise the abort semantics to "let the in-flight wave finish, record every failure, then abort" (no new waves start after the first failure). Then implement: `ModelRunRecord` gains both fields; the wave-flush `Err` arm in `execute_project` records **every** failing model in the wave as `Failed` with its own error text (no fall-through to the `skipped` catch-up loop); a per-model retry counter is threaded from `model_retrying` into the manifest entry.
+
 **TDD tests to write first.**
 - `crates/smelt-cli/tests/run_report.rs::report_written_on_success_and_on_failure` — `.smelt/targets/<t>/reports/<run_id>.json` exists in both cases; schema fields per `run_state.md` (models, outcomes, durations, row counts, error strings, retry counts).
 - `crates/smelt-cli/tests/run_report.rs::log_format_json_emits_parseable_lines` — `--log-format json` → every stderr line parses as JSON.
@@ -270,6 +272,7 @@ The production-release review found that smelt's correctness core is release-gra
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-cli/src/reporter.rs`, `crates/smelt-cli/src/main.rs`, `crates/smelt-runtime/src/reporter.rs`
+- Per the Option 2 unblock decision: `crates/smelt-state/src/lib.rs` (`ModelRunRecord` schema), `crates/smelt-runtime/src/execute.rs` (wave-flush failure recording, retry-count threading), `docs/specs/run_state.md` (spec-first manifest schema + abort-semantics diff)
 
 **Docs touched.**
 - `docs-site/docs/reference/cli.md` — report schema + `--log-format`; groundwork the W6 deployment guide links to.
@@ -298,6 +301,7 @@ Append-only log of phases the loop recorded as `blocked` and continued past. Eac
     1. **Scope the report down to today's model.** Report a single `first_error: {model, message}` plus outcome counts (success/skipped/failed, where `failed` is always ≤ 1 entry) and drop retry counts and "each failed model" from the TDD tests; update Phase 8's test bullets and `run_state.md` §"Run report" to match. No `execute.rs`/`smelt-state` changes needed — stays inside the declared critical files.
     2. **Extend the schema.** Add `error: Option<String>` and `retry_count: u32` to `ModelRunRecord`, change the wave-flush `Err(e)` arm to record every failing model as `Failed` (not just the first) with its own error text instead of falling through to the `skipped` catch-up loop, and thread a per-model retry counter from `model_retrying` into the manifest entry. This is real scope growth — touches `smelt-state`, `execute.rs`, and `run_state.md` §"Run manifest" (schema change, spec-first) — and changes the abort model from "stop at first failure" to "let a wave finish, then abort with every failure recorded," which is itself a semantics decision beyond what W2 phases 5-7 established.
   Row set to `blocked`; tree restored to clean, no code changes made this iteration.
+  - **Resolved 2026-07-20 (Andrew): Option 2 — extend the schema.** Row flipped back to `pending`; the decision's scope (fields, wave-abort semantics change, expanded critical files) is recorded inline in Phase 8's detail section. Multi-failure recording and per-model retry counts are in scope; spec-first via `run_state.md`.
 
 ## Verification
 
