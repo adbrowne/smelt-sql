@@ -175,6 +175,59 @@ impl STracker {
         Ok(())
     }
 
+    /// Spark/Delta-safe counterpart of [`Self::materialize_s`]
+    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 3):
+    /// Spark SQL has no `CREATE TEMP TABLE` DDL (a DuckDB-ism) — this
+    /// materializes `S_k` as a `CREATE OR REPLACE TEMPORARY VIEW` over a
+    /// `VALUES` table constructor instead, portable ANSI-ish SQL both
+    /// DuckDB and Spark SQL accept identically (a temp view is scoped to the
+    /// session/connection that created it, exactly like DuckDB's `TEMP
+    /// TABLE`, so the same "same backend creates and queries it" contract
+    /// [`Self::materialize_s`]'s doc comment states still applies). Kept as
+    /// a SEPARATE method rather than replacing [`Self::materialize_s`] — the
+    /// DuckDB gate's existing `TEMP TABLE` path is untouched (plan Phase 3
+    /// review checklist: "DuckDB standing gate untouched").
+    pub async fn materialize_s_as_view(
+        &self,
+        backend: &dyn Backend,
+        k: usize,
+    ) -> anyhow::Result<()> {
+        let view = self.oracle_table_name();
+        backend
+            .execute_sql(&format!("DROP VIEW IF EXISTS {view}"))
+            .await
+            .map_err(|e| anyhow::anyhow!("drop stale oracle view {view}: {e}"))?;
+
+        let d = &self.source.clock_column;
+        let id = &self.source.key_column;
+        let val = &self.source.payload_column;
+        let rows = self.s_at(k);
+        let select = if rows.is_empty() {
+            // A zero-row `VALUES` list is invalid SQL on both engines; use a
+            // dummy row (typed the same as a real one) then filter it out —
+            // `WHERE 1 = 0` always parses since the query still has a FROM.
+            format!(
+                "SELECT {d}, {id}, {val} FROM (VALUES (DATE '1970-01-01', 0, 0)) \
+                 AS t({d}, {id}, {val}) WHERE 1 = 0"
+            )
+        } else {
+            let values = rows
+                .iter()
+                .map(|r| format!("(DATE '{}', {}, {})", r.d.format("%Y-%m-%d"), r.id, r.val))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("SELECT * FROM (VALUES {values}) AS t({d}, {id}, {val})")
+        };
+
+        backend
+            .execute_sql(&format!(
+                "CREATE OR REPLACE TEMPORARY VIEW {view} AS {select}"
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("create oracle view {view}: {e}"))?;
+        Ok(())
+    }
+
     /// The oracle body query for `recipe` evaluated over the materialized
     /// `S_k` table rather than the physical source table — the same body
     /// [`render::render_model_body`] produces (design §4 "renders once,

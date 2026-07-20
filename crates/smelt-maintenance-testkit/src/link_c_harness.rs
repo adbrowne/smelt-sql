@@ -188,12 +188,12 @@ impl LinkCProject {
     }
 
     /// [`Self::run`] generalised over a [`ConformanceTarget`]
-    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2):
+    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phases 2-3):
     /// selects the backend factory arm by target. `DuckDb` reproduces
     /// [`Self::run`]'s exact behaviour (the `DuckDbBackendFactory` above);
-    /// `SparkDelta` is `unimplemented!()` until a later phase of that plan
-    /// wires up a Spark backend factory — never reachable today since no
-    /// caller constructs a `SparkDelta`-targeted `LinkCProject`.
+    /// `SparkDelta` drives the exact same `execute_project` real run pipeline
+    /// through [`SparkBackendFactory`] (behind the `spark` feature — without
+    /// it, `SparkDelta` is unreachable since no caller constructs one).
     pub async fn run_with_target(
         &self,
         target: ConformanceTarget,
@@ -203,10 +203,32 @@ impl LinkCProject {
     ) -> Result<RunOutcome> {
         match target {
             ConformanceTarget::DuckDb => self.run(run_id, request, reporter).await,
-            ConformanceTarget::SparkDelta => unimplemented!(
-                "Spark backend factory arm lands in a later phase of \
-                 docs/plans/20260720-prod-w9-spark-conformance-twin.md"
-            ),
+            ConformanceTarget::SparkDelta => {
+                #[cfg(feature = "spark")]
+                {
+                    let (db, graph) = self.build_db_and_graph();
+                    let outcome = execute_project(
+                        run_id.to_string(),
+                        request,
+                        Arc::clone(&self.config),
+                        graph,
+                        db,
+                        &self.project_dir,
+                        &SparkBackendFactory,
+                        reporter,
+                        CancellationToken::new(),
+                    )
+                    .await?;
+                    Ok(outcome)
+                }
+                #[cfg(not(feature = "spark"))]
+                {
+                    unimplemented!(
+                        "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                         smelt-maintenance-testkit"
+                    )
+                }
+            }
         }
     }
 
@@ -228,6 +250,104 @@ impl LinkCProject {
             .await
             .map_err(|e| anyhow::anyhow!("DuckDB backend open failed: {}", e))?;
         Ok(Box::new(backend))
+    }
+
+    /// [`Self::backend`] generalised over a [`ConformanceTarget`] (Phase 3):
+    /// `DuckDb` reproduces [`Self::backend`]'s exact behaviour; `SparkDelta`
+    /// opens a direct Spark/Delta connection to the dedicated conformance
+    /// schema ([`open_spark_conformance_backend`]) — the Spark twin's own
+    /// harness-internal seeding/oracle-comparison channel, never a raw
+    /// host-filesystem read (spec's backend-client-API requirement).
+    pub async fn backend_for_target(&self, target: ConformanceTarget) -> Result<Box<dyn Backend>> {
+        match target {
+            ConformanceTarget::DuckDb => self.backend().await,
+            ConformanceTarget::SparkDelta => {
+                #[cfg(feature = "spark")]
+                {
+                    open_spark_conformance_backend(&self.db_path).await
+                }
+                #[cfg(not(feature = "spark"))]
+                {
+                    unimplemented!(
+                        "ConformanceTarget::SparkDelta requires the `spark` feature on \
+                         smelt-maintenance-testkit"
+                    )
+                }
+            }
+        }
+    }
+}
+
+/// Open a Spark/Delta backend bound to the dedicated conformance schema
+/// (`crate::recipe::SPARK_CONFORMANCE_SCHEMA`) — the Spark-arm counterpart of
+/// [`LinkCProject::backend`]'s hardcoded `main`-schema DuckDB connection.
+/// `db_path` is only consulted for [`crate::recipe::spark_warehouse_dir`]'s
+/// env-unset fallback; the Spark arm never opens it as a file.
+#[cfg(feature = "spark")]
+pub async fn open_spark_conformance_backend(db_path: &Path) -> Result<Box<dyn Backend>> {
+    use smelt_backend_spark::SparkBackend;
+
+    let connect_url = crate::recipe::spark_connect_url();
+    let warehouse = crate::recipe::spark_warehouse_dir(db_path);
+    let warehouse_str = warehouse.to_str().ok_or_else(|| {
+        anyhow::anyhow!("Spark warehouse path must be valid UTF-8: {warehouse:?}")
+    })?;
+
+    let backend = SparkBackend::new(
+        &connect_url,
+        "spark_catalog",
+        crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+        Some(warehouse_str),
+        true,
+    )
+    .await
+    .map_err(|e| anyhow::anyhow!("Spark backend init failed: {e}"))?;
+    Ok(Box::new(backend))
+}
+
+/// `BackendFactory` that opens a Spark/Delta backend from whatever
+/// `Target` config `execute_project` resolves for the run's target name —
+/// mirrors `crates/smelt-cli/src/backend_factory.rs::CliBackendFactory`'s
+/// production Spark arm (`smelt_backends::create_backend`'s `BackendType::Spark`
+/// case) so the harness's Spark run path exercises the same field
+/// resolution (`connect_url`/`catalog`/`schema`/`warehouse`/`format`) real
+/// runs do, rather than a harness-only shortcut.
+#[cfg(feature = "spark")]
+pub struct SparkBackendFactory;
+
+#[cfg(feature = "spark")]
+impl BackendFactory for SparkBackendFactory {
+    fn create<'a>(
+        &'a self,
+        _target_name: &'a str,
+        target_config: &'a smelt_core::config::Target,
+        _project_dir: &'a Path,
+    ) -> BackendFuture<'a> {
+        Box::pin(async move {
+            use smelt_backend_spark::SparkBackend;
+            use smelt_core::config::TableFormat;
+
+            let connect_url = target_config
+                .connect_url
+                .as_deref()
+                .ok_or_else(|| anyhow::anyhow!("Spark target requires 'connect_url'"))?;
+            let catalog = target_config.catalog.as_deref().unwrap_or("spark_catalog");
+            let use_delta = target_config
+                .table_format()
+                .map(|f| matches!(f, TableFormat::Delta))
+                .unwrap_or(true);
+
+            let backend = SparkBackend::new(
+                connect_url,
+                catalog,
+                &target_config.schema,
+                target_config.warehouse.as_deref(),
+                use_delta,
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("Spark backend init failed: {}", e))?;
+            Ok(Box::new(backend) as Box<dyn Backend>)
+        })
     }
 }
 

@@ -79,5 +79,5 @@ async-trait = "0.1"
 default = ["duckdb"]
 duckdb = ["smelt-backend-duckdb", "dep:duckdb", "smelt-backends/duckdb"]
 bundled-duckdb = ["smelt-backend-duckdb/bundled", "duckdb/bundled", "smelt-ui/bundled-duckdb", "smelt-backends/bundled-duckdb"]
-spark = ["smelt-backend-spark", "python", "smelt-backends/spark"]
+spark = ["smelt-backend-spark", "python", "smelt-backends/spark", "smelt-maintenance-testkit/spark"]
 python = ["smelt-planner/python", "smelt-core/python", "pyo3"]

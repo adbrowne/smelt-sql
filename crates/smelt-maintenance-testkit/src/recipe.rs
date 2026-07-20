@@ -49,6 +49,42 @@ pub enum ConformanceTarget {
     SparkDelta,
 }
 
+/// Dedicated Spark/Delta schema the generative conformance harness's Spark
+/// twin stages every case into (`docs/plans/20260720-prod-w9-spark-conformance-twin.md`
+/// Phase 3) — isolated from every other Spark integration test's own schema
+/// (`spark_smoke.rs`'s `analytics`, `cross_engine_parity.rs`'s own schemas),
+/// so a stale table from an unrelated suite can never collide with a
+/// generated recipe's deterministic model/source names.
+pub const SPARK_CONFORMANCE_SCHEMA: &str = "smelt_conf_gen";
+
+/// The Spark Connect URL the conformance harness's Spark arms connect to:
+/// `SPARK_CONNECT_URL` from the environment (`scripts/spark-env.sh`'s
+/// convention, mirroring `crates/smelt-cli/tests/common/mod.rs::spark_connect_url`),
+/// falling back to the default local Spark Connect port when unset. Callers
+/// that reach the Spark arm at all have already checked
+/// `SPARK_CONNECT_URL.is_some()` (the harness's skip-when-unset gate), so
+/// this fallback is only ever exercised by a caller that bypassed that
+/// check — it fails loud on connect rather than silently targeting nothing.
+pub fn spark_connect_url() -> String {
+    std::env::var("SPARK_CONNECT_URL").unwrap_or_else(|_| "sc://localhost:15002".to_string())
+}
+
+/// The Delta warehouse directory the conformance harness's Spark arms write
+/// managed tables to: `SMELT_SPARK_WAREHOUSE` from the environment
+/// (`scripts/spark-env.sh`'s convention) when set, otherwise a directory
+/// sibling to `db_path` (this module's pre-Phase-3 fallback, kept for a
+/// caller with no env var set).
+pub fn spark_warehouse_dir(db_path: &std::path::Path) -> std::path::PathBuf {
+    std::env::var("SMELT_SPARK_WAREHOUSE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            db_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("spark_warehouse")
+        })
+}
+
 /// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
 /// Phase 4; design §6 "mixed models"). Phase 1-3's pool is exclusively
 /// [`SourcePosture::AppendOnly`] (the fixed `events(d, id, val)` shape);
