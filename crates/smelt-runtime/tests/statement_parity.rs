@@ -1350,6 +1350,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         "last_seen_date",
         delta_select,
         "2026-01-30",
+        MaintenanceDialect::DuckDb,
     );
     assert_eq!(
         probe_sql, &expected_probe.sql,

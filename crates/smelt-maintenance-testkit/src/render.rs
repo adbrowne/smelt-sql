@@ -394,16 +394,38 @@ pub fn stage_for_target(
 /// file per case has nothing to collide with).
 #[cfg(feature = "spark")]
 fn reset_and_create_spark_source_table(db_path: &Path, recipe: &ModelRecipe) -> anyhow::Result<()> {
-    let db_path = db_path.to_path_buf();
-    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
-    let source_table = format!("{schema}.sources_{}", recipe.source.name);
-    let model_table = format!("{schema}.{}", recipe.model_name);
     let column_defs = format!(
         "{d} DATE, {id} INT, {val} INT",
         d = recipe.source.clock_column,
         id = recipe.source.key_column,
         val = recipe.source.payload_column,
     );
+    reset_and_create_spark_table_for(
+        db_path,
+        &recipe.source.name,
+        &recipe.model_name,
+        &column_defs,
+    )
+}
+
+/// [`reset_and_create_spark_source_table`] generalised over the raw
+/// source/model names and column-def string (plan Phase 5): the composed-pool
+/// staging path ([`stage_composed_for_target`]) needs the identical
+/// drop-before-seed idempotent DDL sequence but over a
+/// [`crate::recipe::ComposedKeyedRecipe`] rather than a [`ModelRecipe`] — this
+/// is the shared body both callers funnel through.
+#[cfg(feature = "spark")]
+fn reset_and_create_spark_table_for(
+    db_path: &Path,
+    source_name: &str,
+    model_name: &str,
+    column_defs: &str,
+) -> anyhow::Result<()> {
+    let db_path = db_path.to_path_buf();
+    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let source_table = format!("{schema}.sources_{source_name}");
+    let model_table = format!("{schema}.{model_name}");
+    let column_defs = column_defs.to_string();
     crate::link_c_harness::block_on_isolated(async move {
         let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
         smelt_backend::Backend::execute_sql(
@@ -783,6 +805,59 @@ pub fn stage_composed(
     )?;
 
     crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+}
+
+/// [`stage_composed`] generalised over [`ConformanceTarget`]
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5): `DuckDb`
+/// delegates straight to [`stage_composed`]; `SparkDelta` stages the model +
+/// source YAML + a Spark-targeted `smelt.yml` and creates the physical source
+/// table through a direct Spark/Delta connection to
+/// `crate::recipe::SPARK_CONFORMANCE_SCHEMA`, dropping any stale model/source
+/// table from a prior run first (drop-before-seed idempotency, mirroring
+/// [`stage_for_target`]/[`stage_keyed_for_target`]'s convention — the Delta
+/// warehouse persists across test invocations).
+#[cfg(feature = "spark")]
+pub fn stage_composed_for_target(
+    recipe: &ComposedKeyedRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+    target: ConformanceTarget,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    match target {
+        ConformanceTarget::DuckDb => stage_composed(recipe, project_dir, db_path),
+        ConformanceTarget::SparkDelta => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            std::fs::write(
+                project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                render_composed_model_file(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                recipe.source.source_yaml(),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                render_smelt_yml_for(target, db_path),
+            )?;
+
+            reset_and_create_spark_table_for(
+                db_path,
+                &recipe.source.name,
+                &recipe.model_name,
+                &format!(
+                    "{d} DATE, {id} INT, {val} INT",
+                    d = recipe.source.clock_column,
+                    id = recipe.source.key_column,
+                    val = recipe.source.payload_column,
+                ),
+            )?;
+
+            crate::link_c_harness::LinkCProject::load(
+                project_dir.to_path_buf(),
+                db_path.to_path_buf(),
+            )
+        }
+    }
 }
 
 #[cfg(test)]

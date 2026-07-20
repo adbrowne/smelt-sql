@@ -212,6 +212,120 @@ pub fn stage_feed_keyed(
     LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
 
+/// [`stage_feed_keyed`] generalised over [`crate::recipe::ConformanceTarget`]
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5):
+/// `DuckDb` delegates straight to [`stage_feed_keyed`]; `SparkDelta` stages
+/// the same model + `change_feed` source YAML + a Spark-targeted
+/// `smelt.yml`, then creates the base AND feed physical tables (dropping any
+/// stale ones from a prior run first — drop-before-seed idempotency,
+/// mirroring `render::stage_for_target`'s convention) through a direct
+/// Spark/Delta connection to `crate::recipe::SPARK_CONFORMANCE_SCHEMA`. Only
+/// the classify-level admission surface
+/// (`change_feed_source_admits_recompute_only`) drives this today — a
+/// `grain: key` model with a fold spec over a `change_feed` source carries a
+/// build-blocking `MaintenanceNoAdmissibleTechnique` diagnostic regardless of
+/// backend, so nothing here is ever executed through `execute_project`.
+#[cfg(feature = "spark")]
+pub fn stage_feed_keyed_for_target(
+    recipe: &KeyedRecipe,
+    project_dir: &std::path::Path,
+    db_path: &std::path::Path,
+    target: crate::recipe::ConformanceTarget,
+) -> anyhow::Result<LinkCProject> {
+    match target {
+        crate::recipe::ConformanceTarget::DuckDb => stage_feed_keyed(recipe, project_dir, db_path),
+        crate::recipe::ConformanceTarget::SparkDelta => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            std::fs::write(
+                project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                render::render_keyed_model_file(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                change_feed_source_yaml(&recipe.source),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                render::render_smelt_yml_for(target, db_path),
+            )?;
+
+            create_feed_tables_via_backend(db_path, &recipe.source)?;
+
+            LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+        }
+    }
+}
+
+/// [`create_feed_tables`] generalised over `&dyn Backend` (plan Phase 5):
+/// drop-then-create both the base AND feed tables in
+/// `crate::recipe::SPARK_CONFORMANCE_SCHEMA` — the Spark counterpart of
+/// [`create_feed_tables`], run on an isolated thread
+/// (`link_c_harness::block_on_isolated`) mirroring `render.rs`'s own
+/// staging-DDL convention.
+#[cfg(feature = "spark")]
+fn create_feed_tables_via_backend(
+    db_path: &std::path::Path,
+    source: &SourceRecipe,
+) -> anyhow::Result<()> {
+    let db_path = db_path.to_path_buf();
+    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let base_table = format!("{schema}.sources_{}", source.name);
+    let feed_table = format!("{schema}.feed_{}", source.name);
+    let (base_defs, feed_defs) = if is_clocked(source) {
+        (
+            format!(
+                "{d} DATE, {id} INT, {val} INT",
+                d = source.clock_column,
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+            format!(
+                "op STRING, {d} DATE, {id} INT, {val} INT, seq INT",
+                d = source.clock_column,
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+        )
+    } else {
+        (
+            format!(
+                "{id} INT, {val} INT",
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+            format!(
+                "op STRING, {id} INT, {val} INT, seq INT",
+                id = source.key_column,
+                val = source.payload_column,
+            ),
+        )
+    };
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        for table in [&base_table, &feed_table] {
+            smelt_backend::Backend::execute_sql(
+                backend.as_ref(),
+                &format!("DROP TABLE IF EXISTS {table}"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("drop stale Spark feed table {table}: {e}"))?;
+        }
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {base_table} ({base_defs}) USING DELTA"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create Spark feed base table {base_table}: {e}"))?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {feed_table} ({feed_defs}) USING DELTA"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create Spark feed log table {feed_table}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
 /// Stage a [`crate::recipe::MutableEnrichedRecipe`] (the fact +
 /// unclocked-dimension mixed shape, `docs/plans/20260712-generative-maintenance-conformance.md`
 /// Phase 4) into a fresh project dir + DuckDB file, declaring the DIMENSION

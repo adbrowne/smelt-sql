@@ -51,7 +51,7 @@ const MIXED_DIM_SEED_MAX_ID: i64 = 12;
 /// Drop-before-seed idempotent, mirroring
 /// `render::reset_and_create_spark_source_table`'s convention, since the
 /// Delta warehouse persists across test invocations.
-fn stage_mixed_recipe_spark(
+pub(crate) fn stage_mixed_recipe_spark(
     recipe: &MutableEnrichedRecipe,
     tmp: &tempfile::TempDir,
 ) -> anyhow::Result<LinkCProject> {
@@ -159,7 +159,7 @@ fn reset_and_seed_spark_mixed_tables(
 /// derivation — copied from `maintenance_conformance/gate.rs::classify_mixed`
 /// (target-agnostic, see `gate_keyed_spark.rs::classify_keyed_full`'s doc
 /// comment for why this is a copy rather than a shared import).
-fn classify_mixed(
+pub(crate) fn classify_mixed(
     project: &LinkCProject,
     recipe: &MutableEnrichedRecipe,
 ) -> anyhow::Result<smelt_logical::maintenance::MaintenancePlan> {
@@ -209,7 +209,7 @@ fn classify_mixed(
 }
 
 /// Insert one fact row into `recipe`'s staged Spark/Delta fact source table.
-async fn insert_fact_row_spark(
+pub(crate) async fn insert_fact_row_spark(
     backend: &dyn Backend,
     recipe: &MutableEnrichedRecipe,
     row: &GenRow,

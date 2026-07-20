@@ -38,7 +38,7 @@ fn keyed_case_count() -> usize {
 /// Stage a [`KeyedRecipe`] targeting Spark/Delta into a fresh temp project
 /// dir (`render::stage_keyed_for_target`'s Spark arm) — drop-before-seed
 /// idempotency, mirroring `gate_spark::stage_recipe_spark`.
-fn stage_keyed_recipe_spark(
+pub(crate) fn stage_keyed_recipe_spark(
     recipe: &KeyedRecipe,
     tmp: &tempfile::TempDir,
 ) -> anyhow::Result<LinkCProject> {
@@ -110,7 +110,7 @@ async fn assert_keyed_equivalence_spark(
 /// window-forward posture) on Spark/Delta through the real `execute_project`
 /// pipeline (`LinkCProject::run_with_target`), asserting end-state
 /// equivalence after every window — mirrors `gate.rs::drive_keyed_and_assert`.
-async fn drive_keyed_and_assert_spark(
+pub(crate) async fn drive_keyed_and_assert_spark(
     project: &LinkCProject,
     recipe: &KeyedRecipe,
     schedule: &KeyedSchedule,

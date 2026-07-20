@@ -185,8 +185,16 @@ pub trait WindowedKeyedRule: Send + Sync {
         delta_sql: &str,
         partition_column: &str,
         slice_lower: &str,
+        dialect: MaintenanceDialect,
     ) -> Option<String> {
-        let _ = (schema, table, delta_sql, partition_column, slice_lower);
+        let _ = (
+            schema,
+            table,
+            delta_sql,
+            partition_column,
+            slice_lower,
+            dialect,
+        );
         None
     }
 }
@@ -336,6 +344,7 @@ pub async fn run_windowed_keyed_maintenance(
                     &delta_sql,
                     partition_column,
                     &slice_lower,
+                    smelt_backend::maintenance_dialect(backend.dialect()),
                 ) {
                     Some(probe_sql) => {
                         let batches = backend.execute_sql(&probe_sql).await.map_err(|e| {

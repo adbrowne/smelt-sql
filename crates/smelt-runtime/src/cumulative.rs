@@ -105,6 +105,7 @@ impl WindowedKeyedRule for CumulativeClassification {
         delta_sql: &str,
         partition_column: &str,
         slice_lower: &str,
+        dialect: MaintenanceDialect,
     ) -> Option<String> {
         let schema_table = format!("{schema}.{table}");
         Some(
@@ -114,6 +115,7 @@ impl WindowedKeyedRule for CumulativeClassification {
                 partition_column,
                 delta_sql,
                 slice_lower,
+                dialect,
             )
             .sql,
         )

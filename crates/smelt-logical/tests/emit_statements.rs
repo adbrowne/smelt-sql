@@ -361,6 +361,7 @@ fn recurrence_bound_probe_matches_production_shape() {
         "last_seen_date",
         delta_select,
         "2026-01-07",
+        MaintenanceDialect::DuckDb,
     );
     assert_eq!(
         stmt.sql,
@@ -386,6 +387,7 @@ fn recurrence_bound_probe_composite_key_concatenates_and_ands() {
         "last_seen_date",
         delta_select,
         "2026-01-01",
+        MaintenanceDialect::DuckDb,
     );
     assert!(
         stmt.sql.contains(
@@ -412,10 +414,52 @@ fn recurrence_bound_probe_escapes_quoted_slice_lower() {
         "last_seen_date",
         "SELECT event_id, event_date FROM events",
         "2026-01-0'7",
+        MaintenanceDialect::DuckDb,
     );
     assert!(
         stmt.sql.contains("< '2026-01-0''7'"),
         "expected escaped literal in: {}",
+        stmt.sql
+    );
+}
+
+/// `MaintenanceDialect::Spark` uses `STRING` (not DuckDB's unsized
+/// `VARCHAR`, which Spark's parser refuses with `DATATYPE_MISSING_SIZE`) and
+/// `CONCAT_WS(', ', COLLECT_LIST(...))` (Spark has no `STRING_AGG`) — a real
+/// bug found while porting the recurrence-bounded composed-pool conformance
+/// leg to live Spark
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5): the
+/// probe's DuckDB-only SQL shape made every route-3 checked-merge step fail
+/// with a Spark `ParseException` before the merge itself ever ran.
+#[test]
+fn recurrence_bound_probe_spark_dialect_uses_string_and_concat_ws() {
+    let stmt = emit_recurrence_bound_probe(
+        "smelt_conf_gen.t",
+        &["id".to_string()],
+        "last_seen",
+        "SELECT id, d FROM events",
+        "2026-01-01",
+        MaintenanceDialect::Spark,
+    );
+    assert!(
+        stmt.sql.contains("CAST(target.id AS STRING)"),
+        "expected Spark's unsized STRING cast, got: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains("VARCHAR"),
+        "Spark dialect must never emit VARCHAR (DATATYPE_MISSING_SIZE): {}",
+        stmt.sql
+    );
+    assert!(
+        stmt.sql
+            .contains("CONCAT_WS(', ', COLLECT_LIST(violation_key))"),
+        "expected Spark's STRING_AGG-equivalent aggregate, got: {}",
+        stmt.sql
+    );
+    assert!(
+        !stmt.sql.contains("STRING_AGG"),
+        "Spark dialect must never emit STRING_AGG (not a Spark SQL builtin): {}",
         stmt.sql
     );
 }
