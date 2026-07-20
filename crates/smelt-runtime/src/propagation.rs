@@ -279,6 +279,120 @@ fn derive_clamp_and_locality(
     models: &[ModelFile],
     source_infos: &[SourceInfo],
 ) -> Result<ClampAndLocality> {
+    // Upstream maintained-model composed outputs admitted so far, keyed by
+    // model address (the same key `model_edges` names an upstream by) —
+    // mirrors `smelt-db::lib.rs`'s `ref_model_source_facts`/
+    // `model_source_granularities` handling: a `grain: key` model whose
+    // driving source is ANOTHER maintained model's own admitted composed
+    // output must see that upstream as both a `SourceFacts` candidate
+    // (`derive_new_data`'s `inputs.source(source)` lookup, which a bare
+    // `ModelEdge` never populates — model edges only ever clamp a
+    // **partition**-addressed downstream's creation cell,
+    // `append_model_edge_cells`'s `output_partition_col` early return) and a
+    // clocked-granularity candidate for the locality gate's own structural
+    // precondition, not only declared `sources.*` refs
+    // (`docs/plans/20260719-prod-w8-composed-axes-followups.md` Phase 6).
+    // `smelt-db`'s Salsa queries resolve this recursively for free via
+    // memoized recursion; this call site has no query-recursion to lean on,
+    // so it re-runs the whole per-model pass to a fixed point instead —
+    // each pass can only add a candidate an upstream model's OWN admission
+    // resolved in the previous pass, so a chain of N maintained models
+    // converges within N passes (never re-deriving admission itself, only
+    // widening which already-derived verdicts are visible as candidates).
+    //
+    // This convergence argument assumes an acyclic model-ref graph. This
+    // call site runs before `DependencyGraph::execution_order()` (the real
+    // cycle detector) on at least one call path, and `build_forward_graph`
+    // itself only rejects a literal self-reference — not a longer cycle.
+    // A composed-source candidate can also *remove* an admission (flipping
+    // `single_clocked_granularity` from unambiguous to ambiguous), so
+    // monotonicity isn't guaranteed on a cyclic graph either — a naive
+    // unbounded loop could hang, or oscillate with a period the consecutive-
+    // state equality check below wouldn't catch. Bound the loop at
+    // `models.len() + 1` passes (enough for the documented N-model
+    // convergence argument plus one confirmation pass) and fail loud rather
+    // than hang, per root `CLAUDE.md` §"Fail-loud discipline".
+    let max_passes = models.len() + 1;
+    let mut composed_sources: BTreeMap<String, (SourceFacts, Granularity)> = BTreeMap::new();
+
+    for _pass in 0..max_passes {
+        let ClampAndLocality {
+            clamp_days,
+            locality_admitted,
+            key_locality_slice,
+        } = derive_clamp_and_locality_pass(models, source_infos, &composed_sources)?;
+
+        let mut next_composed_sources: BTreeMap<String, (SourceFacts, Granularity)> =
+            BTreeMap::new();
+        for (addr, admitted) in &locality_admitted {
+            if !admitted {
+                continue;
+            }
+            let Some(slice) = key_locality_slice.get(addr) else {
+                continue;
+            };
+            let Some(Some(granularity)) = models
+                .iter()
+                .find(|m| &m.canonical_path() == addr)
+                .and_then(|m| m.metadata.as_deref())
+                .map(|m| m.timeseries.as_ref().map(|t| t.granularity))
+            else {
+                continue;
+            };
+            let facts = SourceFacts {
+                name: addr.clone(),
+                // Mirrors `smelt-db::lib.rs::ref_model_source_facts`: a
+                // composed maintained output's rows, once written, are not
+                // retroactively mutated by a later run touching a different
+                // slice — the same append-only posture a declared
+                // `timeseries:` source with no explicit `mutation_profile:
+                // mutable` gets by default.
+                mutation: PlanMutationProfile::AppendOnly,
+                partition_col: Some(slice.partition_column().to_string()),
+                unique_key: Vec::new(),
+                allow_full_scan: false,
+            };
+            next_composed_sources.insert(addr.clone(), (facts, granularity));
+        }
+
+        // `SourceFacts` carries no `PartialEq` — compare the
+        // (name, partition_col, granularity) signature convergence tracks
+        // by instead of the whole struct.
+        let sig = |m: &BTreeMap<String, (SourceFacts, Granularity)>| {
+            m.iter()
+                .map(|(addr, (facts, g))| (addr.clone(), facts.partition_col.clone(), *g))
+                .collect::<Vec<_>>()
+        };
+        if sig(&next_composed_sources) == sig(&composed_sources) {
+            return Ok(ClampAndLocality {
+                clamp_days,
+                locality_admitted,
+                key_locality_slice,
+            });
+        }
+        composed_sources = next_composed_sources;
+    }
+
+    bail!(
+        "MaintenanceGraphUnsupportedNode: the composed-source fixed-point derivation did not \
+         converge within {max_passes} passes over {} model(s) — the model-ref graph likely \
+         contains a cycle among maintained `grain: key` composed models (the documented \
+         N-model convergence argument assumes an acyclic model-ref graph)",
+        models.len()
+    );
+}
+
+/// One pass of [`derive_clamp_and_locality`]'s per-model derivation, over a
+/// caller-supplied `composed_sources` candidate map (an upstream maintained
+/// model's own admitted-composed-output `SourceFacts` + declared
+/// granularity, as folded by a PRIOR pass — see that function's own doc
+/// comment for why this is a fixed-point iteration rather than a single
+/// walk). Never mutates its input; the caller drives convergence.
+fn derive_clamp_and_locality_pass(
+    models: &[ModelFile],
+    source_infos: &[SourceInfo],
+    composed_sources: &BTreeMap<String, (SourceFacts, Granularity)>,
+) -> Result<ClampAndLocality> {
     let model_by_addr: BTreeMap<String, &ModelFile> =
         models.iter().map(|m| (m.canonical_path(), m)).collect();
 
@@ -407,19 +521,46 @@ fn derive_clamp_and_locality(
             }
         }
 
+        // A `grain: key` model's driving source may itself be another
+        // maintained model's locality-admitted composed output, not just a
+        // declared `sources:` entry — `derive_new_data`'s `inputs.source(source)`
+        // lookup (via the `Trigger::NewData` this model's `SourceFacts` list
+        // drives) is already agnostic to provenance, so publish every
+        // referenced upstream model that cleared the locality gate in a
+        // PRIOR pass into the same `SourceFacts` candidate list a declared
+        // source populates — mirroring `smelt-db::lib.rs`'s own
+        // `ref_model_source_facts`/`model_source_granularities` handling at
+        // its `maintenance_plan_report` call site
+        // (`docs/plans/20260719-prod-w8-composed-axes-followups.md` Phase 6).
+        // A bare `ModelEdge` alone is not enough: `append_model_edge_cells`
+        // only ever clamps a **partition**-addressed downstream's creation
+        // cell (`output_partition_col` early return), so a `grain: key`
+        // downstream needs the composed upstream as an actual `SourceFacts`
+        // entry to get a `Trigger::NewData` cell at all. Scoped to `grain:
+        // key` models only — a `grain: partition` downstream's pushdown
+        // against a composed upstream is already derived through
+        // `smelt-logical`'s own model-graph registry, not this path.
+        if metadata.grain == Some(ConfigGrain::Key) {
+            for edge in &model_edges {
+                if let Some((facts, _)) = composed_sources.get(&edge.name) {
+                    if !sources.iter().any(|s| s.name == facts.name) {
+                        sources.push(facts.clone());
+                    }
+                }
+            }
+        }
+
         // The locality gate's granularity-equality structural precondition
         // (`smelt_logical::maintenance::locality::establish_locality`)
         // needs the driving source's own declared granularity — the same
         // value `smelt-db`'s `check_file_diagnostics` (the `smelt explain`
         // path) computes via `single_clocked_granularity` over every
-        // declared source this model references, so a `grain: key` model
-        // admits (or refuses) locality identically here and there. Scoped
-        // to declared `sources.*` refs only — a driving source that is
-        // itself another maintained model's composed output (recursive
-        // "composed driven by composed") is `smelt-db`'s wider
-        // `model_source_granularities` handling and is out of B1's scope
-        // (this call site only needs to admit the ordinary
-        // source-driven composed shape).
+        // declared source this model references (now including the
+        // composed-output `SourceFacts` just pushed above), so a `grain:
+        // key` model admits (or refuses) locality identically here and
+        // there. The "exactly one clocked candidate, else undecided" rule
+        // (`single_clocked_granularity`) is unchanged — this only widens
+        // the candidate pool fed into it.
         let driving_source_granularity = if metadata.grain == Some(ConfigGrain::Key) {
             let clocked_granularities: Vec<Granularity> = sources
                 .iter()
@@ -429,6 +570,7 @@ fn derive_clamp_and_locality(
                         .find(|info| bare_name(&info.address_segments) == s.name)
                         .and_then(|info| info.timeseries.as_ref())
                         .map(|ts| ts.granularity)
+                        .or_else(|| composed_sources.get(&s.name).map(|(_, g)| *g))
                 })
                 .collect();
             smelt_logical::maintenance::locality::single_clocked_granularity(clocked_granularities)
