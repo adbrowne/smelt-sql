@@ -21,5 +21,7 @@
 //! Spark Connect makes unconditional per-PR runs impractical
 //! (`multi_backend.md` §"CI tiering").
 
+mod gate_keyed_spark;
+mod gate_mixed_spark;
 mod gate_spark;
 mod harness_self_check_spark;

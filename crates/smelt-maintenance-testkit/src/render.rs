@@ -565,6 +565,103 @@ pub fn stage_keyed(
     crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
 
+/// [`stage_keyed`] generalised over [`ConformanceTarget`]
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 4), mirroring
+/// [`stage_for_target`]'s DuckDb/SparkDelta split: `DuckDb` delegates straight
+/// to [`stage_keyed`]; `SparkDelta` writes the keyed model + driving-source
+/// YAML + a Spark-targeted `smelt.yml`, then drops-and-recreates the staged
+/// source table (and any stale maintained model table from a prior run)
+/// through a direct Spark/Delta connection to
+/// `crate::recipe::SPARK_CONFORMANCE_SCHEMA` — the same drop-before-seed
+/// idempotency [`stage_for_target`]'s Spark arm needs, since the Delta
+/// warehouse persists across test invocations.
+#[cfg(feature = "spark")]
+pub fn stage_keyed_for_target(
+    recipe: &KeyedRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+    target: ConformanceTarget,
+) -> anyhow::Result<crate::link_c_harness::LinkCProject> {
+    match target {
+        ConformanceTarget::DuckDb => stage_keyed(recipe, project_dir, db_path),
+        ConformanceTarget::SparkDelta => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            std::fs::write(
+                project_dir.join(format!("models/{}.sql", recipe.model_name)),
+                render_keyed_model_file(recipe),
+            )?;
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", recipe.source.name)),
+                recipe.source.source_yaml(),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                render_smelt_yml_for(target, db_path),
+            )?;
+
+            reset_and_create_spark_keyed_source_table(db_path, recipe)?;
+
+            crate::link_c_harness::LinkCProject::load(
+                project_dir.to_path_buf(),
+                db_path.to_path_buf(),
+            )
+        }
+    }
+}
+
+/// Drop then (re)create `<SPARK_CONFORMANCE_SCHEMA>.sources_<name>` AND drop
+/// any stale `<SPARK_CONFORMANCE_SCHEMA>.<model_name>` from a prior run
+/// ([`stage_keyed_for_target`]'s Spark arm) — mirrors
+/// [`reset_and_create_spark_source_table`], generalised over
+/// [`SourcePosture`] since a [`KeyedRecipe`]'s driving source may be either
+/// the clocked append-only `events` shape or the unclocked
+/// `mutable_snapshot` shape ([`KeyedRecipe::new_snapshot_reconcile`]).
+#[cfg(feature = "spark")]
+fn reset_and_create_spark_keyed_source_table(
+    db_path: &Path,
+    recipe: &KeyedRecipe,
+) -> anyhow::Result<()> {
+    let db_path = db_path.to_path_buf();
+    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let source_table = format!("{schema}.sources_{}", recipe.source.name);
+    let model_table = format!("{schema}.{}", recipe.model_name);
+    let column_defs = match recipe.source.posture {
+        SourcePosture::AppendOnly => format!(
+            "{d} DATE, {id} INT, {val} INT",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+        SourcePosture::MutableSnapshot => format!(
+            "{id} INT, {val} INT",
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    };
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("DROP TABLE IF EXISTS {model_table}"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("drop stale Spark keyed model table {model_table}: {e}"))?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("DROP TABLE IF EXISTS {source_table}"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("drop stale Spark keyed source table {source_table}: {e}"))?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {source_table} ({column_defs}) USING DELTA"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create Spark keyed source table {source_table}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
 /// Every `DiagnosticCode` variant in the `Maintenance*` family
 /// (`incremental_models.md` §Diagnostics) — permitted on a staged recipe's
 /// diagnostics, since Phase 1 does not yet constrain which techniques a

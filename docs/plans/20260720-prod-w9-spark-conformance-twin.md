@@ -59,7 +59,7 @@ W4 left one gap keeping Spark below DuckDB's verification bar: the equivalence i
 | 1     | done     | (this commit) | 2026-07-20 |
 | 2     | done     | (this commit) | 2026-07-20 |
 | 3     | done     | (this commit) | 2026-07-20 |
-| 4     | pending  |        |      |
+| 4     | done     | (this commit) | 2026-07-20 |
 | 5     | pending  |        |      |
 | 6     | pending  |        |      |
 
@@ -217,6 +217,9 @@ W4 left one gap keeping Spark below DuckDB's verification bar: the equivalence i
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **2026-07-20, Phase 4:** `keyed_pool_upholds_end_state_equivalence_on_spark` covers only `KeyedCombiner::Idempotent`, not `KeyedCombiner::Additive` (the DuckDB leg samples both via `arb_keyed_combiner()`). Reason: `KeyedCombiner::Additive` grades `Grade::Additive`, whose never-fold-twice reconciliation ledger (`maintenance_driver.rs`'s `Grade::Additive` arm, MP12) has only a DuckDB dialect (`smelt_state::ddl_duckdb`) implemented today; the driver already fails loud (`BackendError::unsupported("additive-fold windowed-keyed maintenance ledger (never-fold-twice)")`) for any non-DuckDB backend rather than silently mishandling it — confirmed live against Spark. This is a pre-existing backend gap, not a W9-introduced one; a Spark ledger dialect is out of this plan's scope (it would be its own plan). The Idempotent-combiner family (`Grade::Idempotent`, watermark-only ledger, no dialect restriction) is unaffected and is what the Spark leg exercises.
+- **2026-07-20, Phase 4 (fixed, not deferred):** while porting the keyed leg, found and fixed a real Spark bug: `smelt_logical::maintenance::emit::emit_create_table_as` (the first-run bootstrap `CREATE TABLE … AS` for any merge-based maintenance cell) ignored its `MaintenanceDialect` parameter and never emitted a format clause, so the bootstrapped table on Spark was a plain (non-Delta) managed table — every subsequent `MERGE INTO` against it then failed with `UnsupportedOperationException: MERGE INTO TABLE is not supported temporarily`. Fixed to emit `USING DELTA` for `MaintenanceDialect::Spark` (DuckDB output unchanged, `MaintenanceDialect::DuckDb` emits no format clause as before). Covered by a new `create_table_as_spark_dialect_specifies_delta_format` test in `crates/smelt-logical/tests/emit_statements.rs`; confirmed the fix live against Spark (the keyed leg's `Idempotent`-combiner cases, which bootstrap via this path and then `MERGE`, went from failing to green).
 
 ## Verification
 

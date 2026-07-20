@@ -747,11 +747,23 @@ pub fn emit_count_preservation_probe(
 pub fn emit_create_table_as(
     table: &str,
     select_sql: &str,
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
+    // Every step after this bootstrap CREATE for a merge-based cell (keyed
+    // fold, column-scoped merge) is a `MERGE INTO`, which Spark refuses
+    // against a plain (default-format, non-Delta) managed table — so the
+    // bootstrap itself must specify `USING DELTA` on Spark. DuckDB has no
+    // such format clause. `MaintenanceDialect::Spark` covers only the
+    // merge-capable Spark family (see `smelt_backend::maintenance_dialect`),
+    // so this is never reached for the cross-engine Parquet read path
+    // (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 4).
+    let using_clause = match dialect {
+        MaintenanceDialect::DuckDb => "",
+        MaintenanceDialect::Spark => " USING DELTA",
+    };
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
-            "CREATE TABLE {table} AS {select_sql}"
+            "CREATE TABLE {table}{using_clause} AS {select_sql}"
         ))],
         transactional: false,
     }

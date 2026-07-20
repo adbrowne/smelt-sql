@@ -246,6 +246,30 @@ fn create_table_as_matches_production_shape() {
     );
 }
 
+/// The Spark twin of [`create_table_as_matches_production_shape`]: the
+/// first-run bootstrap CREATE for a keyed-fold/column-scoped-merge cell must
+/// itself create a Delta-formatted table (`USING DELTA`), since every
+/// following step for that same cell is a `MERGE INTO` — a plain
+/// (default-format, non-Delta) Spark-managed table cannot be the target of a
+/// `MERGE` (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 4:
+/// discovered via a live-Spark equivalence-leg failure —
+/// `UnsupportedOperationException: MERGE INTO TABLE is not supported
+/// temporarily` — when the bootstrap CREATE omitted the format clause).
+#[test]
+fn create_table_as_spark_dialect_specifies_delta_format() {
+    let group = emit_create_table_as(
+        "smelt_conf_gen.device_user_edges",
+        "SELECT device_id, user_id, COUNT(*) AS event_count FROM events GROUP BY 1, 2",
+        MaintenanceDialect::Spark,
+    );
+    assert_eq!(group.statements.len(), 1);
+    assert_eq!(
+        group.statements[0].sql,
+        "CREATE TABLE smelt_conf_gen.device_user_edges USING DELTA AS SELECT device_id, \
+         user_id, COUNT(*) AS event_count FROM events GROUP BY 1, 2"
+    );
+}
+
 /// The column-scoped `MERGE` production actually executes for `Technique::
 /// ColumnScopedMerge` (`crate::maintenance_driver::execute_column_scoped_merge`/
 /// `execute_column_scoped_merge_full`'s pre-phase text, both DuckDB's
