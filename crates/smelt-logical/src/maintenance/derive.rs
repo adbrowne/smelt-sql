@@ -720,12 +720,36 @@ fn derive_maintenance_plan_impl(
     let mut plan = MaintenancePlan::default();
     let bounds = derive_model_bounds(inputs.sql, &inputs.bound_context());
     let identity = row_identity(inputs.declared_unique_key(), inputs.sql);
+    // The set of sources this model's own trigger list covers with an
+    // `UpstreamMutation` cell — i.e. every source name for which `triggers`
+    // (built by the caller, e.g. `smelt-db::queries::maintenance::
+    // derive_model_maintenance_plan`, under the unclocked +
+    // `explicitly_mutable` predicate ≈ that function's L397-404) already
+    // contains a `Trigger::UpstreamMutation`. Read straight off `triggers`
+    // rather than re-deriving the predicate here: `triggers` IS that
+    // predicate's own output, so this is one source of truth, not a second
+    // copy that could drift. Consulted by `derive_new_data`'s key-grain
+    // branch (`incremental_models.md` §"The key grain (`grain: key`)") to
+    // waive the append-only obligation for a source maintained by a covered
+    // enrichment cell instead of folded.
+    let covered_by_mutation: BTreeSet<String> = triggers
+        .iter()
+        .filter_map(|t| match t {
+            Trigger::UpstreamMutation { source } => Some(source.clone()),
+            _ => None,
+        })
+        .collect();
 
     for trigger in triggers {
         match trigger {
-            Trigger::NewData { source } => {
-                derive_new_data(inputs, &bounds, source, &identity, &mut plan)
-            }
+            Trigger::NewData { source } => derive_new_data(
+                inputs,
+                &bounds,
+                source,
+                &identity,
+                &covered_by_mutation,
+                &mut plan,
+            ),
             Trigger::UpstreamMutation { source } => derive_mutation(
                 inputs,
                 &bounds,
@@ -779,6 +803,7 @@ fn derive_new_data(
     bounds: &HashMap<String, BoundResult>,
     source: &str,
     identity: &RowIdentityVerdict,
+    covered_by_mutation: &BTreeSet<String>,
     plan: &mut MaintenancePlan,
 ) {
     let trigger = Trigger::NewData {
@@ -848,6 +873,32 @@ fn derive_new_data(
             let discovery = input_delta_discovery(source_shape(facts));
             let carries_retractions = facts.mutation != MutationProfile::AppendOnly;
             if carries_retractions {
+                // Narrowing (`incremental_models.md` §"The key grain
+                // (`grain: key`)"): the append-only obligation binds a
+                // FOLD-CONTRIBUTING source, not every source the model
+                // references. This `NewData` trigger's obligation is waived
+                // iff (i) `source` is covered by an `UpstreamMutation` cell
+                // for this model — its post-creation mutations are
+                // maintained by that cell, not silently dropped — AND (ii)
+                // `source_contributes_to_fold` proves `source` is never an
+                // argument to the fold's own aggregates. Both conditions are
+                // required: coverage alone would let an un-retractable
+                // folded contribution through (the classifier's
+                // conservatism is the safety net there); non-contribution
+                // alone would still fold an un-retractable delta with
+                // nothing else maintaining it. A source that is both
+                // fold-contributing and mutable stays refused below — the
+                // folded contribution genuinely is un-retractable. When
+                // waived, this `NewData{source}` trigger needs no technique
+                // at all (no cell, no refusal): `source`'s deltas do not
+                // feed the fold, and its post-creation mutations are already
+                // this model's `UpstreamMutation{source}` cell's job, not
+                // this one's.
+                if covered_by_mutation.contains(source)
+                    && !source_contributes_to_fold(inputs.sql, source)
+                {
+                    return;
+                }
                 if discovery == InputDeltaKind::WindowForward {
                     // The blind spot the (now-deleted) dead-code tripwire
                     // required a human sign-off before wiring: a clocked
