@@ -206,7 +206,7 @@ W8 Phase 5a/5b tried to make the **change-suppressed column-scoped `MERGE`** rea
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| 1     | pending |        |      |
+| 1     | done    | `docs(spec): key-grain append-only obligation binds fold-contributing sources, not every referenced source` | 2026-07-20 |
 | 2     | pending |        |      |
 | 3     | pending |        |      |
 | 4     | pending |        |      |

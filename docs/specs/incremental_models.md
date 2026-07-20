@@ -1128,7 +1128,7 @@ Snapshot-reconcile models keep no ledger — each run is a self-contained reconc
 
 #### Admission matrix (column family × source shape)
 
-Which families a model may use depends on its run shape. This is the key-grain instance of §"Per-cell admission": each cell in the matrix below is that framework's obligations 2 ("faithful fold") and 3 ("combiner algebra class") discharged for one `(column family × run shape)` pair — fold families consume **events** (each row contributes exactly once, satisfying the faithful-fold obligation only under a replayable, retraction-free feed); overwrite families consume **observations** (each row supersedes, so they discharge the obligation only under the snapshot's current-state semantics, never a fold). The matrix is checked per column:
+Which families a model may use depends on its run shape. This is the key-grain instance of §"Per-cell admission": each cell in the matrix below is that framework's obligations 2 ("faithful fold") and 3 ("combiner algebra class") discharged for one `(column family × run shape)` pair — fold families consume **events** (each row contributes exactly once, satisfying the faithful-fold obligation only under a replayable, retraction-free feed); overwrite families consume **observations** (each row supersedes, so they discharge the obligation only under the snapshot's current-state semantics, never a fold). The obligation binds **fold-contributing sources** — a source whose rows the cumulative combiner actually folds — not every source the model's `FROM` clause names; see the scope note below the table for sources that are merely enrich-joined. The matrix is checked per column:
 
 | Column family | window-forward (clocked source) | snapshot-reconcile (mutable snapshot) |
 |---|---|---|
@@ -1139,6 +1139,8 @@ Which families a model may use depends on its run shape. This is the key-grain i
 | plain overwrite | ✗ — order-dependent over events (fails obligation 3; `KeyedUnknownCombiner` names the `MAX_BY` fix) | ✓ (obligation 3, current-snapshot semantics) |
 
 The three snapshot ✗ cells marked *observer semantics* are not double-count hazards — those families re-merge safely — they are **equivalence failures**: `MIN(price)` folded over successive snapshots computes *min ever observed* while a full refresh over the current snapshot computes the *current* min; `MAX_BY(attr, updated_at)` retains a stale incumbent forever if a mutation regresses the ordering value; `COALESCE`-once-write captures *first observed*, unrecoverable from the current snapshot. Each is a different contract (a history *observation*, not a recomputation) and is refused (`KeyedSnapshotSourceUnsupportedColumn`) rather than admitted silently — obligation 2 fails closed, never approximated.
+
+**Scope: fold-contributing sources, not every referenced source.** A window-forward model's non-driving sources are not automatically held to the same append-only/replayable obligation as the driving source — the obligation binds each **fold-contributing source**, one whose columns feed an aggregate the cumulative combiner folds. A mutable source the model consumes **only** through a covered enrichment cell (an `UpstreamMutation`-triggered column-scoped `MERGE`, §Known Divergences) is admitted regardless of its own mutation profile: its post-creation mutations are maintained by that separate cell, so the fold's replayable-feed obligation never reaches it. A source that is **both** a fold input and a mutable enrichment stays refused — its folded contribution really is un-retractable, and admission fails closed (`MaintenanceNoAdmissibleTechnique`) rather than approximating which of a source's columns are "safe."
 
 #### End-state equivalence: the SQL is the oracle
 
@@ -1762,14 +1764,17 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   (`Backend::supports_column_scoped_merge`) into an executable choice — a pin naming a cell the
   plan did not admit, or a capability gap on the backend, refuses rather than silently falling
   back — and `execute_column_scoped_merge` performs the targeted `MERGE` against a real backend.
-  The regular incremental run loop (`smelt-runtime::execute_project`) dispatches into the
-  column-scoped `MERGE` automatically on every run once the plan admits a mutation cell for one
-  of the model's `explicitly_mutable` sources AND the target table already exists — no explicit
-  "a mutation happened" signal is required to reach the technique; `resolve_live_column_scoped_cell`
-  re-derives the same plan every run and the batch loop reads its verdict (exercised end-to-end
-  in `crates/smelt-runtime/tests/technique_lowering.rs::column_scoped_merge_e2e` against the
-  real `examples/timeseries/models/daily_events_enriched.sql` fact+dimension fixture, which
-  drives the accepted-full-scan corner below). Two distinct physical corners exist for a live
+  Both the partition-grain incremental run loop and the keyed run loop (`smelt-runtime::
+  execute_project`) dispatch into the column-scoped `MERGE` automatically on every run once the
+  plan admits a mutation cell for one of the model's `explicitly_mutable` sources AND the target
+  table already exists — no explicit "a mutation happened" signal is required to reach the
+  technique; `resolve_live_column_scoped_cell` re-derives the same plan every run and each run
+  loop's batch dispatch reads its verdict, exercised end-to-end on the partition-grain run loop
+  in `crates/smelt-runtime/tests/technique_lowering.rs::column_scoped_merge_e2e` against the real
+  `examples/timeseries/models/daily_events_enriched.sql` fact+dimension fixture, which drives the
+  accepted-full-scan corner below (the keyed run loop's own real-fixture proof is tracked
+  alongside the fold-contribution admission narrowing above, which is what makes a keyed model
+  carrying a covered mutable enrichment source reachable in the first place). Two distinct physical corners exist for a live
   cell, chosen by `maintenance_driver::decide_column_merge_dispatch` from the cell's
   `partition_local` verdict: the accepted-full-scan corner (`PartitionLocal::No`, an unclocked
   dimension the operator declared `allow_full_scan` for) is the one currently reachable from any
