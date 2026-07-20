@@ -6,15 +6,18 @@ timeseries:
   partition_column: event_date
   event_time_column: event_timestamp
   granularity: day
-batched:
-  # `event_id` is the fact source's own declared `unique_key`
-  # (`models/sources/raw/events.yml`) and, since this model neither
-  # aggregates nor fans the join out, still uniquely identifies each output
-  # row — the row identity the regular incremental execution loop's
-  # column-scoped `MERGE` (MP11) keys on when a `raw.users` mutation drives
-  # the `{user_name}` cell, in place of the default region-recompute
-  # `DELETE`+`INSERT`.
-  unique_key: [event_id]
+# `event_id` is the fact source's own declared `unique_key`
+# (`models/sources/raw/events.yml`) — but a `grain: partition` output has no
+# top-level `unique_key:` slot of its own (declaring one makes an output
+# key-shaped, `docs/specs/models.md` §"The Relation Contract"), so this
+# cell's own row identity resolves `WholeRow`. That is still what the
+# regular incremental execution loop's column-scoped `MERGE` (MP11) keys on
+# when a `raw.users` mutation drives the `{user_name}` cell, in place of the
+# default region-recompute `DELETE`+`INSERT` — the retired
+# `batched.unique_key: [event_id]` spelling this model used to carry here
+# never fed row-identity derivation for a partition-grain output either
+# (`derive::ModelInputs::declared_unique_key` is empty for every
+# `Grain::Partition`), so dropping it changes nothing.
 maintenance:
   scan_bounds:
     per_source:

@@ -11,9 +11,8 @@ timeseries:
 # practice: a redelivered duplicate always lands in the *same* event_date
 # partition as its original, so the window never needs to see across a
 # partition boundary to resolve one event_id's duplicates.
-batched:
-  safety_overrides:
-    allow_window_functions: true
+safety_overrides:
+  allow_window_functions: true
 ---
 -- Tutorial stage 4 (see docs-site examples/web-analytics): stage 3 plus one
 -- new derived column, `is_purchase`. The CASE has no ELSE arm, so the

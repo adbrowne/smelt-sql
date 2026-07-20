@@ -193,7 +193,7 @@ Best for:
 - Tables consumed downstream as a lookup (no `partition_column` on the output — the output has no partition column at all)
 
 !!! warning "Forbidden combinations"
-    `grain: key` models cannot declare a `batched:` block (`grain: key` and `grain: partition` are sibling refresh strategies with different equivalence contracts) — combining them produces `KeyedForbidsBatched`. `refresh: incremental` on an `ephemeral` model is also a hard error.
+    The retired `batched:` sub-block is a hard error for every model, regardless of grain — see [Incremental models](incremental-models.md). Top-level `safety_overrides:` is admitted only on a partition-shaped output (no declared identity); declaring it on a `grain: key` model is refused. `refresh: incremental` on an `ephemeral` model is also a hard error.
 
 `grain: key` and `timeseries:` are **not** a forbidden combination — the key axis (identity) and the time axis (clock) are independent, and declaring both is a first-class shape of its own: the [composed shape](incremental-models.md#the-composed-shape-key-time), a keyed output that is also time-partitioned. It requires one more fact beyond a bare `grain: key` declaration: proof, or a checked declaration, that key temporal locality holds (every duplicate delivery of one key stays within a bounded window of itself on the event axis). A `timeseries:` block on a `grain: key` model that satisfies none of the three locality routes is refused (`KeyedForbidsTimeseries`, naming the missing route) — the composed shape is opt-in on the declared facts, not automatic.
 
@@ -204,7 +204,7 @@ For the deeper rationale, see the [key-grain patterns reference](../reference/cu
 
 ### refresh: materialized_view
 
-Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like `grain: key`; it must not declare a `timeseries:`, `grain:`, or `batched:` block.
+Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like `grain: key`; it must not declare a `timeseries:` or `grain:` key.
 
 ```sql
 ---

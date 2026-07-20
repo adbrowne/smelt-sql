@@ -524,14 +524,18 @@ impl AdversarialLeafRecipe {
     }
 
     /// The full model file contents: frontmatter (`timeseries:` + `refresh:
-    /// incremental` + `grain: partition` + `batched.unique_key`) followed by
-    /// [`Self::model_body`] — the same shape
-    /// [`crate::render::render_model_file`] produces for [`ModelRecipe`].
+    /// incremental` + `grain: partition`) followed by [`Self::model_body`] —
+    /// the same shape [`crate::render::render_model_file`] produces for
+    /// [`ModelRecipe`]. The retired `batched.unique_key` sub-block this used
+    /// to carry [`Self::unique_key`] under is gone — it never fed
+    /// row-identity derivation for a `Grain::Partition` output anyway
+    /// (`derive::ModelInputs::declared_unique_key` is empty for every
+    /// `Grain::Partition`), so dropping it changes no derived maintenance
+    /// plan.
     pub fn model_file(&self) -> String {
         let d = &self.source.clock_column;
-        let unique_key = self.unique_key().join(", ");
         format!(
-            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
             body = self.model_body(),
         )
     }
@@ -634,15 +638,19 @@ impl MutableEnrichedRecipe {
     }
 
     /// The full model file contents: frontmatter (`timeseries:` + `refresh:
-    /// incremental` + `grain: partition` + `batched.unique_key` +
+    /// incremental` + `grain: partition` +
     /// `maintenance.scan_bounds.per_source.<dim>.allow_full_scan: true`,
     /// mirroring `daily_events_enriched.sql`'s own frontmatter) followed by
-    /// [`Self::model_body`].
+    /// [`Self::model_body`]. The retired `batched.unique_key` sub-block this
+    /// used to carry [`Self::unique_key`] under is gone — it never fed
+    /// row-identity derivation for a `Grain::Partition` output anyway
+    /// (`derive::ModelInputs::declared_unique_key` is empty for every
+    /// `Grain::Partition`), so dropping it changes no derived maintenance
+    /// plan.
     pub fn model_file(&self) -> String {
         let d = &self.fact.clock_column;
-        let unique_key = self.unique_key().join(", ");
         format!(
-            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
             dim_name = self.dimension.name,
             body = self.model_body(),
         )

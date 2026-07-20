@@ -307,11 +307,16 @@ pub fn render_node_file(dag: &DagRecipe, idx: usize) -> String {
     let node = &dag.nodes[idx];
     let body = render_node_body(dag, idx);
     match &node.grain {
-        NodeGrain::Partition { unique_key } => {
+        NodeGrain::Partition { unique_key: _ } => {
+            // The retired `batched.unique_key` sub-block this used to carry
+            // `unique_key` under is gone — it never fed row-identity
+            // derivation for a `Grain::Partition` output anyway
+            // (`derive::ModelInputs::declared_unique_key` is empty for
+            // every `Grain::Partition`), so dropping it changes no derived
+            // maintenance plan.
             let d = &dag.source.clock_column;
-            let key = unique_key.join(", ");
             format!(
-                "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{key}]\n---\n{body}\n"
+                "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n---\n{body}\n"
             )
         }
         NodeGrain::Key => {

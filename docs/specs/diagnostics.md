@@ -128,22 +128,35 @@ Owned by `docs/specs/incremental_models.md`.
 | `BatchedNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 
+A `.sql` frontmatter `batched:` sub-block is refused outright — `YamlParseError` (no dedicated
+code), with a fix-it naming each declared sub-key's top-level replacement and the caller's own
+value under the new spelling (`unique_key` → top-level `unique_key:`, `safety_overrides` →
+top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`;
+`docs/specs/models.md` §"The Relation Contract"). The `smelt.yml` model-override spelling of
+`batched:` is unaffected by this refusal.
+
 ---
 
 ### Keyed refresh mode
 
 Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
-unchanged; `CumulativeNoDrivingSource` and `AccumulatingSnapshotUnboundedHorizon` are
-**retired outright, not renamed** (an unclocked model is a legitimate snapshot-reconcile
-posture under `keyed`, not an error, and there is no write-eligibility horizon to bound —
-`incremental_models.md` §Known Divergences "The key grain").
+unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, and
+`KeyedForbidsBatched` are **retired outright, not renamed**:
+- `CumulativeNoDrivingSource`/`AccumulatingSnapshotUnboundedHorizon` — an unclocked model is a
+  legitimate snapshot-reconcile posture under `keyed`, not an error, and there is no
+  write-eligibility horizon to bound (`incremental_models.md` §Known Divergences "The key grain").
+- `KeyedForbidsBatched` — the literal `batched:` sub-block it named is refused universally, for
+  every grain, at frontmatter parse time (`YamlParseError`, not a dedicated code) — a `grain: key`
+  model can no longer declare the sub-block at all, so the dedicated keyed check is gone rather
+  than reachable. `BatchedRequiresRefreshBatched` still catches the one surviving way a `grain: key`
+  model can carry an internally-folded `batched` block (via the top-level `safety_overrides:` fold),
+  a strict subset of what that check already covers.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
 | `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
-| `KeyedForbidsBatched` | Error | A `grain: key` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `grain: key` model's outer body. |

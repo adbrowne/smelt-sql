@@ -397,9 +397,8 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  safety_overrides:
-    allow_subqueries: true
+safety_overrides:
+  allow_subqueries: true
 ---
 WITH staged AS (
     SELECT event_date, user_id FROM smelt.sources.events2

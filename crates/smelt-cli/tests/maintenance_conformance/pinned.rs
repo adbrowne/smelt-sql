@@ -338,8 +338,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d, user_id, dt]
 maintenance:
   scan_bounds:
     per_source:

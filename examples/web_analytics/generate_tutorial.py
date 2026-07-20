@@ -108,7 +108,15 @@ class WorkspaceCache:
         dest = self.tmp_root / f"ws_{self._counter}"
         _copy_workspace(src, dest)
         if fixture_schemas:
-            schemas_dir = dest / ".smelt" / "schemas"
+            # `.smelt/targets/<target>/schemas/` is the current on-disk
+            # layout (`smelt-state::file_store::FileStore::schemas_dir`) —
+            # not the flat `.smelt/schemas/` legacy pre-partitioning path,
+            # which only migrates into the partitioned layout inside
+            # `FileStore::lock()` (never called by `smelt diff`). Writing
+            # straight into the partitioned path here is what `smelt diff`
+            # (an unlocked reader) actually looks under; all tutorial
+            # projects use the `dev` target.
+            schemas_dir = dest / ".smelt" / "targets" / "dev" / "schemas"
             schemas_dir.mkdir(parents=True, exist_ok=True)
             fixture_src = src / "deployed_schema_fixture"
             if fixture_src.is_dir():

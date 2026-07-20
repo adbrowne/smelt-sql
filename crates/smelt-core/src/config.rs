@@ -1844,11 +1844,15 @@ models:
         );
     }
 
-    /// `refresh: incremental` + `grain: key` models cannot carry a
-    /// `batched:` block. The forbid is enforced in `validate_timeseries` via
-    /// `is_keyed()`. Since `materialization: cumulative_aggregate` is no
-    /// longer accepted, this test uses the new surface
-    /// (`materialization: table` + `refresh: incremental` + `grain: key`).
+    /// `refresh: incremental` + `grain: key` models with an internally-folded
+    /// `batched` block emit `BatchedRequiresRefreshBatched` — the dedicated
+    /// `KeyedForbidsBatched` check was removed as unreachable once the
+    /// literal `batched:` sub-block became a parse-time refusal (`is_keyed()`
+    /// implies `!is_partition_grain()`, which is exactly what
+    /// `BatchedRequiresRefreshBatched` already checks). Since
+    /// `materialization: cumulative_aggregate` is no longer accepted, this
+    /// test uses the new surface (`materialization: table` +
+    /// `refresh: incremental` + `grain: key`).
     #[test]
     fn test_validate_refresh_keyed_forbids_incremental_via_metadata() {
         use crate::config::{BatchedConfig, BatchedSafetyOverrides, Grain, RefreshStrategy};
@@ -1868,8 +1872,8 @@ models:
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: incremental + grain: key + batched: must error");
         assert!(
-            matches!(err, MetadataError::KeyedForbidsBatched),
-            "Expected KeyedForbidsBatched, got: {}",
+            matches!(err, MetadataError::BatchedRequiresRefreshBatched),
+            "Expected BatchedRequiresRefreshBatched, got: {}",
             err
         );
     }

@@ -93,7 +93,6 @@ Reordering merges across source partitions does not change the final state (for 
 | `KeyedForbidsNondeterministic` | Non-deterministic function in the outer body (`NOW()`, `RANDOM()`, …) |
 | `KeyedMultipleDrivingSources` | More than one `timeseries:`-tagged source in the FROM clause |
 | `KeyedForbidsTimeseries` | A `grain: key` model declares a `timeseries:` block but none of the three [key temporal locality](../guide/incremental-models.md#the-composed-shape-key-time) routes admits it |
-| `KeyedForbidsBatched` | Model declares both `grain: key` and a `batched:` block |
 | `KeyedSnapshotPostureUnsupported` | Interim: no clocked driving source is found and the snapshot-reconcile executor is not yet built — a not-yet-supported refusal, not a model error |
 
 There is no `safety_overrides:` block for `grain: key` models. Rejected constructs break the end-state equivalence contract, not partial correctness — there is no opt-in escape hatch.

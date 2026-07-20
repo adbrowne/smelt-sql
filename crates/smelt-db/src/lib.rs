@@ -124,7 +124,6 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::TimeseriesRequiredForBatched => None,
         MetadataError::MalformedTimeseries { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
-        MetadataError::KeyedForbidsBatched => None,
         MetadataError::BatchedRequiresRefreshBatched => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
         MetadataError::MaterializedViewForbidsBatched => None,
@@ -1914,11 +1913,14 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 // `MetadataError` variant's diagnostic mapping stays
                 // documented at its point of historical use.
                 smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => None,
-                smelt_core::metadata::MetadataError::KeyedForbidsBatched => {
-                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsBatched))
-                }
                 // `batched:` without `refresh: batched` maps to the generic
-                // YamlParseError code — no dedicated code exists yet.
+                // YamlParseError code — no dedicated code exists yet. This
+                // is also the only remaining way a `grain: key` model can
+                // still carry an internally-folded `batched` block — the
+                // literal sub-block is refused before a `ModelMetadata`
+                // exists, so the dedicated `KeyedForbidsBatched` code was
+                // retired outright (`docs/specs/diagnostics.md` §"Keyed
+                // refresh mode").
                 smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
                     Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
                 }

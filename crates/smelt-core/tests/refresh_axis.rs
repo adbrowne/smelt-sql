@@ -172,7 +172,14 @@ fn refresh_keyed_with_timeseries_reaches_plan_derivation() {
     );
 }
 
-/// `refresh: incremental` + `grain: key` + `batched:` → `KeyedForbidsBatched`.
+/// `refresh: incremental` + `grain: key` with an internally-folded `batched`
+/// block → `BatchedRequiresRefreshBatched`. The literal `batched:` sub-block
+/// itself is refused at parse time (before a `ModelMetadata` even exists),
+/// so this constructs the internal representation directly to exercise
+/// `validate_timeseries`'s pure check — the dedicated `KeyedForbidsBatched`
+/// check was removed as unreachable (`is_keyed()` implies
+/// `!is_partition_grain()`, a strict subset of what
+/// `BatchedRequiresRefreshBatched` already checks).
 #[test]
 fn refresh_keyed_forbids_incremental() {
     use smelt_core::config::{BatchedConfig, BatchedSafetyOverrides};
@@ -192,8 +199,8 @@ fn refresh_keyed_forbids_incremental() {
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
         .expect_err("refresh: incremental + grain: key + batched: must error");
     assert!(
-        matches!(err, MetadataError::KeyedForbidsBatched),
-        "Expected KeyedForbidsBatched, got: {}",
+        matches!(err, MetadataError::BatchedRequiresRefreshBatched),
+        "Expected BatchedRequiresRefreshBatched, got: {}",
         err
     );
 }
@@ -462,11 +469,11 @@ models:
     );
 }
 
-/// Top-level `safety_overrides:` in frontmatter parses into `ModelMetadata`
-/// identically to the `batched.safety_overrides` sub-block form — both end up
-/// on `ModelMetadata::batched.safety_overrides`, the internal representation
-/// every existing safety check already reads (`docs/specs/models.md`
-/// §"The Relation Contract").
+/// Top-level `safety_overrides:` in frontmatter parses into `ModelMetadata`,
+/// folding into the internal `batched.safety_overrides` representation every
+/// existing safety check already reads (`docs/specs/models.md` §"The Relation
+/// Contract"). The `batched.safety_overrides` sub-block spelling this
+/// replaces no longer parses at all — see `batched_sub_block_is_hard_refused`.
 #[test]
 fn top_level_safety_overrides_parses() {
     let top_level_source = r#"---
@@ -497,37 +504,15 @@ SELECT event_ts, event_date FROM foo"#;
         _ => panic!("Expected Single variant"),
     };
     assert!(top_level_batched.safety_overrides.allow_window_functions);
-
-    let sub_block_source = r#"---
-materialization: table
-refresh: incremental
-grain: partition
-timeseries:
-  event_time_column: event_ts
-  partition_column: event_date
-  granularity: day
-batched:
-  safety_overrides:
-    allow_window_functions: true
----
-SELECT event_ts, event_date FROM foo"#;
-    let result = extract_file_metadata(sub_block_source)
-        .expect("batched.safety_overrides sub-block must still parse");
-    let sub_block_batched = match result {
-        FileMetadata::Single { metadata, .. } => {
-            metadata.batched.clone().expect("batched: block declared")
-        }
-        _ => panic!("Expected Single variant"),
-    };
-
-    assert_eq!(top_level_batched, sub_block_batched);
 }
 
-/// Declaring both the top-level `safety_overrides:` key and a non-default
-/// `batched.safety_overrides` sub-block on the same model is a conflict error
-/// — never silent precedence between the old and new spellings.
+/// The retired `batched:` sub-block is a hard parse-time error, regardless of
+/// its contents — a `batched.safety_overrides` sub-block naming the exact
+/// same fact as the top-level `safety_overrides:` spelling is refused just
+/// like any other `batched:` declaration, never silently accepted as an
+/// alternate spelling.
 #[test]
-fn top_level_safety_overrides_conflicts_with_batched_sub_block() {
+fn batched_sub_block_is_hard_refused() {
     let source = r#"---
 materialization: table
 refresh: incremental
@@ -536,21 +521,17 @@ timeseries:
   event_time_column: event_ts
   partition_column: event_date
   granularity: day
-safety_overrides:
-  allow_window_functions: true
 batched:
   safety_overrides:
     allow_having: true
 ---
 SELECT event_ts, event_date FROM foo"#;
-    let err =
-        extract_file_metadata(source).expect_err("declaring both spellings must be a hard error");
+    let err = extract_file_metadata(source)
+        .expect_err("the batched: sub-block must be refused regardless of contents");
+    let message = err.to_string();
     assert!(
-        matches!(
-            err,
-            smelt_core::metadata::MetadataError::SafetyOverridesDoubleDeclared
-        ),
-        "expected SafetyOverridesDoubleDeclared, got {err:?}"
+        message.contains("safety_overrides") && message.contains("allow_having"),
+        "fix-it must name safety_overrides: and the caller's own declared flag; got: {message}"
     );
 }
 

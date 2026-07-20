@@ -6,9 +6,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key:
-    - event_date
 ---
 
 SELECT event_date, 'orders' AS source_type, COUNT(*) AS n

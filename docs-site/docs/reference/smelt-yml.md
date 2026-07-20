@@ -153,7 +153,7 @@ models:
     safety_overrides:
       # safety-override fields...
     batched:
-      # batched fields...
+      unique_key: [<column>, ...]  # MERGE-dedup-only key — see the callout below
 ```
 
 `refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` / `key_per_partition` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.
@@ -167,10 +167,10 @@ models:
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
 | `timeseries` | object | no | | Time-dimension declaration — the **clock** shape-defining fact (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
-| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from the `batched:` sub-block's `unique_key` (a partition-grain dedup aid, never identity). |
+| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from `batched.unique_key` below (a partition-grain MERGE-dedup key, never identity). |
 | `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
-| `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. Declaring both this key and the `batched.safety_overrides` sub-block on the same model is an error — declare it once. |
-| `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
+| `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. Declaring both this key and a non-default `batched.safety_overrides` on the same `smelt.yml` model entry is an error — declare it once. |
+| `batched` | object | no | | `smelt.yml`-only preference block carrying `unique_key` — a MERGE-dedup key for a partition-shaped output, distinct from the identity-conferring top-level `unique_key:` above (see the callout in [Incremental Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -243,12 +243,15 @@ models:
         - transaction_id
 ```
 
+!!! note "`batched:` is `smelt.yml`-only"
+    The `.sql` frontmatter `batched:` sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (`unique_key` → top-level `unique_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`). Declaring the *identity* fact this way makes the output key-shaped (see [Incremental models](../guide/incremental-models.md)), which a row-shaped model with no `GROUP BY` cannot become. `smelt.yml`'s `models.<name>.batched:` block above is a **separate, still-supported** mechanism carrying a MERGE-dedup-only `unique_key` (and `nondeterministic_columns`, since per-column `contract:` is SQL-frontmatter-only) for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed.
+
 #### Incremental Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
-| `nondeterministic_columns` | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
+| `unique_key` (under `batched:`) | string[] | no | `[]` | A MERGE-dedup key for a partition-shaped output — never the identity-conferring fact top-level `unique_key:` is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell. |
+| `nondeterministic_columns` (under `batched:`) | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
 
 `safety_overrides` is a top-level model key (see [Model Fields](#model-fields) and [Safety Overrides](#safety-overrides) below), not part of this `batched:` block.
 
@@ -267,7 +270,7 @@ Smelt validates incremental models to ensure they produce the same results wheth
 
 ### Maintenance Configuration
 
-`maintenance:` is a sibling of `timeseries:`/`batched:` in SQL frontmatter (it is not a `smelt.yml` per-model field). It constrains the derived maintenance plan — the per-`(column-group × trigger)` cell matrix `smelt explain <model>` prints — without ever choosing a strategy the derivation didn't already admit.
+`maintenance:` is a sibling of `timeseries:` in SQL frontmatter (it is not a `smelt.yml` per-model field). It constrains the derived maintenance plan — the per-`(column-group × trigger)` cell matrix `smelt explain <model>` prints — without ever choosing a strategy the derivation didn't already admit.
 
 ```yaml
 maintenance:
@@ -342,13 +345,13 @@ Smelt validates model configurations and reports errors or warnings:
 
 **Errors (block execution):**
 
-- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `batched:` block
+- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `smelt.yml` `batched:` block
 - Ephemeral models cannot have a target override
 
 **Warnings (printed to stderr):**
 
 - View models with `refresh:` set (the refresh axis only applies to stored tables)
-- `refresh: materialized_view` models with a `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
+- `refresh: materialized_view` models with a `smelt.yml` `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
 
 ---
 
@@ -400,7 +403,7 @@ models:
   transactions:
     materialization: table
 
-  # Incremental model (grain: partition) — timeseries: and batched: are sibling keys
+  # Incremental model (grain: partition)
   daily_revenue:
     materialization: table
     refresh: incremental

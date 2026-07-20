@@ -424,7 +424,6 @@ impl Backend {
                 DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
                 DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
                 DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
-                DbCode::KeyedForbidsBatched => "keyed-forbids-batched",
                 DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
                 DbCode::MaterializedViewForbidsBatched => "materialized-view-forbids-batched",
                 DbCode::BatchedNotSafe => "batched-not-safe",

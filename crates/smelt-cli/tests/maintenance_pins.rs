@@ -71,9 +71,17 @@ columns:
 fn stage_project(project_dir: &Path, db_path: &Path, cells_yaml: &str) {
     std::fs::create_dir_all(project_dir.join("models/sources")).expect("create models/sources");
 
+    // The `.sql` frontmatter `batched:` sub-block is retired
+    // (`docs/specs/models.md` §"The Relation Contract") — this model's own
+    // row-shaped join can't become the composed key+clock shape a top-level
+    // `unique_key:` would derive (no `GROUP BY` to satisfy
+    // `KeyedRequiresGroupBy`), so the MERGE-dedup-only `unique_key` stays
+    // declared via the `smelt.yml` model override instead, which the
+    // sub-block retirement does not touch.
     let smelt_yml = format!(
         "name: maintenance_pins_fixture\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    \
-         type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
+         type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n\
+         models:\n  daily_events_enriched:\n    batched:\n      unique_key: [event_id]\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).expect("write smelt.yml");
@@ -87,8 +95,6 @@ timeseries:
   partition_column: event_date
   event_time_column: event_timestamp
   granularity: day
-batched:
-  unique_key: [event_id]
 maintenance:
   scan_bounds:
     per_source:

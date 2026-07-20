@@ -97,8 +97,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [acct_id]
 ---
 WITH joined AS (
     SELECT

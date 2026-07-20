@@ -59,8 +59,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [user_id, event_date]
 ---
 SELECT
   e.event_date,
@@ -117,8 +115,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 maintenance:
   scan_bounds:
     per_source:
@@ -158,8 +154,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 maintenance:
   scan_bounds:
     per_source:
@@ -198,8 +192,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d, user_id]
 ---
 SELECT e.d, e.user_id, e.val, r.refund_amt
 FROM smelt.sources.events e
@@ -259,8 +251,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 ---
 SELECT d, balance FROM (
   SELECT
@@ -301,8 +291,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 ---
 SELECT
   t.d AS d,
@@ -337,8 +325,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d, id, src]
 ---
 SELECT d, id, val, 'a' AS src FROM smelt.sources.events_a
 UNION ALL
@@ -398,8 +384,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [user_id, d]
 ---
 SELECT
   l.d,
@@ -456,8 +440,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d, user_id, tier]
 ---
 WITH user_tiers AS (
     SELECT DISTINCT user_id, tier FROM smelt.sources.events
@@ -496,8 +478,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 ---
 WITH seven AS (
     SELECT

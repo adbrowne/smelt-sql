@@ -11,9 +11,8 @@ timeseries:
 # practice: a redelivered duplicate always lands in the *same* event_date
 # partition as its original, so the window never needs to see across a
 # partition boundary to resolve one event_id's duplicates.
-batched:
-  safety_overrides:
-    allow_window_functions: true
+safety_overrides:
+  allow_window_functions: true
 ---
 -- Tutorial stage 3 (see docs-site examples/web-analytics): stage 1 plus
 -- both upstream-hygiene rules of the full example's silver.events_parsed —

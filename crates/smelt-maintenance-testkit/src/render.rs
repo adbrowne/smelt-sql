@@ -147,12 +147,18 @@ pub fn rewritten_unique_key(recipe: &ModelRecipe, edit: ModelEdit) -> Vec<String
 }
 
 /// The full rewritten model file contents (Phase 9): same frontmatter shape
-/// as [`render_model_file`], with [`rewritten_unique_key`]'s declared key and
-/// [`render_model_body_with_edit`]'s body.
+/// as [`render_model_file`], with [`render_model_body_with_edit`]'s body.
+/// The retired `batched:` sub-block this used to carry
+/// [`rewritten_unique_key`]'s declared key under is gone — it never fed
+/// row-identity derivation for a `Grain::Partition` output anyway
+/// (`derive::ModelInputs::declared_unique_key` is empty for every
+/// `Grain::Partition`), so dropping it changes no derived maintenance plan.
+/// [`rewritten_unique_key`] is kept for callers that still want the
+/// evolved key shape as data (e.g. schema-evolution comparisons) without it
+/// being re-embedded in frontmatter.
 pub fn render_model_file_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> String {
-    let unique_key = rewritten_unique_key(recipe, edit).join(", ");
     format!(
-        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,
@@ -171,13 +177,16 @@ pub fn render_oracle_sql_with_edit(recipe: &ModelRecipe, edit: ModelEdit) -> Str
 }
 
 /// The full model file contents: frontmatter (`timeseries:` + `refresh:
-/// incremental` + `grain: partition` + `batched.unique_key`) followed by
-/// [`render_model_body`]. Follows `model_shapes.rs`'s documented convention:
-/// no `WHERE start/end`, `smelt.sources.*` refs.
+/// incremental` + `grain: partition`) followed by [`render_model_body`].
+/// Follows `model_shapes.rs`'s documented convention: no `WHERE start/end`,
+/// `smelt.sources.*` refs. The retired `batched.unique_key` sub-block this
+/// used to carry `recipe.grain.unique_key` under is gone — it never fed
+/// row-identity derivation for a `Grain::Partition` output anyway
+/// (`derive::ModelInputs::declared_unique_key` is empty for every
+/// `Grain::Partition`), so dropping it changes no derived maintenance plan.
 pub fn render_model_file(recipe: &ModelRecipe) -> String {
-    let unique_key = recipe.grain.unique_key.join(", ");
     format!(
-        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+        "---\ntimeseries:\n  event_time_column: {etc}\n  partition_column: {pc}\n  granularity: {gran}\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
         etc = recipe.grain.event_time_column,
         pc = recipe.grain.partition_column,
         gran = recipe.grain.granularity,

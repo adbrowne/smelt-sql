@@ -637,8 +637,6 @@ async fn self_referential_bootstrap_statements_come_from_the_emitter() {
          \x20\x20partition_column: d\n\
          \x20\x20event_time_column: d\n\
          \x20\x20granularity: day\n\
-         batched:\n\
-         \x20\x20unique_key: [d]\n\
          ---\n\
          SELECT d, balance FROM (\n\
          \x20\x20SELECT\n\

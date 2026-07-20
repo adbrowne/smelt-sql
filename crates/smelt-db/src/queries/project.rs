@@ -3540,14 +3540,12 @@ mod tests {
     /// reflects the generator file's frontmatter `timeseries:` block.
     #[test]
     fn emitted_incremental_model_inherits_frontmatter_incremental_block() {
-        // Generator file with batched + timeseries frontmatter.
+        // Generator file with timeseries frontmatter.
         let generator = concat!(
             "---\n",
             "generates: models\n",
             "refresh: incremental\n",
             "grain: partition\n",
-            "batched:\n",
-            "  unique_key: [dt]\n",
             "timeseries:\n",
             "  event_time_column: dt\n",
             "  partition_column: dt\n",
@@ -3700,8 +3698,6 @@ mod tests {
             "generates: models\n",
             "refresh: incremental\n",
             "grain: partition\n",
-            "batched:\n",
-            "  unique_key: [dt]\n",
             "timeseries:\n",
             "  event_time_column: dt\n",
             "  partition_column: dt\n",

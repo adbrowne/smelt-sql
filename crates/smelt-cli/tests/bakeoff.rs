@@ -54,9 +54,15 @@ columns:
 fn stage_multi_technique_project(project_dir: &Path, db_path: &Path, project_name: &str) {
     std::fs::create_dir_all(project_dir.join("models/sources")).expect("create models/sources");
 
+    // `batched:` is retired in `.sql` frontmatter; the MERGE-dedup-only
+    // `unique_key` (this row-shaped join can't become the composed
+    // key+clock shape — no `GROUP BY`) stays declared via the `smelt.yml`
+    // model override instead (`docs/specs/models.md` §"The Relation
+    // Contract").
     let smelt_yml = format!(
         "name: {project_name}\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    \
-         type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
+         type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n\
+         models:\n  daily_events_enriched:\n    batched:\n      unique_key: [event_id]\n",
         db = db_path.display()
     );
     std::fs::write(project_dir.join("smelt.yml"), smelt_yml).expect("write smelt.yml");
@@ -69,8 +75,6 @@ timeseries:
   partition_column: event_date
   event_time_column: event_timestamp
   granularity: day
-batched:
-  unique_key: [event_id]
 maintenance:
   scan_bounds:
     per_source:
@@ -119,8 +123,6 @@ timeseries:
   partition_column: event_date
   event_time_column: event_timestamp
   granularity: day
-batched:
-  unique_key: [event_id]
 ---
 SELECT
     e.event_id,

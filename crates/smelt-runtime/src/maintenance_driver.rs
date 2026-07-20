@@ -913,12 +913,13 @@ pub fn resolve_live_column_scoped_cell(
         // to this dimension — out of scope for Phase 2 of
         // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
         // family (Fold/Recompute/RederiveColumns) dimension.
-        let Ok((suppression, _variant_reason)) = resolve_write_variant(
+        let write_variant_result = resolve_write_variant(
             &raw_suppression,
             &cell.trigger,
             cell.ledger_catch_up,
             &overrides,
-        ) else {
+        );
+        let Ok((suppression, _variant_reason)) = write_variant_result else {
             continue;
         };
         return Ok(Some((source.clone(), cell, suppression)));

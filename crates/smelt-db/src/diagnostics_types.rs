@@ -741,10 +741,6 @@ pub enum DiagnosticCode {
     /// partition column by default; the rule reads it from the driving
     /// source. Anchored at offset 0. Error severity.
     KeyedForbidsTimeseries,
-    /// A `refresh: keyed` model incorrectly declares a `batched:` block.
-    /// The two refresh strategies have different equivalence contracts; pick one.
-    /// Anchored at offset 0. Error severity.
-    KeyedForbidsBatched,
     /// A `refresh: materialized_view` model incorrectly declares a
     /// `timeseries:` block. Like `keyed`, the engine-maintained output
     /// has no partition column. Anchored at offset 0. Error severity.
