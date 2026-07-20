@@ -71,7 +71,7 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 | 2     | done    | 42147964 | 2026-07-20 |
 | 3     | done    | (this commit) | 2026-07-20 |
 | 4     | done    | (this commit) | 2026-07-20 |
-| 5     | pending |        |      |
+| 5     | blocked |        | 2026-07-20 |
 | 6     | pending |        |      |
 
 ### Phase 1: Spec diff — sub-block retirement surface
@@ -233,6 +233,14 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+## Blocked phases
+
+**2026-07-20 — Phase 5** ("Generative conformance leg for change-suppressed column-scoped MERGE"): no recipe can reach a live, suppression-capable `Technique::ColumnScopedMerge` cell with a proven/declared row key over a joined external source through the *current production pipeline*, so the phase's own "no production code expected" constraint is unsatisfiable as scoped. Two independent, exhaustive gaps, both requiring real production changes with their own admission-safety implications:
+- `Grain::Partition` recipes (e.g. `MutableEnrichedRecipe`) can never get `RowIdentity::Key` for an `UpstreamMutation` cell driven by a joined external source: `ModelInputs::declared_unique_key()` (`crates/smelt-logical/src/maintenance/derive.rs:464`) returns `&[]` for `Grain::Partition` (top-level `unique_key:` only threads into `Grain::Key`), and the proven-key fallback (`row_identity_with_context`) is always called with an empty `JoinContext` for external sources in the general derivation path (`derive_maintenance_plan_impl`, `derive.rs:573`) — verified empirically, `row_identity` returns `WholeRow` for enrichment-join bodies against a mutable dimension either way. `SourceFacts::unique_key` is hardcoded to `vec![]` at its one call site (`crates/smelt-db/src/queries/maintenance.rs::source_facts:82`).
+- `Grain::Key` recipes get `RowIdentity::Key` for free (even through a join) but their maintenance is never dispatched through the `ColumnScopedMerge` suppression path at runtime: `execute.rs`'s `plan_is_keyed` branch (~line 1471) routes every `grain: key` model to `cumulative::execute_cumulative_aggregate` and returns before reaching `resolve_live_column_scoped_cell` (`maintenance_driver.rs:769`); `cumulative.rs` has no handling of `UpstreamMutation`/`ColumnScopedMerge`/mutable dimensions at all.
+
+Candidate reshapes (neither attempted — both are production changes, not test-only): (a) thread `SourceFacts`/`JoinContext` facts into row-identity derivation for external-source enrichment joins on `Grain::Partition`; (b) wire `ColumnScopedMerge` dispatch into `execute_cumulative_aggregate` for `Grain::Key` models. Filed as a new finding for human triage; Phase 5 stays `blocked` until reshaped by a human (new plan phase or a follow-up sub-plan).
 
 ## Verification
 
