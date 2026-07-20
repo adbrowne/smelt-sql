@@ -20,7 +20,7 @@ smelt-bench expect 3
 smelt-bench println 27
 smelt-bench unwrap 8
 smelt-cli expect 41
-smelt-cli println 160
+smelt-cli println 161
 smelt-cli unwrap 0
 smelt-core expect 6
 smelt-core println 0

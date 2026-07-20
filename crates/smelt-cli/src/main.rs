@@ -60,6 +60,8 @@ enum Commands {
     History(HistoryArgs),
     /// Output model graph and configuration as JSON for orchestrator integration
     Explain(ExplainArgs),
+    /// Measure per-cell maintenance technique cost over replayed windows of real data
+    Bakeoff(BakeoffArgs),
     /// Show pending schema changes between model definitions and deployed state
     Diff(DiffArgs),
     /// Run unit tests for models
@@ -487,6 +489,42 @@ struct ExplainArgs {
 }
 
 #[derive(Parser)]
+struct BakeoffArgs {
+    /// Model to measure
+    model_name: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Target environment from smelt.yml to clone for scratch measurement runs.
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Narrow measurement to specific cells: `<col>@<source>`, repeatable
+    /// and/or comma-separated. Defaults to every cell with 2+ admissible
+    /// techniques.
+    #[arg(long = "cells")]
+    cells: Vec<String>,
+
+    /// Number of sequential replayed windows to slice the driving source's
+    /// event-time extent into.
+    #[arg(long, default_value = "3")]
+    runs: u32,
+
+    /// Retain the scratch schemas (and their per-target state dirs) after
+    /// measurement instead of dropping them.
+    #[arg(long)]
+    keep: bool,
+
+    /// Print the winning technique per measured cell as ready-to-paste
+    /// `cells[]` YAML. Emit-only — never writes the model's `.sql` file.
+    /// Not yet implemented (`docs/plans/20260719-prod-w7-bakeoff.md` Phase 5).
+    #[arg(long)]
+    pin: bool,
+}
+
+#[derive(Parser)]
 pub struct DocsGenerateArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
@@ -656,6 +694,7 @@ async fn main() -> std::process::ExitCode {
         Commands::Status(args) => commands::status::status(args, scope).await,
         Commands::History(args) => commands::history::history(args, scope).await,
         Commands::Explain(args) => commands::explain::explain(args, scope).await,
+        Commands::Bakeoff(args) => commands::bakeoff::bakeoff(args, scope).await,
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Check(args) => commands::check::run_checks(args).await,

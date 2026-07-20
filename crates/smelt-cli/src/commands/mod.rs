@@ -1,4 +1,5 @@
 pub mod backbuild;
+pub mod bakeoff;
 pub mod build;
 pub mod check;
 pub mod clean;

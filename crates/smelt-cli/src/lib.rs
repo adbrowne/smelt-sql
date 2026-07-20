@@ -1,6 +1,7 @@
 pub mod argument_resolution;
 pub mod backend_factory;
 pub mod backend_registry;
+pub mod bakeoff;
 pub mod config;
 pub mod diagnostics_terminal;
 pub mod discovery;
