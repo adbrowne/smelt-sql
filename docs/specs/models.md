@@ -244,7 +244,12 @@ Calling a non-parameterised model with arguments, or omitting required parameter
 | `view` + non-`full` `refresh:` | Warning (stderr); refresh config ignored |
 | `refresh: materialized_view` on a backend without native IVM | Hard error (`materialized_view.md`) |
 | `refresh: batched` \| `keyed` \| `cumulative` \| `versioned` | Hard error: unknown refresh value, with a fix-it naming the `refresh: incremental` + shape-facts (`timeseries:` / `unique_key:`) replacement (`smelt migrate` applies it) |
+| A `batched:` sub-block (`batched.unique_key` / `batched.safety_overrides` / `batched.nondeterministic_columns`) | Hard error naming each sub-block key the caller declared, with a fix-it giving the top-level replacement and the caller's own value under the new spelling (`unique_key:`, `safety_overrides:`, or `columns.<c>.contract: plausible` respectively) |
 | Unknown frontmatter key | Hard error (`deny_unknown_fields`) |
+
+### Batched sub-block retirement
+
+A `.sql` frontmatter or `smelt.yml` model override that still declares a `batched:` sub-block is refused (see Constraint violations above): the sub-block's three keys are only ever a nested surface for options that already have top-level homes. `batched.unique_key` → top-level `unique_key:`; `batched.safety_overrides` → top-level `safety_overrides:` — both carry the same precedence as every other Relation-Contract fact (SQL frontmatter over the `smelt.yml` model override; `smelt_yml.md` §"Precedence rules" rule 2, "Incremental"). `batched.nondeterministic_columns` → per-column `columns.<c>.contract: plausible` (`incremental_models.md` §"Partition-grain frontmatter (in `.sql` files)"); `nondeterministic_columns` has no top-level form of its own — the column-scoped `contract` declaration is its only replacement, with unchanged semantics, owned where it already is. The refusal's fix-it names each declared sub-block key together with the caller's own value, rewritten under its replacement spelling.
 
 ## Semantics
 

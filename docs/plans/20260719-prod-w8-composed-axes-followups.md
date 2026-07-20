@@ -67,7 +67,7 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 
 | Phase | Status  | Commit | Date |
 |-------|---------|--------|------|
-| 1     | pending |        |      |
+| 1     | done    | (this commit) | 2026-07-20 |
 | 2     | pending |        |      |
 | 3     | pending |        |      |
 | 4     | pending |        |      |
