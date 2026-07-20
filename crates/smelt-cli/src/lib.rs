@@ -23,7 +23,7 @@ pub mod test_runner;
 
 pub use backend_registry::BackendRegistry;
 pub use config::{
-    find_project_root, BackendType, BatchedConfig, Config, Materialization, SourcesConfig,
+    find_project_root, BackendType, Config, Materialization, PartitionGrainConfig, SourcesConfig,
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
 pub use errors::{exit_code_for, CliError};

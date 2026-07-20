@@ -734,7 +734,7 @@ fn check_nondeterminism(
     partition_col: &str,
     partition_expr: &str,
     event_time_column: &str,
-    inc_config: &crate::types::BatchedConfig,
+    inc_config: &crate::types::PartitionGrainConfig,
 ) -> Result<(), String> {
     // 1. Hard exclusion: the partition_column expression.
     if let Some(func) = find_nondeterministic_fn(&partition_expr.to_uppercase()) {
@@ -1406,7 +1406,7 @@ pub fn optimize(model: &ModelInfo) -> Result<Option<Transformation>, String> {
 mod tests {
     use super::*;
     use crate::graph::TimeseriesConfig;
-    use crate::types::{BatchedConfig, BatchedSafetyOverrides, Granularity};
+    use crate::types::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 
     /// Test shim for the walk-based OVER admission gate: accepts either a
     /// full SELECT statement or a bare select-item fragment (wrapped in a
@@ -1446,10 +1446,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         }
     }
@@ -1458,7 +1458,7 @@ mod tests {
         name: &str,
         sql: &str,
         partition_column: &str,
-        overrides: BatchedSafetyOverrides,
+        overrides: PartitionGrainSafetyOverrides,
     ) -> ModelInfo {
         ModelInfo {
             name: name.to_string(),
@@ -1471,7 +1471,7 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
                 safety_overrides: overrides,
@@ -1499,10 +1499,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key,
                 nondeterministic_columns,
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         }
     }
@@ -1577,10 +1577,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
         let opp = detect(&m).unwrap().unwrap();
@@ -1632,7 +1632,7 @@ mod tests {
             "windowed",
             "SELECT date_trunc('day', event_timestamp) as event_date, ROW_NUMBER() OVER (PARTITION BY user_id ORDER BY event_timestamp) as rn FROM events GROUP BY 1",
             "event_date",
-            BatchedSafetyOverrides {
+            PartitionGrainSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },
@@ -1713,7 +1713,7 @@ mod tests {
             "having_model",
             "SELECT date_trunc('day', event_timestamp) as event_date, user_id, COUNT(*) as cnt FROM events GROUP BY 1, 2 HAVING COUNT(*) > 10",
             "event_date",
-            BatchedSafetyOverrides {
+            PartitionGrainSafetyOverrides {
                 allow_having: true,
                 ..Default::default()
             },
@@ -2141,10 +2141,10 @@ mod tests {
                 week_start: Some(Weekday::Monday),
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
         let opp = detect(&m).unwrap().unwrap();
@@ -2219,10 +2219,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec!["event_date".to_string(), "user_id".to_string()],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
         let result = detect(&m);
@@ -2243,10 +2243,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec!["nonexistent_col".to_string()],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
         let result = detect(&m);
@@ -2277,7 +2277,7 @@ mod tests {
             "lagged",
             "SELECT user_id, event_timestamp, LAG(amount, 3) OVER (ORDER BY event_timestamp) as prev FROM events",
             "event_date",
-            BatchedSafetyOverrides {
+            PartitionGrainSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },
@@ -2302,7 +2302,7 @@ mod tests {
             "running",
             "SELECT user_id, event_timestamp, SUM(amount) OVER (ORDER BY event_timestamp RANGE BETWEEN UNBOUNDED PRECEDING AND CURRENT ROW) as running FROM events",
             "event_date",
-            BatchedSafetyOverrides {
+            PartitionGrainSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },
@@ -2430,7 +2430,7 @@ mod tests {
     }
 
     /// Fail-closed reject: any `NotDerivable` source refuses the whole model
-    /// (`BatchedNotSafe`), naming the offending source — never silently
+    /// (`PartitionGrainNotSafe`), naming the offending source — never silently
     /// downgraded to a coarser class computed from the other sources.
     #[test]
     fn test_batch_safety_from_bounds_not_derivable_refuses_naming_source() {
@@ -2554,10 +2554,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -2613,10 +2613,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -2671,10 +2671,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides {
+                safety_overrides: PartitionGrainSafetyOverrides {
                     allow_window_functions: true,
                     ..Default::default()
                 },
@@ -2757,10 +2757,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -2798,10 +2798,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -2841,10 +2841,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -2891,10 +2891,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -2936,10 +2936,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides {
+                safety_overrides: PartitionGrainSafetyOverrides {
                     allow_subqueries: true,
                     ..Default::default()
                 },
@@ -2981,10 +2981,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides {
+                safety_overrides: PartitionGrainSafetyOverrides {
                     allow_subqueries: true,
                     ..Default::default()
                 },
@@ -3028,10 +3028,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -3075,10 +3075,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -3125,10 +3125,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -3167,10 +3167,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: true,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -3210,10 +3210,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: true,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -3267,10 +3267,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 
@@ -3372,10 +3372,10 @@ mod tests {
                 week_start: None,
                 assert_monotonic: false,
             }),
-            incremental_config: Some(BatchedConfig {
+            incremental_config: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
         };
 

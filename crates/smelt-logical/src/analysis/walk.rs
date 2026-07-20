@@ -903,7 +903,7 @@ pub fn enumerate_scopes(sql: &str) -> Option<ScopeEnumeration> {
     Some(walk(&tree, &ScopeEnum))
 }
 
-// ===== Batched admission: alignment judged per walk-enumerated scope =====
+// ===== Partition-grain admission: alignment judged per walk-enumerated scope =====
 
 /// Which batched admission gate a violation falls under. Each gate maps to
 /// one `safety_overrides.allow_*` escape; `Unsupported` has no escape short
@@ -965,11 +965,11 @@ impl AdmissionViolation {
 /// `window_over_alignment`), and an unnormalizable construct yields an
 /// `Unsupported` violation (fail-closed by construction,
 /// `model_properties.md` §"The composition walk").
-struct BatchedAdmission<'a> {
+struct PartitionGrainAdmission<'a> {
     partition_col: &'a str,
 }
 
-impl Transfer for BatchedAdmission<'_> {
+impl Transfer for PartitionGrainAdmission<'_> {
     type Verdict = Vec<AdmissionViolation>;
 
     fn leaf(&self, _leaf: &LeafInput<'_>, _cx: &NodeCx) -> Self::Verdict {
@@ -1215,7 +1215,7 @@ pub fn batched_admission_violations(
     partition_col: &str,
 ) -> Option<Vec<AdmissionViolation>> {
     let tree = QueryTree::from_sql(sql)?;
-    Some(walk(&tree, &BatchedAdmission { partition_col }))
+    Some(walk(&tree, &PartitionGrainAdmission { partition_col }))
 }
 
 // ===== The partition-skew fold: the model's own output-window skew =====

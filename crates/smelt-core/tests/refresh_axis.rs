@@ -173,34 +173,34 @@ fn refresh_keyed_with_timeseries_reaches_plan_derivation() {
 }
 
 /// `refresh: incremental` + `grain: key` with an internally-folded `batched`
-/// block → `BatchedRequiresRefreshBatched`. The literal `batched:` sub-block
+/// block → `PartitionGrainRequiresRefreshIncremental`. The literal `batched:` sub-block
 /// itself is refused at parse time (before a `ModelMetadata` even exists),
 /// so this constructs the internal representation directly to exercise
-/// `validate_timeseries`'s pure check — the dedicated `KeyedForbidsBatched`
+/// `validate_timeseries`'s pure check — the dedicated `KeyedForbidsPartitionGrain`
 /// check was removed as unreachable (`is_keyed()` implies
 /// `!is_partition_grain()`, a strict subset of what
-/// `BatchedRequiresRefreshBatched` already checks).
+/// `PartitionGrainRequiresRefreshIncremental` already checks).
 #[test]
 fn refresh_keyed_forbids_incremental() {
-    use smelt_core::config::{BatchedConfig, BatchedSafetyOverrides};
+    use smelt_core::config::{PartitionGrainConfig, PartitionGrainSafetyOverrides};
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
         refresh: Some(RefreshStrategy::Incremental),
         grain: Some(Grain::Key),
-        batched: Some(BatchedConfig {
+        batched: Some(PartitionGrainConfig {
             unique_key: vec![],
             nondeterministic_columns: vec![],
-            safety_overrides: BatchedSafetyOverrides::default(),
+            safety_overrides: PartitionGrainSafetyOverrides::default(),
         }),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT * FROM foo")
         .expect_err("refresh: incremental + grain: key + batched: must error");
     assert!(
-        matches!(err, MetadataError::BatchedRequiresRefreshBatched),
-        "Expected BatchedRequiresRefreshBatched, got: {}",
+        matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+        "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
         err
     );
 }
@@ -268,7 +268,7 @@ fn refresh_batched_with_timeseries_is_valid() {
 }
 
 /// `refresh: incremental` + `grain: partition` without `timeseries:` →
-/// `TimeseriesRequiredForBatched`.
+/// `TimeseriesRequiredForPartitionGrain`.
 #[test]
 fn refresh_batched_without_timeseries_errors() {
     use smelt_core::metadata::MetadataError;
@@ -282,8 +282,8 @@ fn refresh_batched_without_timeseries_errors() {
     let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
         .expect_err("refresh: incremental + grain: partition without timeseries: must error");
     assert!(
-        matches!(err, MetadataError::TimeseriesRequiredForBatched),
-        "Expected TimeseriesRequiredForBatched, got: {}",
+        matches!(err, MetadataError::TimeseriesRequiredForPartitionGrain),
+        "Expected TimeseriesRequiredForPartitionGrain, got: {}",
         err
     );
 }
@@ -292,19 +292,19 @@ fn refresh_batched_without_timeseries_errors() {
 /// a hard error.
 #[test]
 fn batched_block_without_refresh_batched_errors() {
-    use smelt_core::config::BatchedConfig;
+    use smelt_core::config::PartitionGrainConfig;
     use smelt_core::metadata::MetadataError;
 
     let metadata = ModelMetadata {
         materialization: Some(Materialization::Table),
-        batched: Some(BatchedConfig::default()),
+        batched: Some(PartitionGrainConfig::default()),
         ..Default::default()
     };
     let err = validate_timeseries(&metadata, "SELECT 1")
         .expect_err("batched: without refresh: incremental + grain: partition must error");
     assert!(
-        matches!(err, MetadataError::BatchedRequiresRefreshBatched),
-        "Expected BatchedRequiresRefreshBatched, got: {}",
+        matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+        "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
         err
     );
 }
@@ -543,7 +543,7 @@ SELECT event_ts, event_date FROM foo"#;
 /// `unique_key:`'s precedence rule.
 #[test]
 fn top_level_safety_overrides_parses_in_smelt_yml() {
-    use smelt_core::config::{BatchedSafetyOverrides, Config};
+    use smelt_core::config::{Config, PartitionGrainSafetyOverrides};
 
     let yaml = r#"
 name: test_project
@@ -587,8 +587,8 @@ models:
             week_start: None,
             assert_monotonic: false,
         }),
-        batched: Some(smelt_core::config::BatchedConfig {
-            safety_overrides: BatchedSafetyOverrides {
+        batched: Some(smelt_core::config::PartitionGrainConfig {
+            safety_overrides: PartitionGrainSafetyOverrides {
                 allow_having: true,
                 ..Default::default()
             },

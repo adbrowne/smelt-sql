@@ -3,7 +3,7 @@ use anyhow::Result;
 use serde::Serialize;
 use smelt_core::config::{Config, Grain, RefreshStrategy, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
-use smelt_core::{BatchedConfig, Granularity, Materialization, ModelOriginKind};
+use smelt_core::{Granularity, Materialization, ModelOriginKind, PartitionGrainConfig};
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
 use smelt_logical::maintenance::{PlanCell, Technique};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
@@ -1429,7 +1429,7 @@ fn compute_batch_safety_label(
     name: &str,
     sql: &str,
     model_file: &ModelFile,
-    inc: &BatchedConfig,
+    inc: &PartitionGrainConfig,
     ts: &TimeseriesConfig,
 ) -> String {
     let model_info = ModelInfo {
@@ -1528,7 +1528,7 @@ mod tests {
     #[test]
     fn test_batch_safety_uses_expanded_function_body() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{BatchedConfig, Granularity};
+        use smelt_core::{Granularity, PartitionGrainConfig};
 
         // A model whose only lookback lives inside a `smelt.define` body must
         // classify as `bounded_safe` — but only when the explain path expands
@@ -1552,7 +1552,7 @@ mod tests {
                 grain: Some(smelt_core::config::Grain::Partition),
                 unique_key: None,
                 safety_overrides: None,
-                batched: Some(BatchedConfig {
+                batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
                     safety_overrides: Default::default(),
@@ -1632,7 +1632,7 @@ mod tests {
     #[test]
     fn test_explain_with_incremental() {
         use smelt_core::config::TimeseriesConfig;
-        use smelt_core::{BatchedConfig, Granularity};
+        use smelt_core::{Granularity, PartitionGrainConfig};
 
         let models = vec![
             make_model("orders", vec![], "SELECT * FROM raw_orders"),
@@ -1657,7 +1657,7 @@ mod tests {
                 grain: Some(smelt_core::config::Grain::Partition),
                 unique_key: None,
                 safety_overrides: None,
-                batched: Some(BatchedConfig {
+                batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
                     safety_overrides: Default::default(),

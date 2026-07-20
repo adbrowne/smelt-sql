@@ -109,7 +109,7 @@ Owned by `docs/specs/timeseries.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
+| `TimeseriesRequiredForPartitionGrain` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
 | `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
 | `MalformedBoundedDomain` | Error | A `bounded_domain:` declaration is structurally invalid: a non-positive `max_cardinality` (an absent cap is already a YAML parse error, since the field is required), an empty `column`, or a `column` absent from the model's SQL body. |
@@ -119,13 +119,13 @@ Owned by `docs/specs/timeseries.md`.
 
 ---
 
-### Batched
+### Partition grain
 
 Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `BatchedNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
+| `PartitionGrainNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
 
 A `.sql` frontmatter `batched:` sub-block is refused outright — `YamlParseError` (no dedicated
@@ -142,14 +142,14 @@ top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contr
 Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
 unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, and
-`KeyedForbidsBatched` are **retired outright, not renamed**:
+`KeyedForbidsPartitionGrain` are **retired outright, not renamed**:
 - `CumulativeNoDrivingSource`/`AccumulatingSnapshotUnboundedHorizon` — an unclocked model is a
   legitimate snapshot-reconcile posture under `keyed`, not an error, and there is no
   write-eligibility horizon to bound (`incremental_models.md` §Known Divergences "The key grain").
-- `KeyedForbidsBatched` — the literal `batched:` sub-block it named is refused universally, for
+- `KeyedForbidsPartitionGrain` — the literal `batched:` sub-block it named is refused universally, for
   every grain, at frontmatter parse time (`YamlParseError`, not a dedicated code) — a `grain: key`
   model can no longer declare the sub-block at all, so the dedicated keyed check is gone rather
-  than reachable. `BatchedRequiresRefreshBatched` still catches the one surviving way a `grain: key`
+  than reachable. `PartitionGrainRequiresRefreshIncremental` still catches the one surviving way a `grain: key`
   model can carry an internally-folded `batched` block (via the top-level `safety_overrides:` fold),
   a strict subset of what that check already covers.
 
@@ -179,7 +179,7 @@ Owned by `docs/specs/materialized_view.md`.
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `MaterializedViewForbidsTimeseries` | Error | A `refresh: materialized_view` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
-| `MaterializedViewForbidsBatched` | Error | A `refresh: materialized_view` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+| `MaterializedViewForbidsPartitionGrain` | Error | A `refresh: materialized_view` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 
 ---
 

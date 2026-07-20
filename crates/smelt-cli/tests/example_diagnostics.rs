@@ -2425,7 +2425,7 @@ fn meta_polish_broken_reducer_arity() {
 //   — one broken model that declares `incremental:` without `timeseries:`
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `TimeseriesRequiredForBatched` or `MalformedTimeseries` diagnostic fires
+/// `TimeseriesRequiredForPartitionGrain` or `MalformedTimeseries` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any
 /// other file in the workspace.
 fn check_workspace_emits_timeseries_diagnostic(
@@ -2438,7 +2438,7 @@ fn check_workspace_emits_timeseries_diagnostic(
     use std::path::Path;
 
     const TIMESERIES_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForPartitionGrain,
         smelt_db::DiagnosticCode::MalformedTimeseries,
     ];
 
@@ -2544,7 +2544,7 @@ fn check_workspace_emits_timeseries_diagnostic(
 }
 
 /// Timeseries TDD: `examples/timeseries_broken_incremental_without_timeseries/` produces
-/// exactly one `TimeseriesRequiredForBatched` diagnostic anchored at
+/// exactly one `TimeseriesRequiredForPartitionGrain` diagnostic anchored at
 /// `models/incremental_without_timeseries.sql`.
 ///
 /// This test verifies that `validate_timeseries` is wired into the production
@@ -2554,7 +2554,7 @@ fn timeseries_broken_incremental_without_timeseries() {
     check_workspace_emits_timeseries_diagnostic(
         "examples/timeseries_broken_incremental_without_timeseries",
         "models/incremental_without_timeseries.sql",
-        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForPartitionGrain,
     );
 }
 
@@ -2565,9 +2565,9 @@ fn timeseries_broken_incremental_without_timeseries() {
 //
 // Fixture: `examples/timeseries_broken_cumulative_with_timeseries/` — KeyedForbidsTimeseries
 //
-// The sibling `KeyedForbidsBatched` regression this helper used to also cover
+// The sibling `KeyedForbidsPartitionGrain` regression this helper used to also cover
 // (`examples/timeseries_broken_cumulative_with_incremental/`) was retired
-// outright along with the `KeyedForbidsBatched` diagnostic code: the literal
+// outright along with the `KeyedForbidsPartitionGrain` diagnostic code: the literal
 // `batched:` sub-block that fixture relied on to trigger it is now refused
 // universally, for every grain, at frontmatter parse time — a `grain: key`
 // model can no longer declare the sub-block at all, so the dedicated keyed
@@ -2730,7 +2730,7 @@ fn timeseries_broken_cumulative_with_timeseries() {
     );
 }
 
-// `timeseries_broken_cumulative_with_incremental` (the `KeyedForbidsBatched`
+// `timeseries_broken_cumulative_with_incremental` (the `KeyedForbidsPartitionGrain`
 // sibling regression test) and its fixture were removed — see the
 // `check_workspace_emits_keyed_frontmatter_diagnostic` doc comment above.
 

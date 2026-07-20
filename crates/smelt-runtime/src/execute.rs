@@ -62,7 +62,7 @@ struct ModelPlan {
 }
 
 struct IncrementalPlan {
-    config: smelt_core::BatchedConfig,
+    config: smelt_core::PartitionGrainConfig,
     timeseries: smelt_core::config::TimeseriesConfig,
     /// Batches with separate partition and filter ranges (bound-aware windowing).
     batches: Vec<IncrementalBatch>,

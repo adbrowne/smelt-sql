@@ -41,6 +41,6 @@ pub use rules::rule_diagnostics::{
     RuleDiagnostic, RuleDiagnosticCode, RuleSeverity,
 };
 pub use types::{
-    BatchedConfig, BatchedSafetyOverrides, ExecutionStep, Frontmatter, Granularity,
-    IncrementalStrategy, Opportunity, OpportunityData, Transformation, Weekday,
+    ExecutionStep, Frontmatter, Granularity, IncrementalStrategy, Opportunity, OpportunityData,
+    PartitionGrainConfig, PartitionGrainSafetyOverrides, Transformation, Weekday,
 };

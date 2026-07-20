@@ -70,7 +70,7 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 | 1     | done    | (this commit) | 2026-07-20 |
 | 2     | done    | 42147964 | 2026-07-20 |
 | 3     | done    | (this commit) | 2026-07-20 |
-| 4     | pending |        |      |
+| 4     | done    | (this commit) | 2026-07-20 |
 | 5     | pending |        |      |
 | 6     | pending |        |      |
 

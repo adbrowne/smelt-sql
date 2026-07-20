@@ -34,7 +34,9 @@ use smelt_backend::Backend;
 use smelt_backend_duckdb::DuckDbBackend;
 use smelt_core::config::{Config, TimeseriesConfig};
 use smelt_core::graph::DependencyGraph;
-use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity, ModelDiscovery};
+use smelt_core::{
+    Granularity, ModelDiscovery, PartitionGrainConfig, PartitionGrainSafetyOverrides,
+};
 use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
 use smelt_maintenance_testkit::link_c_harness::SqlCapturingReporter;
 use smelt_runtime::execute::{BackendFactory, BackendFuture};
@@ -868,11 +870,11 @@ fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {
     }
 }
 
-fn make_inc() -> BatchedConfig {
-    BatchedConfig {
+fn make_inc() -> PartitionGrainConfig {
+    PartitionGrainConfig {
         unique_key: vec![],
         nondeterministic_columns: vec![],
-        safety_overrides: BatchedSafetyOverrides::default(),
+        safety_overrides: PartitionGrainSafetyOverrides::default(),
     }
 }
 

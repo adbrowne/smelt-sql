@@ -17,7 +17,7 @@ use std::collections::HashMap;
 use chrono::{Datelike, Duration, NaiveDate};
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{BatchedConfig, Granularity};
+use smelt_core::{Granularity, PartitionGrainConfig};
 use smelt_logical::analysis::source_bounds::{Seconds, Skew};
 use smelt_logical::analysis::walk::{model_partition_skew, model_partition_skew_excluding_self};
 use smelt_logical::analysis::window_independence::{window_independence, WindowIndependence};
@@ -115,7 +115,7 @@ const WIDE_BATCH_PERIOD_THRESHOLD: u32 = 30;
 #[allow(clippy::too_many_arguments)]
 pub fn compute_incremental_windows(
     timeseries: &TimeseriesConfig,
-    inc_config: &BatchedConfig,
+    inc_config: &PartitionGrainConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
@@ -157,7 +157,7 @@ pub fn compute_incremental_windows(
 #[allow(clippy::too_many_arguments)]
 fn compute_incremental_windows_impl(
     timeseries: &TimeseriesConfig,
-    _inc_config: &BatchedConfig,
+    _inc_config: &PartitionGrainConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,
@@ -355,7 +355,7 @@ pub fn compute_incremental_windows_ordered(
     model_name: &str,
     refs: &[String],
     timeseries: &TimeseriesConfig,
-    inc_config: &BatchedConfig,
+    inc_config: &PartitionGrainConfig,
     sql: &str,
     dep_timeseries: &HashMap<String, (Vec<String>, String)>,
     data_latency_days: u32,

@@ -24,8 +24,8 @@
 //!    ```
 
 use crate::config::{
-    BatchedConfig, BatchedSafetyOverrides, DataLatency, Materialization, RefreshStrategy,
-    StateConfig, TimeseriesConfig,
+    DataLatency, Materialization, PartitionGrainConfig, PartitionGrainSafetyOverrides,
+    RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::de::Error as _;
@@ -200,7 +200,7 @@ pub struct ModelMetadata {
     /// `fold_top_level_safety_overrides` from the top-level
     /// `safety_overrides:` key, never directly deserialized from user YAML.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batched: Option<BatchedConfig>,
+    pub batched: Option<PartitionGrainConfig>,
 
     /// Target to execute this model on (overrides smelt.yml and CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -314,7 +314,7 @@ pub struct ModelMetadata {
     /// [`ModelMetadata::batched`] representation every existing safety check
     /// already reads.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub safety_overrides: Option<BatchedSafetyOverrides>,
+    pub safety_overrides: Option<PartitionGrainSafetyOverrides>,
 
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
@@ -495,8 +495,8 @@ pub enum MetadataError {
     },
 
     /// A model declares `refresh: batched` without a sibling `timeseries:` block.
-    #[error("TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
-    TimeseriesRequiredForBatched,
+    #[error("TimeseriesRequiredForPartitionGrain: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
+    TimeseriesRequiredForPartitionGrain,
 
     /// The `timeseries:` block violates a structural rule.
     #[error("MalformedTimeseries: {message}")]
@@ -519,8 +519,8 @@ pub enum MetadataError {
 
     /// A model declares a `batched:` block without `refresh: incremental` +
     /// `grain: partition`.
-    #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
-    BatchedRequiresRefreshBatched,
+    #[error("PartitionGrainRequiresRefreshIncremental: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
+    PartitionGrainRequiresRefreshIncremental,
 
     /// A model declares both the top-level `safety_overrides:` key and a
     /// non-default `batched.safety_overrides` sub-block. The two spellings
@@ -541,8 +541,8 @@ pub enum MetadataError {
     /// A model declares `refresh: materialized_view` and a `batched:` block.
     /// The engine, not smelt, owns freshness for this mode — there is no
     /// smelt-driven batch loop to configure.
-    #[error("MaterializedViewForbidsBatched: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
-    MaterializedViewForbidsBatched,
+    #[error("MaterializedViewForbidsPartitionGrain: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
+    MaterializedViewForbidsPartitionGrain,
 
     /// A `functional_dependencies:` entry is structurally invalid: an empty
     /// `key`/`determines`, a `determines` column also listed in `key`
@@ -646,7 +646,7 @@ pub enum MetadataError {
 /// partition grain").
 ///
 /// `raw_value` is the still-unvalidated YAML value under the `batched:` key.
-/// When it deserializes cleanly into [`BatchedConfig`], each declared sub-key
+/// When it deserializes cleanly into [`PartitionGrainConfig`], each declared sub-key
 /// is named with its own value under the replacement spelling
 /// (`unique_key` -> top-level `unique_key:`; `safety_overrides` -> top-level
 /// `safety_overrides:`; each `nondeterministic_columns` entry `<c>` ->
@@ -657,7 +657,7 @@ pub enum MetadataError {
 fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
     let header = "the `batched:` sub-block has been removed — declare each key at the \
                   model's top level instead:";
-    let cfg = match serde_yaml::from_value::<BatchedConfig>(raw_value.clone()) {
+    let cfg = match serde_yaml::from_value::<PartitionGrainConfig>(raw_value.clone()) {
         Ok(cfg) => cfg,
         Err(_) => {
             return format!(
@@ -675,7 +675,7 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
             cfg.unique_key, cfg.unique_key
         ));
     }
-    if cfg.safety_overrides != BatchedSafetyOverrides::default() {
+    if cfg.safety_overrides != PartitionGrainSafetyOverrides::default() {
         let mut flags = Vec::new();
         if cfg.safety_overrides.allow_window_functions {
             flags.push("allow_window_functions: true");
@@ -715,8 +715,8 @@ fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
 /// Fold the top-level `safety_overrides:` frontmatter key
 /// ([`ModelMetadata::safety_overrides`]) into the internal `batched:`
 /// representation ([`ModelMetadata::batched`]) so every existing
-/// `batched:`-shaped safety check — `KeyedForbidsBatched`,
-/// `BatchedRequiresRefreshBatched`, `MaterializedViewForbidsBatched`, and the
+/// `batched:`-shaped safety check — `KeyedForbidsPartitionGrain`,
+/// `PartitionGrainRequiresRefreshIncremental`, `MaterializedViewForbidsPartitionGrain`, and the
 /// safety-override consumers in `smelt_logical::rules::incremental` — sees
 /// the top-level spelling identically to the sub-block form, with zero
 /// changes to those consumers (`docs/specs/models.md` §"The Relation
@@ -735,14 +735,14 @@ fn fold_top_level_safety_overrides(metadata: &mut ModelMetadata) -> Result<(), M
         return Ok(());
     };
     match &mut metadata.batched {
-        Some(existing) if existing.safety_overrides != BatchedSafetyOverrides::default() => {
+        Some(existing) if existing.safety_overrides != PartitionGrainSafetyOverrides::default() => {
             return Err(MetadataError::SafetyOverridesDoubleDeclared);
         }
         Some(existing) => {
             existing.safety_overrides = top_level;
         }
         None => {
-            metadata.batched = Some(BatchedConfig {
+            metadata.batched = Some(PartitionGrainConfig {
                 safety_overrides: top_level,
                 ..Default::default()
             });
@@ -780,12 +780,12 @@ fn frontmatter_has_generates(source: &str) -> bool {
 /// Rules checked (per `models.md` §"Constraint violations", `timeseries.md` §Semantics):
 /// - `refresh: incremental` without `grain:` → `GrainRequiredForIncremental`
 /// - `grain:` without `refresh: incremental` → `GrainRequiresIncremental`
-/// - `refresh: incremental` + `grain: partition` without `timeseries:` → `TimeseriesRequiredForBatched`
-/// - `batched:` block without `refresh: incremental` + `grain: partition` → `BatchedRequiresRefreshBatched`
+/// - `refresh: incremental` + `grain: partition` without `timeseries:` → `TimeseriesRequiredForPartitionGrain`
+/// - `batched:` block without `refresh: incremental` + `grain: partition` → `PartitionGrainRequiresRefreshIncremental`
 /// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
 /// - Legacy nested form (`event_time_column` inside `batched:`) was removed;
 ///   its presence in the YAML block now produces a YAML parse error (unknown field)
-///   rather than a custom diagnostic, because `BatchedConfig` no longer
+///   rather than a custom diagnostic, because `PartitionGrainConfig` no longer
 ///   declares those fields.
 /// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
@@ -853,9 +853,9 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // / `extract_multi_model`), before a `ModelMetadata` value even exists.
     // The only way `metadata.batched` can still be `Some` here is via the
     // top-level `safety_overrides:` fold (`fold_top_level_safety_overrides`);
-    // that case is a strict subset of the `BatchedRequiresRefreshBatched`
+    // that case is a strict subset of the `PartitionGrainRequiresRefreshIncremental`
     // check below (`is_keyed()` implies `!is_partition_grain()`), so a
-    // dedicated `KeyedForbidsBatched` check here would be unreachable and was
+    // dedicated `KeyedForbidsPartitionGrain` check here would be unreachable and was
     // removed (`docs/specs/diagnostics.md` §"Keyed refresh mode").
 
     // Keyed + timeseries: is NOT rejected here. Admission depends on
@@ -873,7 +873,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // Rule: materialized_view forbids batched: — the engine owns freshness
     // for this mode; there is no smelt-driven batch loop to configure.
     if metadata.is_materialized_view() && metadata.batched.is_some() {
-        return Err(MetadataError::MaterializedViewForbidsBatched);
+        return Err(MetadataError::MaterializedViewForbidsPartitionGrain);
     }
 
     // Rule: materialized_view forbids timeseries: — like keyed, the
@@ -911,15 +911,15 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     }
 
     // Rule: batched: block without refresh: incremental + grain: partition →
-    // BatchedRequiresRefreshBatched
+    // PartitionGrainRequiresRefreshIncremental
     if metadata.batched.is_some() && !metadata.is_partition_grain() {
-        return Err(MetadataError::BatchedRequiresRefreshBatched);
+        return Err(MetadataError::PartitionGrainRequiresRefreshIncremental);
     }
 
     // Rule: refresh: incremental + grain: partition without timeseries: →
-    // TimeseriesRequiredForBatched
+    // TimeseriesRequiredForPartitionGrain
     if metadata.is_partition_grain() && metadata.timeseries.is_none() {
-        return Err(MetadataError::TimeseriesRequiredForBatched);
+        return Err(MetadataError::TimeseriesRequiredForPartitionGrain);
     }
 
     let ts = match &metadata.timeseries {
@@ -2436,7 +2436,7 @@ FROM smelt.orders_raw"#;
     }
 
     /// A `.sql` file declaring `refresh: batched` with no `timeseries:` produces
-    /// `TimeseriesRequiredForBatched` from `validate_timeseries`.
+    /// `TimeseriesRequiredForPartitionGrain` from `validate_timeseries`.
     #[test]
     fn test_batched_without_timeseries_errors() {
         // Build a ModelMetadata with refresh: batched but no timeseries
@@ -2449,8 +2449,8 @@ FROM smelt.orders_raw"#;
         let err = validate_timeseries(&metadata, "SELECT event_date FROM foo")
             .expect_err("must error when refresh: batched has no timeseries:");
         assert!(
-            matches!(err, MetadataError::TimeseriesRequiredForBatched),
-            "Expected TimeseriesRequiredForBatched, got: {}",
+            matches!(err, MetadataError::TimeseriesRequiredForPartitionGrain),
+            "Expected TimeseriesRequiredForPartitionGrain, got: {}",
             err
         );
     }
@@ -2467,14 +2467,14 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig::default()),
+            batched: Some(crate::config::PartitionGrainConfig::default()),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
             .expect_err("must error when batched: has no refresh: batched");
         assert!(
-            matches!(err, MetadataError::BatchedRequiresRefreshBatched),
-            "Expected BatchedRequiresRefreshBatched, got: {}",
+            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
             err
         );
     }
@@ -2495,10 +2495,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec!["order_ts".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2527,10 +2527,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec!["order_date".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2559,10 +2559,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec!["order_id".to_string()],
                 nondeterministic_columns: vec!["order_id".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2591,10 +2591,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec!["order_id".to_string()],
                 nondeterministic_columns: vec!["inserted_at".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -3064,10 +3064,10 @@ GROUP BY device_id, user_id"#;
     /// A `grain: key` model with an internally-folded `batched` block (the
     /// only way one can still reach `validate_timeseries` now that the
     /// literal `batched:` sub-block is refused at parse time) emits
-    /// `BatchedRequiresRefreshBatched` — the dedicated `KeyedForbidsBatched`
+    /// `PartitionGrainRequiresRefreshIncremental` — the dedicated `KeyedForbidsPartitionGrain`
     /// check was removed as unreachable, since `is_keyed()` implies
     /// `!is_partition_grain()` and that's exactly what
-    /// `BatchedRequiresRefreshBatched` already checks
+    /// `PartitionGrainRequiresRefreshIncremental` already checks
     /// (`docs/specs/diagnostics.md` §"Keyed refresh mode").
     #[test]
     fn test_keyed_with_batched_block_is_batched_requires_refresh_batched() {
@@ -3075,18 +3075,18 @@ GROUP BY device_id, user_id"#;
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::Incremental),
             grain: Some(crate::config::Grain::Key),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::BatchedRequiresRefreshBatched),
-            "Expected BatchedRequiresRefreshBatched, got: {}",
+            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
             err
         );
     }
@@ -3146,24 +3146,24 @@ GROUP BY device_id, user_id"#;
     }
 
     /// A model with `refresh: materialized_view` + a `batched:` block
-    /// emits `MaterializedViewForbidsBatched`.
+    /// emits `MaterializedViewForbidsPartitionGrain`.
     #[test]
     fn test_materialized_view_forbids_batched() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::MaterializedView),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: materialized_view + batched: must error");
         assert!(
-            matches!(err, MetadataError::MaterializedViewForbidsBatched),
-            "Expected MaterializedViewForbidsBatched, got: {}",
+            matches!(err, MetadataError::MaterializedViewForbidsPartitionGrain),
+            "Expected MaterializedViewForbidsPartitionGrain, got: {}",
             err
         );
     }

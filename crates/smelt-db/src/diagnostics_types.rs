@@ -643,8 +643,8 @@ pub enum DiagnosticCode {
     // ── Timeseries diagnostic codes ──────────────────────────────────────────
     /// A model declares `refresh: batched` without a sibling `timeseries:` block.
     /// Anchored at the top of the file (line 0, column 0).
-    /// Message: "TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
-    TimeseriesRequiredForBatched,
+    /// Message: "TimeseriesRequiredForPartitionGrain: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
+    TimeseriesRequiredForPartitionGrain,
     /// The `timeseries:` block parses but violates a structural rule.
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
@@ -748,11 +748,11 @@ pub enum DiagnosticCode {
     /// A `refresh: materialized_view` model incorrectly declares a
     /// `batched:` block. The engine, not smelt, owns freshness for this
     /// mode. Anchored at offset 0. Error severity.
-    MaterializedViewForbidsBatched,
+    MaterializedViewForbidsPartitionGrain,
     /// Advisory (`Warning`): a `batched` model's SQL is not batch-safe
     /// under the planner's batch safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).
-    BatchedNotSafe,
+    PartitionGrainNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM

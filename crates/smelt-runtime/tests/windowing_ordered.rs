@@ -20,7 +20,7 @@
 //! must still derive and apply real skew.
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
+use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_logical::analysis::source_bounds::{Seconds, Skew};
 use smelt_runtime::windowing::compute_incremental_windows_ordered;
 use smelt_runtime::TimeRange;
@@ -36,11 +36,11 @@ fn make_ts(event_col: &str, partition_col: &str, granularity: Granularity) -> Ti
     }
 }
 
-fn make_inc() -> BatchedConfig {
-    BatchedConfig {
+fn make_inc() -> PartitionGrainConfig {
+    PartitionGrainConfig {
         unique_key: vec![],
         nondeterministic_columns: vec![],
-        safety_overrides: BatchedSafetyOverrides::default(),
+        safety_overrides: PartitionGrainSafetyOverrides::default(),
     }
 }
 

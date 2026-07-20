@@ -23,7 +23,7 @@ use crate::graph::ModelInfo;
 use crate::rules::cumulative::{classify_cumulative, KeyedDiagnostic, SourceTimeseriesMap};
 use crate::rules::incremental;
 use crate::rules::incremental::trace_union_branches;
-use crate::types::BatchedConfig;
+use crate::types::PartitionGrainConfig;
 
 // ── Parser imports for event-time injectability check ──────────────────────
 use smelt_parser::{parse, File};
@@ -51,7 +51,7 @@ pub enum RuleDiagnosticCode {
     KeyedSnapshotPostureUnsupported,
     KeyedMultipleDrivingSources,
     KeyedSqlNotParseable,
-    BatchedNotSafe,
+    PartitionGrainNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM
@@ -88,7 +88,7 @@ pub struct RuleContext<'a> {
     /// Frontmatter `timeseries:` block, if any.
     pub timeseries_config: Option<&'a TimeseriesConfig>,
     /// Frontmatter `incremental:` block, if any.
-    pub incremental_config: Option<&'a BatchedConfig>,
+    pub incremental_config: Option<&'a PartitionGrainConfig>,
 }
 
 /// A planner rule that surfaces its rejections as diagnostics.
@@ -130,7 +130,7 @@ impl PlannerRule for KeyedRule {
 /// dispatch uses `analyze_batch_safety`, which always yields a buildable
 /// classification — so they never block the build (Diagnostic parity rule:
 /// only `Error` blocks). A missing `timeseries:` block is already surfaced by
-/// the frontmatter validator (`TimeseriesRequiredForBatched`), so this rule
+/// the frontmatter validator (`TimeseriesRequiredForPartitionGrain`), so this rule
 /// stays silent in that case to avoid double-reporting.
 pub struct IncrementalRule;
 
@@ -174,7 +174,7 @@ impl PlannerRule for IncrementalRule {
         match incremental::detect(&model) {
             Ok(_) => Vec::new(),
             Err(message) => vec![RuleDiagnostic {
-                code: RuleDiagnosticCode::BatchedNotSafe,
+                code: RuleDiagnosticCode::PartitionGrainNotSafe,
                 severity: RuleSeverity::Warning,
                 message,
             }],
@@ -218,7 +218,7 @@ fn check_batched_bound_derivable(ctx: &RuleContext) -> Option<RuleDiagnostic> {
     match incremental::batch_safety_from_bounds(&bounds) {
         Ok(_) => None,
         Err(message) => Some(RuleDiagnostic {
-            code: RuleDiagnosticCode::BatchedNotSafe,
+            code: RuleDiagnosticCode::PartitionGrainNotSafe,
             severity: RuleSeverity::Warning,
             message: format!("Model '{}': {message}", ctx.model_name),
         }),
@@ -641,8 +641,8 @@ mod tests {
         assert!(detect_builtin_rules(&ctx).is_empty());
     }
 
-    fn inc_config() -> BatchedConfig {
-        BatchedConfig {
+    fn inc_config() -> PartitionGrainConfig {
+        PartitionGrainConfig {
             unique_key: vec!["event_date".to_string()],
             nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
@@ -676,9 +676,9 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.code == RuleDiagnosticCode::BatchedNotSafe
+                .any(|d| d.code == RuleDiagnosticCode::PartitionGrainNotSafe
                     && d.severity == RuleSeverity::Warning),
-            "expected BatchedNotSafe Warning, got {diags:?}"
+            "expected PartitionGrainNotSafe Warning, got {diags:?}"
         );
     }
 
@@ -842,7 +842,7 @@ mod tests {
             week_start: None,
             assert_monotonic: false,
         };
-        let inc_cfg = BatchedConfig {
+        let inc_cfg = PartitionGrainConfig {
             unique_key: vec!["month_start".to_string()],
             nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
@@ -952,7 +952,7 @@ mod tests {
         // RANGE BETWEEN INTERVAL frame) — `derive_model_bounds` cannot prove
         // a bound for `smelt.src`, so the roll-up
         // (`incremental::batch_safety_from_bounds`) refuses and the rule
-        // surfaces `BatchedNotSafe` as a Warning here (advisory —
+        // surfaces `PartitionGrainNotSafe` as a Warning here (advisory —
         // `check_batched_bound_derivable`'s doc comment explains why this
         // diagnostic-parity gate stays non-blocking: the fail-closed
         // enforcement with the `--allow-downgrade` escape hatch lives at the
@@ -964,10 +964,10 @@ mod tests {
         let tsc = day_ts();
         let mut ts_map: SourceTimeseriesMap = HashMap::new();
         ts_map.insert("smelt.src".to_string(), tsc.clone());
-        let inc = BatchedConfig {
+        let inc = PartitionGrainConfig {
             unique_key: vec![],
             nondeterministic_columns: vec![],
-            safety_overrides: crate::types::BatchedSafetyOverrides {
+            safety_overrides: crate::types::PartitionGrainSafetyOverrides {
                 allow_window_functions: true,
                 ..Default::default()
             },
@@ -985,7 +985,7 @@ mod tests {
         assert!(
             diags
                 .iter()
-                .any(|d| d.code == RuleDiagnosticCode::BatchedNotSafe
+                .any(|d| d.code == RuleDiagnosticCode::PartitionGrainNotSafe
                     && d.severity == RuleSeverity::Warning),
             "a NotDerivable source bound must surface as an advisory Warning; got: {diags:?}"
         );
@@ -1034,7 +1034,7 @@ mod tests {
             week_start: None,
             assert_monotonic: false,
         };
-        let inc_cfg = BatchedConfig {
+        let inc_cfg = PartitionGrainConfig {
             unique_key: vec!["event_ts".to_string()],
             nondeterministic_columns: vec![],
             safety_overrides: Default::default(),
@@ -1049,7 +1049,7 @@ mod tests {
             timeseries_config: Some(&ts_cfg),
             incremental_config: Some(&inc_cfg),
         };
-        // Note: BatchedNotSafe Warning may fire (subquery in FROM),
+        // Note: PartitionGrainNotSafe Warning may fire (subquery in FROM),
         // but EventTimeColumnNotVisibleAtOuterSelect must NOT fire.
         let diags = detect_builtin_rules(&ctx);
         assert!(

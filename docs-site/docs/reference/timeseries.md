@@ -112,4 +112,4 @@ A `grain: key` model whose `timeseries:` block satisfies none of the three route
 | Code | Severity | Trigger |
 |---|---|---|
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule — unknown key, `granularity` not in the enum, `partition_column` absent from the model's SQL body, `week_start` set without `granularity: week`, or `timeseries:` on an `ephemeral` / `test` model. |
-| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
+| `TimeseriesRequiredForPartitionGrain` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |

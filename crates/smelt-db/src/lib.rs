@@ -121,12 +121,12 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         MetadataError::GeneratesMixedWithBareModel { .. } => None,
         // These variants only arise from validate_timeseries on the Ok(Single)
         // path — they are never returned by extract_file_metadata itself:
-        MetadataError::TimeseriesRequiredForBatched => None,
+        MetadataError::TimeseriesRequiredForPartitionGrain => None,
         MetadataError::MalformedTimeseries { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
-        MetadataError::BatchedRequiresRefreshBatched => None,
+        MetadataError::PartitionGrainRequiresRefreshIncremental => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
-        MetadataError::MaterializedViewForbidsBatched => None,
+        MetadataError::MaterializedViewForbidsPartitionGrain => None,
         MetadataError::MalformedFunctionalDependency { .. } => None,
         MetadataError::MalformedBoundedDomain { .. } => None,
         MetadataError::GrainRequiredForIncremental => None,
@@ -1119,7 +1119,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::KeyedSnapshotPostureUnsupported => DiagnosticCode::KeyedSnapshotPostureUnsupported,
         R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
         R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
-        R::BatchedNotSafe => DiagnosticCode::BatchedNotSafe,
+        R::PartitionGrainNotSafe => DiagnosticCode::PartitionGrainNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
         }
@@ -1896,9 +1896,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let sql_body = &text[sql_offset..];
         if let Err(ts_err) = smelt_core::metadata::validate_timeseries(metadata, sql_body) {
             let maybe_diag = match &ts_err {
-                smelt_core::metadata::MetadataError::TimeseriesRequiredForBatched => Some((
+                smelt_core::metadata::MetadataError::TimeseriesRequiredForPartitionGrain => Some((
                     ts_err.to_string(),
-                    DiagnosticCode::TimeseriesRequiredForBatched,
+                    DiagnosticCode::TimeseriesRequiredForPartitionGrain,
                 )),
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
@@ -1918,20 +1918,22 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 // is also the only remaining way a `grain: key` model can
                 // still carry an internally-folded `batched` block — the
                 // literal sub-block is refused before a `ModelMetadata`
-                // exists, so the dedicated `KeyedForbidsBatched` code was
+                // exists, so the dedicated `KeyedForbidsPartitionGrain` code was
                 // retired outright (`docs/specs/diagnostics.md` §"Keyed
                 // refresh mode").
-                smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
+                smelt_core::metadata::MetadataError::PartitionGrainRequiresRefreshIncremental => {
                     Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
                 }
                 smelt_core::metadata::MetadataError::MaterializedViewForbidsTimeseries => Some((
                     ts_err.to_string(),
                     DiagnosticCode::MaterializedViewForbidsTimeseries,
                 )),
-                smelt_core::metadata::MetadataError::MaterializedViewForbidsBatched => Some((
-                    ts_err.to_string(),
-                    DiagnosticCode::MaterializedViewForbidsBatched,
-                )),
+                smelt_core::metadata::MetadataError::MaterializedViewForbidsPartitionGrain => {
+                    Some((
+                        ts_err.to_string(),
+                        DiagnosticCode::MaterializedViewForbidsPartitionGrain,
+                    ))
+                }
                 smelt_core::metadata::MetadataError::GrainRequiredForIncremental => Some((
                     ts_err.to_string(),
                     DiagnosticCode::GrainRequiredForIncremental,
@@ -2108,7 +2110,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // The opt-in is `refresh: batched`, not the presence of the optional
             // `batched:` block — default to an empty config when the block is
             // absent so a bare `refresh: batched` model still reaches the rule.
-            let default_batched_config = smelt_core::config::BatchedConfig::default();
+            let default_batched_config = smelt_core::config::PartitionGrainConfig::default();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,

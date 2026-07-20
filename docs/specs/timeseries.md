@@ -65,7 +65,7 @@ A source that declares `timeseries:` must declare the named `event_time_column` 
 | Code | Severity | Trigger |
 |---|---|---|
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule (missing required key, unknown key, `granularity` not in the enum, `partition_column` absent from the model's output / source's columns, `event_time_column` has an incompatible type). |
-| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` without `timeseries:`. |
+| `TimeseriesRequiredForPartitionGrain` | Error | A model declares `refresh: incremental` + `grain: partition` without `timeseries:`. |
 
 ### `smelt.yml` (project-level overrides)
 
@@ -102,7 +102,7 @@ A model or source **without** `timeseries:` is non-timeseries — it has no decl
 
 ### Interaction with the partition grain (`grain: partition`)
 
-A model that declares `refresh: incremental` + `grain: partition` (the shape profile detailed in `incremental_models.md` §"The partition grain (`grain: partition`)") must also declare `timeseries:`. The two surfaces are independent — `timeseries:` declares the time dimension, the partition-grain surface carries grain-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `grain: partition` without `timeseries:` is `TimeseriesRequiredForBatched`.
+A model that declares `refresh: incremental` + `grain: partition` (the shape profile detailed in `incremental_models.md` §"The partition grain (`grain: partition`)") must also declare `timeseries:`. The two surfaces are independent — `timeseries:` declares the time dimension, the partition-grain surface carries grain-specific keys (`unique_key`, `safety_overrides`, etc.). Declaring `grain: partition` without `timeseries:` is `TimeseriesRequiredForPartitionGrain`.
 
 A source declaring `timeseries:` opts in to being a pushdown target for downstream rules. It does not run incrementally — sources are externally managed.
 
@@ -124,7 +124,7 @@ A `grain: key` model (the shape profile detailed in `incremental_models.md` §"T
 ### LSP surface
 
 - **Hover** on a `smelt.<path>` reference whose target carries `timeseries:` shows the declared partition column and granularity alongside the column list.
-- **Diagnostics** for `MalformedTimeseries` and `TimeseriesRequiredForBatched` follow the standard diagnostic format (`lsp.md`).
+- **Diagnostics** for `MalformedTimeseries` and `TimeseriesRequiredForPartitionGrain` follow the standard diagnostic format (`lsp.md`).
 - **Goto-definition** for a `timeseries:` field navigates to the column declaration in the model's output or the source YAML.
 
 ### Granularity arithmetic
@@ -169,10 +169,10 @@ This section captures the load-bearing rationale.
 ## References
 
 - **Code**:
-  - `crates/smelt-core/src/config.rs` — `BatchedConfig`, `TimeseriesConfig`
+  - `crates/smelt-core/src/config.rs` — `PartitionGrainConfig`, `TimeseriesConfig`
   - `crates/smelt-core/src/metadata.rs` — frontmatter parsing (`ModelMetadata`)
   - `crates/smelt-core/src/sources.rs` — `SourceInfo` (will gain a `timeseries:` parser path)
-- **Tests**: schema validation, `MalformedTimeseries` diagnostic coverage, `TimeseriesRequiredForBatched` coverage (to be added with the migration plan)
+- **Tests**: schema validation, `MalformedTimeseries` diagnostic coverage, `TimeseriesRequiredForPartitionGrain` coverage (to be added with the migration plan)
 - **User docs**: to be authored alongside the migration plan; will live at `docs-site/docs/reference/timeseries.md`
 - **Plans (history)**:
   - `docs/research/20260521-incremental-as-planner-rule.md` — research doc that proposed factoring `timeseries:` out of `incremental:`

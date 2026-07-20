@@ -29,6 +29,6 @@ pub use rules::rule_diagnostics::{
 };
 pub use rules::Planner;
 pub use types::{
-    BatchedConfig, BatchedSafetyOverrides, ExecutionStep, Frontmatter, Granularity,
-    IncrementalStrategy, Opportunity, OpportunityData, Transformation, Weekday,
+    ExecutionStep, Frontmatter, Granularity, IncrementalStrategy, Opportunity, OpportunityData,
+    PartitionGrainConfig, PartitionGrainSafetyOverrides, Transformation, Weekday,
 };
