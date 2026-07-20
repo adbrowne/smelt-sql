@@ -251,19 +251,20 @@ within one cycle rather than sitting unnoticed on `main`.
 
 Full-refresh and view materializations, ephemeral models, and the `batched`/`keyed`/`versioned`
 incremental maintenance techniques are verified on Spark by the same parametrized tests that run
-against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per technique. What is
-**not** yet covered on Spark:
+against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per technique. The
+generative incremental-maintenance sweep (randomized recipe pool, admission-rate statistics,
+DAG-propagation, composed-pool, pinned-hazard, and change-feed-admission legs) also runs against
+a live Spark Connect server in the gated CI tier, driven by the same recipe pool and
+multiset-equivalence oracle as the DuckDB leg. What is **not** covered by that sweep on Spark:
 
 | Area | Status |
 |---|---|
-| Generative incremental-maintenance sweep (randomized recipe pool, admission-rate statistics, DAG-propagation/boundary/redelivery/schema-evolution probes) | DuckDB only — Spark has fixed-recipe smoke coverage per technique, not the generative sweep |
-| Change-feed and feed-declared source recompute paths | No Spark fixture yet |
+| `Additive`-combiner keyed/composed folds (e.g. `SUM` across a keyed or composed cumulative fold) | No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the runtime fails loud rather than silently mishandling it |
+| Feed-declared source recompute, replayed against a change-log oracle (admission is covered) | Oracle-replay machinery is DuckDB-connection-specific; execution-driven leg not yet ported |
+| Probe harness (`window_order_permutations_converge`, write-window byte-equality, technique-pin agreement) | Staging/read-back is DuckDB-connection-specific; not yet generalized to the backend trait |
 | Skeleton-position-add refusal path | No Spark fixture yet |
 | Partition pruning on cross-engine `read_parquet()` reads | Not implemented — every downstream run reads the full Parquet glob (performance gap, not correctness) |
 | Databricks-specific capabilities | Not modeled as a distinct backend; Databricks Connect works via the generic Spark Connect adapter, but Databricks-only behavior isn't verified |
-
-Building a Spark-native twin of the generative maintenance-conformance harness is the largest
-remaining Spark coverage gap and is tracked as post-release backlog.
 
 ## Cross-engine data exchange
 

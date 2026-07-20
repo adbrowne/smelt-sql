@@ -61,7 +61,7 @@ W4 left one gap keeping Spark below DuckDB's verification bar: the equivalence i
 | 3     | done     | (this commit) | 2026-07-20 |
 | 4     | done     | (this commit) | 2026-07-20 |
 | 5     | done     | (this commit) | 2026-07-20 |
-| 6     | pending  |        |      |
+| 6     | done     | (this commit) | 2026-07-21 |
 
 ## Phase detail
 

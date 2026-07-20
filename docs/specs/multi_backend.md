@@ -335,16 +335,20 @@ resolves nested widening to a table rewrite.
   confirmed by a 1000-case property soak with zero new unregistered divergences. Per-PR gating on
   Spark-relevant paths (§"CI tiering" above) is in place as of `.github/workflows/compat.yml`'s
   `changes` job.
-- **The generative maintenance-conformance oracle's Spark rollout is partial.** The
-  dual-execution harness (see §"Generative equivalence coverage") is retargetable at Spark, but
-  not every recipe-pool and structural leg has landed there yet: coverage rolls out
-  incrementally across the append-only, keyed, mutable, redelivery, interleave, boundary, and
-  schema-evolution legs, then the composed/DAG/probe/pinned/change-feed structural legs. Until a
-  given leg's Spark twin lands, it is verified generatively on DuckDB only; Spark's incremental
-  techniques (region-overwrite, keyed fold, column-scoped merge, in-place update) retain
-  hand-authored fixed-recipe dual-target parity coverage for that leg in the interim. Full
-  rollout status and per-leg dispositions are tracked against the gap table in
-  `docs/plans/20260719-prod-w4-spark.md`.
+- **The generative maintenance-conformance oracle is dual-backend.** The dual-execution harness
+  (see §"Generative equivalence coverage") runs the same recipe pool, run schedules, and
+  multiset-equivalence oracle against a live Spark Connect server in the gated CI tier
+  (`cargo test -p smelt-cli --features smelt-cli/spark --test maintenance_conformance_spark`),
+  covering the append-only, keyed, mutable, redelivery, interleave, boundary, schema-evolution,
+  composed-pool, DAG-propagation, pinned-hazard, and change-feed-admission legs. A small number of
+  legs remain DuckDB-only for reasons independent of this rollout, not because the Spark twin
+  hasn't landed: `Additive`-combiner keyed/composed folds have no Spark ledger dialect yet for the
+  never-fold-twice reconciliation ledger (the runtime fails loud rather than mishandling it); the
+  probe harness (`probes.rs`) and the feed-declared-source execution-driven leg (as opposed to its
+  admission check, which is covered) still stage through a raw DuckDB connection rather than the
+  backend trait. Full per-leg disposition is tracked in the gap table in
+  `docs/plans/20260719-prod-w4-spark.md`; the remaining DuckDB-only legs are follow-up work, not
+  blockers to the supported-vs-beta label decision.
 
 ## References
 

@@ -348,6 +348,28 @@ conformance gap remaining post-v0.5. It is out of scope for this plan (see
 Explicitly deferred) and is the natural next backlog item once the
 supported-vs-beta label decision (Phase 6) lands.
 
+**Closure (2026-07-21, `docs/plans/20260720-prod-w9-spark-conformance-twin.md`).** The dual-execution
+twin landed: `append_only_partition_pool_upholds_equivalence`, `admission_rate_stays_above_floor`,
+`mutable_pool_settles_to_full_refresh`, `redelivery_of_processed_window_is_idempotent`,
+`full_refresh_interleave_resets_state_correctly`, `boundary_rows_within_reach_are_reflected`,
+`column_add_between_runs_recovers_equivalence`, the `dags.rs` DAG-propagation legs,
+`composed_keyed_admission_rate_stays_above_floor`, and (route-3/`Idempotent`-combiner slice only)
+`keyed_pool_upholds_end_state_equivalence` / `composed_keyed_pool_upholds_equivalence` /
+`pinned_recipes_reproduce_catalogue_coverage` / `hazard_schedules_are_pinned` now run generatively
+against a live Spark Connect server via `maintenance_conformance_spark`
+(`crates/smelt-cli/tests/maintenance_conformance_spark/`), gated in CI as
+`maintenance-conformance-spark`. `change_feed_source_admits_recompute_only` is covered
+(classify-only). `delta_restriction_admission_rate_stays_above_floor` is dispositioned N/A (pure
+classification, no backend I/O — the DuckDB run already fully covers it). Still DuckDB-only, for
+reasons independent of the twin's rollout (see the W9 plan's "Deferred during implementation"
+section): `Additive`-combiner folds (no Spark reconciliation-ledger dialect yet — MP12),
+`feed_declared_source_upholds_equivalence_via_recompute`'s execution-driven leg (oracle-replay
+machinery is DuckDB-connection-specific), `probes.rs`'s two legs plus its three `#[tokio::test]`
+probes (staging is DuckDB-connection-specific), `skeleton_position_add_is_refused_or_recomputed_never_corrupted`,
+`retained_departed_keys_adjusts_the_oracle` (DuckDB-harness-only concept), and
+`hazard::keyed_merge_reprocessed_window` (pins an `Additive`-only refusal). This closes the D1
+promotion criterion — see `docs/plans/20260719-production-readiness.md` §"D1 evidence brief".
+
 ## Verification
 
 How to confirm the spec is satisfied at the end:

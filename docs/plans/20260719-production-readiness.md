@@ -48,12 +48,17 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 - **Dual-target parity sweep.** Full-refresh/view/ephemeral models and the
   `batched`/`keyed`/`versioned` maintenance legs green on both backends, zero skipped
   assertions.
-- **Gap.** The generative `maintenance_conformance` harness (recipe pool + `s_tracker` oracle)
-  has no Spark twin — Spark's per-technique coverage is fixed-recipe smoke tests only, not the
-  generative sweep. Full gap table in `docs/plans/20260719-prod-w4-spark.md` Phase 5. Building
-  the twin is the largest remaining Spark gap — registered as sub-plan **W9**
-  (`docs/plans/20260720-prod-w9-spark-conformance-twin.md`) and the promotion criterion for
-  the supported label.
+- **Gap closed (2026-07-21).** The generative `maintenance_conformance` harness (recipe pool +
+  `s_tracker` oracle) now has a dual-execution Spark twin (sub-plan **W9**,
+  `docs/plans/20260720-prod-w9-spark-conformance-twin.md`), gated in CI as
+  `maintenance-conformance-spark`: append-only, keyed (`Idempotent` combiner), mutable,
+  redelivery, interleave, boundary, schema-evolution, composed-pool (route 3), DAG-propagation,
+  pinned-hazard, and change-feed-admission legs all run against a live Spark Connect server.
+  Remaining DuckDB-only legs are named, independent gaps (no Spark reconciliation-ledger dialect
+  yet for `Additive`-combiner folds; a few harness pieces still stage through a raw DuckDB
+  connection) — see the closure note in `docs/plans/20260719-prod-w4-spark.md` Phase 5 gap table
+  and `docs/specs/multi_backend.md` §Known Divergences. This satisfies the W9 promotion
+  criterion for the supported label.
 - **Open question for Andrew: supported or beta for v0.5?**
 
 ## Pre-flight (human-gated — NOT loop work)
@@ -98,7 +103,7 @@ made on W4's evidence brief). 1.0 is reserved for environments + fingerprint reu
 | [`docs/plans/20260719-prod-w7-bakeoff.md`](20260719-prod-w7-bakeoff.md) | **W7 `smelt bakeoff`** — un-defers ROADMAP §10: wire the choice ladder into the runtime (frontmatter `technique:` pins honoured at execution), `ExecuteRequest.technique_overrides` + scratch-as-synthetic-target seam, the measurement CLI over replayed real-data windows, emit-only `--pin`. Decisions B1–B4 recorded in the sub-plan. **Runs after W2** (builds on per-target state + the rewritten `execute.rs`); registered last so the loop reaches it post-W6. | done (2026-07-20) |
 | [`docs/plans/20260719-prod-w8-composed-axes-followups.md`](20260719-prod-w8-composed-axes-followups.md) | **W8 Composed-axes follow-ups** — the deferred-item sweep from `20260715-composed-axes-conditional-maintenance.md`: `batched:` sub-block retirement (top-level `safety_overrides:`, fix-it refusal, pre-cut spelling rename) and the recursive composed-driving-source case in `build_forward_graph` (its decision 9). Its 5a/5b (keyed suppressed-MERGE dispatch + generative leg) are **superseded by W10** — they were unreachable until W10's admission fix. Remaining source-plan deferrals recorded there with tracked homes. | done (Phases 1–4, 6 landed; 5a/5b superseded by W10 — 2026-07-20) |
 | [`docs/plans/20260720-prod-w10-keyed-mutable-admission.md`](20260720-prod-w10-keyed-mutable-admission.md) | **W10 Keyed mutable-source admission + suppressed-MERGE closure** — absorbs W8 5a/5b. Narrows the key-grain `NewData` append-only obligation so it binds **fold-contributing** sources only: a mutable dimension consumed only via a covered `UpstreamMutation` enrichment cell is admitted, while a source that both feeds the fold and is enrich-joined stays refused (fail-loud). Adds a fold-contribution leaf classifier, reintroduces the keyed-branch column-scoped-`MERGE` dispatch against a now-reachable test, and lands the generative suppressed-MERGE conformance leg. **DuckDB-only** — no Spark; runs ahead of W9. | done (2026-07-21) |
-| [`docs/plans/20260720-prod-w9-spark-conformance-twin.md`](20260720-prod-w9-spark-conformance-twin.md) | **W9 Spark conformance twin** — dual-execution mode of the generative `maintenance_conformance` harness (backend-trait seam in `smelt-maintenance-testkit`, Spark legs for the recipe pool / admission-rate / DAG / probe / pinned / change-feed gates, gated `maintenance-conformance-spark` CI job). Closes the W4 Phase 5 gap table; the D1 promotion criterion for the supported label. **Needs live Spark Connect server in loop env** (phases 3–6 block without it). | pending |
+| [`docs/plans/20260720-prod-w9-spark-conformance-twin.md`](20260720-prod-w9-spark-conformance-twin.md) | **W9 Spark conformance twin** — dual-execution mode of the generative `maintenance_conformance` harness (backend-trait seam in `smelt-maintenance-testkit`, Spark legs for the recipe pool / admission-rate / DAG / probe / pinned / change-feed gates, gated `maintenance-conformance-spark` CI job). Closes the W4 Phase 5 gap table; the D1 promotion criterion for the supported label. **Needs live Spark Connect server in loop env** (phases 3–6 block without it). | done (2026-07-21) |
 
 ## Scaffolding queue (human-gated — NOT registered until scaffolded)
 
