@@ -3318,8 +3318,11 @@ within one cycle rather than sitting unnoticed on <code>main</code>.</p>
 <h3 id="known-limitations">Known limitations<a class="headerlink" href="#known-limitations" title="Permanent link">&para;</a></h3>
 <p>Full-refresh and view materializations, ephemeral models, and the <code>batched</code>/<code>keyed</code>/<code>versioned</code>
 incremental maintenance techniques are verified on Spark by the same parametrized tests that run
-against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per technique. What is
-<strong>not</strong> yet covered on Spark:</p>
+against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per technique. The
+generative incremental-maintenance sweep (randomized recipe pool, admission-rate statistics,
+DAG-propagation, composed-pool, pinned-hazard, and change-feed-admission legs) also runs against
+a live Spark Connect server in the gated CI tier, driven by the same recipe pool and
+multiset-equivalence oracle as the DuckDB leg. What is <strong>not</strong> covered by that sweep on Spark:</p>
 <table>
 <thead>
 <tr>
@@ -3329,12 +3332,16 @@ against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per tec
 </thead>
 <tbody>
 <tr>
-<td>Generative incremental-maintenance sweep (randomized recipe pool, admission-rate statistics, DAG-propagation/boundary/redelivery/schema-evolution probes)</td>
-<td>DuckDB only — Spark has fixed-recipe smoke coverage per technique, not the generative sweep</td>
+<td><code>Additive</code>-combiner keyed/composed folds (e.g. <code>SUM</code> across a keyed or composed cumulative fold)</td>
+<td>No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the runtime fails loud rather than silently mishandling it</td>
 </tr>
 <tr>
-<td>Change-feed and feed-declared source recompute paths</td>
-<td>No Spark fixture yet</td>
+<td>Feed-declared source recompute, replayed against a change-log oracle (admission is covered)</td>
+<td>Oracle-replay machinery is DuckDB-connection-specific; execution-driven leg not yet ported</td>
+</tr>
+<tr>
+<td>Probe harness (<code>window_order_permutations_converge</code>, write-window byte-equality, technique-pin agreement)</td>
+<td>Staging/read-back is DuckDB-connection-specific; not yet generalized to the backend trait</td>
 </tr>
 <tr>
 <td>Skeleton-position-add refusal path</td>
@@ -3350,8 +3357,6 @@ against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per tec
 </tr>
 </tbody>
 </table>
-<p>Building a Spark-native twin of the generative maintenance-conformance harness is the largest
-remaining Spark coverage gap and is tracked as post-release backlog.</p>
 <h2 id="cross-engine-data-exchange">Cross-engine data exchange<a class="headerlink" href="#cross-engine-data-exchange" title="Permanent link">&para;</a></h2>
 <p>When models on different backends reference each other, smelt automatically handles data transfer via Parquet files.</p>
 <p><strong>How it works:</strong></p>
