@@ -86,6 +86,17 @@ backend advertises `supports_native_ivm` today (see §"Output-schema type confor
 mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
 beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
 
+**Generative equivalence coverage.** The equivalence invariant
+(`incremental_models.md` §"The equivalence invariant") is verified generatively — not just by
+fixed-recipe parity tests — on every supported backend, via a single dual-execution harness that
+owns the recipe pool, run schedules, and multiset-comparison oracle; the backend under test is a
+parameter, not a duplicated implementation. On DuckDB this runs per-PR as
+`cargo test -p smelt-cli --test maintenance_conformance`. On Spark this runs in the gated tier
+(see "CI tiering" below) as `cargo test -p smelt-cli --features smelt-cli/spark --test
+maintenance_conformance_spark`, with a reduced deterministic case count; rollout across the
+recipe pool is tracked incrementally, with any leg still DuckDB-only recorded in §Known
+Divergences until it lands.
+
 **CI tiering.** Two tiers enforce the supported surface. A **per-PR tier** — gated on the PR's
 changed paths touching Spark-relevant code (the Spark backend crate, Spark/parity integration
 tests, the function-signature registry, type inference, the parser's dialect surface, or the
@@ -316,7 +327,7 @@ resolves nested widening to a table rewrite.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
 - **The `spark_type` divergence ledger.** The ledger in
-  `crates/smelt-db/tests/prop_helpers/divergences.rs` (24 entries) has been re-verified entry by
+  `crates/smelt-db/tests/prop_helpers/divergences.rs` (23 entries) has been re-verified entry by
   entry against a live Spark Connect server: every recorded `spark_type` (both `Some` claims and
   `None` "matches smelt" claims) was checked against `DESCRIBE QUERY` output for the entry's
   representative expression, corrected where stale (e.g. `SIGN`'s Spark return type is always
@@ -324,14 +335,15 @@ resolves nested widening to a table rewrite.
   confirmed by a 1000-case property soak with zero new unregistered divergences. Per-PR gating on
   Spark-relevant paths (§"CI tiering" above) is in place as of `.github/workflows/compat.yml`'s
   `changes` job.
-- **The generative maintenance-conformance oracle has no Spark twin.** The
-  deterministic-seeded `ModelRecipe` pool and its S-restricted multiset-equivalence oracle
-  (`incremental_models.md` §"The equivalence invariant") run only against the DuckDB backend.
-  Spark's incremental techniques (region-overwrite, keyed fold, column-scoped merge, in-place
-  update) each have hand-authored fixed-recipe dual-target parity coverage, but not the generative
-  sweep, its admission-rate statistics, or DAG-propagation/boundary/redelivery/schema-evolution
-  probes. Building a Spark-native twin (or a dual-execution mode of the existing harness) is
-  tracked as post-v0.5 backlog seeded by the gap table in
+- **The generative maintenance-conformance oracle's Spark rollout is partial.** The
+  dual-execution harness (see §"Generative equivalence coverage") is retargetable at Spark, but
+  not every recipe-pool and structural leg has landed there yet: coverage rolls out
+  incrementally across the append-only, keyed, mutable, redelivery, interleave, boundary, and
+  schema-evolution legs, then the composed/DAG/probe/pinned/change-feed structural legs. Until a
+  given leg's Spark twin lands, it is verified generatively on DuckDB only; Spark's incremental
+  techniques (region-overwrite, keyed fold, column-scoped merge, in-place update) retain
+  hand-authored fixed-recipe dual-target parity coverage for that leg in the interim. Full
+  rollout status and per-leg dispositions are tracked against the gap table in
   `docs/plans/20260719-prod-w4-spark.md`.
 
 ## References
