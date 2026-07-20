@@ -210,7 +210,7 @@ W8 Phase 5a/5b tried to make the **change-suppressed column-scoped `MERGE`** rea
 | 2     | done    | `feat(maintenance): fold-contribution leaf classifier — does a source feed the cumulative fold` | 2026-07-20 |
 | 3     | done    | `feat(maintenance): key-grain NewData waives append-only for enrich-only covered mutable sources` | 2026-07-20 |
 | 4     | done    | `feat(runtime): dispatch change-suppressed column-scoped MERGE on the keyed run path` | 2026-07-20 |
-| 5     | pending |        |      |
+| 5     | done    | `test(conformance): generative suppressed-MERGE equivalence leg via keyed declared-key recipe` | 2026-07-21 |
 
 ---
 
