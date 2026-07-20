@@ -1834,6 +1834,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../orchestration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Orchestration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../web-ui/" class="md-nav__link">
         
   
@@ -2494,6 +2550,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../../reference/state/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State & Recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/smelt-explain/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    smelt explain
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../reference/language/" class="md-nav__link">
         
   
@@ -3127,7 +3267,7 @@
 </ul>
 <div class="admonition warning">
 <p class="admonition-title">Forbidden combinations</p>
-<p><code>grain: key</code> models cannot declare a <code>batched:</code> block (<code>grain: key</code> and <code>grain: partition</code> are sibling refresh strategies with different equivalence contracts) — combining them produces <code>KeyedForbidsBatched</code>. <code>refresh: incremental</code> on an <code>ephemeral</code> model is also a hard error.</p>
+<p>The retired <code>batched:</code> sub-block is a hard error for every model, regardless of grain — see <a href="../incremental-models/">Incremental models</a>. Top-level <code>safety_overrides:</code> is admitted only on a partition-shaped output (no declared identity); declaring it on a <code>grain: key</code> model is refused. <code>refresh: incremental</code> on an <code>ephemeral</code> model is also a hard error.</p>
 </div>
 <p><code>grain: key</code> and <code>timeseries:</code> are <strong>not</strong> a forbidden combination — the key axis (identity) and the time axis (clock) are independent, and declaring both is a first-class shape of its own: the <a href="../incremental-models/#the-composed-shape-key-time">composed shape</a>, a keyed output that is also time-partitioned. It requires one more fact beyond a bare <code>grain: key</code> declaration: proof, or a checked declaration, that key temporal locality holds (every duplicate delivery of one key stays within a bounded window of itself on the event axis). A <code>timeseries:</code> block on a <code>grain: key</code> model that satisfies none of the three locality routes is refused (<code>KeyedForbidsTimeseries</code>, naming the missing route) — the composed shape is opt-in on the declared facts, not automatic.</p>
 <div class="admonition note">
@@ -3136,7 +3276,7 @@
 </div>
 <p>For the deeper rationale, see the <a href="../../reference/cumulative-aggregate/">key-grain patterns reference</a>.</p>
 <h3 id="refresh-materialized_view">refresh: materialized_view<a class="headerlink" href="#refresh-materialized_view" title="Permanent link">&para;</a></h3>
-<p>Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like <code>grain: key</code>; it must not declare a <code>timeseries:</code>, <code>grain:</code>, or <code>batched:</code> block.</p>
+<p>Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like <code>grain: key</code>; it must not declare a <code>timeseries:</code> or <code>grain:</code> key.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">---</span>
 <a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
 <a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">materialized_view</span>

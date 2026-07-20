@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/model-selection/">
+        <link rel="canonical" href="https://smeltsql.com/guide/orchestration/">
       
       
-        <link rel="prev" href="../datagen/">
+        <link rel="prev" href="../deployment/">
       
       
-        <link rel="next" href="../python-models/">
+        <link rel="next" href="../web-ui/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Model Selection - smelt</title>
+        <title>Orchestration - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#model-selection" class="md-skip">
+        <a href="#orchestration" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Model Selection
+              Orchestration
             
           </span>
         </div>
@@ -1439,37 +1439,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Model Selection
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../model-selection/" class="md-nav__link">
         
   
   
@@ -1485,236 +1458,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#selection-syntax" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Selection syntax
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Selection syntax">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#by-name" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By name
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#by-tag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By tag
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-upstream-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include upstream dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-downstream-dependents" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include downstream dependents
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-both-upstream-and-downstream" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include both upstream and downstream
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multiple-selectors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple selectors
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#excluding-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Excluding models
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#practical-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Practical examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Practical examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#run-a-single-model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a single model
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-model-and-all-its-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a model and all its dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-downstream-of-staging" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything downstream of staging
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-except-expensive-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything except expensive models
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-specific-model-with-dependencies-excluding-one-branch" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a specific model with dependencies, excluding one branch
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explain-selected-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Explain selected models
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-selection-works" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How selection works
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#selector-names-and-scope-resolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Selector names and scope resolution
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Further reading
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1864,10 +1607,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../orchestration/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Orchestration
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1883,6 +1653,114 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#exit-codes" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Exit codes
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduling-with-cron" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduling with cron
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#scheduling-with-airflow" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Scheduling with Airflow
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#bounded-automatic-retry-vs-resume" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Bounded automatic retry vs. --resume
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#partial-failure-walkthrough" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Partial-failure walkthrough
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-report" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run report
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smelt-explain-for-dag-introspection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        smelt explain for DAG introspection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#log-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log capture
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -2811,93 +2689,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#selection-syntax" class="md-nav__link">
+  <a href="#exit-codes" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Selection syntax
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Selection syntax">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#by-name" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By name
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#by-tag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By tag
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-upstream-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include upstream dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-downstream-dependents" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include downstream dependents
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-both-upstream-and-downstream" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include both upstream and downstream
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multiple-selectors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple selectors
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#excluding-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Excluding models
+        Exit codes
       
     </span>
   </a>
@@ -2905,93 +2700,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#practical-examples" class="md-nav__link">
+  <a href="#scheduling-with-cron" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Practical examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Practical examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#run-a-single-model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a single model
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-model-and-all-its-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a model and all its dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-downstream-of-staging" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything downstream of staging
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-except-expensive-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything except expensive models
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-specific-model-with-dependencies-excluding-one-branch" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a specific model with dependencies, excluding one branch
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explain-selected-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Explain selected models
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-selection-works" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How selection works
+        Scheduling with cron
       
     </span>
   </a>
@@ -2999,10 +2711,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#selector-names-and-scope-resolution" class="md-nav__link">
+  <a href="#scheduling-with-airflow" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Selector names and scope resolution
+        Scheduling with Airflow
       
     </span>
   </a>
@@ -3010,10 +2722,54 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
+  <a href="#bounded-automatic-retry-vs-resume" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Further reading
+        Bounded automatic retry vs. --resume
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#partial-failure-walkthrough" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Partial-failure walkthrough
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#run-report" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Run report
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smelt-explain-for-dag-introspection" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        smelt explain for DAG introspection
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#log-capture" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Log capture
       
     </span>
   </a>
@@ -3037,7 +2793,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/model-selection.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/orchestration.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -3045,106 +2801,107 @@
   
 
 
-<h1 id="model-selection">Model Selection<a class="headerlink" href="#model-selection" title="Permanent link">&para;</a></h1>
-<p>When working with a project that has many models, you often want to run only a subset. smelt provides <code>--select</code> and <code>--exclude</code> flags to control which models are included in a run.</p>
-<p>These flags are available on <code>smelt run</code>, <code>smelt build</code>, and <code>smelt explain</code>.</p>
-<h2 id="selection-syntax">Selection syntax<a class="headerlink" href="#selection-syntax" title="Permanent link">&para;</a></h2>
-<h3 id="by-name">By name<a class="headerlink" href="#by-name" title="Permanent link">&para;</a></h3>
-<p>Select a single model by its full canonical path:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
+<h1 id="orchestration">Orchestration<a class="headerlink" href="#orchestration" title="Permanent link">&para;</a></h1>
+<p>This page covers running smelt under a scheduler -- cron, Airflow, or anything that shells out and checks an exit code: how to interpret exit codes, how retries and <code>--resume</code> interact, what happens when a run is interrupted partway through, where to find the run report, and how to capture logs. See <a href="../deployment/">Production Deployment</a> for installing smelt and configuring targets/secrets first.</p>
+<h2 id="exit-codes">Exit codes<a class="headerlink" href="#exit-codes" title="Permanent link">&para;</a></h2>
+<p>Every <code>smelt</code> subcommand exits one of three codes, and an orchestrator should branch on them rather than parsing stdout:</p>
+<table>
+<thead>
+<tr>
+<th>Code</th>
+<th>Meaning</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>0</code></td>
+<td>Success. Includes a <code>warn</code>-severity <code>smelt check</code> violation and an empty-but-valid selection -- a build that ran nothing because there was nothing to do is not a failure.</td>
+</tr>
+<tr>
+<td><code>1</code></td>
+<td>Detected failure. A failed model build, a failed <code>smelt test</code> case, an <code>error</code>-severity <code>smelt check</code> violation, <code>smelt diff</code> detecting a schema change, or a check referencing a model not built in the target.</td>
+</tr>
+<tr>
+<td><code>2</code></td>
+<td>Usage error. Malformed CLI arguments, a malformed or missing <code>smelt.yml</code>, or an unresolvable project/target.</td>
+</tr>
+</tbody>
+</table>
+<p>The distinction between <code>1</code> and <code>2</code> matters for retry logic: <code>1</code> means the command ran correctly and <em>found</em> a problem in the data or models -- worth investigating, and often worth retrying if the cause is transient (a flaky upstream source, a backend hiccup). <code>2</code> means the command couldn't run at all because its own inputs were invalid -- retrying a <code>2</code> without changing the invocation (fixing a typo'd flag, a missing target, a broken <code>smelt.yml</code>) is never useful. See the <a href="../../reference/cli/#exit-codes">CLI reference</a> for the full contract, including per-command specifics (<code>smelt diff</code>, <code>smelt test</code>, <code>smelt check</code>).</p>
+<h2 id="scheduling-with-cron">Scheduling with cron<a class="headerlink" href="#scheduling-with-cron" title="Permanent link">&para;</a></h2>
+<p>A cron entry runs <code>smelt build</code> (or <code>smelt run</code>) against a named target on a fixed schedule:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>0 * * * *  cd /srv/my-project &amp;&amp; smelt build --target prod &gt;&gt; /var/log/smelt/build.log 2&gt;&amp;1
 </code></pre></div>
-<p>When working from inside a namespace directory, use <code>--scope</code> or rely on cwd auto-scoping to shorten the name (see <a href="../../reference/cli/#argument-resolution-and-scope">Argument resolution and <code>--scope</code></a>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>daily_revenue
+<p>Because every state-mutating run acquires an exclusive advisory lock on <code>.smelt/lock</code> for its duration (see <a href="../deployment/#locking">Production Deployment</a>), an overlapping second invocation -- the previous hour's run still in flight when the next one fires -- fails loudly rather than interleaving writes with the first, naming the PID that holds the lock. This means you do not need an external lockfile (<code>flock</code>) around the cron entry for correctness; a run that finds the lock held exits non-zero and the next scheduled tick tries again. If overlap is expected to be common (a run that occasionally exceeds its interval), wrap the cron entry in <code>flock -n</code> to skip cleanly instead of paying for a failed invocation:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>0 * * * *  flock -n /srv/my-project/.smelt/lock.cron smelt build --target prod --project-dir /srv/my-project
 </code></pre></div>
-<h3 id="by-tag">By tag<a class="headerlink" href="#by-tag" title="Permanent link">&para;</a></h3>
-<p>Select all models with a given tag:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:revenue
+<h2 id="scheduling-with-airflow">Scheduling with Airflow<a class="headerlink" href="#scheduling-with-airflow" title="Permanent link">&para;</a></h2>
+<p>A <code>BashOperator</code> (or any operator that shells out) maps naturally onto smelt's exit-code contract -- Airflow's own task-retry mechanism handles a <code>1</code>, while a <code>2</code> should not be retried blindly since it indicates a broken invocation rather than a transient failure:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="kn">from</span><span class="w"> </span><span class="nn">airflow.operators.bash</span><span class="w"> </span><span class="kn">import</span> <span class="n">BashOperator</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="n">smelt_build</span> <span class="o">=</span> <span class="n">BashOperator</span><span class="p">(</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;smelt_build&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a>    <span class="n">bash_command</span><span class="o">=</span><span class="s2">&quot;cd /srv/my-project &amp;&amp; smelt build --target prod&quot;</span><span class="p">,</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>    <span class="n">retries</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a>    <span class="n">retry_exponential_backoff</span><span class="o">=</span><span class="kc">True</span><span class="p">,</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="p">)</span>
 </code></pre></div>
-<p>Tags are assigned in <code>smelt.yml</code> or in YAML frontmatter:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># smelt.yml</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">revenue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">daily</span><span class="p p-Indicator">]</span>
+<p>A retried Airflow task should pass <code>--resume</code> on retry attempts after the first, so a re-run does not redo work that already succeeded:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="n">smelt_build</span> <span class="o">=</span> <span class="n">BashOperator</span><span class="p">(</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a>    <span class="n">task_id</span><span class="o">=</span><span class="s2">&quot;smelt_build&quot;</span><span class="p">,</span>
+<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a>    <span class="n">bash_command</span><span class="o">=</span><span class="p">(</span>
+<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a>        <span class="s2">&quot;cd /srv/my-project &amp;&amp; &quot;</span>
+<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a>        <span class="s2">&quot;smelt build --target prod &quot;</span>
+<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a>        <span class="s2">&quot;$(test </span><span class="se">\&quot;</span><span class="s2">$AIRFLOW_CTX_TRY_NUMBER</span><span class="se">\&quot;</span><span class="s2"> -gt 1 &amp;&amp; echo --resume)&quot;</span>
+<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a>    <span class="p">),</span>
+<a id="__codelineno-3-8" name="__codelineno-3-8" href="#__codelineno-3-8"></a>    <span class="n">retries</span><span class="o">=</span><span class="mi">2</span><span class="p">,</span>
+<a id="__codelineno-3-9" name="__codelineno-3-9" href="#__codelineno-3-9"></a><span class="p">)</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1">---</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">tags</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="n">revenue</span><span class="p">,</span><span class="w"> </span><span class="n">daily</span><span class="p">]</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="c1">---</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...</span>
+<h2 id="bounded-automatic-retry-vs-resume">Bounded automatic retry vs. <code>--resume</code><a class="headerlink" href="#bounded-automatic-retry-vs-resume" title="Permanent link">&para;</a></h2>
+<p>smelt retries a <strong>transient backend failure within a single model's execution</strong> automatically and internally -- a bounded number of attempts with backoff, applied only to errors the backend classifies as transient (a dropped connection, a lock-contention error), never to a deterministic failure like a type mismatch or a constraint violation. This is not configurable via a CLI flag; it happens inside one model's statement-group execution and is invisible to the orchestrator except as a longer wall-clock time and a non-zero <code>retry_count</code> recorded against that model in the run report.</p>
+<p><code>--resume</code> is a different mechanism, invoked explicitly, that operates <strong>across an entire run</strong> rather than within one model:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>prod<span class="w"> </span>--resume
 </code></pre></div>
-<h3 id="include-upstream-dependencies">Include upstream dependencies<a class="headerlink" href="#include-upstream-dependencies" title="Permanent link">&para;</a></h3>
-<p>Prefix with <code>+</code> to include the selected model(s) and all their upstream dependencies:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+tag:revenue
-</code></pre></div>
-<p>This ensures that every model <code>marts.daily_revenue</code> depends on is also run, in the correct order.</p>
-<h3 id="include-downstream-dependents">Include downstream dependents<a class="headerlink" href="#include-downstream-dependents" title="Permanent link">&para;</a></h3>
-<p>Suffix with <code>+</code> to include the selected model(s) and everything that depends on them:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue+
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:staging+
-</code></pre></div>
-<h3 id="include-both-upstream-and-downstream">Include both upstream and downstream<a class="headerlink" href="#include-both-upstream-and-downstream" title="Permanent link">&para;</a></h3>
-<p>Combine the prefix and suffix:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue+
-</code></pre></div>
-<p>This selects <code>marts.daily_revenue</code>, all its upstream dependencies, and all its downstream dependents.</p>
-<h3 id="multiple-selectors">Multiple selectors<a class="headerlink" href="#multiple-selectors" title="Permanent link">&para;</a></h3>
-<p>The <code>--select</code> flag is repeatable. All selectors are combined (union):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--select<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<p>Short form with <code>-s</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>-s<span class="w"> </span>marts.daily_revenue<span class="w"> </span>-s<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<h2 id="excluding-models">Excluding models<a class="headerlink" href="#excluding-models" title="Permanent link">&para;</a></h2>
-<p>The <code>--exclude</code> flag uses the same syntax as <code>--select</code> but removes models from the selection:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>tag:expensive
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>silver.staging_legacy
-</code></pre></div>
-<p>Exclusions are applied after selections. If you use <code>--select</code> and <code>--exclude</code> together, smelt first builds the selected set, then removes the excluded models.</p>
-<h2 id="practical-examples">Practical examples<a class="headerlink" href="#practical-examples" title="Permanent link">&para;</a></h2>
-<h3 id="run-a-single-model">Run a single model<a class="headerlink" href="#run-a-single-model" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
-</code></pre></div>
-<h3 id="run-a-model-and-all-its-dependencies">Run a model and all its dependencies<a class="headerlink" href="#run-a-model-and-all-its-dependencies" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-</code></pre></div>
-<h3 id="run-everything-downstream-of-staging">Run everything downstream of staging<a class="headerlink" href="#run-everything-downstream-of-staging" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:staging+
-</code></pre></div>
-<h3 id="run-everything-except-expensive-models">Run everything except expensive models<a class="headerlink" href="#run-everything-except-expensive-models" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>tag:expensive
-</code></pre></div>
-<h3 id="run-a-specific-model-with-dependencies-excluding-one-branch">Run a specific model with dependencies, excluding one branch<a class="headerlink" href="#run-a-specific-model-with-dependencies-excluding-one-branch" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--exclude<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<h3 id="explain-selected-models">Explain selected models<a class="headerlink" href="#explain-selected-models" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>tag:revenue<span class="w"> </span>--json
-</code></pre></div>
-<h2 id="how-selection-works">How selection works<a class="headerlink" href="#how-selection-works" title="Permanent link">&para;</a></h2>
-<ol>
-<li>If no <code>--select</code> flags are provided, all models are included.</li>
-<li>Each <code>--select</code> flag adds models to the set. The <code>+</code> prefix/suffix expands the set by walking the dependency graph.</li>
-<li>Each <code>--exclude</code> flag removes models from the set, using the same expansion rules.</li>
-<li>The final set is executed in topological order (dependencies first).</li>
-</ol>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>During development, use <code>--select +model_name</code> to run just the model you are working on along with its dependencies. This is much faster than running the entire project.</p>
-</div>
-<h2 id="selector-names-and-scope-resolution">Selector names and scope resolution<a class="headerlink" href="#selector-names-and-scope-resolution" title="Permanent link">&para;</a></h2>
-<p>Selector values that are plain model names (not <code>tag:...</code> or <code>generator_file:...</code> selectors) go through the same scope resolution as other CLI arguments. A bare <code>--select events_parsed</code> expands to <code>--select silver.events_parsed</code> when the active scope is <code>silver</code>. An unresolvable bare selector with multiple matches is an error — smelt never silently picks one.</p>
-<p>The safest form for scripts and CI is the full canonical path:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>silver.events_parsed<span class="w"> </span>--select<span class="w"> </span>gold.eventstream_with_identity
-</code></pre></div>
-<p>When working interactively from inside a namespace directory, use <code>--scope</code> to shorten repeated names:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>events_parsed<span class="w"> </span>--select<span class="w"> </span>sessions
-</code></pre></div>
-<p>All smelt output — including selector match lists and run summaries — always uses the canonical dot-path (e.g. <code>silver.events_parsed</code>) regardless of how you specified the selector. Copy-pasting a printed name back into a subsequent command always works.</p>
-<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
+<p><code>--resume</code> re-runs a previously-interrupted or partially-failed selection while skipping models that don't need to run again. A model is skipped only when both hold: it succeeded in the most recent incomplete run, and its compiled definition hasn't changed since. A model that failed, was skipped, or whose SQL has changed always re-runs -- and so does every downstream dependent of any such model, since a dependent's prior success said nothing about inputs that have since been rebuilt out from under it. This makes <code>--resume</code> a pure optimization over a full re-run, never a correctness trade-off: the worst case (a hash mismatch) is always "run it again," never "skip it incorrectly."</p>
+<p><code>--resume</code> refuses with a hard error -- not a silent full run -- when there's nothing to resume from: the most recent run for the target already completed successfully, or no run manifest exists at all. This is deliberate: a stale or typo'd <code>--resume</code> invocation must never be mistaken for "nothing needed doing." An orchestrator that always passes <code>--resume</code> on retry attempts needs its retry step to tolerate this refusal on the first attempt (when there is no prior incomplete run) by falling back to a plain run, as in the Airflow example above.</p>
+<h2 id="partial-failure-walkthrough">Partial-failure walkthrough<a class="headerlink" href="#partial-failure-walkthrough" title="Permanent link">&para;</a></h2>
+<p>A run executes selected models in topologically-ordered waves; models within one wave may run concurrently. When a model's execution errors, smelt does not abort the instant the first error is observed -- every model already dispatched in that wave finishes, and each failure gets recorded independently. Only once the wave has fully drained does the run stop dispatching further waves. Concretely, for a run selecting <code>[a, b, c, d]</code> where <code>c</code> depends on <code>a</code> and <code>d</code> depends on <code>b</code>, and <code>b</code> fails:</p>
 <ul>
-<li><a href="../incremental-models/">Incremental Models</a> for combining selection with time ranges</li>
-<li><a href="../sql-models/">SQL Models</a> for setting tags in YAML frontmatter</li>
+<li><code>a</code> -- in the same wave as <code>b</code>, already dispatched -- finishes normally: <code>success</code>.</li>
+<li><code>b</code> -- fails: <code>failed</code>.</li>
+<li><code>c</code> -- depends only on <code>a</code>, which succeeded, so it runs in the next wave: <code>success</code>.</li>
+<li><code>d</code> -- depends on <code>b</code>, which failed -- never dispatched: <code>skipped</code>.</li>
 </ul>
+<p>Nothing downstream of a failure silently appears to succeed, and nothing independent of a failure is held back waiting for it. Re-running with <code>--resume</code> after fixing whatever caused <code>b</code> to fail skips <code>a</code> and <code>c</code> (both <code>success</code>, unchanged definitions) and re-runs <code>b</code> and <code>d</code>.</p>
+<h2 id="run-report">Run report<a class="headerlink" href="#run-report" title="Permanent link">&para;</a></h2>
+<p>Every run writes a run report to <code>.smelt/targets/&lt;target&gt;/reports/&lt;run_id&gt;.json</code>, alongside the run manifest, sharing its <code>run_id</code>. The report is the human/tooling-facing summary: outcome counts, total duration, and per-model error messages for anything that failed.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>{
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>  &quot;run_id&quot;: &quot;20260604-141233-a1b2c3&quot;,
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>  &quot;started_at&quot;: &quot;2026-06-04T14:12:33Z&quot;,
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>  &quot;completed_at&quot;: &quot;2026-06-04T14:12:41Z&quot;,
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>  &quot;duration_ms&quot;: 8123,
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>  &quot;outcome_counts&quot;: { &quot;success&quot;: 5, &quot;failed&quot;: 2, &quot;skipped&quot;: 1 },
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>  &quot;failures&quot;: [
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    { &quot;model&quot;: &quot;bad_a&quot;, &quot;error&quot;: &quot;Conversion Error: ...&quot;, &quot;retry_count&quot;: 0 },
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    { &quot;model&quot;: &quot;bad_b&quot;, &quot;error&quot;: &quot;Conversion Error: ...&quot;, &quot;retry_count&quot;: 1 }
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>  ]
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>}
+</code></pre></div>
+<p>A report is written at every point a manifest is persisted -- successful completion, cancellation, and abort -- so a partial report (<code>completed_at: null</code>) is available immediately after a failed or cancelled run, not only after a subsequent successful one. Point log shipping or an observability pipeline at <code>.smelt/targets/&lt;target&gt;/reports/</code> to pick up each run's outcome without parsing stdout; <code>retry_count</code> on a <code>failures</code> entry tells you whether a failure exhausted the bounded automatic retry described above or failed outright on the first attempt.</p>
+<h2 id="smelt-explain-for-dag-introspection"><code>smelt explain</code> for DAG introspection<a class="headerlink" href="#smelt-explain-for-dag-introspection" title="Permanent link">&para;</a></h2>
+<p><code>smelt explain --json</code> prints the whole-project dependency graph as JSON -- model names, their upstream/downstream edges, and configuration -- for an orchestrator to consume when it needs to generate its own task graph from a smelt project rather than shelling out to a single <code>smelt build</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span>--project-dir<span class="w"> </span>/srv/my-project<span class="w"> </span>&gt;<span class="w"> </span>graph.json
+</code></pre></div>
+<p>Pass a model name to instead print that one model's maintenance-plan report (its materialization cells, clamps, and locality verdicts); this is a debugging tool for a single model, not something an orchestrator typically parses. See the <a href="../../reference/cli/">CLI reference</a> for the full flag table.</p>
+<h2 id="log-capture">Log capture<a class="headerlink" href="#log-capture" title="Permanent link">&para;</a></h2>
+<p>By default smelt logs human-readable text. Pass <code>--log-format json</code> (a global flag, valid on every subcommand) to instead emit one parseable JSON object per line, suited to a log aggregator:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>smelt<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>prod<span class="w"> </span>--log-format<span class="w"> </span>json<span class="w"> </span>&gt;&gt;<span class="w"> </span>/var/log/smelt/build.jsonl<span class="w"> </span><span class="m">2</span>&gt;<span class="p">&amp;</span><span class="m">1</span>
+</code></pre></div>
+<p>Log verbosity is controlled the same way as any <code>tracing</code>-based Rust binary: the standard <code>RUST_LOG</code> environment variable.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nv">RUST_LOG</span><span class="o">=</span>debug<span class="w"> </span>smelt<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>prod
+<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="nv">RUST_LOG</span><span class="o">=</span><span class="nv">smelt_runtime</span><span class="o">=</span>debug,smelt_backend_duckdb<span class="o">=</span>info<span class="w"> </span>smelt<span class="w"> </span>build<span class="w"> </span>--target<span class="w"> </span>prod
+</code></pre></div>
+<p>Without <code>RUST_LOG</code> set, smelt logs at a sensible default level -- enough to see per-model progress without debug-level backend chatter. Set it per-invocation (as above) rather than exporting it globally in a scheduler's environment, so a one-off debugging run doesn't silently change the verbosity of every other scheduled job sharing that environment.</p>
 
 
 

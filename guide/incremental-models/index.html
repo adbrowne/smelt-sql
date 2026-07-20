@@ -1435,10 +1435,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#batched-fields" class="md-nav__link">
+  <a href="#partition-grain-frontmatter-keys" class="md-nav__link">
     <span class="md-ellipsis">
       
-        batched: fields
+        Partition-grain frontmatter keys
       
     </span>
   </a>
@@ -2232,6 +2232,62 @@
   
   
     <li class="md-nav__item">
+      <a href="../deployment/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Deployment
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../orchestration/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Orchestration
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../web-ui/" class="md-nav__link">
         
   
@@ -2892,6 +2948,90 @@
   
   
     <li class="md-nav__item">
+      <a href="../../reference/state/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State & Recovery
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
+      <a href="../../reference/smelt-explain/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    smelt explain
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../reference/language/" class="md-nav__link">
         
   
@@ -3109,10 +3249,10 @@
 </li>
         
           <li class="md-nav__item">
-  <a href="#batched-fields" class="md-nav__link">
+  <a href="#partition-grain-frontmatter-keys" class="md-nav__link">
     <span class="md-ellipsis">
       
-        batched: fields
+        Partition-grain frontmatter keys
       
     </span>
   </a>
@@ -3707,9 +3847,9 @@
 <li><strong><code>refresh: incremental</code></strong> opts the model into the derived maintenance plan. It implies a stored <code>table</code> — you do not also declare <code>materialization: table</code>.</li>
 <li><strong><code>timeseries:</code></strong> declares the clock — which column is the event time, which column partitions the output, and at what granularity. See the <a href="../../reference/timeseries/">timeseries reference</a> for the full key table.</li>
 <li><strong><code>grain: partition</code></strong> is the friendly name for this shape — an <em>optional</em> check-only assertion, not what admits the model. Write it if you want it in frontmatter; it errors if it disagrees with what the declared facts derive.</li>
-<li><strong><code>batched:</code></strong> (optional) carries strategy-specific keys (<code>unique_key</code>, <code>safety_overrides</code>) — a dedup aid layered on top of the partition-addressed shape, distinct from the top-level <code>unique_key:</code> identity fact that opts a model into the key-grain shape instead.</li>
+<li><strong><code>safety_overrides:</code></strong> (optional, top level) overrides safety checks for patterns that may behave differently on partial data — see <a href="#safety-analysis">Safety analysis</a>. Admitted only on a partition-shaped output (a declared clock, no declared identity).</li>
 </ul>
-<p><code>timeseries:</code> is required for the shape this guide covers (a model with no declared identity). Declaring <code>refresh: incremental</code> without any shape-defining fact is a validation error (<code>GrainRequiredForIncremental</code>). A <code>batched:</code> block without a declared clock is also a validation error.</p>
+<p><code>timeseries:</code> is required for the shape this guide covers (a model with no declared identity). Declaring <code>refresh: incremental</code> without any shape-defining fact is a validation error (<code>GrainRequiredForIncremental</code>).</p>
 <h3 id="frontmatter-example">Frontmatter example<a class="headerlink" href="#frontmatter-example" title="Permanent link">&para;</a></h3>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">---</span>
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
@@ -3742,30 +3882,25 @@
 <a id="__codelineno-1-8" name="__codelineno-1-8" href="#__codelineno-1-8"></a><span class="w">      </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">revenue_date</span>
 <a id="__codelineno-1-9" name="__codelineno-1-9" href="#__codelineno-1-9"></a><span class="w">      </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
 </code></pre></div>
-<h3 id="batched-fields"><code>batched:</code> fields<a class="headerlink" href="#batched-fields" title="Permanent link">&para;</a></h3>
+<h3 id="partition-grain-frontmatter-keys">Partition-grain frontmatter keys<a class="headerlink" href="#partition-grain-frontmatter-keys" title="Permanent link">&para;</a></h3>
 <table>
 <thead>
 <tr>
-<th>Field</th>
+<th>Key</th>
 <th>Required</th>
 <th>Description</th>
 </tr>
 </thead>
 <tbody>
 <tr>
-<td><code>unique_key</code></td>
-<td>No</td>
-<td>List of columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT.</td>
-</tr>
-<tr>
-<td><code>nondeterministic_columns</code></td>
-<td>No</td>
-<td>Output columns exempt from the determinism requirement (e.g. an <code>inserted_at = NOW()</code> audit stamp). See <a href="#non-deterministic-columns">Non-deterministic columns</a>.</td>
-</tr>
-<tr>
 <td><code>safety_overrides</code></td>
 <td>No</td>
 <td>Override safety checks for patterns that may behave differently on partial data. See <a href="#safety-analysis">Safety analysis</a>.</td>
+</tr>
+<tr>
+<td><code>columns.&lt;c&gt;.contract</code></td>
+<td>No</td>
+<td>Set to <code>plausible</code> to exempt output column <code>&lt;c&gt;</code> from the determinism requirement (e.g. an <code>inserted_at = NOW()</code> audit stamp). See <a href="#non-deterministic-columns">Non-deterministic columns</a>.</td>
 </tr>
 </tbody>
 </table>
@@ -3940,55 +4075,56 @@
 </code></pre></div>
 <p><code>assert_monotonic</code> only ever <strong>widens</strong> the pushdown decision — it never overrides a case smelt can already prove is <em>not</em> monotone. A constant/<code>NULL</code> seed, a row-nondeterministic function (<code>RANDOM()</code>, <code>UUID()</code>), a periodic or piecewise construct (<code>MOD</code>, <code>CASE</code>, <code>EXTRACT</code>), or an ambiguous/unresolvable column reference is still refused even with the declaration set — only an otherwise-unrecognised function call is admitted.</p>
 <h3 id="non-deterministic-columns">Non-deterministic columns<a class="headerlink" href="#non-deterministic-columns" title="Permanent link">&para;</a></h3>
-<p>The non-deterministic-function check can be relaxed per column instead of disabled entirely. List the output column in <code>batched.nondeterministic_columns</code> and the value is allowed to vary between runs — useful for audit stamps and surrogates such as <code>inserted_at = NOW()</code> or <code>batch_id = UUID()</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="w">  </span><span class="nt">audit_stamped</span><span class="p">:</span>
-<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>
-<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a><span class="w">    </span><span class="nt">grain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">partition</span>
-<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a><span class="w">    </span><span class="nt">timeseries</span><span class="p">:</span>
-<a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a><span class="w">      </span><span class="nt">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_time</span>
-<a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a><span class="w">      </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_date</span>
-<a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a><span class="w">      </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
-<a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
-<a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a><span class="w">      </span><span class="nt">nondeterministic_columns</span><span class="p">:</span>
-<a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">inserted_at</span>
+<p>The non-deterministic-function check can be relaxed per column instead of disabled entirely. Declare <code>columns.&lt;c&gt;.contract: plausible</code> for the output column and its value is allowed to vary between runs — useful for audit stamps and surrogates such as <code>inserted_at = NOW()</code> or <code>batch_id = UUID()</code>:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="c1">---</span>
+<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
+<a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-16-4" name="__codelineno-16-4" href="#__codelineno-16-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
+<a id="__codelineno-16-5" name="__codelineno-16-5" href="#__codelineno-16-5"></a><span class="n">timeseries</span><span class="p">:</span>
+<a id="__codelineno-16-6" name="__codelineno-16-6" href="#__codelineno-16-6"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_time</span>
+<a id="__codelineno-16-7" name="__codelineno-16-7" href="#__codelineno-16-7"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
+<a id="__codelineno-16-8" name="__codelineno-16-8" href="#__codelineno-16-8"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
+<a id="__codelineno-16-9" name="__codelineno-16-9" href="#__codelineno-16-9"></a><span class="n">columns</span><span class="p">:</span>
+<a id="__codelineno-16-10" name="__codelineno-16-10" href="#__codelineno-16-10"></a><span class="w">  </span><span class="n">inserted_at</span><span class="p">:</span>
+<a id="__codelineno-16-11" name="__codelineno-16-11" href="#__codelineno-16-11"></a><span class="w">    </span><span class="n">contract</span><span class="p">:</span><span class="w"> </span><span class="n">plausible</span>
+<a id="__codelineno-16-12" name="__codelineno-16-12" href="#__codelineno-16-12"></a><span class="c1">---</span>
+<a id="__codelineno-16-13" name="__codelineno-16-13" href="#__codelineno-16-13"></a><span class="k">SELECT</span>
+<a id="__codelineno-16-14" name="__codelineno-16-14" href="#__codelineno-16-14"></a><span class="w">    </span><span class="n">event_date</span><span class="p">,</span>
+<a id="__codelineno-16-15" name="__codelineno-16-15" href="#__codelineno-16-15"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
+<a id="__codelineno-16-16" name="__codelineno-16-16" href="#__codelineno-16-16"></a><span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">event_count</span><span class="p">,</span>
+<a id="__codelineno-16-17" name="__codelineno-16-17" href="#__codelineno-16-17"></a><span class="w">    </span><span class="n">NOW</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">inserted_at</span>
+<a id="__codelineno-16-18" name="__codelineno-16-18" href="#__codelineno-16-18"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">events</span>
+<a id="__codelineno-16-19" name="__codelineno-16-19" href="#__codelineno-16-19"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="k">SELECT</span>
-<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="w">    </span><span class="n">event_date</span><span class="p">,</span>
-<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
-<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">event_count</span><span class="p">,</span>
-<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a><span class="w">    </span><span class="n">NOW</span><span class="p">()</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">inserted_at</span>
-<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">events</span>
-<a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span>
-</code></pre></div>
-<p>The non-deterministic value must flow <strong>directly</strong> into a listed column — a bare <code>NOW() AS inserted_at</code> or <code>RANDOM() AS batch_id</code> in the SELECT list. Three positions are always rejected, regardless of the list:</p>
+<p>The non-deterministic value must flow <strong>directly</strong> into the column carrying <code>contract: plausible</code> — a bare <code>NOW() AS inserted_at</code> or <code>RANDOM() AS batch_id</code> in the SELECT list. Three positions are always rejected, regardless of any declared contract:</p>
 <ul>
 <li>the <code>event_time_column</code> or <code>partition_column</code> expression,</li>
 <li>any <code>unique_key</code> column,</li>
 <li>a row-set-membership or grouping position — <code>WHERE</code>, <code>HAVING</code>, <code>JOIN ... ON</code>, <code>DISTINCT</code>, <code>GROUP BY</code> keys, or a window's <code>PARTITION BY</code>/<code>ORDER BY</code>/frame.</li>
 </ul>
-<p>Listing one of these columns in <code>nondeterministic_columns</code> is a configuration error, since those columns must stay deterministic no matter what the model opts into.</p>
-<p><code>NOW()</code>, <code>CURRENT_TIMESTAMP</code>, and <code>CURRENT_DATE</code> are frozen once per run, so a direct projection is admitted even when the target column is <strong>not</strong> listed — pinning already removes the variance the list exists to gate. <code>RANDOM()</code> and <code>UUID()</code> values differ row-to-row within the same run, so their target column must still be listed. If the analysis can't confidently attribute a non-deterministic call to a single output column (for example, it's nested inside a CTE or subquery), the model is rejected — use <code>safety_overrides.allow_nondeterministic</code> if you've verified the pattern is safe.</p>
+<p>Declaring <code>contract: plausible</code> on one of these columns is a configuration error, since those columns must stay deterministic no matter what the model opts into.</p>
+<p><code>NOW()</code>, <code>CURRENT_TIMESTAMP</code>, and <code>CURRENT_DATE</code> are frozen once per run, so a direct projection is admitted even when the target column carries no <code>plausible</code> contract — pinning already removes the variance the contract exists to gate. <code>RANDOM()</code> and <code>UUID()</code> values differ row-to-row within the same run, so their target column must still declare it. If the analysis can't confidently attribute a non-deterministic call to a single output column (for example, it's nested inside a CTE or subquery), the model is rejected — use <code>safety_overrides.allow_nondeterministic</code> if you've verified the pattern is safe.</p>
 <h3 id="overriding-safety-checks">Overriding safety checks<a class="headerlink" href="#overriding-safety-checks" title="Permanent link">&para;</a></h3>
-<p>If you understand the implications and the pattern is safe in your specific case, use <code>safety_overrides</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="w">  </span><span class="nt">my_model</span><span class="p">:</span>
-<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>
-<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="w">    </span><span class="nt">grain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">partition</span>
-<a id="__codelineno-18-6" name="__codelineno-18-6" href="#__codelineno-18-6"></a><span class="w">    </span><span class="nt">timeseries</span><span class="p">:</span>
-<a id="__codelineno-18-7" name="__codelineno-18-7" href="#__codelineno-18-7"></a><span class="w">      </span><span class="nt">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_time</span>
-<a id="__codelineno-18-8" name="__codelineno-18-8" href="#__codelineno-18-8"></a><span class="w">      </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">event_date</span>
-<a id="__codelineno-18-9" name="__codelineno-18-9" href="#__codelineno-18-9"></a><span class="w">      </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
-<a id="__codelineno-18-10" name="__codelineno-18-10" href="#__codelineno-18-10"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
-<a id="__codelineno-18-11" name="__codelineno-18-11" href="#__codelineno-18-11"></a><span class="w">      </span><span class="nt">safety_overrides</span><span class="p">:</span>
-<a id="__codelineno-18-12" name="__codelineno-18-12" href="#__codelineno-18-12"></a><span class="w">        </span><span class="nt">allow_window_functions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-18-13" name="__codelineno-18-13" href="#__codelineno-18-13"></a><span class="w">        </span><span class="nt">allow_having</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-18-14" name="__codelineno-18-14" href="#__codelineno-18-14"></a><span class="w">        </span><span class="nt">allow_limit</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-18-15" name="__codelineno-18-15" href="#__codelineno-18-15"></a><span class="w">        </span><span class="nt">allow_subqueries</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-18-16" name="__codelineno-18-16" href="#__codelineno-18-16"></a><span class="w">        </span><span class="nt">allow_nondeterministic</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
-<a id="__codelineno-18-17" name="__codelineno-18-17" href="#__codelineno-18-17"></a><span class="w">        </span><span class="nt">allow_distinct</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<p>If you understand the implications and the pattern is safe in your specific case, use the top-level <code>safety_overrides:</code> key:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="c1">---</span>
+<a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
+<a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-17-4" name="__codelineno-17-4" href="#__codelineno-17-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
+<a id="__codelineno-17-5" name="__codelineno-17-5" href="#__codelineno-17-5"></a><span class="n">timeseries</span><span class="p">:</span>
+<a id="__codelineno-17-6" name="__codelineno-17-6" href="#__codelineno-17-6"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_time</span>
+<a id="__codelineno-17-7" name="__codelineno-17-7" href="#__codelineno-17-7"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
+<a id="__codelineno-17-8" name="__codelineno-17-8" href="#__codelineno-17-8"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
+<a id="__codelineno-17-9" name="__codelineno-17-9" href="#__codelineno-17-9"></a><span class="n">safety_overrides</span><span class="p">:</span>
+<a id="__codelineno-17-10" name="__codelineno-17-10" href="#__codelineno-17-10"></a><span class="w">  </span><span class="n">allow_window_functions</span><span class="p">:</span><span class="w"> </span><span class="k">true</span>
+<a id="__codelineno-17-11" name="__codelineno-17-11" href="#__codelineno-17-11"></a><span class="w">  </span><span class="n">allow_having</span><span class="p">:</span><span class="w"> </span><span class="k">true</span>
+<a id="__codelineno-17-12" name="__codelineno-17-12" href="#__codelineno-17-12"></a><span class="w">  </span><span class="n">allow_limit</span><span class="p">:</span><span class="w"> </span><span class="k">true</span>
+<a id="__codelineno-17-13" name="__codelineno-17-13" href="#__codelineno-17-13"></a><span class="w">  </span><span class="n">allow_subqueries</span><span class="p">:</span><span class="w"> </span><span class="k">true</span>
+<a id="__codelineno-17-14" name="__codelineno-17-14" href="#__codelineno-17-14"></a><span class="w">  </span><span class="n">allow_nondeterministic</span><span class="p">:</span><span class="w"> </span><span class="k">true</span>
+<a id="__codelineno-17-15" name="__codelineno-17-15" href="#__codelineno-17-15"></a><span class="w">  </span><span class="n">allow_distinct</span><span class="p">:</span><span class="w"> </span><span class="k">true</span>
+<a id="__codelineno-17-16" name="__codelineno-17-16" href="#__codelineno-17-16"></a><span class="c1">---</span>
+<a id="__codelineno-17-17" name="__codelineno-17-17" href="#__codelineno-17-17"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_count</span>
+<a id="__codelineno-17-18" name="__codelineno-17-18" href="#__codelineno-17-18"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">events</span>
+<a id="__codelineno-17-19" name="__codelineno-17-19" href="#__codelineno-17-19"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span><span class="p">,</span><span class="w"> </span><span class="mi">2</span>
 </code></pre></div>
 <div class="admonition warning">
 <p class="admonition-title">Warning</p>
@@ -3997,29 +4133,29 @@
 <h3 id="partition-aligned-window-functions">Partition-aligned window functions<a class="headerlink" href="#partition-aligned-window-functions" title="Permanent link">&para;</a></h3>
 <p>You do not need a safety override for window functions that are <strong>partition-aligned</strong> — where the <code>PARTITION BY</code> keys of the window include the model's <code>partition_column</code>. The optimizer admits these directly because each window is evaluated within a single output partition: the DELETE+INSERT contract deletes and re-inserts entire partitions, and a window that cannot look across partition boundaries produces the same result on partial data as on the full table.</p>
 <p>For a model with <code>partition_column: event_date</code>, these windows are admissible without any override:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="c1">-- Admitted: PARTITION BY contains event_date (equality)</span>
-<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="n">FIRST_VALUE</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_user</span>
-<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>
-<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="c1">-- Admitted: PARTITION BY contains event_date (superset — extra key is fine)</span>
-<a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a><span class="n">FIRST_VALUE</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span><span class="w"> </span><span class="n">device_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_user</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="c1">-- Admitted: PARTITION BY contains event_date (equality)</span>
+<a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="n">FIRST_VALUE</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_user</span>
+<a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a>
+<a id="__codelineno-18-4" name="__codelineno-18-4" href="#__codelineno-18-4"></a><span class="c1">-- Admitted: PARTITION BY contains event_date (superset — extra key is fine)</span>
+<a id="__codelineno-18-5" name="__codelineno-18-5" href="#__codelineno-18-5"></a><span class="n">FIRST_VALUE</span><span class="p">(</span><span class="n">user_id</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span><span class="w"> </span><span class="n">device_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_user</span>
 </code></pre></div>
 <p>These windows are <strong>not</strong> admissible (and will be refused) because their <code>PARTITION BY</code> keys do not include <code>event_date</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="c1">-- Refused: PARTITION BY does not contain event_date</span>
-<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="n">ROW_NUMBER</span><span class="p">()</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">rn</span>
-<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a>
-<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="c1">-- Refused: no PARTITION BY at all</span>
-<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">running_total</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="c1">-- Refused: PARTITION BY does not contain event_date</span>
+<a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="n">ROW_NUMBER</span><span class="p">()</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">rn</span>
+<a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a>
+<a id="__codelineno-19-4" name="__codelineno-19-4" href="#__codelineno-19-4"></a><span class="c1">-- Refused: no PARTITION BY at all</span>
+<a id="__codelineno-19-5" name="__codelineno-19-5" href="#__codelineno-19-5"></a><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">running_total</span>
 </code></pre></div>
 <p>Use <code>safety_overrides.allow_window_functions: true</code> for windows that cannot be partition-aligned and that you have verified are safe in your specific context.</p>
 <h3 id="bounded-range-cross-partition-windows">Bounded-<code>RANGE</code> cross-partition windows<a class="headerlink" href="#bounded-range-cross-partition-windows" title="Permanent link">&para;</a></h3>
 <p>A window whose <code>PARTITION BY</code> keys do <strong>not</strong> include the model's <code>partition_column</code> is still admitted — without an override — when its frame is a bounded <code>RANGE BETWEEN INTERVAL '…' PRECEDING [AND …]</code> clause with no <code>UNBOUNDED</code> bound. The finite interval is a derivable lookback (or lookforward): the planner widens the <em>source</em> read to cover it, so the window is provably partition-local up to that bound even though <code>PARTITION BY</code> disagrees with the model's own partition column.</p>
 <p>This is what lets a sessionization model window <code>LAG</code>/<code>LEAD</code> by <code>device_id</code> (ordered by event time, framed to a bounded interval) while the model itself is partitioned by a derived <code>session_start_date</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="c1">-- Admitted despite PARTITION BY device_id not matching partition_column session_start_date:</span>
-<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="c1">-- the bounded 30-minute RANGE frame licenses a 30-minute widened source read.</span>
-<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="n">LAG</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
-<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="w">    </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
-<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a><span class="w">    </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 minutes&#39;</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span>
-<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">prev_ts</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="c1">-- Admitted despite PARTITION BY device_id not matching partition_column session_start_date:</span>
+<a id="__codelineno-20-2" name="__codelineno-20-2" href="#__codelineno-20-2"></a><span class="c1">-- the bounded 30-minute RANGE frame licenses a 30-minute widened source read.</span>
+<a id="__codelineno-20-3" name="__codelineno-20-3" href="#__codelineno-20-3"></a><span class="n">LAG</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-20-4" name="__codelineno-20-4" href="#__codelineno-20-4"></a><span class="w">    </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
+<a id="__codelineno-20-5" name="__codelineno-20-5" href="#__codelineno-20-5"></a><span class="w">    </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 minutes&#39;</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span>
+<a id="__codelineno-20-6" name="__codelineno-20-6" href="#__codelineno-20-6"></a><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">prev_ts</span>
 </code></pre></div>
 <p>The exception is narrow:</p>
 <ul>
@@ -4031,55 +4167,55 @@
 <p>The planner recognises two standard SQL forms:</p>
 <h3 id="form-a-window-frame-range-between-interval">Form A — window-frame <code>RANGE BETWEEN INTERVAL</code><a class="headerlink" href="#form-a-window-frame-range-between-interval" title="Permanent link">&para;</a></h3>
 <p>When a window function uses an explicit <code>RANGE BETWEEN INTERVAL '…' PRECEDING</code> clause, the interval becomes the source's lookback:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="k">SELECT</span>
-<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="w">    </span><span class="n">device_id</span><span class="p">,</span>
-<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="w">    </span><span class="n">event_ts</span><span class="p">,</span>
-<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="w">    </span><span class="n">LAG</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
-<a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a><span class="w">        </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span>
-<a id="__codelineno-22-6" name="__codelineno-22-6" href="#__codelineno-22-6"></a><span class="w">        </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
-<a id="__codelineno-22-7" name="__codelineno-22-7" href="#__codelineno-22-7"></a><span class="w">        </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 minutes&#39;</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span>
-<a id="__codelineno-22-8" name="__codelineno-22-8" href="#__codelineno-22-8"></a><span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">prev_ts</span>
-<a id="__codelineno-22-9" name="__codelineno-22-9" href="#__codelineno-22-9"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="k">SELECT</span>
+<a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="w">    </span><span class="n">device_id</span><span class="p">,</span>
+<a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="w">    </span><span class="n">event_ts</span><span class="p">,</span>
+<a id="__codelineno-21-4" name="__codelineno-21-4" href="#__codelineno-21-4"></a><span class="w">    </span><span class="n">LAG</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-21-5" name="__codelineno-21-5" href="#__codelineno-21-5"></a><span class="w">        </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span>
+<a id="__codelineno-21-6" name="__codelineno-21-6" href="#__codelineno-21-6"></a><span class="w">        </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
+<a id="__codelineno-21-7" name="__codelineno-21-7" href="#__codelineno-21-7"></a><span class="w">        </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 minutes&#39;</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span>
+<a id="__codelineno-21-8" name="__codelineno-21-8" href="#__codelineno-21-8"></a><span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">prev_ts</span>
+<a id="__codelineno-21-9" name="__codelineno-21-9" href="#__codelineno-21-9"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
 </code></pre></div>
 <p>The planner reads <code>INTERVAL '30 minutes' PRECEDING</code> and derives <code>before = PT30M</code> for <code>events_parsed</code>.</p>
 <p>A bare <code>LAG(x) OVER (PARTITION BY id ORDER BY ts)</code> without a <code>RANGE BETWEEN</code> clause is <strong>not derivable</strong> — the planner cannot determine the lookback and will refuse the model at planning time. Rewrite it with an explicit <code>RANGE BETWEEN INTERVAL '…' PRECEDING</code> clause.</p>
 <p><strong>Forward reach (<code>after</code>).</strong> The same frame can carry a <code>FOLLOWING</code> bound, read as the source's <em>lookforward</em> margin — the mirror of the <code>PRECEDING</code> case above, from the same walk:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="n">LEAD</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
-<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="w">    </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span>
-<a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="w">    </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
-<a id="__codelineno-23-4" name="__codelineno-23-4" href="#__codelineno-23-4"></a><span class="w">    </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;2 hours&#39;</span><span class="w"> </span><span class="n">FOLLOWING</span>
-<a id="__codelineno-23-5" name="__codelineno-23-5" href="#__codelineno-23-5"></a><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">next_ts</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="n">LEAD</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="w">    </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span>
+<a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="w">    </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
+<a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="w">    </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;2 hours&#39;</span><span class="w"> </span><span class="n">FOLLOWING</span>
+<a id="__codelineno-22-5" name="__codelineno-22-5" href="#__codelineno-22-5"></a><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">next_ts</span>
 </code></pre></div>
 <p>The planner reads <code>INTERVAL '2 hours' FOLLOWING</code> and derives <code>after = PT2H</code>. An <strong>unbounded</strong> forward reach — <code>UNBOUNDED FOLLOWING</code>, or a <code>FOLLOWING</code> bound with no <code>INTERVAL</code> literal — is <strong>not derivable</strong>, mirroring the bare-<code>LAG</code>/<code>UNBOUNDED PRECEDING</code> refusal: the planner cannot bound how far forward the source must be read, so the model is refused at planning time rather than silently treated as zero-margin.</p>
 <h3 id="form-b-explicit-wherejoin-interval-filters">Form B — explicit WHERE/JOIN interval filters<a class="headerlink" href="#form-b-explicit-wherejoin-interval-filters" title="Permanent link">&para;</a></h3>
 <p>When the model's WHERE clause or a JOIN condition contains an explicit <code>INTERVAL</code> offset on a source column, the interval becomes the source's bound:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="c1">-- Same-column lookback: reads 1 day before the run window</span>
-<a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">event_date</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="c1">-- Same-column lookback: reads 1 day before the run window</span>
+<a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">event_date</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1">-- Cross-column rebase: UTC timestamps into local-date partitions</span>
-<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">event_ts_utc</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">event_date_local</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span>
-<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="w">                          </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">event_date_local</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="c1">-- Cross-column rebase: UTC timestamps into local-date partitions</span>
+<a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">b</span><span class="p">.</span><span class="n">event_ts_utc</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">event_date_local</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span>
+<a id="__codelineno-24-3" name="__codelineno-24-3" href="#__codelineno-24-3"></a><span class="w">                          </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">event_date_local</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span>
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="c1">-- Forward-only reach: no backward offset, only a lookforward</span>
-<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">e</span><span class="p">.</span><span class="n">event_ts</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">conversion_ts</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">conversion_ts</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 days&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1">-- Forward-only reach: no backward offset, only a lookforward</span>
+<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">e</span><span class="p">.</span><span class="n">event_ts</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">conversion_ts</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">conversion_ts</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;30 days&#39;</span>
 </code></pre></div>
 <p>Both <code>BETWEEN</code> form and paired <code>&gt;=</code> / <code>&lt;</code> form are read:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span>
-<a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">event_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;1 day&#39;</span>
+<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">event_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="n">m</span><span class="p">.</span><span class="n">partition_date</span>
 </code></pre></div>
 <h3 id="viewing-derived-bounds">Viewing derived bounds<a class="headerlink" href="#viewing-derived-bounds" title="Permanent link">&para;</a></h3>
 <p>Run <code>smelt explain --json</code> to see the derived bound map for each incremental model:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--json<span class="w"> </span><span class="p">|</span><span class="w"> </span>jq<span class="w"> </span><span class="s1">&#39;.models.sessions.incremental.source_bounds&#39;</span>
 </code></pre></div>
 <p>Example output:
-<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a><span class="p">{</span>
-<a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
-<a id="__codelineno-29-3" name="__codelineno-29-3" href="#__codelineno-29-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
-<a id="__codelineno-29-4" name="__codelineno-29-4" href="#__codelineno-29-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
-<a id="__codelineno-29-5" name="__codelineno-29-5" href="#__codelineno-29-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span><span class="p">,</span>
-<a id="__codelineno-29-6" name="__codelineno-29-6" href="#__codelineno-29-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span>
-<a id="__codelineno-29-7" name="__codelineno-29-7" href="#__codelineno-29-7"></a><span class="w">  </span><span class="p">}</span>
-<a id="__codelineno-29-8" name="__codelineno-29-8" href="#__codelineno-29-8"></a><span class="p">}</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a><span class="p">{</span>
+<a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="w">  </span><span class="nt">&quot;events_parsed&quot;</span><span class="p">:</span><span class="w"> </span><span class="p">{</span>
+<a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a><span class="w">    </span><span class="nt">&quot;type&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;bounded&quot;</span><span class="p">,</span>
+<a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="w">    </span><span class="nt">&quot;partition_col&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;event_date&quot;</span><span class="p">,</span>
+<a id="__codelineno-28-5" name="__codelineno-28-5" href="#__codelineno-28-5"></a><span class="w">    </span><span class="nt">&quot;before&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span><span class="p">,</span>
+<a id="__codelineno-28-6" name="__codelineno-28-6" href="#__codelineno-28-6"></a><span class="w">    </span><span class="nt">&quot;after&quot;</span><span class="p">:</span><span class="w"> </span><span class="s2">&quot;PT0S&quot;</span>
+<a id="__codelineno-28-7" name="__codelineno-28-7" href="#__codelineno-28-7"></a><span class="w">  </span><span class="p">}</span>
+<a id="__codelineno-28-8" name="__codelineno-28-8" href="#__codelineno-28-8"></a><span class="p">}</span>
 </code></pre></div></p>
 <p>Durations use ISO-8601 format: <code>PT30M</code> (30 minutes), <code>P1D</code> (1 day), <code>PT0S</code> (zero / partition-local).</p>
 <h3 id="when-the-bound-is-not-derivable">When the bound is not derivable<a class="headerlink" href="#when-the-bound-is-not-derivable" title="Permanent link">&para;</a></h3>
@@ -4087,39 +4223,39 @@
 <p>Sources without <code>timeseries:</code> declared (lookup tables, dimension tables) are always read in full and do not appear in the bound map.</p>
 <h3 id="source-filter-pushdown">Source-filter pushdown<a class="headerlink" href="#source-filter-pushdown" title="Permanent link">&para;</a></h3>
 <p>Once smelt derives the bound for a source, it automatically injects a pushdown <code>WHERE</code> filter on that source's <code>FROM</code> clause. For a run window <code>[run_start, run_end)</code> and a source with bound <code>Bounded(col, before, after)</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a><span class="c1">-- Injected by the planner on the source&#39;s FROM:</span>
-<a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">run_start</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">before</span>
-<a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="o">&lt;</span><span class="w">  </span><span class="n">run_end</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">after</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-29-1" name="__codelineno-29-1" href="#__codelineno-29-1"></a><span class="c1">-- Injected by the planner on the source&#39;s FROM:</span>
+<a id="__codelineno-29-2" name="__codelineno-29-2" href="#__codelineno-29-2"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="n">run_start</span><span class="w"> </span><span class="o">-</span><span class="w"> </span><span class="k">before</span>
+<a id="__codelineno-29-3" name="__codelineno-29-3" href="#__codelineno-29-3"></a><span class="w">  </span><span class="k">AND</span><span class="w"> </span><span class="n">col</span><span class="w"> </span><span class="o">&lt;</span><span class="w">  </span><span class="n">run_end</span><span class="w"> </span><span class="o">+</span><span class="w"> </span><span class="k">after</span>
 </code></pre></div>
 <p>This filter is applied <strong>per source reference</strong> before compilation — each <code>smelt.&lt;path&gt;</code> reference in the model SQL gets its own pushdown WHERE. The outer model WHERE (constraining the model's output to the run window using the model's own <code>partition_column</code>) is unchanged and applied separately.</p>
 <h3 id="model-to-model-chains">Model-to-model chains<a class="headerlink" href="#model-to-model-chains" title="Permanent link">&para;</a></h3>
 <p>A ref to <strong>another incremental model</strong> in the same project is a maintenance-plan edge of the same standing as a source ref. When an incremental model reads another incremental model, the downstream model derives a <strong>creation-trigger cell</strong> for that upstream, clocked by the upstream model's own <code>timeseries:</code> declaration — the same clock the upstream maintains itself. Scan bounds compose down the chain exactly as they do for sources: the downstream cell reads the upstream over <code>[start − before, end + after)</code>.</p>
 <p><code>smelt explain &lt;model&gt;</code> shows these edges. For a model that joins an upstream <code>silver.events_parsed</code>, the report lists a creation cell whose trigger names the upstream and whose scan clamp is anchored to the upstream's clock column:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a>Cells (…):
-<a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a>  - group {*} on trigger NewData { source: &quot;silver.events_parsed&quot; }
-<a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a>      corner:    RecomputeRegion
-<a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a>      technique: DeleteInsert
-<a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a>      locality:  partition_local
-<a id="__codelineno-31-6" name="__codelineno-31-6" href="#__codelineno-31-6"></a>      scan clamps:
-<a id="__codelineno-31-7" name="__codelineno-31-7" href="#__codelineno-31-7"></a>        - source=silver.events_parsed column=event_date before=… after=…
+<div class="highlight"><pre><span></span><code><a id="__codelineno-30-1" name="__codelineno-30-1" href="#__codelineno-30-1"></a>Cells (…):
+<a id="__codelineno-30-2" name="__codelineno-30-2" href="#__codelineno-30-2"></a>  - group {*} on trigger NewData { source: &quot;silver.events_parsed&quot; }
+<a id="__codelineno-30-3" name="__codelineno-30-3" href="#__codelineno-30-3"></a>      corner:    RecomputeRegion
+<a id="__codelineno-30-4" name="__codelineno-30-4" href="#__codelineno-30-4"></a>      technique: DeleteInsert
+<a id="__codelineno-30-5" name="__codelineno-30-5" href="#__codelineno-30-5"></a>      locality:  partition_local
+<a id="__codelineno-30-6" name="__codelineno-30-6" href="#__codelineno-30-6"></a>      scan clamps:
+<a id="__codelineno-30-7" name="__codelineno-30-7" href="#__codelineno-30-7"></a>        - source=silver.events_parsed column=event_date before=… after=…
 </code></pre></div>
 <p>If the upstream is a maintained model that declares <strong>no</strong> <code>timeseries:</code> clock (and none can be inferred), the edge cannot be clamped. smelt records this as a refusal naming the edge in the plan's <code>Refusals</code> section rather than silently dropping the upstream — surfacing that the chain needs a clock to maintain the downstream incrementally. A ref to a <code>full</code>-refresh model or a view contributes no creation cell (there is no incremental delta to receive).</p>
 <p><strong>Example.</strong> A sessions model that reads <code>smelt.silver.events_parsed</code> (partition column <code>event_date</code>) with a derived bound of <code>PT0S</code>/<code>PT0S</code> (partition-local, no lookback) for a run window <code>[2024-01-15, 2024-01-16)</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="c1">-- Before pushdown (model SQL):</span>
-<a id="__codelineno-32-2" name="__codelineno-32-2" href="#__codelineno-32-2"></a><span class="k">WITH</span><span class="w"> </span><span class="n">sessionized</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
-<a id="__codelineno-32-3" name="__codelineno-32-3" href="#__codelineno-32-3"></a><span class="w">  </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">functions</span><span class="p">.</span><span class="n">sessionize</span><span class="p">(</span>
-<a id="__codelineno-32-4" name="__codelineno-32-4" href="#__codelineno-32-4"></a><span class="w">    </span><span class="k">source</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span><span class="p">,</span><span class="w"> </span><span class="p">...</span>
-<a id="__codelineno-32-5" name="__codelineno-32-5" href="#__codelineno-32-5"></a><span class="w">  </span><span class="p">)</span>
-<a id="__codelineno-32-6" name="__codelineno-32-6" href="#__codelineno-32-6"></a><span class="p">)</span><span class="w"> </span><span class="p">...</span>
-<a id="__codelineno-32-7" name="__codelineno-32-7" href="#__codelineno-32-7"></a>
-<a id="__codelineno-32-8" name="__codelineno-32-8" href="#__codelineno-32-8"></a><span class="c1">-- After pushdown (what the engine sees):</span>
-<a id="__codelineno-32-9" name="__codelineno-32-9" href="#__codelineno-32-9"></a><span class="k">WITH</span><span class="w"> </span><span class="n">sessionized</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
-<a id="__codelineno-32-10" name="__codelineno-32-10" href="#__codelineno-32-10"></a><span class="w">  </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">functions</span><span class="p">.</span><span class="n">sessionize</span><span class="p">(</span>
-<a id="__codelineno-32-11" name="__codelineno-32-11" href="#__codelineno-32-11"></a><span class="w">    </span><span class="k">source</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
-<a id="__codelineno-32-12" name="__codelineno-32-12" href="#__codelineno-32-12"></a><span class="w">               </span><span class="k">WHERE</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2024-01-15&#39;</span>
-<a id="__codelineno-32-13" name="__codelineno-32-13" href="#__codelineno-32-13"></a><span class="w">                 </span><span class="k">AND</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2024-01-16&#39;</span><span class="p">),</span><span class="w"> </span><span class="p">...</span>
-<a id="__codelineno-32-14" name="__codelineno-32-14" href="#__codelineno-32-14"></a><span class="w">  </span><span class="p">)</span>
-<a id="__codelineno-32-15" name="__codelineno-32-15" href="#__codelineno-32-15"></a><span class="p">)</span><span class="w"> </span><span class="p">...</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-31-1" name="__codelineno-31-1" href="#__codelineno-31-1"></a><span class="c1">-- Before pushdown (model SQL):</span>
+<a id="__codelineno-31-2" name="__codelineno-31-2" href="#__codelineno-31-2"></a><span class="k">WITH</span><span class="w"> </span><span class="n">sessionized</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-31-3" name="__codelineno-31-3" href="#__codelineno-31-3"></a><span class="w">  </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">functions</span><span class="p">.</span><span class="n">sessionize</span><span class="p">(</span>
+<a id="__codelineno-31-4" name="__codelineno-31-4" href="#__codelineno-31-4"></a><span class="w">    </span><span class="k">source</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span><span class="p">,</span><span class="w"> </span><span class="p">...</span>
+<a id="__codelineno-31-5" name="__codelineno-31-5" href="#__codelineno-31-5"></a><span class="w">  </span><span class="p">)</span>
+<a id="__codelineno-31-6" name="__codelineno-31-6" href="#__codelineno-31-6"></a><span class="p">)</span><span class="w"> </span><span class="p">...</span>
+<a id="__codelineno-31-7" name="__codelineno-31-7" href="#__codelineno-31-7"></a>
+<a id="__codelineno-31-8" name="__codelineno-31-8" href="#__codelineno-31-8"></a><span class="c1">-- After pushdown (what the engine sees):</span>
+<a id="__codelineno-31-9" name="__codelineno-31-9" href="#__codelineno-31-9"></a><span class="k">WITH</span><span class="w"> </span><span class="n">sessionized</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-31-10" name="__codelineno-31-10" href="#__codelineno-31-10"></a><span class="w">  </span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">functions</span><span class="p">.</span><span class="n">sessionize</span><span class="p">(</span>
+<a id="__codelineno-31-11" name="__codelineno-31-11" href="#__codelineno-31-11"></a><span class="w">    </span><span class="k">source</span><span class="w"> </span><span class="o">=&gt;</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
+<a id="__codelineno-31-12" name="__codelineno-31-12" href="#__codelineno-31-12"></a><span class="w">               </span><span class="k">WHERE</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2024-01-15&#39;</span>
+<a id="__codelineno-31-13" name="__codelineno-31-13" href="#__codelineno-31-13"></a><span class="w">                 </span><span class="k">AND</span><span class="w"> </span><span class="n">event_date</span><span class="w"> </span><span class="o">&lt;</span><span class="w"> </span><span class="s1">&#39;2024-01-16&#39;</span><span class="p">),</span><span class="w"> </span><span class="p">...</span>
+<a id="__codelineno-31-14" name="__codelineno-31-14" href="#__codelineno-31-14"></a><span class="w">  </span><span class="p">)</span>
+<a id="__codelineno-31-15" name="__codelineno-31-15" href="#__codelineno-31-15"></a><span class="p">)</span><span class="w"> </span><span class="p">...</span>
 </code></pre></div>
 <p>Lookup sources (those without <code>timeseries:</code>) are never pushdown candidates — they are read in full each run. Pushdown is per-reference: a self-join on a timeseries source receives the same widened filter on each occurrence.</p>
 <p><strong>Below the outer SELECT.</strong> Pushdown is not limited to a single top-level <code>FROM</code> clause. smelt traces whether the model's projected <code>event_time</code>/<code>partition_column</code> value is a monotone image of a real source's time column — a bare column, a truncation like <code>DATE_TRUNC</code>/<code>time_bucket</code>, a <code>CAST</code> to a temporal type, or a constant <code>INTERVAL</code> shift are all traceable; an arithmetic combination of two columns, <code>CASE</code>, <code>COALESCE</code>, or an unrecognised function are not. When that trace succeeds, the pushdown filter can relocate past constructs that would otherwise keep it stuck at the outer clamp:</p>
@@ -4137,31 +4273,31 @@
 <h3 id="declaring-a-horizon-ceiling-warning-only">Declaring a horizon ceiling (warning only)<a class="headerlink" href="#declaring-a-horizon-ceiling-warning-only" title="Permanent link">&para;</a></h3>
 <p>The <strong>horizon</strong> — the far edge of the maintained window, past which inputs are no longer read — is always <strong>derived</strong> from the model's own SQL (its lookback, window frames, and join contribution). smelt never trusts a declared horizon for the clamp itself: an under-estimate would silently drop rows that should have been rewritten.</p>
 <p>A modeller may still declare a <code>horizon_ceiling:</code> as a <em>warning</em> ceiling on how far that derived horizon is expected to reach:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="c1">---</span>
-<a id="__codelineno-33-2" name="__codelineno-33-2" href="#__codelineno-33-2"></a><span class="n">timeseries</span><span class="p">:</span>
-<a id="__codelineno-33-3" name="__codelineno-33-3" href="#__codelineno-33-3"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_ts</span>
-<a id="__codelineno-33-4" name="__codelineno-33-4" href="#__codelineno-33-4"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
-<a id="__codelineno-33-5" name="__codelineno-33-5" href="#__codelineno-33-5"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
-<a id="__codelineno-33-6" name="__codelineno-33-6" href="#__codelineno-33-6"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
-<a id="__codelineno-33-7" name="__codelineno-33-7" href="#__codelineno-33-7"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
-<a id="__codelineno-33-8" name="__codelineno-33-8" href="#__codelineno-33-8"></a><span class="n">horizon_ceiling</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;30 days&#39;</span>
-<a id="__codelineno-33-9" name="__codelineno-33-9" href="#__codelineno-33-9"></a><span class="c1">---</span>
-<a id="__codelineno-33-10" name="__codelineno-33-10" href="#__codelineno-33-10"></a><span class="k">SELECT</span>
-<a id="__codelineno-33-11" name="__codelineno-33-11" href="#__codelineno-33-11"></a><span class="w">    </span><span class="n">event_date</span><span class="p">,</span>
-<a id="__codelineno-33-12" name="__codelineno-33-12" href="#__codelineno-33-12"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
-<a id="__codelineno-33-13" name="__codelineno-33-13" href="#__codelineno-33-13"></a><span class="w">    </span><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
-<a id="__codelineno-33-14" name="__codelineno-33-14" href="#__codelineno-33-14"></a><span class="w">        </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">user_id</span>
-<a id="__codelineno-33-15" name="__codelineno-33-15" href="#__codelineno-33-15"></a><span class="w">        </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
-<a id="__codelineno-33-16" name="__codelineno-33-16" href="#__codelineno-33-16"></a><span class="w">        </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;2 hours&#39;</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span>
-<a id="__codelineno-33-17" name="__codelineno-33-17" href="#__codelineno-33-17"></a><span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">rolling_amount</span>
-<a id="__codelineno-33-18" name="__codelineno-33-18" href="#__codelineno-33-18"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">events</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-32-1" name="__codelineno-32-1" href="#__codelineno-32-1"></a><span class="c1">---</span>
+<a id="__codelineno-32-2" name="__codelineno-32-2" href="#__codelineno-32-2"></a><span class="n">timeseries</span><span class="p">:</span>
+<a id="__codelineno-32-3" name="__codelineno-32-3" href="#__codelineno-32-3"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_ts</span>
+<a id="__codelineno-32-4" name="__codelineno-32-4" href="#__codelineno-32-4"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
+<a id="__codelineno-32-5" name="__codelineno-32-5" href="#__codelineno-32-5"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
+<a id="__codelineno-32-6" name="__codelineno-32-6" href="#__codelineno-32-6"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-32-7" name="__codelineno-32-7" href="#__codelineno-32-7"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
+<a id="__codelineno-32-8" name="__codelineno-32-8" href="#__codelineno-32-8"></a><span class="n">horizon_ceiling</span><span class="p">:</span><span class="w"> </span><span class="s1">&#39;30 days&#39;</span>
+<a id="__codelineno-32-9" name="__codelineno-32-9" href="#__codelineno-32-9"></a><span class="c1">---</span>
+<a id="__codelineno-32-10" name="__codelineno-32-10" href="#__codelineno-32-10"></a><span class="k">SELECT</span>
+<a id="__codelineno-32-11" name="__codelineno-32-11" href="#__codelineno-32-11"></a><span class="w">    </span><span class="n">event_date</span><span class="p">,</span>
+<a id="__codelineno-32-12" name="__codelineno-32-12" href="#__codelineno-32-12"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
+<a id="__codelineno-32-13" name="__codelineno-32-13" href="#__codelineno-32-13"></a><span class="w">    </span><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span>
+<a id="__codelineno-32-14" name="__codelineno-32-14" href="#__codelineno-32-14"></a><span class="w">        </span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">user_id</span>
+<a id="__codelineno-32-15" name="__codelineno-32-15" href="#__codelineno-32-15"></a><span class="w">        </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_ts</span>
+<a id="__codelineno-32-16" name="__codelineno-32-16" href="#__codelineno-32-16"></a><span class="w">        </span><span class="n">RANGE</span><span class="w"> </span><span class="k">BETWEEN</span><span class="w"> </span><span class="nb">INTERVAL</span><span class="w"> </span><span class="s1">&#39;2 hours&#39;</span><span class="w"> </span><span class="n">PRECEDING</span><span class="w"> </span><span class="k">AND</span><span class="w"> </span><span class="k">CURRENT</span><span class="w"> </span><span class="k">ROW</span>
+<a id="__codelineno-32-17" name="__codelineno-32-17" href="#__codelineno-32-17"></a><span class="w">    </span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">rolling_amount</span>
+<a id="__codelineno-32-18" name="__codelineno-32-18" href="#__codelineno-32-18"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">events</span>
 </code></pre></div>
 <p>Here the model's own <code>RANGE BETWEEN INTERVAL '2 hours'</code> frame derives a 2-hour horizon, comfortably inside the declared 30-day ceiling — no warning. If a future edit widened that frame past 30 days, smelt would emit a compile-time warning naming both the derived reach and the declared ceiling. Either way, <strong>the clamp always uses the derived value</strong> — the ceiling narrows nothing; it only tells you when the model's real reach has grown further than expected.</p>
 <h2 id="batching">Batching<a class="headerlink" href="#batching" title="Permanent link">&para;</a></h2>
 <p>When you specify a large time range, smelt automatically chunks it into batches. Each batch is a separate DELETE+INSERT cycle.</p>
 <p>The default batch size is determined by the granularity -- for example, daily granularity defaults to processing one day per batch. Use <code>--batch-size</code> to override:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="c1"># Process 90 days in 7-day chunks</span>
-<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2025</span>-04-01<span class="w"> </span>--batch-size<span class="w"> </span><span class="m">7</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-33-1" name="__codelineno-33-1" href="#__codelineno-33-1"></a><span class="c1"># Process 90 days in 7-day chunks</span>
+<a id="__codelineno-33-2" name="__codelineno-33-2" href="#__codelineno-33-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2025</span>-04-01<span class="w"> </span>--batch-size<span class="w"> </span><span class="m">7</span>
 </code></pre></div>
 <p>Batching provides two benefits:</p>
 <ul>
@@ -4181,37 +4317,37 @@
 <h2 id="monitoring">Monitoring<a class="headerlink" href="#monitoring" title="Permanent link">&para;</a></h2>
 <h3 id="interval-coverage">Interval coverage<a class="headerlink" href="#interval-coverage" title="Permanent link">&para;</a></h3>
 <p>Use <code>smelt status</code> to see which time ranges have been processed:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a><span class="c1"># Show all incremental models</span>
-<a id="__codelineno-35-2" name="__codelineno-35-2" href="#__codelineno-35-2"></a>smelt<span class="w"> </span>status
-<a id="__codelineno-35-3" name="__codelineno-35-3" href="#__codelineno-35-3"></a>
-<a id="__codelineno-35-4" name="__codelineno-35-4" href="#__codelineno-35-4"></a><span class="c1"># Show a specific model</span>
-<a id="__codelineno-35-5" name="__codelineno-35-5" href="#__codelineno-35-5"></a>smelt<span class="w"> </span>status<span class="w"> </span>daily_revenue
-<a id="__codelineno-35-6" name="__codelineno-35-6" href="#__codelineno-35-6"></a>
-<a id="__codelineno-35-7" name="__codelineno-35-7" href="#__codelineno-35-7"></a><span class="c1"># Show gaps in a specific date range</span>
-<a id="__codelineno-35-8" name="__codelineno-35-8" href="#__codelineno-35-8"></a>smelt<span class="w"> </span>status<span class="w"> </span>daily_revenue<span class="w"> </span>--since<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--until<span class="w"> </span><span class="m">2025</span>-03-01
+<div class="highlight"><pre><span></span><code><a id="__codelineno-34-1" name="__codelineno-34-1" href="#__codelineno-34-1"></a><span class="c1"># Show all incremental models</span>
+<a id="__codelineno-34-2" name="__codelineno-34-2" href="#__codelineno-34-2"></a>smelt<span class="w"> </span>status
+<a id="__codelineno-34-3" name="__codelineno-34-3" href="#__codelineno-34-3"></a>
+<a id="__codelineno-34-4" name="__codelineno-34-4" href="#__codelineno-34-4"></a><span class="c1"># Show a specific model</span>
+<a id="__codelineno-34-5" name="__codelineno-34-5" href="#__codelineno-34-5"></a>smelt<span class="w"> </span>status<span class="w"> </span>daily_revenue
+<a id="__codelineno-34-6" name="__codelineno-34-6" href="#__codelineno-34-6"></a>
+<a id="__codelineno-34-7" name="__codelineno-34-7" href="#__codelineno-34-7"></a><span class="c1"># Show gaps in a specific date range</span>
+<a id="__codelineno-34-8" name="__codelineno-34-8" href="#__codelineno-34-8"></a>smelt<span class="w"> </span>status<span class="w"> </span>daily_revenue<span class="w"> </span>--since<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--until<span class="w"> </span><span class="m">2025</span>-03-01
 </code></pre></div>
 <h3 id="run-history">Run history<a class="headerlink" href="#run-history" title="Permanent link">&para;</a></h3>
 <p>Use <code>smelt history</code> to see past runs:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a><span class="c1"># Show recent runs (default: 10)</span>
-<a id="__codelineno-36-2" name="__codelineno-36-2" href="#__codelineno-36-2"></a>smelt<span class="w"> </span><span class="nb">history</span>
-<a id="__codelineno-36-3" name="__codelineno-36-3" href="#__codelineno-36-3"></a>
-<a id="__codelineno-36-4" name="__codelineno-36-4" href="#__codelineno-36-4"></a><span class="c1"># Show history for a specific model</span>
-<a id="__codelineno-36-5" name="__codelineno-36-5" href="#__codelineno-36-5"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>daily_revenue
-<a id="__codelineno-36-6" name="__codelineno-36-6" href="#__codelineno-36-6"></a>
-<a id="__codelineno-36-7" name="__codelineno-36-7" href="#__codelineno-36-7"></a><span class="c1"># Show more entries</span>
-<a id="__codelineno-36-8" name="__codelineno-36-8" href="#__codelineno-36-8"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-35-1" name="__codelineno-35-1" href="#__codelineno-35-1"></a><span class="c1"># Show recent runs (default: 10)</span>
+<a id="__codelineno-35-2" name="__codelineno-35-2" href="#__codelineno-35-2"></a>smelt<span class="w"> </span><span class="nb">history</span>
+<a id="__codelineno-35-3" name="__codelineno-35-3" href="#__codelineno-35-3"></a>
+<a id="__codelineno-35-4" name="__codelineno-35-4" href="#__codelineno-35-4"></a><span class="c1"># Show history for a specific model</span>
+<a id="__codelineno-35-5" name="__codelineno-35-5" href="#__codelineno-35-5"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>daily_revenue
+<a id="__codelineno-35-6" name="__codelineno-35-6" href="#__codelineno-35-6"></a>
+<a id="__codelineno-35-7" name="__codelineno-35-7" href="#__codelineno-35-7"></a><span class="c1"># Show more entries</span>
+<a id="__codelineno-35-8" name="__codelineno-35-8" href="#__codelineno-35-8"></a>smelt<span class="w"> </span><span class="nb">history</span><span class="w"> </span>--limit<span class="w"> </span><span class="m">50</span>
 </code></pre></div>
 <h2 id="run-window-vs-partition-granularity">Run window vs partition granularity<a class="headerlink" href="#run-window-vs-partition-granularity" title="Permanent link">&para;</a></h2>
 <p>The <code>--event-time-start</code> / <code>--event-time-end</code> flags declare a <strong>run window</strong> — not a per-partition invocation. The window must be a positive integer multiple of the model's <code>timeseries.granularity</code> aligned to granularity boundaries, but inside that constraint the window size and the partition unit are independent.</p>
 <p>For a daily-partitioned model, all of the following are valid:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a><span class="c1"># One-day run</span>
-<a id="__codelineno-37-2" name="__codelineno-37-2" href="#__codelineno-37-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>daily_revenue<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2025</span>-03-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2025</span>-03-02
-<a id="__codelineno-37-3" name="__codelineno-37-3" href="#__codelineno-37-3"></a>
-<a id="__codelineno-37-4" name="__codelineno-37-4" href="#__codelineno-37-4"></a><span class="c1"># One-week run — one engine query, seven partitions written</span>
-<a id="__codelineno-37-5" name="__codelineno-37-5" href="#__codelineno-37-5"></a>smelt<span class="w"> </span>run<span class="w"> </span>daily_revenue<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2025</span>-03-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2025</span>-03-08
-<a id="__codelineno-37-6" name="__codelineno-37-6" href="#__codelineno-37-6"></a>
-<a id="__codelineno-37-7" name="__codelineno-37-7" href="#__codelineno-37-7"></a><span class="c1"># 60-day backfill — one engine query, sixty partitions written</span>
-<a id="__codelineno-37-8" name="__codelineno-37-8" href="#__codelineno-37-8"></a>smelt<span class="w"> </span>run<span class="w"> </span>daily_revenue<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2025</span>-03-02
+<div class="highlight"><pre><span></span><code><a id="__codelineno-36-1" name="__codelineno-36-1" href="#__codelineno-36-1"></a><span class="c1"># One-day run</span>
+<a id="__codelineno-36-2" name="__codelineno-36-2" href="#__codelineno-36-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>daily_revenue<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2025</span>-03-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2025</span>-03-02
+<a id="__codelineno-36-3" name="__codelineno-36-3" href="#__codelineno-36-3"></a>
+<a id="__codelineno-36-4" name="__codelineno-36-4" href="#__codelineno-36-4"></a><span class="c1"># One-week run — one engine query, seven partitions written</span>
+<a id="__codelineno-36-5" name="__codelineno-36-5" href="#__codelineno-36-5"></a>smelt<span class="w"> </span>run<span class="w"> </span>daily_revenue<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2025</span>-03-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2025</span>-03-08
+<a id="__codelineno-36-6" name="__codelineno-36-6" href="#__codelineno-36-6"></a>
+<a id="__codelineno-36-7" name="__codelineno-36-7" href="#__codelineno-36-7"></a><span class="c1"># 60-day backfill — one engine query, sixty partitions written</span>
+<a id="__codelineno-36-8" name="__codelineno-36-8" href="#__codelineno-36-8"></a>smelt<span class="w"> </span>run<span class="w"> </span>daily_revenue<span class="w"> </span>--event-time-start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--event-time-end<span class="w"> </span><span class="m">2025</span>-03-02
 </code></pre></div>
 <p>For <code>FullyBatchSafe</code> models, the entire window runs as a single engine query covering the whole range, then a single <code>DELETE</code> over the partitions in the window followed by <code>INSERT</code>. Backfilling 60 days is one invocation, not sixty.</p>
 <p>For <code>BoundedSafe(n)</code> models, the window is auto-chunked into sub-ranges sized to <code>n</code> partitions each; each chunk is one engine query and one DELETE+INSERT transaction. <code>PerPartitionOnly</code> models still run one partition at a time, sequentially.</p>
@@ -4225,7 +4361,7 @@
 <p>The output window is what the <code>DELETE</code> and the output clamp both key off; every written partition's <strong>scan</strong> is sized from the output window's own reach (plus any further lookback the model's SQL declares), never from the narrower run window. Backfill chunking still applies to the derived output window exactly as it does to a plain run window — a wide skew or lookback is split into several bounded sequential updates rather than one large one.</p>
 <h2 id="backbuilding">Backbuilding<a class="headerlink" href="#backbuilding" title="Permanent link">&para;</a></h2>
 <p>Backbuilding rebuilds a model <strong>and all its upstream dependencies</strong> for a given time range. This is useful when you need to reprocess historical data after changing a model's logic.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>+daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2025</span>-02-01
+<div class="highlight"><pre><span></span><code><a id="__codelineno-37-1" name="__codelineno-37-1" href="#__codelineno-37-1"></a>smelt<span class="w"> </span>backbuild<span class="w"> </span>+daily_revenue<span class="w"> </span>--start<span class="w"> </span><span class="m">2025</span>-01-01<span class="w"> </span>--end<span class="w"> </span><span class="m">2025</span>-02-01
 </code></pre></div>
 <p>The <code>+</code> prefix means "include upstream dependencies." smelt will:</p>
 <ol>
@@ -4266,30 +4402,30 @@
 <h2 id="enrichment-joins-and-dimension-updates">Enrichment joins and dimension updates<a class="headerlink" href="#enrichment-joins-and-dimension-updates" title="Permanent link">&para;</a></h2>
 <p>A <code>grain: partition</code> model that joins a fact source to a dimension table (a <code>smelt.ref()</code>/<code>smelt.sources.*</code> with no <code>timeseries:</code> block) is enrichment: every fact row carries a copy of whatever the dimension held at compute time. When a dimension row changes later — a user renamed, a product recategorized — the fact rows that joined against it are stale until that partition is recomputed.</p>
 <p>smelt derives a <strong>maintenance plan</strong> for every <code>refresh: incremental</code> model: a matrix of what to do for each group of output columns under each kind of change. For an enrichment join, the columns that came from the dimension form their own group, distinct from the columns that came from the fact table — because a dimension update only ever needs to touch the dimension-derived columns, never the fact-derived ones. Run <code>smelt explain &lt;model&gt;</code> to see the derived plan:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a>$ smelt explain daily_events_enriched
-<a id="__codelineno-39-2" name="__codelineno-39-2" href="#__codelineno-39-2"></a>Maintenance plan: daily_events_enriched
-<a id="__codelineno-39-3" name="__codelineno-39-3" href="#__codelineno-39-3"></a>
-<a id="__codelineno-39-4" name="__codelineno-39-4" href="#__codelineno-39-4"></a>Cells (4):
-<a id="__codelineno-39-5" name="__codelineno-39-5" href="#__codelineno-39-5"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
-<a id="__codelineno-39-6" name="__codelineno-39-6" href="#__codelineno-39-6"></a>      corner:    RecomputeRegion
-<a id="__codelineno-39-7" name="__codelineno-39-7" href="#__codelineno-39-7"></a>      technique: DeleteInsert
-<a id="__codelineno-39-8" name="__codelineno-39-8" href="#__codelineno-39-8"></a>      ...
-<a id="__codelineno-39-9" name="__codelineno-39-9" href="#__codelineno-39-9"></a>  - group {user_name} on trigger UpstreamMutation { source: &quot;raw.users&quot; }
-<a id="__codelineno-39-10" name="__codelineno-39-10" href="#__codelineno-39-10"></a>      corner:    ColumnMerge
-<a id="__codelineno-39-11" name="__codelineno-39-11" href="#__codelineno-39-11"></a>      technique: ColumnScopedMerge
-<a id="__codelineno-39-12" name="__codelineno-39-12" href="#__codelineno-39-12"></a>      ...
+<div class="highlight"><pre><span></span><code><a id="__codelineno-38-1" name="__codelineno-38-1" href="#__codelineno-38-1"></a>$ smelt explain daily_events_enriched
+<a id="__codelineno-38-2" name="__codelineno-38-2" href="#__codelineno-38-2"></a>Maintenance plan: daily_events_enriched
+<a id="__codelineno-38-3" name="__codelineno-38-3" href="#__codelineno-38-3"></a>
+<a id="__codelineno-38-4" name="__codelineno-38-4" href="#__codelineno-38-4"></a>Cells (4):
+<a id="__codelineno-38-5" name="__codelineno-38-5" href="#__codelineno-38-5"></a>  - group {*} on trigger NewData { source: &quot;raw.events&quot; }
+<a id="__codelineno-38-6" name="__codelineno-38-6" href="#__codelineno-38-6"></a>      corner:    RecomputeRegion
+<a id="__codelineno-38-7" name="__codelineno-38-7" href="#__codelineno-38-7"></a>      technique: DeleteInsert
+<a id="__codelineno-38-8" name="__codelineno-38-8" href="#__codelineno-38-8"></a>      ...
+<a id="__codelineno-38-9" name="__codelineno-38-9" href="#__codelineno-38-9"></a>  - group {user_name} on trigger UpstreamMutation { source: &quot;raw.users&quot; }
+<a id="__codelineno-38-10" name="__codelineno-38-10" href="#__codelineno-38-10"></a>      corner:    ColumnMerge
+<a id="__codelineno-38-11" name="__codelineno-38-11" href="#__codelineno-38-11"></a>      technique: ColumnScopedMerge
+<a id="__codelineno-38-12" name="__codelineno-38-12" href="#__codelineno-38-12"></a>      ...
 </code></pre></div>
 <p>The <code>UpstreamMutation</code> cell for <code>raw.users</code> shows that a dimension change only needs a <strong>column-scoped <code>MERGE</code></strong> touching <code>{user_name}</code> — not a rebuild of the whole partition. Declare the dimension's mutability explicitly on its source YAML so smelt derives this cell instead of assuming worst-case immutability:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a><span class="c1"># models/sources/raw/users.yml</span>
-<a id="__codelineno-40-2" name="__codelineno-40-2" href="#__codelineno-40-2"></a><span class="nt">mutation_profile</span><span class="p">:</span>
-<a id="__codelineno-40-3" name="__codelineno-40-3" href="#__codelineno-40-3"></a><span class="w">  </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mutable_snapshot</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-39-1" name="__codelineno-39-1" href="#__codelineno-39-1"></a><span class="c1"># models/sources/raw/users.yml</span>
+<a id="__codelineno-39-2" name="__codelineno-39-2" href="#__codelineno-39-2"></a><span class="nt">mutation_profile</span><span class="p">:</span>
+<a id="__codelineno-39-3" name="__codelineno-39-3" href="#__codelineno-39-3"></a><span class="w">  </span><span class="nt">kind</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">mutable_snapshot</span>
 </code></pre></div>
 <p>An unclocked dimension source has no partition column to bound a scan by, so admitting the mutation cell requires accepting a full read of it — name that acceptance on the model that reads it:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="nt">maintenance</span><span class="p">:</span>
-<a id="__codelineno-41-2" name="__codelineno-41-2" href="#__codelineno-41-2"></a><span class="w">  </span><span class="nt">scan_bounds</span><span class="p">:</span>
-<a id="__codelineno-41-3" name="__codelineno-41-3" href="#__codelineno-41-3"></a><span class="w">    </span><span class="nt">per_source</span><span class="p">:</span>
-<a id="__codelineno-41-4" name="__codelineno-41-4" href="#__codelineno-41-4"></a><span class="w">      </span><span class="nt">raw.users</span><span class="p">:</span>
-<a id="__codelineno-41-5" name="__codelineno-41-5" href="#__codelineno-41-5"></a><span class="w">        </span><span class="nt">allow_full_scan</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-40-1" name="__codelineno-40-1" href="#__codelineno-40-1"></a><span class="nt">maintenance</span><span class="p">:</span>
+<a id="__codelineno-40-2" name="__codelineno-40-2" href="#__codelineno-40-2"></a><span class="w">  </span><span class="nt">scan_bounds</span><span class="p">:</span>
+<a id="__codelineno-40-3" name="__codelineno-40-3" href="#__codelineno-40-3"></a><span class="w">    </span><span class="nt">per_source</span><span class="p">:</span>
+<a id="__codelineno-40-4" name="__codelineno-40-4" href="#__codelineno-40-4"></a><span class="w">      </span><span class="nt">raw.users</span><span class="p">:</span>
+<a id="__codelineno-40-5" name="__codelineno-40-5" href="#__codelineno-40-5"></a><span class="w">        </span><span class="nt">allow_full_scan</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 </code></pre></div>
 <p>Once the cell is admitted (and the target table already exists), a plain <code>smelt run</code> dispatches through the column-scoped <code>MERGE</code> on every run over the fact table's own event-time window — no separate "a dimension changed" signal is required, so it re-derives the <code>MERGE</code> every time rather than skipping one where nothing upstream moved. To skip runs where the dimension didn't change, declare the landed delta explicitly with <a href="../../reference/cli/#forward-propagation-with---since-upstream">forward propagation</a> (<code>smelt run --since-upstream --source raw.users --landed &lt;a&gt;..&lt;b&gt;</code>), which composes the maintenance plan's per-source scan clamps into a propagation graph and runs only the <code>(model, region)</code> pairs that delta can actually affect. If the plan hasn't admitted a cell for your model yet (an unbounded scan, a missing <code>mutation_profile</code> declaration, or a backend without column-scoped <code>MERGE</code> support), the run falls back to the region-recompute technique (<code>DELETE</code>+<code>INSERT</code>), which re-reads the dimension's current contents and is always correct, just not column-scoped. <code>smelt explain</code> is the way to see today which of your models already have a targeted-write cell derived and ready.</p>
 <p>Declaring the dimension's <a href="../sources/#declaring-referential-integrity">referential integrity</a> narrows the enrichment <code>MERGE</code>'s recompute further, down to a point lookup: renaming exactly one user out of a million-row dimension only ever needs to touch the fact rows for that one user, not the fact table's whole event-time window. smelt derives this from two facts together — the enrichment join provably preserves every driving row (licensed by a <code>LEFT JOIN</code>, or by a declared <code>referential_integrity:</code> on an inner join), and the dimension's own current-vs-previously-seen content diff names exactly which key(s) changed. <code>smelt explain</code> reports the row-preservation verdict for the join; the count-preservation check the declaration is paired with re-verifies it against every touched region on each run, and fails the run loudly rather than silently trusting a declaration a data change has since made false.</p>
@@ -4306,22 +4442,22 @@
 <p>See the <a href="../materializations/#grain-partition-vs-grain-key">materializations guide</a> for a side-by-side comparison.</p>
 <h2 id="the-composed-shape-key-time">The composed shape (key + time)<a class="headerlink" href="#the-composed-shape-key-time" title="Permanent link">&para;</a></h2>
 <p>"Partitioned" and "keyed" aren't alternatives you pick between — they're independent facts, and a model may declare both. A <code>grain: key</code> model may add a <code>timeseries:</code> block to time-partition its output: still one row per key, but that row now lives in a fixed time partition too.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-42-1" name="__codelineno-42-1" href="#__codelineno-42-1"></a><span class="c1">---</span>
-<a id="__codelineno-42-2" name="__codelineno-42-2" href="#__codelineno-42-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-42-3" name="__codelineno-42-3" href="#__codelineno-42-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
-<a id="__codelineno-42-4" name="__codelineno-42-4" href="#__codelineno-42-4"></a><span class="n">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="n">event_id</span><span class="p">]</span>
-<a id="__codelineno-42-5" name="__codelineno-42-5" href="#__codelineno-42-5"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="k">key</span>
-<a id="__codelineno-42-6" name="__codelineno-42-6" href="#__codelineno-42-6"></a><span class="n">timeseries</span><span class="p">:</span>
-<a id="__codelineno-42-7" name="__codelineno-42-7" href="#__codelineno-42-7"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">first_seen_date</span>
-<a id="__codelineno-42-8" name="__codelineno-42-8" href="#__codelineno-42-8"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">first_seen_date</span>
-<a id="__codelineno-42-9" name="__codelineno-42-9" href="#__codelineno-42-9"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
-<a id="__codelineno-42-10" name="__codelineno-42-10" href="#__codelineno-42-10"></a><span class="c1">---</span>
-<a id="__codelineno-42-11" name="__codelineno-42-11" href="#__codelineno-42-11"></a><span class="k">SELECT</span>
-<a id="__codelineno-42-12" name="__codelineno-42-12" href="#__codelineno-42-12"></a><span class="w">    </span><span class="n">event_id</span><span class="p">,</span>
-<a id="__codelineno-42-13" name="__codelineno-42-13" href="#__codelineno-42-13"></a><span class="w">    </span><span class="k">MIN</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">payload</span><span class="p">,</span>
-<a id="__codelineno-42-14" name="__codelineno-42-14" href="#__codelineno-42-14"></a><span class="w">    </span><span class="k">MIN</span><span class="p">(</span><span class="n">event_date</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_seen_date</span>
-<a id="__codelineno-42-15" name="__codelineno-42-15" href="#__codelineno-42-15"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">events</span>
-<a id="__codelineno-42-16" name="__codelineno-42-16" href="#__codelineno-42-16"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_id</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-41-1" name="__codelineno-41-1" href="#__codelineno-41-1"></a><span class="c1">---</span>
+<a id="__codelineno-41-2" name="__codelineno-41-2" href="#__codelineno-41-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
+<a id="__codelineno-41-3" name="__codelineno-41-3" href="#__codelineno-41-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
+<a id="__codelineno-41-4" name="__codelineno-41-4" href="#__codelineno-41-4"></a><span class="n">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="n">event_id</span><span class="p">]</span>
+<a id="__codelineno-41-5" name="__codelineno-41-5" href="#__codelineno-41-5"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="k">key</span>
+<a id="__codelineno-41-6" name="__codelineno-41-6" href="#__codelineno-41-6"></a><span class="n">timeseries</span><span class="p">:</span>
+<a id="__codelineno-41-7" name="__codelineno-41-7" href="#__codelineno-41-7"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">first_seen_date</span>
+<a id="__codelineno-41-8" name="__codelineno-41-8" href="#__codelineno-41-8"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">first_seen_date</span>
+<a id="__codelineno-41-9" name="__codelineno-41-9" href="#__codelineno-41-9"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
+<a id="__codelineno-41-10" name="__codelineno-41-10" href="#__codelineno-41-10"></a><span class="c1">---</span>
+<a id="__codelineno-41-11" name="__codelineno-41-11" href="#__codelineno-41-11"></a><span class="k">SELECT</span>
+<a id="__codelineno-41-12" name="__codelineno-41-12" href="#__codelineno-41-12"></a><span class="w">    </span><span class="n">event_id</span><span class="p">,</span>
+<a id="__codelineno-41-13" name="__codelineno-41-13" href="#__codelineno-41-13"></a><span class="w">    </span><span class="k">MIN</span><span class="p">(</span><span class="n">payload</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">payload</span><span class="p">,</span>
+<a id="__codelineno-41-14" name="__codelineno-41-14" href="#__codelineno-41-14"></a><span class="w">    </span><span class="k">MIN</span><span class="p">(</span><span class="n">event_date</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_seen_date</span>
+<a id="__codelineno-41-15" name="__codelineno-41-15" href="#__codelineno-41-15"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">sources</span><span class="p">.</span><span class="n">raw</span><span class="p">.</span><span class="n">events</span>
+<a id="__codelineno-41-16" name="__codelineno-41-16" href="#__codelineno-41-16"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_id</span>
 </code></pre></div>
 <p>Adding the clock isn't free — it requires <strong>key temporal locality</strong>: a guarantee that every duplicate delivery of one key stays within a bounded window of itself on the event axis. smelt establishes this one of three ways, in order:</p>
 <ol>

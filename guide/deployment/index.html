@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/model-selection/">
+        <link rel="canonical" href="https://smeltsql.com/guide/deployment/">
       
       
-        <link rel="prev" href="../datagen/">
+        <link rel="prev" href="../targets/">
       
       
-        <link rel="next" href="../python-models/">
+        <link rel="next" href="../orchestration/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Model Selection - smelt</title>
+        <title>Production Deployment - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#model-selection" class="md-skip">
+        <a href="#production-deployment" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Model Selection
+              Production Deployment
             
           </span>
         </div>
@@ -1439,37 +1439,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Model Selection
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../model-selection/" class="md-nav__link">
         
   
   
@@ -1485,236 +1458,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#selection-syntax" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Selection syntax
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Selection syntax">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#by-name" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By name
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#by-tag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By tag
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-upstream-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include upstream dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-downstream-dependents" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include downstream dependents
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-both-upstream-and-downstream" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include both upstream and downstream
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multiple-selectors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple selectors
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#excluding-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Excluding models
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#practical-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Practical examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Practical examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#run-a-single-model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a single model
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-model-and-all-its-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a model and all its dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-downstream-of-staging" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything downstream of staging
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-except-expensive-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything except expensive models
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-specific-model-with-dependencies-excluding-one-branch" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a specific model with dependencies, excluding one branch
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explain-selected-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Explain selected models
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-selection-works" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How selection works
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#selector-names-and-scope-resolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Selector names and scope resolution
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Further reading
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1836,10 +1579,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../deployment/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Production Deployment
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1855,6 +1625,131 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#installing-for-servers" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Installing for servers
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-layout-in-ci" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project layout in CI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuring-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuring targets
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuring targets">
+      <ul class="md-nav__list">
+        
+          <li class="md-nav__item">
+  <a href="#resource-limits" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Resource limits
+      
+    </span>
+  </a>
+  
+</li>
+        
+      </ul>
+    </nav>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#secrets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Secrets
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#smelt-state-layout" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        .smelt/ state layout
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#backup-and-restore" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Backup and restore
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrades
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -2811,77 +2706,44 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#selection-syntax" class="md-nav__link">
+  <a href="#installing-for-servers" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Selection syntax
+        Installing for servers
       
     </span>
   </a>
   
-    <nav class="md-nav" aria-label="Selection syntax">
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#project-layout-in-ci" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Project layout in CI
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#configuring-targets" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Configuring targets
+      
+    </span>
+  </a>
+  
+    <nav class="md-nav" aria-label="Configuring targets">
       <ul class="md-nav__list">
         
           <li class="md-nav__item">
-  <a href="#by-name" class="md-nav__link">
+  <a href="#resource-limits" class="md-nav__link">
     <span class="md-ellipsis">
       
-        By name
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#by-tag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By tag
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-upstream-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include upstream dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-downstream-dependents" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include downstream dependents
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-both-upstream-and-downstream" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include both upstream and downstream
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multiple-selectors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple selectors
+        Resource limits
       
     </span>
   </a>
@@ -2894,10 +2756,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#excluding-models" class="md-nav__link">
+  <a href="#secrets" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Excluding models
+        Secrets
       
     </span>
   </a>
@@ -2905,93 +2767,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#practical-examples" class="md-nav__link">
+  <a href="#smelt-state-layout" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Practical examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Practical examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#run-a-single-model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a single model
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-model-and-all-its-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a model and all its dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-downstream-of-staging" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything downstream of staging
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-except-expensive-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything except expensive models
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-specific-model-with-dependencies-excluding-one-branch" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a specific model with dependencies, excluding one branch
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explain-selected-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Explain selected models
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-selection-works" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How selection works
+        .smelt/ state layout
       
     </span>
   </a>
@@ -2999,10 +2778,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#selector-names-and-scope-resolution" class="md-nav__link">
+  <a href="#locking" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Selector names and scope resolution
+        Locking
       
     </span>
   </a>
@@ -3010,10 +2789,21 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
+  <a href="#backup-and-restore" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Further reading
+        Backup and restore
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#upgrades" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Upgrades
       
     </span>
   </a>
@@ -3037,7 +2827,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/model-selection.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/deployment.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -3045,106 +2835,75 @@
   
 
 
-<h1 id="model-selection">Model Selection<a class="headerlink" href="#model-selection" title="Permanent link">&para;</a></h1>
-<p>When working with a project that has many models, you often want to run only a subset. smelt provides <code>--select</code> and <code>--exclude</code> flags to control which models are included in a run.</p>
-<p>These flags are available on <code>smelt run</code>, <code>smelt build</code>, and <code>smelt explain</code>.</p>
-<h2 id="selection-syntax">Selection syntax<a class="headerlink" href="#selection-syntax" title="Permanent link">&para;</a></h2>
-<h3 id="by-name">By name<a class="headerlink" href="#by-name" title="Permanent link">&para;</a></h3>
-<p>Select a single model by its full canonical path:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
+<h1 id="production-deployment">Production Deployment<a class="headerlink" href="#production-deployment" title="Permanent link">&para;</a></h1>
+<p>This page walks through taking a smelt project from a laptop to a scheduled production run: installing the binary, configuring targets and secrets, understanding what <code>.smelt/</code> stores, and how to back it up and upgrade it safely.</p>
+<h2 id="installing-for-servers">Installing for servers<a class="headerlink" href="#installing-for-servers" title="Permanent link">&para;</a></h2>
+<p>Install the <code>smelt</code> CLI the same way you would locally -- see <a href="../../getting-started/installation/">Installation</a> for the available methods (pip wheel, Homebrew, Docker image). For a CI or production host, pin an exact version rather than tracking latest, so a run behaves identically across deploys:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>pip<span class="w"> </span>install<span class="w"> </span><span class="s2">&quot;smelt-sql==&lt;version&gt;&quot;</span>
 </code></pre></div>
-<p>When working from inside a namespace directory, use <code>--scope</code> or rely on cwd auto-scoping to shorten the name (see <a href="../../reference/cli/#argument-resolution-and-scope">Argument resolution and <code>--scope</code></a>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>daily_revenue
+<p>Rebuilding the pin is a deliberate upgrade step (see <a href="#upgrades">Upgrades</a> below), not something that happens implicitly on every deploy.</p>
+<h2 id="project-layout-in-ci">Project layout in CI<a class="headerlink" href="#project-layout-in-ci" title="Permanent link">&para;</a></h2>
+<p>A typical production setup checks out the project repository and runs <code>smelt build</code> (seed + run) or <code>smelt run</code> against a named target:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>git<span class="w"> </span>clone<span class="w"> </span>&lt;your-repo&gt;<span class="w"> </span><span class="o">&amp;&amp;</span><span class="w"> </span><span class="nb">cd</span><span class="w"> </span>&lt;your-repo&gt;
+<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>prod
 </code></pre></div>
-<h3 id="by-tag">By tag<a class="headerlink" href="#by-tag" title="Permanent link">&para;</a></h3>
-<p>Select all models with a given tag:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:revenue
+<p><code>smelt.yml</code> is checked into version control alongside your models. Nothing about a production run requires a different project layout than local development -- the only difference is which <code>--target</code> you point at and where its <code>.smelt/</code> state lives (normally the checkout's working directory, so state persists across invocations only if the working directory itself persists between runs).</p>
+<h2 id="configuring-targets">Configuring targets<a class="headerlink" href="#configuring-targets" title="Permanent link">&para;</a></h2>
+<p>Targets are named execution environments under the <code>targets:</code> key in <code>smelt.yml</code> -- see <a href="../targets/">Targets and Backends</a> for the full field reference. A production deploy typically adds a <code>prod</code> target alongside the <code>dev</code> target used locally:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="nt">targets</span><span class="p">:</span>
+<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="w">  </span><span class="nt">dev</span><span class="p">:</span>
+<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">duckdb</span>
+<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a><span class="w">    </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">target/dev.duckdb</span>
+<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a>
+<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="w">  </span><span class="nt">prod</span><span class="p">:</span>
+<a id="__codelineno-2-8" name="__codelineno-2-8" href="#__codelineno-2-8"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">duckdb</span>
+<a id="__codelineno-2-9" name="__codelineno-2-9" href="#__codelineno-2-9"></a><span class="w">    </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/lib/smelt/prod.duckdb</span>
+<a id="__codelineno-2-10" name="__codelineno-2-10" href="#__codelineno-2-10"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+<a id="__codelineno-2-11" name="__codelineno-2-11" href="#__codelineno-2-11"></a><span class="w">    </span><span class="nt">settings</span><span class="p">:</span>
+<a id="__codelineno-2-12" name="__codelineno-2-12" href="#__codelineno-2-12"></a><span class="w">      </span><span class="nt">memory_limit</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;16GB&quot;</span>
+<a id="__codelineno-2-13" name="__codelineno-2-13" href="#__codelineno-2-13"></a><span class="w">      </span><span class="nt">threads</span><span class="p">:</span><span class="w"> </span><span class="s">&quot;8&quot;</span>
+<a id="__codelineno-2-14" name="__codelineno-2-14" href="#__codelineno-2-14"></a><span class="w">      </span><span class="nt">temp_directory</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">/var/lib/smelt/spill</span>
 </code></pre></div>
-<p>Tags are assigned in <code>smelt.yml</code> or in YAML frontmatter:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># smelt.yml</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">revenue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">daily</span><span class="p p-Indicator">]</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--target<span class="w"> </span>prod
 </code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1">---</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">tags</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="n">revenue</span><span class="p">,</span><span class="w"> </span><span class="n">daily</span><span class="p">]</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="c1">---</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...</span>
+<h3 id="resource-limits">Resource limits<a class="headerlink" href="#resource-limits" title="Permanent link">&para;</a></h3>
+<p>DuckDB targets accept a <code>settings:</code> map applied as <code>SET key = value</code> on connection open (unknown keys are rejected at startup). The keys that matter most for a production host are <code>memory_limit</code>, <code>threads</code>, and <code>temp_directory</code> -- see <a href="../targets/#duckdb-settings">Targets and Backends</a> for the full table. If <code>settings:</code> omits <code>memory_limit</code> or <code>temp_directory</code>, smelt applies host-aware defaults (roughly <code>min(50% of RAM, RAM - 20GB)</code> for memory, <code>.smelt-duckdb-tmp</code> next to the database file for spill) rather than DuckDB's own unbounded default -- see <a href="../../reference/smelt-yml/#memory-limits-and-spilling">Project Configuration</a> for the exact defaulting rule. On a shared or memory-constrained host, set both explicitly instead of relying on the default.</p>
+<h2 id="secrets">Secrets<a class="headerlink" href="#secrets" title="Permanent link">&para;</a></h2>
+<p>Never write a <code>connect_url</code>, credential, or other secret directly into <code>smelt.yml</code> -- the file is normally committed to version control. Reference an environment variable instead with <code>${VAR}</code> interpolation, resolved once against the process environment when the config loads, before any other validation runs:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">targets</span><span class="p">:</span>
+<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="w">  </span><span class="nt">prod</span><span class="p">:</span>
+<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark</span>
+<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="w">    </span><span class="nt">connect_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">${SMELT_PROD_CONNECT_URL}</span>
+<a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">catalog</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark_catalog</span>
+<a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
 </code></pre></div>
-<h3 id="include-upstream-dependencies">Include upstream dependencies<a class="headerlink" href="#include-upstream-dependencies" title="Permanent link">&para;</a></h3>
-<p>Prefix with <code>+</code> to include the selected model(s) and all their upstream dependencies:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+tag:revenue
+<p>A missing environment variable is a fail-loud configuration error naming the variable and the YAML key path -- smelt never silently substitutes an empty string and lets a blank credential fail later inside a connection attempt. A literal <code>$</code> that is not the start of a <code>${VAR}</code> reference is written <code>$$</code> to escape it. Set the referenced variable through your CI secrets store or the host's environment (e.g. a systemd unit's <code>Environment=</code> / <code>EnvironmentFile=</code>, or an orchestrator's secret injection) -- never in a <code>.env</code> file checked into the repository.</p>
+<h2 id="smelt-state-layout"><code>.smelt/</code> state layout<a class="headerlink" href="#smelt-state-layout" title="Permanent link">&para;</a></h2>
+<p>Any target with <code>state.mode</code> other than the default <code>stateless</code> persists run state under a project-local <code>.smelt/</code> directory (gitignore this directory -- it is regenerable host-local state, not something to commit):</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>.smelt/
+<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>  meta.json                       # { &quot;state_version&quot;: 1 } -- layout version marker
+<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a>  lock                             # advisory single-writer lock, held for a run&#39;s duration
+<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a>  targets/&lt;target&gt;/
+<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a>    runs/&lt;run_id&gt;.json              # one run manifest per execution
+<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a>    intervals.json                  # cumulative interval coverage across runs
+<a id="__codelineno-5-7" name="__codelineno-5-7" href="#__codelineno-5-7"></a>    reconciliation.json             # reconciliation ledger for grain: key models
+<a id="__codelineno-5-8" name="__codelineno-5-8" href="#__codelineno-5-8"></a>    landed_deltas.json              # per-source landed-delta intervals
+<a id="__codelineno-5-9" name="__codelineno-5-9" href="#__codelineno-5-9"></a>    snapshots.json                  # fingerprint snapshots (state.mode: environments)
+<a id="__codelineno-5-10" name="__codelineno-5-10" href="#__codelineno-5-10"></a>    schemas/&lt;model&gt;.json            # deployed schema snapshot per model
+<a id="__codelineno-5-11" name="__codelineno-5-11" href="#__codelineno-5-11"></a>    reports/&lt;run_id&gt;.json           # run-report artifact for the run
 </code></pre></div>
-<p>This ensures that every model <code>marts.daily_revenue</code> depends on is also run, in the correct order.</p>
-<h3 id="include-downstream-dependents">Include downstream dependents<a class="headerlink" href="#include-downstream-dependents" title="Permanent link">&para;</a></h3>
-<p>Suffix with <code>+</code> to include the selected model(s) and everything that depends on them:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue+
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:staging+
+<p>Every run-scoped artifact is nested under <code>.smelt/targets/&lt;target&gt;/</code>, keyed by the target the run executed against -- a <code>dev</code> run's interval ledger or reconciliation state never answers a question about <code>prod</code>, and vice versa. Only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target.</p>
+<p>Set <code>state.mode</code> in <code>smelt.yml</code> to opt into persistence -- <code>stateless</code> (the default) writes nothing and requires no <code>.smelt/</code> directory at all:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="nt">state</span><span class="p">:</span>
+<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="w">  </span><span class="nt">mode</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">intervals</span><span class="w">   </span><span class="c1"># stateless | intervals | environments</span>
 </code></pre></div>
-<h3 id="include-both-upstream-and-downstream">Include both upstream and downstream<a class="headerlink" href="#include-both-upstream-and-downstream" title="Permanent link">&para;</a></h3>
-<p>Combine the prefix and suffix:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue+
-</code></pre></div>
-<p>This selects <code>marts.daily_revenue</code>, all its upstream dependencies, and all its downstream dependents.</p>
-<h3 id="multiple-selectors">Multiple selectors<a class="headerlink" href="#multiple-selectors" title="Permanent link">&para;</a></h3>
-<p>The <code>--select</code> flag is repeatable. All selectors are combined (union):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--select<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<p>Short form with <code>-s</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>-s<span class="w"> </span>marts.daily_revenue<span class="w"> </span>-s<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<h2 id="excluding-models">Excluding models<a class="headerlink" href="#excluding-models" title="Permanent link">&para;</a></h2>
-<p>The <code>--exclude</code> flag uses the same syntax as <code>--select</code> but removes models from the selection:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>tag:expensive
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>silver.staging_legacy
-</code></pre></div>
-<p>Exclusions are applied after selections. If you use <code>--select</code> and <code>--exclude</code> together, smelt first builds the selected set, then removes the excluded models.</p>
-<h2 id="practical-examples">Practical examples<a class="headerlink" href="#practical-examples" title="Permanent link">&para;</a></h2>
-<h3 id="run-a-single-model">Run a single model<a class="headerlink" href="#run-a-single-model" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
-</code></pre></div>
-<h3 id="run-a-model-and-all-its-dependencies">Run a model and all its dependencies<a class="headerlink" href="#run-a-model-and-all-its-dependencies" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-</code></pre></div>
-<h3 id="run-everything-downstream-of-staging">Run everything downstream of staging<a class="headerlink" href="#run-everything-downstream-of-staging" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:staging+
-</code></pre></div>
-<h3 id="run-everything-except-expensive-models">Run everything except expensive models<a class="headerlink" href="#run-everything-except-expensive-models" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>tag:expensive
-</code></pre></div>
-<h3 id="run-a-specific-model-with-dependencies-excluding-one-branch">Run a specific model with dependencies, excluding one branch<a class="headerlink" href="#run-a-specific-model-with-dependencies-excluding-one-branch" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--exclude<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<h3 id="explain-selected-models">Explain selected models<a class="headerlink" href="#explain-selected-models" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>tag:revenue<span class="w"> </span>--json
-</code></pre></div>
-<h2 id="how-selection-works">How selection works<a class="headerlink" href="#how-selection-works" title="Permanent link">&para;</a></h2>
-<ol>
-<li>If no <code>--select</code> flags are provided, all models are included.</li>
-<li>Each <code>--select</code> flag adds models to the set. The <code>+</code> prefix/suffix expands the set by walking the dependency graph.</li>
-<li>Each <code>--exclude</code> flag removes models from the set, using the same expansion rules.</li>
-<li>The final set is executed in topological order (dependencies first).</li>
-</ol>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>During development, use <code>--select +model_name</code> to run just the model you are working on along with its dependencies. This is much faster than running the entire project.</p>
-</div>
-<h2 id="selector-names-and-scope-resolution">Selector names and scope resolution<a class="headerlink" href="#selector-names-and-scope-resolution" title="Permanent link">&para;</a></h2>
-<p>Selector values that are plain model names (not <code>tag:...</code> or <code>generator_file:...</code> selectors) go through the same scope resolution as other CLI arguments. A bare <code>--select events_parsed</code> expands to <code>--select silver.events_parsed</code> when the active scope is <code>silver</code>. An unresolvable bare selector with multiple matches is an error — smelt never silently picks one.</p>
-<p>The safest form for scripts and CI is the full canonical path:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>silver.events_parsed<span class="w"> </span>--select<span class="w"> </span>gold.eventstream_with_identity
-</code></pre></div>
-<p>When working interactively from inside a namespace directory, use <code>--scope</code> to shorten repeated names:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>events_parsed<span class="w"> </span>--select<span class="w"> </span>sessions
-</code></pre></div>
-<p>All smelt output — including selector match lists and run summaries — always uses the canonical dot-path (e.g. <code>silver.events_parsed</code>) regardless of how you specified the selector. Copy-pasting a printed name back into a subsequent command always works.</p>
-<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
-<ul>
-<li><a href="../incremental-models/">Incremental Models</a> for combining selection with time ranges</li>
-<li><a href="../sql-models/">SQL Models</a> for setting tags in YAML frontmatter</li>
-</ul>
+<h2 id="locking">Locking<a class="headerlink" href="#locking" title="Permanent link">&para;</a></h2>
+<p>A run acquires an exclusive advisory lock on <code>.smelt/lock</code> for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly, naming the PID recorded in the lock file, rather than interleaving writes with the first process. This means a production scheduler must never fire overlapping invocations against the same target's state directory.</p>
+<h2 id="backup-and-restore">Backup and restore<a class="headerlink" href="#backup-and-restore" title="Permanent link">&para;</a></h2>
+<p><code>.smelt/</code> is plain JSON files, safe to copy with any file-level backup tool while no run is in progress (or, for a live backup, after acquiring the same advisory lock your ops tooling uses for other maintenance). Every write under <code>.smelt/</code> is atomic (temp file + rename), so a snapshot taken between runs is always internally consistent -- there is no "flush" step to coordinate. Restoring is copying the backed-up <code>.smelt/</code> directory back into place; because state is opt-in and regenerable (a <code>stateless</code> project needs none, and an <code>intervals</code>/<code>environments</code> project can rebuild its ledgers from a full re-run), a lost <code>.smelt/</code> is a correctness/performance regression to full recomputation, never data loss of your warehouse tables.</p>
+<h2 id="upgrades">Upgrades<a class="headerlink" href="#upgrades" title="Permanent link">&para;</a></h2>
+<p><code>.smelt/meta.json</code> records the on-disk layout's <code>state_version</code>. Upgrading the smelt binary is safe to do in place -- a newer binary understands older layout versions and migrates a legacy (pre-versioning) store automatically, under the lock, on first open. A <code>state_version</code> newer than the binary understands is a hard error naming both versions, so a downgrade of the smelt binary against state written by a newer version fails loudly instead of misreading it. Roll out a binary upgrade the same way as any other deploy: update the pin, redeploy, let the next scheduled run perform any needed migration.</p>
 
 
 

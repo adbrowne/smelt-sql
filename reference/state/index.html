@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/model-selection/">
+        <link rel="canonical" href="https://smeltsql.com/reference/state/">
       
       
-        <link rel="prev" href="../datagen/">
+        <link rel="prev" href="../cumulative-aggregate/">
       
       
-        <link rel="next" href="../python-models/">
+        <link rel="next" href="../diagnostics/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Model Selection - smelt</title>
+        <title>State & Recovery - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#model-selection" class="md-skip">
+        <a href="#state-recovery" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Model Selection
+              State & Recovery
             
           </span>
         </div>
@@ -308,13 +308,11 @@
   
   
   
-    
-  
   
     
     
-      <li class="md-tabs__item md-tabs__item--active">
-        <a href="../sql-models/" class="md-tabs__link">
+      <li class="md-tabs__item">
+        <a href="../../guide/sql-models/" class="md-tabs__link">
           
   
   
@@ -360,11 +358,13 @@
   
   
   
+    
+  
   
     
     
-      <li class="md-tabs__item">
-        <a href="../../reference/cli/" class="md-tabs__link">
+      <li class="md-tabs__item md-tabs__item--active">
+        <a href="../cli/" class="md-tabs__link">
           
   
   
@@ -1158,31 +1158,28 @@
       
   
   
-    
   
   
-  
     
     
     
     
-      
-        
-        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--nested">
       
         
-        
-        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_5" checked>
         
           
-          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="">
+        
+        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_5" >
+        
+          
+          <label class="md-nav__link" for="__nav_5" id="__nav_5_label" tabindex="0">
             
   
   
@@ -1200,7 +1197,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="true">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_5_label" aria-expanded="false">
           <label class="md-nav__title" for="__nav_5">
             <span class="md-nav__icon md-icon"></span>
             
@@ -1218,7 +1215,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../sql-models/" class="md-nav__link">
+      <a href="../../guide/sql-models/" class="md-nav__link">
         
   
   
@@ -1246,7 +1243,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../pipe-syntax/" class="md-nav__link">
+      <a href="../../guide/pipe-syntax/" class="md-nav__link">
         
   
   
@@ -1274,7 +1271,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../sources/" class="md-nav__link">
+      <a href="../../guide/sources/" class="md-nav__link">
         
   
   
@@ -1302,7 +1299,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../materializations/" class="md-nav__link">
+      <a href="../../guide/materializations/" class="md-nav__link">
         
   
   
@@ -1330,7 +1327,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../incremental-models/" class="md-nav__link">
+      <a href="../../guide/incremental-models/" class="md-nav__link">
         
   
   
@@ -1358,7 +1355,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../schema-evolution/" class="md-nav__link">
+      <a href="../../guide/schema-evolution/" class="md-nav__link">
         
   
   
@@ -1386,7 +1383,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../seeds/" class="md-nav__link">
+      <a href="../../guide/seeds/" class="md-nav__link">
         
   
   
@@ -1414,7 +1411,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../datagen/" class="md-nav__link">
+      <a href="../../guide/datagen/" class="md-nav__link">
         
   
   
@@ -1439,37 +1436,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Model Selection
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../../guide/model-selection/" class="md-nav__link">
         
   
   
@@ -1485,236 +1455,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#selection-syntax" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Selection syntax
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Selection syntax">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#by-name" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By name
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#by-tag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By tag
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-upstream-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include upstream dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-downstream-dependents" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include downstream dependents
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-both-upstream-and-downstream" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include both upstream and downstream
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multiple-selectors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple selectors
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#excluding-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Excluding models
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#practical-examples" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Practical examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Practical examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#run-a-single-model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a single model
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-model-and-all-its-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a model and all its dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-downstream-of-staging" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything downstream of staging
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-except-expensive-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything except expensive models
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-specific-model-with-dependencies-excluding-one-branch" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a specific model with dependencies, excluding one branch
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explain-selected-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Explain selected models
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-selection-works" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How selection works
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#selector-names-and-scope-resolution" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Selector names and scope resolution
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Further reading
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1727,7 +1467,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../python-models/" class="md-nav__link">
+      <a href="../../guide/python-models/" class="md-nav__link">
         
   
   
@@ -1755,7 +1495,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../functions/" class="md-nav__link">
+      <a href="../../guide/functions/" class="md-nav__link">
         
   
   
@@ -1783,7 +1523,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../testing/" class="md-nav__link">
+      <a href="../../guide/testing/" class="md-nav__link">
         
   
   
@@ -1811,7 +1551,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../targets/" class="md-nav__link">
+      <a href="../../guide/targets/" class="md-nav__link">
         
   
   
@@ -1839,7 +1579,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../deployment/" class="md-nav__link">
+      <a href="../../guide/deployment/" class="md-nav__link">
         
   
   
@@ -1867,7 +1607,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../orchestration/" class="md-nav__link">
+      <a href="../../guide/orchestration/" class="md-nav__link">
         
   
   
@@ -1895,7 +1635,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../web-ui/" class="md-nav__link">
+      <a href="../../guide/web-ui/" class="md-nav__link">
         
   
   
@@ -1923,7 +1663,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../editor-setup/" class="md-nav__link">
+      <a href="../../guide/editor-setup/" class="md-nav__link">
         
   
   
@@ -1951,7 +1691,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../editor-features/" class="md-nav__link">
+      <a href="../../guide/editor-features/" class="md-nav__link">
         
   
   
@@ -2358,28 +2098,31 @@
       
   
   
+    
   
   
+  
     
     
     
     
+      
+        
+        
       
       
         
       
     
     
-    <li class="md-nav__item md-nav__item--nested">
+    <li class="md-nav__item md-nav__item--active md-nav__item--section md-nav__item--nested">
       
         
+        
+        <input class="md-nav__toggle md-toggle " type="checkbox" id="__nav_7" checked>
         
           
-        
-        <input class="md-nav__toggle md-toggle md-toggle--indeterminate" type="checkbox" id="__nav_7" >
-        
-          
-          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="0">
+          <label class="md-nav__link" for="__nav_7" id="__nav_7_label" tabindex="">
             
   
   
@@ -2397,7 +2140,7 @@
             <span class="md-nav__icon md-icon"></span>
           </label>
         
-        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="false">
+        <nav class="md-nav" data-md-level="1" aria-labelledby="__nav_7_label" aria-expanded="true">
           <label class="md-nav__title" for="__nav_7">
             <span class="md-nav__icon md-icon"></span>
             
@@ -2415,7 +2158,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/cli/" class="md-nav__link">
+      <a href="../cli/" class="md-nav__link">
         
   
   
@@ -2443,7 +2186,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/smelt-yml/" class="md-nav__link">
+      <a href="../smelt-yml/" class="md-nav__link">
         
   
   
@@ -2471,7 +2214,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/sources-yml/" class="md-nav__link">
+      <a href="../sources-yml/" class="md-nav__link">
         
   
   
@@ -2499,7 +2242,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/timeseries/" class="md-nav__link">
+      <a href="../timeseries/" class="md-nav__link">
         
   
   
@@ -2527,7 +2270,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/cumulative-aggregate/" class="md-nav__link">
+      <a href="../cumulative-aggregate/" class="md-nav__link">
         
   
   
@@ -2552,10 +2295,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../../reference/state/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    State & Recovery
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -2571,6 +2341,103 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#inventory" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Inventory
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#state-schema-version-and-migration" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        State-schema version and migration
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#locking" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Locking
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#what-smelt-status-and-smelt-history-read" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        What smelt status and smelt history read
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#-resume-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --resume semantics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-reconciliation-ledger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The reconciliation ledger
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recovery-playbook" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recovery playbook
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -2583,7 +2450,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/diagnostics/" class="md-nav__link">
+      <a href="../diagnostics/" class="md-nav__link">
         
   
   
@@ -2611,7 +2478,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/smelt-explain/" class="md-nav__link">
+      <a href="../smelt-explain/" class="md-nav__link">
         
   
   
@@ -2639,7 +2506,7 @@
   
   
     <li class="md-nav__item">
-      <a href="../../reference/language/" class="md-nav__link">
+      <a href="../language/" class="md-nav__link">
         
   
   
@@ -2811,93 +2678,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#selection-syntax" class="md-nav__link">
+  <a href="#inventory" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Selection syntax
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Selection syntax">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#by-name" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By name
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#by-tag" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        By tag
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-upstream-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include upstream dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-downstream-dependents" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include downstream dependents
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#include-both-upstream-and-downstream" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Include both upstream and downstream
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#multiple-selectors" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Multiple selectors
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#excluding-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Excluding models
+        Inventory
       
     </span>
   </a>
@@ -2905,93 +2689,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#practical-examples" class="md-nav__link">
+  <a href="#state-schema-version-and-migration" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Practical examples
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Practical examples">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#run-a-single-model" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a single model
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-model-and-all-its-dependencies" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a model and all its dependencies
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-downstream-of-staging" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything downstream of staging
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-everything-except-expensive-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run everything except expensive models
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#run-a-specific-model-with-dependencies-excluding-one-branch" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Run a specific model with dependencies, excluding one branch
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#explain-selected-models" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Explain selected models
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#how-selection-works" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        How selection works
+        State-schema version and migration
       
     </span>
   </a>
@@ -2999,10 +2700,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#selector-names-and-scope-resolution" class="md-nav__link">
+  <a href="#locking" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Selector names and scope resolution
+        Locking
       
     </span>
   </a>
@@ -3010,10 +2711,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
+  <a href="#what-smelt-status-and-smelt-history-read" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Further reading
+        What smelt status and smelt history read
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#-resume-semantics" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        --resume semantics
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#the-reconciliation-ledger" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        The reconciliation ledger
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#recovery-playbook" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Recovery playbook
       
     </span>
   </a>
@@ -3037,7 +2771,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/model-selection.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/reference/state.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -3045,106 +2779,78 @@
   
 
 
-<h1 id="model-selection">Model Selection<a class="headerlink" href="#model-selection" title="Permanent link">&para;</a></h1>
-<p>When working with a project that has many models, you often want to run only a subset. smelt provides <code>--select</code> and <code>--exclude</code> flags to control which models are included in a run.</p>
-<p>These flags are available on <code>smelt run</code>, <code>smelt build</code>, and <code>smelt explain</code>.</p>
-<h2 id="selection-syntax">Selection syntax<a class="headerlink" href="#selection-syntax" title="Permanent link">&para;</a></h2>
-<h3 id="by-name">By name<a class="headerlink" href="#by-name" title="Permanent link">&para;</a></h3>
-<p>Select a single model by its full canonical path:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
-</code></pre></div>
-<p>When working from inside a namespace directory, use <code>--scope</code> or rely on cwd auto-scoping to shorten the name (see <a href="../../reference/cli/#argument-resolution-and-scope">Argument resolution and <code>--scope</code></a>):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>marts<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>daily_revenue
-</code></pre></div>
-<h3 id="by-tag">By tag<a class="headerlink" href="#by-tag" title="Permanent link">&para;</a></h3>
-<p>Select all models with a given tag:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:revenue
-</code></pre></div>
-<p>Tags are assigned in <code>smelt.yml</code> or in YAML frontmatter:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1"># smelt.yml</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">    </span><span class="nt">tags</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">revenue</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">daily</span><span class="p p-Indicator">]</span>
-</code></pre></div>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="c1">---</span>
-<a id="__codelineno-4-2" name="__codelineno-4-2" href="#__codelineno-4-2"></a><span class="n">tags</span><span class="p">:</span><span class="w"> </span><span class="p">[</span><span class="n">revenue</span><span class="p">,</span><span class="w"> </span><span class="n">daily</span><span class="p">]</span>
-<a id="__codelineno-4-3" name="__codelineno-4-3" href="#__codelineno-4-3"></a><span class="c1">---</span>
-<a id="__codelineno-4-4" name="__codelineno-4-4" href="#__codelineno-4-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...</span>
-</code></pre></div>
-<h3 id="include-upstream-dependencies">Include upstream dependencies<a class="headerlink" href="#include-upstream-dependencies" title="Permanent link">&para;</a></h3>
-<p>Prefix with <code>+</code> to include the selected model(s) and all their upstream dependencies:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+tag:revenue
-</code></pre></div>
-<p>This ensures that every model <code>marts.daily_revenue</code> depends on is also run, in the correct order.</p>
-<h3 id="include-downstream-dependents">Include downstream dependents<a class="headerlink" href="#include-downstream-dependents" title="Permanent link">&para;</a></h3>
-<p>Suffix with <code>+</code> to include the selected model(s) and everything that depends on them:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue+
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:staging+
-</code></pre></div>
-<h3 id="include-both-upstream-and-downstream">Include both upstream and downstream<a class="headerlink" href="#include-both-upstream-and-downstream" title="Permanent link">&para;</a></h3>
-<p>Combine the prefix and suffix:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue+
-</code></pre></div>
-<p>This selects <code>marts.daily_revenue</code>, all its upstream dependencies, and all its downstream dependents.</p>
-<h3 id="multiple-selectors">Multiple selectors<a class="headerlink" href="#multiple-selectors" title="Permanent link">&para;</a></h3>
-<p>The <code>--select</code> flag is repeatable. All selectors are combined (union):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue<span class="w"> </span>--select<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<p>Short form with <code>-s</code>:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>-s<span class="w"> </span>marts.daily_revenue<span class="w"> </span>-s<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<h2 id="excluding-models">Excluding models<a class="headerlink" href="#excluding-models" title="Permanent link">&para;</a></h2>
-<p>The <code>--exclude</code> flag uses the same syntax as <code>--select</code> but removes models from the selection:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>tag:expensive
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>silver.staging_legacy
-</code></pre></div>
-<p>Exclusions are applied after selections. If you use <code>--select</code> and <code>--exclude</code> together, smelt first builds the selected set, then removes the excluded models.</p>
-<h2 id="practical-examples">Practical examples<a class="headerlink" href="#practical-examples" title="Permanent link">&para;</a></h2>
-<h3 id="run-a-single-model">Run a single model<a class="headerlink" href="#run-a-single-model" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>marts.daily_revenue
-</code></pre></div>
-<h3 id="run-a-model-and-all-its-dependencies">Run a model and all its dependencies<a class="headerlink" href="#run-a-model-and-all-its-dependencies" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-</code></pre></div>
-<h3 id="run-everything-downstream-of-staging">Run everything downstream of staging<a class="headerlink" href="#run-everything-downstream-of-staging" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>tag:staging+
-</code></pre></div>
-<h3 id="run-everything-except-expensive-models">Run everything except expensive models<a class="headerlink" href="#run-everything-except-expensive-models" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--exclude<span class="w"> </span>tag:expensive
-</code></pre></div>
-<h3 id="run-a-specific-model-with-dependencies-excluding-one-branch">Run a specific model with dependencies, excluding one branch<a class="headerlink" href="#run-a-specific-model-with-dependencies-excluding-one-branch" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue<span class="w"> </span>--exclude<span class="w"> </span>silver.user_activity
-</code></pre></div>
-<h3 id="explain-selected-models">Explain selected models<a class="headerlink" href="#explain-selected-models" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>+marts.daily_revenue
-<a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a>smelt<span class="w"> </span>explain<span class="w"> </span>--select<span class="w"> </span>tag:revenue<span class="w"> </span>--json
-</code></pre></div>
-<h2 id="how-selection-works">How selection works<a class="headerlink" href="#how-selection-works" title="Permanent link">&para;</a></h2>
-<ol>
-<li>If no <code>--select</code> flags are provided, all models are included.</li>
-<li>Each <code>--select</code> flag adds models to the set. The <code>+</code> prefix/suffix expands the set by walking the dependency graph.</li>
-<li>Each <code>--exclude</code> flag removes models from the set, using the same expansion rules.</li>
-<li>The final set is executed in topological order (dependencies first).</li>
-</ol>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>During development, use <code>--select +model_name</code> to run just the model you are working on along with its dependencies. This is much faster than running the entire project.</p>
-</div>
-<h2 id="selector-names-and-scope-resolution">Selector names and scope resolution<a class="headerlink" href="#selector-names-and-scope-resolution" title="Permanent link">&para;</a></h2>
-<p>Selector values that are plain model names (not <code>tag:...</code> or <code>generator_file:...</code> selectors) go through the same scope resolution as other CLI arguments. A bare <code>--select events_parsed</code> expands to <code>--select silver.events_parsed</code> when the active scope is <code>silver</code>. An unresolvable bare selector with multiple matches is an error — smelt never silently picks one.</p>
-<p>The safest form for scripts and CI is the full canonical path:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a>smelt<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>silver.events_parsed<span class="w"> </span>--select<span class="w"> </span>gold.eventstream_with_identity
-</code></pre></div>
-<p>When working interactively from inside a namespace directory, use <code>--scope</code> to shorten repeated names:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a>smelt<span class="w"> </span>--scope<span class="w"> </span>silver<span class="w"> </span>run<span class="w"> </span>--select<span class="w"> </span>events_parsed<span class="w"> </span>--select<span class="w"> </span>sessions
-</code></pre></div>
-<p>All smelt output — including selector match lists and run summaries — always uses the canonical dot-path (e.g. <code>silver.events_parsed</code>) regardless of how you specified the selector. Copy-pasting a printed name back into a subsequent command always works.</p>
-<h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
+<h1 id="state-recovery">State &amp; Recovery<a class="headerlink" href="#state-recovery" title="Permanent link">&para;</a></h1>
+<p>Normative reference for what <code>.smelt/</code> records, how <code>smelt status</code>/<code>smelt history</code> and <code>--resume</code> read it, and how to recover from state loss or corruption. See <a href="../../guide/deployment/#smelt-state-layout">Production Deployment</a> for the directory layout summary and backup/restore procedure, and <a href="../../guide/orchestration/">Orchestration</a> for how a scheduler consumes this state across runs.</p>
+<h2 id="inventory">Inventory<a class="headerlink" href="#inventory" title="Permanent link">&para;</a></h2>
+<p>Every artifact <code>.smelt/</code> can contain, and what it records:</p>
+<table>
+<thead>
+<tr>
+<th>Path</th>
+<th>Records</th>
+</tr>
+</thead>
+<tbody>
+<tr>
+<td><code>.smelt/meta.json</code></td>
+<td><code>{ "state_version": &lt;int&gt; }</code> -- the on-disk layout version.</td>
+</tr>
+<tr>
+<td><code>.smelt/lock</code></td>
+<td>The advisory single-writer lock, held for a run's duration; contains the holding process's PID.</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/runs/&lt;run_id&gt;.json</code></td>
+<td>One run manifest per execution: per-model outcome (<code>success</code>/<code>failed</code>/<code>skipped</code>), strategy, row count, duration, <code>definition_hash</code>, and <code>retry_count</code>.</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/reports/&lt;run_id&gt;.json</code></td>
+<td>The run-report artifact -- a summary derived entirely from the matching manifest: outcome counts, total duration, and per-failure error text. Written at every point a manifest is persisted, so a report exists even for an interrupted or aborted run.</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/intervals.json</code></td>
+<td>Cumulative interval coverage per incremental model, keyed by calendar date (half-open <code>[start, end)</code>); read by <code>smelt status</code> for gap detection and by backfill planning.</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/reconciliation.json</code></td>
+<td>The reconciliation ledger -- per <code>grain: key</code> (and <code>key_per_partition</code>) model, the processed-input vector for each <code>(output-region x column-group)</code> cell (see "The reconciliation ledger" below).</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/landed_deltas.json</code></td>
+<td>Per-source landed-delta intervals -- which partition intervals of each source have landed, keyed by source address; consumed by <code>smelt run --since-upstream</code> forward propagation.</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/schemas/&lt;model&gt;.json</code></td>
+<td>The deployed schema snapshot for one model -- column names/types/nullability as of its last successful write; consumed by schema-evolution diffing.</td>
+</tr>
+<tr>
+<td><code>.smelt/targets/&lt;target&gt;/snapshots.json</code></td>
+<td>Fingerprint-keyed reuse snapshots (<code>state.mode: environments</code> only).</td>
+</tr>
+</tbody>
+</table>
+<p>Every run-scoped artifact nests under <code>.smelt/targets/&lt;target&gt;/</code>; only <code>meta.json</code> and <code>lock</code> live at the project root, shared across every target. A file is created lazily the first time something is recorded into it -- a project that has never run an incremental model has no <code>intervals.json</code>, and one with no <code>grain: key</code> models has no <code>reconciliation.json</code>.</p>
+<h2 id="state-schema-version-and-migration">State-schema version and migration<a class="headerlink" href="#state-schema-version-and-migration" title="Permanent link">&para;</a></h2>
+<p><code>.smelt/meta.json</code> records the layout version this store was written with. A version this smelt binary does not recognise (newer than the binary's own highest known version) is a hard error naming both versions -- smelt refuses to read or write rather than guess at an unfamiliar layout. A missing <code>meta.json</code> denotes the legacy pre-versioning layout (root-level <code>runs/</code>, <code>intervals.json</code>, etc. with no <code>targets/&lt;target&gt;/</code> nesting); the first locked open under a version-aware binary migrates it to the current layout and writes <code>meta.json</code>, under the advisory lock so a concurrent process can never observe a half-migrated store.</p>
+<h2 id="locking">Locking<a class="headerlink" href="#locking" title="Permanent link">&para;</a></h2>
+<p>A run acquires an exclusive advisory lock on <code>.smelt/lock</code> for its entire duration and releases it on completion or error. A second smelt process that tries to acquire the lock while it is held fails loudly -- the error names the PID recorded in the lock file -- rather than interleaving writes with the first process. The lock is project-wide, not per-target, and is held for the whole run regardless of how many models execute concurrently under <code>--jobs</code>; every write to a shared per-target file (the interval ledger, the landed-delta store, the reconciliation ledger) is additionally serialized within the locked run so two models finishing at the same moment cannot each drop the other's write. Every write under <code>.smelt/</code> goes through a temp-file-then-rename path, so a process killed mid-write leaves either the old file intact or the new one -- never a truncated one.</p>
+<h2 id="what-smelt-status-and-smelt-history-read">What <code>smelt status</code> and <code>smelt history</code> read<a class="headerlink" href="#what-smelt-status-and-smelt-history-read" title="Permanent link">&para;</a></h2>
+<p><code>smelt status [MODEL_NAME] --target &lt;target&gt;</code> reads that target's <code>intervals.json</code> and reports covered ranges plus any gap between the last covered date and today (or a <code>--since</code>/<code>--until</code> window). <code>smelt history [MODEL_NAME] --target &lt;target&gt; --limit &lt;n&gt;</code> reads that target's <code>runs/*.json</code> manifests, most recent first, showing per-model strategy, row counts, and duration for each run. Both are read-only -- neither command acquires the write lock or mutates <code>.smelt/</code>.</p>
+<h2 id="-resume-semantics"><code>--resume</code> semantics<a class="headerlink" href="#-resume-semantics" title="Permanent link">&para;</a></h2>
+<p><code>smelt run --resume</code> (or <code>smelt build --resume</code>) re-runs a previously interrupted or partially-failed selection while skipping models that do not need to run again. A model is skipped when <strong>both</strong> hold: its outcome in the most recent <em>incomplete</em> run (a manifest with <code>completed_at: null</code>, or one whose selection overlaps the current run and ended with at least one non-<code>success</code> outcome) was <code>success</code>, <strong>and</strong> its <code>definition_hash</code> in that manifest entry matches the model's current compiled-definition hash. A model that previously <code>failed</code> or was <code>skipped</code>, or whose definition changed since, always re-runs -- and so does every downstream dependent of any such model, since a dependent's prior <code>success</code> said nothing about inputs rebuilt out from under it. <code>--resume</code> refuses with a hard error (never a silent full run) when there is no incomplete run to resume from -- the most recent run completed successfully, or no run manifest exists at all -- so a stale or typo'd <code>--resume</code> invocation is never mistaken for "nothing needed doing."</p>
+<h2 id="the-reconciliation-ledger">The reconciliation ledger<a class="headerlink" href="#the-reconciliation-ledger" title="Permanent link">&para;</a></h2>
+<p><code>grain: key</code> (and <code>key_per_partition</code>) models are maintained through a merge into an existing table rather than a full recompute, and the reconciliation ledger is the correctness structure that makes repeated, possibly-overlapping runs safe. Each ledger entry keys a <code>(output-region x column-group)</code> cell to the processed-input vector that has already been folded into it. Storage is graded by the column-group's algebra:</p>
 <ul>
-<li><a href="../incremental-models/">Incremental Models</a> for combining selection with time ranges</li>
-<li><a href="../sql-models/">SQL Models</a> for setting tags in YAML frontmatter</li>
+<li><strong>Additive</strong> groups (a running sum, a count) record the <strong>delta identities</strong> already folded in -- re-folding the same delta a second time would double-count, so the ledger's job is to refuse a repeat.</li>
+<li><strong>Idempotent</strong> groups (a last-write-wins column, a MAX aggregate) record only a <strong>frontier</strong> watermark -- re-applying an already-seen delta is harmless, so the ledger only needs to know how far processing has reached.</li>
 </ul>
+<p>Two operations act on the ledger: <strong>fold</strong> (extend an entry with a new delta, refusing if that delta is already in the entry's processed set) and <strong>recompute-reset</strong> (a region recompute resets every intersecting entry to exactly the input it read). For an additive-graded cell, the fold is transactional with the write it accompanies -- on DuckDB targets, the delta identity is folded into a warehouse-resident ledger table in the same transaction as the merge, so a repeat delta violates a primary key and refuses the run before the merge executes a second time, rather than after.</p>
+<p>This ledger is distinct from the interval ledger (<code>intervals.json</code>) above: intervals are project-wide observability ("what has this project run, and where are the gaps") that a <code>state.mode: stateless</code> project can forgo entirely; the reconciliation ledger is required correctness structure for every plan-managed <code>grain: key</code> model, present whenever the plan is, independent of <code>state.mode</code>.</p>
+<h2 id="recovery-playbook">Recovery playbook<a class="headerlink" href="#recovery-playbook" title="Permanent link">&para;</a></h2>
+<p><strong><code>.smelt/</code> is lost (deleted, never backed up, new environment).</strong> State is regenerable: an incremental model's interval ledger and reconciliation ledger rebuild from a full re-run over the model's complete history; there is no data loss to the warehouse tables themselves, only a loss of the bookkeeping that lets <em>future</em> runs skip already-covered work. Re-run the affected selection with a full time range (or the whole project) to rebuild coverage from scratch.</p>
+<p><strong><code>.smelt/</code> is corrupt (malformed JSON, truncated file, manually edited).</strong> Because every write is atomic (temp file + rename), a file smelt itself wrote cannot be left truncated by a crash -- a corrupt file is evidence of something else (disk-level corruption, an out-of-band edit, a copy taken mid-write by a tool that doesn't respect the rename). smelt fails loudly with a parse or read error naming the file rather than silently discarding the record; there is no automatic quarantine-and-continue. Treat a corrupt <code>.smelt/</code> the same as a lost one: remove the affected file (or the whole directory) and let the next run regenerate it. Restore from a known-good backup first if one exists, to avoid losing more coverage history than necessary.</p>
+<p><strong>A run was interrupted mid-flight (process killed, machine restarted).</strong> The run's manifest is left with <code>completed_at: null</code>; a matching partial run report is available immediately (see "Inventory" above). Nothing needs manual cleanup: <code>.smelt/lock</code> is an OS-level advisory lock (<code>flock</code>-style), which the operating system releases automatically when the holding process exits or is killed -- there is no stale-lock file to remove by hand, even after a crash. Re-run with <code>--resume</code> to pick up exactly the models that did not reach <code>success</code>, or omit <code>--resume</code> for an unconditional full re-run of the selection.</p>
+<p><strong>Backup and restore.</strong> See <a href="../../guide/deployment/#backup-and-restore">Production Deployment -- Backup and restore</a> -- <code>.smelt/</code> is plain JSON, safe to copy with any file-level backup tool between runs (or under the same lock your other maintenance tooling uses for a live backup).</p>
 
 
 
