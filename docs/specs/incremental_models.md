@@ -1811,21 +1811,30 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
-- **The keyed run loop's real-fixture coverage proves suppression and technique selection, not a
-  genuinely changed value landing.** `keyed_column_scoped_merge_e2e` (previous bullet) is the only
-  real-fixture proof of the keyed run loop's `ColumnScopedMerge` dispatch, and every merge it
-  drives is a `WriteSuppression::Suppressed` no-op by construction: the fixture's merged column
-  (`COUNT(t.transaction_id)`, folded from the append-only fact) never actually depends on the
-  joined dimension's own attribute, so a dimension mutation can never change the compared column's
-  value. This is forced by a pre-existing gap in
+- **The keyed run loop's suppression and technique-selection dispatch is now covered
+  generatively, not only by one hand-built fixture; the underlying provenance gap that makes
+  every dispatched merge a structural no-op is unchanged.** `keyed_column_scoped_merge_e2e`
+  (previous bullet) was originally the only proof of the keyed run loop's `ColumnScopedMerge`
+  dispatch; `crates/smelt-cli/tests/maintenance_conformance/gate.rs`'s
+  `keyed_enriched_recipe_admits_suppressed_column_scoped_merge` (a structural leg: the derived
+  plan admits the cell and resolves `WriteSuppression::Suppressed` with zero admission-blocking
+  diagnostics) and `keyed_enriched_pool_upholds_equivalence_with_zero_write_redelivery` (an
+  equivalence leg: a generated fact-window schedule plus a genuine zero-change redelivery step,
+  driven through the real `execute_project` pipeline and checked against a full-refresh oracle
+  after every step) now exercise the same dispatch generatively over a fixed `grain: key`
+  fact-plus-enrich-only-dimension shape. Every merge either leg drives is still a
+  `WriteSuppression::Suppressed` no-op by construction: the fold reads only the append-only fact
+  (e.g. `COUNT(fact.val)`), never the joined dimension's own attribute, so a dimension mutation
+  can never change the compared column's value. This is forced by a pre-existing gap in
   `smelt_logical::maintenance::grouping::collect_column_refs` — once 2+ `FROM` sources are joined,
   an aggregate's own function-name token is misread as an ambiguous unqualified column reference,
   and the fail-closed `degenerate_whole_model` collapse this triggers is what admits the cell at
   all (it widens the fold column's mutation-sensitivity to every referenced source, including the
-  dimension it never reads). Until that provenance gap is fixed, no real fixture can drive the
-  keyed run loop's dispatch through a case where the merged value genuinely changes — the sibling
-  non-keyed test (`column_scoped_merge_e2e::column_scoped_merge_dispatches_through_execute_project`)
-  does assert a changed value lands, but the keyed path has no equivalent. Tracked by
+  dimension it never reads). Until that provenance gap is fixed, no fixture — hand-built or
+  generated — can drive the keyed run loop's dispatch through a case where the merged value
+  genuinely changes — the sibling non-keyed test
+  (`column_scoped_merge_e2e::column_scoped_merge_dispatches_through_execute_project`) does assert
+  a changed value lands, but the keyed path has no equivalent. Tracked by
   `docs/plans/20260720-prod-w10-keyed-mutable-admission.md`.
 - **Statement emission is single-owner for the region-recompute, keyed-fold, and
   column-scoped-MERGE families, and both the conformance gate and `--show-sql` are wired to
