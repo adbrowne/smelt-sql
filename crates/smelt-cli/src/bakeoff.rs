@@ -30,7 +30,7 @@ use std::time::Instant;
 use anyhow::{bail, Context, Result};
 use tokio_util::sync::CancellationToken;
 
-use smelt_core::config::{CellTechnique, Config};
+use smelt_core::config::{CellTechnique, Config, MaintenanceCellConfig, MaintenanceConfig};
 use smelt_core::graph::DependencyGraph;
 use smelt_core::ModelDiscovery;
 use smelt_logical::maintenance::{ColumnGroup, PlanCell, Technique, Trigger};
@@ -74,6 +74,10 @@ pub struct BakeoffOptions {
     pub runs: u32,
     pub target: String,
     pub keep: bool,
+    /// Emit the winning technique per measured cell as ready-to-paste YAML
+    /// (`incremental_models.md` §"CLI": "never rewrites the model's `.sql`
+    /// file"). Populates [`BakeoffReport::pin`]; never touches disk.
+    pub pin: bool,
 }
 
 impl Default for BakeoffOptions {
@@ -83,6 +87,7 @@ impl Default for BakeoffOptions {
             runs: 3,
             target: "dev".to_string(),
             keep: false,
+            pin: false,
         }
     }
 }
@@ -133,6 +138,34 @@ pub struct BakeoffReport {
     pub message: Option<String>,
     /// Scratch schema names retained on disk (`--keep`); empty otherwise.
     pub kept_schemas: Vec<String>,
+    /// Set when `--pin` was requested and there was at least one measured
+    /// cell to pin. `None` when `--pin` was not requested, or when the run
+    /// had nothing to measure (`message` is set instead).
+    pub pin: Option<PinSuggestion>,
+}
+
+/// The ready-to-paste YAML `--pin` prints alongside the report
+/// (`incremental_models.md` §"CLI": "emits the winning `cells[]` entry (or a
+/// complete `maintenance:` block when the model has none) as ready-to-paste
+/// YAML on stdout — it never rewrites the model's `.sql` file"). Emit-only:
+/// nothing here ever touches disk — this is pure formatted data the caller
+/// prints.
+#[derive(Debug, Clone)]
+pub struct PinSuggestion {
+    /// "to pin this choice, add to `<model>.sql` frontmatter:" — printed
+    /// immediately above `yaml`.
+    pub header: String,
+    /// The emitted YAML itself: a bare `cells[]` sequence when the model
+    /// already declares a `maintenance:` block, or a complete `maintenance:`
+    /// block otherwise. Deserializes via the same `Serialize`/`Deserialize`
+    /// derives `MaintenanceCellConfig`/`MaintenanceConfig` use for parsing
+    /// real frontmatter — a genuine round-trip, not a hand-formatted string.
+    pub yaml: String,
+    /// Human-readable labels (`columns=[...] on=...`) of cells whose
+    /// measured techniques tied on total wall-clock — the pin keeps that
+    /// cell's current default choice in that case, called out explicitly
+    /// here rather than silently.
+    pub tied_cells: Vec<String>,
 }
 
 const REPORT_HEADER: &str = "smelt bakeoff report";
@@ -181,6 +214,18 @@ impl fmt::Display for BakeoffReport {
                 "\nkept scratch schemas: {}",
                 self.kept_schemas.join(", ")
             )?;
+        }
+        if let Some(pin) = &self.pin {
+            writeln!(f, "\n{}", pin.header)?;
+            write!(f, "{}", pin.yaml)?;
+            if !pin.tied_cells.is_empty() {
+                writeln!(
+                    f,
+                    "\nnote: total wall-clock tied across all measured techniques for the \
+                     following cell(s) — the pin above keeps the current default choice: {}",
+                    pin.tied_cells.join("; ")
+                )?;
+            }
         }
         Ok(())
     }
@@ -552,6 +597,7 @@ pub async fn run_bakeoff(
                     .to_string(),
             ),
             kept_schemas: Vec::new(),
+            pin: None,
         });
     }
 
@@ -770,6 +816,21 @@ pub async fn run_bakeoff(
         Vec::new()
     };
 
+    let pin = if opts.pin {
+        let model_has_maintenance_block = model
+            .metadata
+            .as_deref()
+            .and_then(|m| m.maintenance.as_ref())
+            .is_some();
+        Some(build_pin_suggestion(
+            model_name,
+            &cell_reports,
+            model_has_maintenance_block,
+        )?)
+    } else {
+        None
+    };
+
     Ok(BakeoffReport {
         model: model_name.to_string(),
         target: opts.target,
@@ -777,16 +838,92 @@ pub async fn run_bakeoff(
         cells: cell_reports,
         message: None,
         kept_schemas,
+        pin,
     })
 }
 
-/// `--pin` lands in Phase 5 (`docs/plans/20260719-prod-w7-bakeoff.md`); the
-/// flag parses today (fail-loud, not silent) but is not yet implemented.
-pub fn pin_not_yet_supported() -> anyhow::Error {
-    anyhow::anyhow!(
-        "smelt bakeoff --pin is not yet supported (tracked in \
-         docs/plans/20260719-prod-w7-bakeoff.md Phase 5)"
-    )
+/// The winning technique for one measured cell: lowest total wall-clock
+/// across the replayed windows. A tie keeps the cell's current default
+/// choice — `techniques[0]`, always the cell's own admitted technique, per
+/// `run_bakeoff`'s `variants = [cell.admitted, CellTechnique::Recompute]`
+/// ordering — and is reported as such (the second element is `true` on a
+/// tie).
+fn cell_winner(cell: &BakeoffCellReport) -> (CellTechnique, bool) {
+    let default_technique = cell.techniques[0].technique;
+    let min_cost = cell
+        .techniques
+        .iter()
+        .map(TechniqueMeasurement::total_wall_clock_ms)
+        .min()
+        .unwrap_or(0);
+    let winners: Vec<CellTechnique> = cell
+        .techniques
+        .iter()
+        .filter(|m| m.total_wall_clock_ms() == min_cost)
+        .map(|m| m.technique)
+        .collect();
+    match winners.as_slice() {
+        [only] => (*only, false),
+        _ => (default_technique, true),
+    }
+}
+
+/// Build the `--pin` suggestion: one `MaintenanceCellConfig` per measured
+/// cell, naming its winning technique, serialized via the same
+/// `Serialize`/`Deserialize` derives real `maintenance:` frontmatter parses
+/// through (`incremental_models.md` §"CLI"). `model_has_maintenance_block`
+/// selects the shape: a bare `cells[]` sequence to append to an existing
+/// block, or a complete `maintenance:` block when the model declares none.
+fn build_pin_suggestion(
+    model_name: &str,
+    cells: &[BakeoffCellReport],
+    model_has_maintenance_block: bool,
+) -> Result<PinSuggestion> {
+    let mut cell_configs = Vec::with_capacity(cells.len());
+    let mut tied_cells = Vec::new();
+    for cell in cells {
+        let (winner, is_tie) = cell_winner(cell);
+        if is_tie {
+            tied_cells.push(format!("columns={:?} on={}", cell.columns, cell.on));
+        }
+        cell_configs.push(MaintenanceCellConfig {
+            columns: cell.columns.clone(),
+            on: cell.on.clone(),
+            prefer: None,
+            technique: Some(winner),
+            write: None,
+        });
+    }
+
+    let yaml = if model_has_maintenance_block {
+        serde_yaml::to_string(&cell_configs).context("serializing bakeoff pin cells[] fragment")?
+    } else {
+        let config = MaintenanceConfig {
+            defaults: None,
+            cells: cell_configs,
+            scan_bounds: None,
+        };
+        let body =
+            serde_yaml::to_string(&config).context("serializing bakeoff pin maintenance: block")?;
+        let indented = body
+            .lines()
+            .map(|line| {
+                if line.is_empty() {
+                    String::new()
+                } else {
+                    format!("  {line}")
+                }
+            })
+            .collect::<Vec<_>>()
+            .join("\n");
+        format!("maintenance:\n{indented}\n")
+    };
+
+    Ok(PinSuggestion {
+        header: format!("to pin this choice, add to {model_name}.sql frontmatter:"),
+        yaml,
+        tied_cells,
+    })
 }
 
 #[cfg(not(feature = "duckdb"))]

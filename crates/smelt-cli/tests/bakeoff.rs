@@ -1,6 +1,9 @@
 //! Phase 4 of `docs/plans/20260719-prod-w7-bakeoff.md` — the `smelt bakeoff`
 //! command: measured per-cell × per-technique cost report over replayed
 //! windows of real data (`incremental_models.md` §"CLI" bakeoff flags).
+//! Phase 5 adds `--pin`: the winning technique per measured cell, emitted as
+//! a ready-to-paste YAML fragment — emit-only, no file on disk is ever
+//! modified.
 //!
 //! Reuses the same fact (`events`) + dimension (`users`) enrichment shape as
 //! `bakeoff_seam.rs`/`maintenance_pins.rs` — its `{user_name}`
@@ -14,6 +17,11 @@ use std::process::Command;
 
 use smelt_cli::bakeoff::{run_bakeoff, BakeoffOptions};
 use smelt_cli::Config;
+use smelt_core::config::{CellTechnique, MaintenanceCellConfig};
+use smelt_logical::maintenance::choice::{
+    effective_override, resolve_cell_choice, ChosenTechnique,
+};
+use smelt_logical::maintenance::Trigger;
 
 const EVENTS_SOURCE: &str = r#"description: events source (fact)
 columns:
@@ -186,6 +194,7 @@ async fn bakeoff_reports_measured_cost_per_admissible_technique() {
         runs: 2,
         target: "dev".to_string(),
         keep: false,
+        pin: false,
     };
 
     let report = run_bakeoff(
@@ -255,6 +264,7 @@ async fn bakeoff_with_no_multi_technique_cells_says_so() {
         runs: 3,
         target: "dev".to_string(),
         keep: false,
+        pin: false,
     };
 
     let report = run_bakeoff(
@@ -315,6 +325,7 @@ async fn bakeoff_drops_scratch_unless_keep() {
         runs: 2,
         target: "dev".to_string(),
         keep: false,
+        pin: false,
     };
     let dropped_report = run_bakeoff(
         &project_dir,
@@ -350,6 +361,7 @@ async fn bakeoff_drops_scratch_unless_keep() {
         runs: 2,
         target: "dev".to_string(),
         keep: true,
+        pin: false,
     };
     let kept_report = run_bakeoff(
         &project_dir,
@@ -457,6 +469,194 @@ fn bakeoff_runs_via_real_binary() {
         stdout.contains("smelt bakeoff report"),
         "expected the report header in stdout; got: {stdout}"
     );
+}
+
+/// Phase 5: `--pin` must emit a `cells[]` entry that round-trips through the
+/// SAME real ladder (`effective_override` + `resolve_cell_choice`) a live run
+/// consults, and it must resolve to exactly the technique bakeoff measured as
+/// the winner — not a re-derived or hand-picked value.
+/// `stage_multi_technique_project`'s model already declares a `maintenance:`
+/// block (`scan_bounds` only, no `cells[]`), so this exercises the "model
+/// already has a `maintenance:` block" branch: the pin is a bare `cells[]`
+/// entry, not a full `maintenance:` block.
+#[tokio::test]
+async fn pin_emits_parseable_cells_entry() {
+    if skip_without_duckdb_lib() {
+        return;
+    }
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_multi_technique_project(&project_dir, &db_path, "bakeoff_pin_fixture");
+    seed_tables(&db_path, "main");
+
+    let config = Config::load(&project_dir).expect("load config");
+    let opts = BakeoffOptions {
+        cells: vec![],
+        runs: 2,
+        target: "dev".to_string(),
+        keep: false,
+        pin: true,
+    };
+
+    let report = run_bakeoff(
+        &project_dir,
+        std::sync::Arc::new(config.clone()),
+        "daily_events_enriched",
+        opts,
+    )
+    .await
+    .expect("bakeoff run must succeed");
+
+    let pin = report
+        .pin
+        .as_ref()
+        .expect("--pin must populate a pin suggestion on the report");
+    assert!(
+        pin.header.contains("daily_events_enriched.sql"),
+        "pin header must name the model's .sql file: {}",
+        pin.header
+    );
+
+    let parsed: Vec<MaintenanceCellConfig> = serde_yaml::from_str(&pin.yaml)
+        .expect("emitted pin YAML must parse as a cells[] entry list");
+    assert_eq!(
+        parsed.len(),
+        1,
+        "exactly one bakeoff-candidate cell in this fixture"
+    );
+    let parsed_cell = &parsed[0];
+    assert_eq!(parsed_cell.on, "users");
+    assert_eq!(parsed_cell.columns, vec!["user_name".to_string()]);
+    let winning_technique = parsed_cell
+        .technique
+        .expect("the pin must be a hard technique pin");
+
+    // Round-trip: feed the parsed cell config through the SAME real ladder
+    // (`effective_override` + `resolve_cell_choice`) a live run consults,
+    // and confirm it resolves to exactly the winning technique.
+    let discovery = smelt_cli::ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+    let models = discovery.discover_models().expect("discover models");
+    let model = models
+        .iter()
+        .find(|m| m.name == "daily_events_enriched")
+        .expect("model exists")
+        .clone();
+    let mut db = smelt_cli::init_db(&project_dir, &models);
+    db.set_active_target(Some(std::sync::Arc::from("dev")));
+    let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+    let file = db.source_file(&model.path).expect("model file registered");
+    let result = smelt_db::maintenance_plan_report(&db, ws, file).expect("maintenance plan report");
+
+    let trigger = Trigger::UpstreamMutation {
+        source: parsed_cell.on.clone(),
+    };
+    let cell = result
+        .plan
+        .cell_for(&trigger)
+        .expect("cell exists in the derived plan");
+    let group_columns = result
+        .column_groups
+        .iter()
+        .find(|g| g.name() == cell.group)
+        .map(|g| g.columns.clone())
+        .unwrap_or_default();
+
+    let overrides = effective_override(
+        None,
+        std::slice::from_ref(parsed_cell),
+        &parsed_cell.on,
+        &group_columns,
+    );
+    let chosen = resolve_cell_choice(&result.plan, &trigger, &overrides, None, true)
+        .expect("the pinned technique must be admissible for this cell");
+
+    let expected = match winning_technique {
+        CellTechnique::Recompute => ChosenTechnique::RegionRecompute,
+        _ => ChosenTechnique::Admitted(cell.technique.clone()),
+    };
+    assert_eq!(
+        chosen, expected,
+        "the pinned YAML must round-trip to exactly the technique bakeoff measured as the winner"
+    );
+}
+
+/// `--pin` is emit-only (B2): the report text is the only output, no file on
+/// disk is ever written or modified.
+#[tokio::test]
+async fn pin_mutates_no_files() {
+    if skip_without_duckdb_lib() {
+        return;
+    }
+    let tmp = tempfile::TempDir::new().expect("tempdir");
+    let project_dir = tmp.path().to_path_buf();
+    let db_path = project_dir.join("dev.duckdb");
+
+    stage_multi_technique_project(&project_dir, &db_path, "bakeoff_pin_no_mutate_fixture");
+    seed_tables(&db_path, "main");
+
+    let before = snapshot_model_files(&project_dir);
+
+    let config = Config::load(&project_dir).expect("load config");
+    let opts = BakeoffOptions {
+        cells: vec![],
+        runs: 2,
+        target: "dev".to_string(),
+        keep: false,
+        pin: true,
+    };
+    let report = run_bakeoff(
+        &project_dir,
+        std::sync::Arc::new(config),
+        "daily_events_enriched",
+        opts,
+    )
+    .await
+    .expect("bakeoff run must succeed");
+    assert!(
+        report.pin.is_some(),
+        "sanity: this fixture must actually produce a pin"
+    );
+
+    let after = snapshot_model_files(&project_dir);
+    assert_eq!(
+        before, after,
+        "smelt bakeoff --pin must never modify or create model files (emit-only per B2)"
+    );
+}
+
+/// Byte contents of every file under `models/` plus `smelt.yml`, sorted by
+/// relative path — a diffable snapshot of "the model files" `--pin` must
+/// never touch (deliberately excludes `.smelt/`/the DuckDB database file,
+/// which bakeoff's own scratch-schema replay legitimately touches).
+fn snapshot_model_files(project_dir: &Path) -> Vec<(String, Vec<u8>)> {
+    let mut files = Vec::new();
+    let models_dir = project_dir.join("models");
+    collect_files(&models_dir, &models_dir, &mut files);
+    files.push((
+        "smelt.yml".to_string(),
+        std::fs::read(project_dir.join("smelt.yml")).expect("read smelt.yml"),
+    ));
+    files.sort_by(|a, b| a.0.cmp(&b.0));
+    files
+}
+
+fn collect_files(root: &Path, dir: &Path, out: &mut Vec<(String, Vec<u8>)>) {
+    for entry in std::fs::read_dir(dir).expect("read dir") {
+        let entry = entry.expect("dir entry");
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files(root, &path, out);
+        } else {
+            let rel = path
+                .strip_prefix(root)
+                .expect("relative path")
+                .to_string_lossy()
+                .to_string();
+            out.push((rel, std::fs::read(&path).expect("read file")));
+        }
+    }
 }
 
 fn copy_dir_recursive(src: &Path, dst: &Path) -> std::io::Result<()> {

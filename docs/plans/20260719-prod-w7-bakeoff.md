@@ -99,7 +99,7 @@ the runtime, which still resolves techniques through the older pin-less path.
 | 2     | done     | (this commit) | 2026-07-20 |
 | 3     | done     | (this commit) | 2026-07-20 |
 | 4     | done     | 863eb692 | 2026-07-20 |
-| 5     | pending  |        |      |
+| 5     | done     | (this commit) | 2026-07-20 |
 | 6     | pending  |        |      |
 
 ## Phase detail

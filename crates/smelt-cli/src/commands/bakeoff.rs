@@ -14,10 +14,6 @@ use smelt_cli::{
 use crate::BakeoffArgs;
 
 pub async fn bakeoff(args: BakeoffArgs, scope: Option<&str>) -> Result<()> {
-    if args.pin {
-        return Err(smelt_cli::bakeoff::pin_not_yet_supported());
-    }
-
     let project_dir = find_project_root(&args.project_dir)
         .with_context(|| format!("Failed to find project root from {:?}", args.project_dir))?;
 
@@ -55,6 +51,7 @@ pub async fn bakeoff(args: BakeoffArgs, scope: Option<&str>) -> Result<()> {
         runs: args.runs,
         target: args.target.clone(),
         keep: args.keep,
+        pin: args.pin,
     };
 
     let report = run_bakeoff(&project_dir, Arc::new(config), &canonical, opts).await?;
