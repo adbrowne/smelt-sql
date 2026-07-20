@@ -3398,7 +3398,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">    </span><span class="nt">safety_overrides</span><span class="p">:</span>
 <a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">      </span><span class="c1"># safety-override fields...</span>
 <a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
-<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">      </span><span class="c1"># batched fields...</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">      </span><span class="nt">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">&lt;column&gt;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">...</span><span class="p p-Indicator">]</span><span class="w">  </span><span class="c1"># MERGE-dedup-only key — see the callout below</span>
 </code></pre></div>
 <p><code>refresh: incremental</code> is admitted on the two <strong>shape-defining facts</strong> alone — a <code>timeseries:</code> block (the clock) and/or a top-level <code>unique_key:</code> (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. <code>grain:</code> itself is never required to admit a model — it is an optional, <strong>check-only</strong> <code>partition</code> / <code>key</code> / <code>key_per_partition</code> label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.</p>
 <h3 id="model-fields">Model Fields<a class="headerlink" href="#model-fields" title="Permanent link">&para;</a></h3>
@@ -3453,7 +3453,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>string | string[]</td>
 <td>no</td>
 <td></td>
-<td>The <strong>identity</strong> shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with <code>timeseries:</code>, this is what admits <code>refresh: incremental</code>; frontmatter wins over this <code>smelt.yml</code> override when both set it. Distinct from the <code>batched:</code> sub-block's <code>unique_key</code> (a partition-grain dedup aid, never identity).</td>
+<td>The <strong>identity</strong> shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with <code>timeseries:</code>, this is what admits <code>refresh: incremental</code>; frontmatter wins over this <code>smelt.yml</code> override when both set it. Distinct from <code>batched.unique_key</code> below (a partition-grain MERGE-dedup key, never identity).</td>
 </tr>
 <tr>
 <td><code>grain</code></td>
@@ -3467,14 +3467,14 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>object</td>
 <td>no</td>
 <td><em>(all false)</em></td>
-<td>Named escape hatches for the partition-grain safety checks (see <a href="#safety-overrides">Safety Overrides</a>). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as <code>unique_key:</code>. Declaring both this key and the <code>batched.safety_overrides</code> sub-block on the same model is an error — declare it once.</td>
+<td>Named escape hatches for the partition-grain safety checks (see <a href="#safety-overrides">Safety Overrides</a>). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as <code>unique_key:</code>. Declaring both this key and a non-default <code>batched.safety_overrides</code> on the same <code>smelt.yml</code> model entry is an error — declare it once.</td>
 </tr>
 <tr>
 <td><code>batched</code></td>
 <td>object</td>
 <td>no</td>
 <td></td>
-<td>Preference/config block layered on top of <code>refresh: incremental</code> (see <a href="#incremental-configuration">Batched Configuration</a>)</td>
+<td><code>smelt.yml</code>-only preference block carrying <code>unique_key</code> — a MERGE-dedup key for a partition-shaped output, distinct from the identity-conferring top-level <code>unique_key:</code> above (see the callout in <a href="#incremental-configuration">Incremental Configuration</a>)</td>
 </tr>
 </tbody>
 </table>
@@ -3570,6 +3570,10 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="nt">unique_key</span><span class="p">:</span>
 <a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction_id</span>
 </code></pre></div>
+<div class="admonition note">
+<p class="admonition-title"><code>batched:</code> is <code>smelt.yml</code>-only</p>
+<p>The <code>.sql</code> frontmatter <code>batched:</code> sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (<code>unique_key</code> → top-level <code>unique_key:</code>, <code>safety_overrides</code> → top-level <code>safety_overrides:</code>, <code>nondeterministic_columns</code> → <code>columns.&lt;c&gt;.contract: plausible</code>). Declaring the <em>identity</em> fact this way makes the output key-shaped (see <a href="../../guide/incremental-models/">Incremental models</a>), which a row-shaped model with no <code>GROUP BY</code> cannot become. <code>smelt.yml</code>'s <code>models.&lt;name&gt;.batched:</code> block above is a <strong>separate, still-supported</strong> mechanism carrying a MERGE-dedup-only <code>unique_key</code> (and <code>nondeterministic_columns</code>, since per-column <code>contract:</code> is SQL-frontmatter-only) for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed.</p>
+</div>
 <h4 id="incremental-fields">Incremental Fields<a class="headerlink" href="#incremental-fields" title="Permanent link">&para;</a></h4>
 <table>
 <thead>
@@ -3583,14 +3587,14 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 </thead>
 <tbody>
 <tr>
-<td><code>unique_key</code></td>
+<td><code>unique_key</code> (under <code>batched:</code>)</td>
 <td>string[]</td>
 <td>no</td>
 <td><code>[]</code></td>
-<td>Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT.</td>
+<td>A MERGE-dedup key for a partition-shaped output — never the identity-conferring fact top-level <code>unique_key:</code> is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell.</td>
 </tr>
 <tr>
-<td><code>nondeterministic_columns</code></td>
+<td><code>nondeterministic_columns</code> (under <code>batched:</code>)</td>
 <td>string[]</td>
 <td>no</td>
 <td><code>[]</code></td>
@@ -3650,7 +3654,7 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 </tbody>
 </table>
 <h3 id="maintenance-configuration">Maintenance Configuration<a class="headerlink" href="#maintenance-configuration" title="Permanent link">&para;</a></h3>
-<p><code>maintenance:</code> is a sibling of <code>timeseries:</code>/<code>batched:</code> in SQL frontmatter (it is not a <code>smelt.yml</code> per-model field). It constrains the derived maintenance plan — the per-<code>(column-group × trigger)</code> cell matrix <code>smelt explain &lt;model&gt;</code> prints — without ever choosing a strategy the derivation didn't already admit.</p>
+<p><code>maintenance:</code> is a sibling of <code>timeseries:</code> in SQL frontmatter (it is not a <code>smelt.yml</code> per-model field). It constrains the derived maintenance plan — the per-<code>(column-group × trigger)</code> cell matrix <code>smelt explain &lt;model&gt;</code> prints — without ever choosing a strategy the derivation didn't already admit.</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="nt">maintenance</span><span class="p">:</span>
 <a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="w">  </span><span class="nt">scan_bounds</span><span class="p">:</span>
 <a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="w">    </span><span class="nt">per_source</span><span class="p">:</span>
@@ -3732,13 +3736,13 @@ proof it relied on), the next compile fails loud rather than silently reverting 
 <p>Smelt validates model configurations and reports errors or warnings:</p>
 <p><strong>Errors (block execution):</strong></p>
 <ul>
-<li>Ephemeral models cannot declare <code>refresh: incremental</code> / <code>grain:</code> / a <code>batched:</code> block</li>
+<li>Ephemeral models cannot declare <code>refresh: incremental</code> / <code>grain:</code> / a <code>smelt.yml</code> <code>batched:</code> block</li>
 <li>Ephemeral models cannot have a target override</li>
 </ul>
 <p><strong>Warnings (printed to stderr):</strong></p>
 <ul>
 <li>View models with <code>refresh:</code> set (the refresh axis only applies to stored tables)</li>
-<li><code>refresh: materialized_view</code> models with a <code>batched:</code> block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)</li>
+<li><code>refresh: materialized_view</code> models with a <code>smelt.yml</code> <code>batched:</code> block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)</li>
 </ul>
 <hr />
 <h2 id="complete-example">Complete Example<a class="headerlink" href="#complete-example" title="Permanent link">&para;</a></h2>
@@ -3786,7 +3790,7 @@ proof it relied on), the next compile fails loud rather than silently reverting 
 <a id="__codelineno-11-41" name="__codelineno-11-41" href="#__codelineno-11-41"></a><span class="w">  </span><span class="nt">transactions</span><span class="p">:</span>
 <a id="__codelineno-11-42" name="__codelineno-11-42" href="#__codelineno-11-42"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
 <a id="__codelineno-11-43" name="__codelineno-11-43" href="#__codelineno-11-43"></a>
-<a id="__codelineno-11-44" name="__codelineno-11-44" href="#__codelineno-11-44"></a><span class="w">  </span><span class="c1"># Incremental model (grain: partition) — timeseries: and batched: are sibling keys</span>
+<a id="__codelineno-11-44" name="__codelineno-11-44" href="#__codelineno-11-44"></a><span class="w">  </span><span class="c1"># Incremental model (grain: partition)</span>
 <a id="__codelineno-11-45" name="__codelineno-11-45" href="#__codelineno-11-45"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
 <a id="__codelineno-11-46" name="__codelineno-11-46" href="#__codelineno-11-46"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
 <a id="__codelineno-11-47" name="__codelineno-11-47" href="#__codelineno-11-47"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>

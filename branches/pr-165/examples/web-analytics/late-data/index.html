@@ -2762,12 +2762,12 @@ duplicate always carries the same <code>event_date</code> as its original — it
 same event. That fact lives in the feed's contract, not in the SQL, so we
 assert it where smelt can hold us to the location, in the model's
 frontmatter:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">batched</span><span class="p">:</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">safety_overrides</span><span class="p">:</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="nt">allow_window_functions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">safety_overrides</span><span class="p">:</span>
+<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">allow_window_functions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">true</span>
 </code></pre></div>
-<p>(<code>batched:</code> is the frontmatter section governing how a model behaves when
-maintained in time-bounded batches; safety overrides live under it.)</p>
+<p>(<code>safety_overrides:</code> is the top-level frontmatter key naming escape hatches
+for the partition-grain safety checks that would otherwise refuse a pattern
+like a window function over a redelivery-dedup window.)</p>
 <p>The override is a signed statement, sitting next to the window function
 it excuses, with a comment explaining why it's safe (see the stage-3
 model below). Compare the alternatives you may have lived with: dbt will
@@ -2793,29 +2793,28 @@ here in the finished version of the model (dedup override included):</p>
 <a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="o">#</span><span class="w"> </span><span class="n">practice</span><span class="p">:</span><span class="w"> </span><span class="n">a</span><span class="w"> </span><span class="n">redelivered</span><span class="w"> </span><span class="n">duplicate</span><span class="w"> </span><span class="n">always</span><span class="w"> </span><span class="n">lands</span><span class="w"> </span><span class="k">in</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="o">*</span><span class="n">same</span><span class="o">*</span><span class="w"> </span><span class="n">event_date</span>
 <a id="__codelineno-4-12" name="__codelineno-4-12" href="#__codelineno-4-12"></a><span class="o">#</span><span class="w"> </span><span class="n">partition</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">its</span><span class="w"> </span><span class="n">original</span><span class="p">,</span><span class="w"> </span><span class="n">so</span><span class="w"> </span><span class="n">the</span><span class="w"> </span><span class="n">window</span><span class="w"> </span><span class="n">never</span><span class="w"> </span><span class="n">needs</span><span class="w"> </span><span class="k">to</span><span class="w"> </span><span class="n">see</span><span class="w"> </span><span class="n">across</span><span class="w"> </span><span class="n">a</span>
 <a id="__codelineno-4-13" name="__codelineno-4-13" href="#__codelineno-4-13"></a><span class="o">#</span><span class="w"> </span><span class="n">partition</span><span class="w"> </span><span class="n">boundary</span><span class="w"> </span><span class="k">to</span><span class="w"> </span><span class="n">resolve</span><span class="w"> </span><span class="n">one</span><span class="w"> </span><span class="n">event_id</span><span class="s1">&#39;s duplicates.</span>
-<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="s1">batched:</span>
-<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="s1">  safety_overrides:</span>
-<a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="s1">    allow_window_functions: true</span>
-<a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="s1">---</span>
-<a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a><span class="s1">SELECT</span>
-<a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="s1">    event_id,</span>
-<a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a><span class="s1">    device_id,</span>
-<a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a><span class="s1">    user_id,</span>
-<a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a><span class="s1">    CASE WHEN user_id IS NOT NULL</span>
-<a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a><span class="s1">         THEN &#39;</span><span class="n">u</span><span class="p">:</span><span class="s1">&#39; || CAST(user_id AS VARCHAR)</span>
-<a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a><span class="s1">         ELSE &#39;</span><span class="n">d</span><span class="p">:</span><span class="s1">&#39; || CAST(device_id AS VARCHAR)</span>
-<a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a><span class="s1">    END AS amplitude_id,</span>
-<a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a><span class="s1">    CAST(event_time AS TIMESTAMP) AS event_ts,</span>
-<a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a><span class="s1">    CAST(event_date AS DATE) AS event_date,</span>
-<a id="__codelineno-4-28" name="__codelineno-4-28" href="#__codelineno-4-28"></a><span class="s1">    utm_campaign,</span>
-<a id="__codelineno-4-29" name="__codelineno-4-29" href="#__codelineno-4-29"></a><span class="s1">    json_extract_string(payload, &#39;</span><span class="err">$</span><span class="p">.</span><span class="n">event_name</span><span class="s1">&#39;) AS event_name,</span>
-<a id="__codelineno-4-30" name="__codelineno-4-30" href="#__codelineno-4-30"></a><span class="s1">    json_extract_string(payload, &#39;</span><span class="err">$</span><span class="p">.</span><span class="n">platform</span><span class="s1">&#39;) AS platform,</span>
-<a id="__codelineno-4-31" name="__codelineno-4-31" href="#__codelineno-4-31"></a><span class="s1">    json_extract_string(payload, &#39;</span><span class="err">$</span><span class="p">.</span><span class="n">url</span><span class="s1">&#39;) AS url</span>
-<a id="__codelineno-4-32" name="__codelineno-4-32" href="#__codelineno-4-32"></a><span class="s1">FROM smelt.bronze.raw_events</span>
-<a id="__codelineno-4-33" name="__codelineno-4-33" href="#__codelineno-4-33"></a><span class="s1">WHERE event_date</span>
-<a id="__codelineno-4-34" name="__codelineno-4-34" href="#__codelineno-4-34"></a><span class="s1">    BETWEEN CAST(arrival_time AS DATE) - INTERVAL &#39;</span><span class="mi">3</span><span class="w"> </span><span class="n">days</span><span class="err">&#39;</span>
-<a id="__codelineno-4-35" name="__codelineno-4-35" href="#__codelineno-4-35"></a><span class="w">        </span><span class="k">AND</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">arrival_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">DATE</span><span class="p">)</span>
-<a id="__codelineno-4-36" name="__codelineno-4-36" href="#__codelineno-4-36"></a><span class="n">QUALIFY</span><span class="w"> </span><span class="n">ROW_NUMBER</span><span class="p">()</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
+<a id="__codelineno-4-14" name="__codelineno-4-14" href="#__codelineno-4-14"></a><span class="s1">safety_overrides:</span>
+<a id="__codelineno-4-15" name="__codelineno-4-15" href="#__codelineno-4-15"></a><span class="s1">  allow_window_functions: true</span>
+<a id="__codelineno-4-16" name="__codelineno-4-16" href="#__codelineno-4-16"></a><span class="s1">---</span>
+<a id="__codelineno-4-17" name="__codelineno-4-17" href="#__codelineno-4-17"></a><span class="s1">SELECT</span>
+<a id="__codelineno-4-18" name="__codelineno-4-18" href="#__codelineno-4-18"></a><span class="s1">    event_id,</span>
+<a id="__codelineno-4-19" name="__codelineno-4-19" href="#__codelineno-4-19"></a><span class="s1">    device_id,</span>
+<a id="__codelineno-4-20" name="__codelineno-4-20" href="#__codelineno-4-20"></a><span class="s1">    user_id,</span>
+<a id="__codelineno-4-21" name="__codelineno-4-21" href="#__codelineno-4-21"></a><span class="s1">    CASE WHEN user_id IS NOT NULL</span>
+<a id="__codelineno-4-22" name="__codelineno-4-22" href="#__codelineno-4-22"></a><span class="s1">         THEN &#39;</span><span class="n">u</span><span class="p">:</span><span class="s1">&#39; || CAST(user_id AS VARCHAR)</span>
+<a id="__codelineno-4-23" name="__codelineno-4-23" href="#__codelineno-4-23"></a><span class="s1">         ELSE &#39;</span><span class="n">d</span><span class="p">:</span><span class="s1">&#39; || CAST(device_id AS VARCHAR)</span>
+<a id="__codelineno-4-24" name="__codelineno-4-24" href="#__codelineno-4-24"></a><span class="s1">    END AS amplitude_id,</span>
+<a id="__codelineno-4-25" name="__codelineno-4-25" href="#__codelineno-4-25"></a><span class="s1">    CAST(event_time AS TIMESTAMP) AS event_ts,</span>
+<a id="__codelineno-4-26" name="__codelineno-4-26" href="#__codelineno-4-26"></a><span class="s1">    CAST(event_date AS DATE) AS event_date,</span>
+<a id="__codelineno-4-27" name="__codelineno-4-27" href="#__codelineno-4-27"></a><span class="s1">    utm_campaign,</span>
+<a id="__codelineno-4-28" name="__codelineno-4-28" href="#__codelineno-4-28"></a><span class="s1">    json_extract_string(payload, &#39;</span><span class="err">$</span><span class="p">.</span><span class="n">event_name</span><span class="s1">&#39;) AS event_name,</span>
+<a id="__codelineno-4-29" name="__codelineno-4-29" href="#__codelineno-4-29"></a><span class="s1">    json_extract_string(payload, &#39;</span><span class="err">$</span><span class="p">.</span><span class="n">platform</span><span class="s1">&#39;) AS platform,</span>
+<a id="__codelineno-4-30" name="__codelineno-4-30" href="#__codelineno-4-30"></a><span class="s1">    json_extract_string(payload, &#39;</span><span class="err">$</span><span class="p">.</span><span class="n">url</span><span class="s1">&#39;) AS url</span>
+<a id="__codelineno-4-31" name="__codelineno-4-31" href="#__codelineno-4-31"></a><span class="s1">FROM smelt.bronze.raw_events</span>
+<a id="__codelineno-4-32" name="__codelineno-4-32" href="#__codelineno-4-32"></a><span class="s1">WHERE event_date</span>
+<a id="__codelineno-4-33" name="__codelineno-4-33" href="#__codelineno-4-33"></a><span class="s1">    BETWEEN CAST(arrival_time AS DATE) - INTERVAL &#39;</span><span class="mi">3</span><span class="w"> </span><span class="n">days</span><span class="err">&#39;</span>
+<a id="__codelineno-4-34" name="__codelineno-4-34" href="#__codelineno-4-34"></a><span class="w">        </span><span class="k">AND</span><span class="w"> </span><span class="k">CAST</span><span class="p">(</span><span class="n">arrival_time</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="nb">DATE</span><span class="p">)</span>
+<a id="__codelineno-4-35" name="__codelineno-4-35" href="#__codelineno-4-35"></a><span class="n">QUALIFY</span><span class="w"> </span><span class="n">ROW_NUMBER</span><span class="p">()</span><span class="w"> </span><span class="n">OVER</span><span class="w"> </span><span class="p">(</span><span class="n">PARTITION</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_id</span><span class="w"> </span><span class="k">ORDER</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">arrival_time</span><span class="p">)</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="mi">1</span>
 </code></pre></div>
 <p>The <code>WHERE</code> clause reads as documentation: <em>accept an event if its
 occurrence day is within 3 days behind its arrival day.</em> Every event in

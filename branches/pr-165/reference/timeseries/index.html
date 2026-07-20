@@ -2971,7 +2971,7 @@
 <p>A <code>refresh: incremental</code> model must also declare <code>timeseries:</code> whenever its <code>grain:</code> is <code>partition</code> or <code>key_per_partition</code>. The two blocks are independent:</p>
 <ul>
 <li><code>timeseries:</code> declares the time dimension (event time, partition column, granularity).</li>
-<li><code>refresh: incremental</code> + <code>grain:</code> opts the model into the derived maintenance plan; the <code>batched:</code> block carries per-model preference keys (<code>unique_key</code>, <code>safety_overrides</code>) layered on top.</li>
+<li><code>refresh: incremental</code> + <code>grain:</code> opts the model into the derived maintenance plan; the top-level <code>safety_overrides:</code> key carries per-model safety-check escape hatches layered on top.</li>
 </ul>
 <p>Declaring <code>refresh: incremental</code> + <code>grain: partition</code> without <code>timeseries:</code> is a validation error. See the <a href="../../guide/incremental-models/">incremental models guide</a>.</p>
 <h2 id="interaction-with-grain-key">Interaction with <code>grain: key</code><a class="headerlink" href="#interaction-with-grain-key" title="Permanent link">&para;</a></h2>
