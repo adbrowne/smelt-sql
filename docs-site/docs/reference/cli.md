@@ -23,6 +23,49 @@ The following flags appear on most subcommands:
 | `--database` | path | _(from smelt.yml)_ | Override the DuckDB database file path |
 | `--target` | string | `dev` | Target environment name as defined in `smelt.yml` |
 | `--scope` | string | _(cwd-derived)_ | Dot-path prefix for expanding bare model names. Pass `--scope ''` to disable auto-scoping. |
+| `--log-format` | `text` \| `json` | `text` | Log line format. `json` emits one parseable JSON object per tracing line, for orchestrator/log-aggregator consumption. Global — set at the root command, applies to every subcommand. |
+
+---
+
+## Exit codes
+
+Every `smelt` subcommand follows the same exit-code contract, so orchestrators (cron, Airflow, CI) can branch on it without parsing stdout:
+
+| Code | Meaning |
+|------|---------|
+| `0` | Success. Includes a `warn`-severity `smelt check` violation and an empty-but-valid selection — a build that ran nothing because there was nothing to do is not a failure. |
+| `1` | Detected failure. A failed model build, a failed `smelt test` case, an `error`-severity `smelt check` violation, `smelt diff` detecting a schema change, or a check referencing a model not built in the target. |
+| `2` | Usage error. Malformed CLI arguments, a malformed or missing `smelt.yml`, or an unresolvable project root. |
+
+`1` means the command ran correctly and found a problem in the data or models — investigate the pipeline. `2` means the command could not run at all because its own inputs were invalid — fix the invocation. Retrying a `2` without changing the command is never useful.
+
+---
+
+## State lock errors
+
+Any command that mutates run state (`smelt run`, `smelt build`, `smelt backbuild`) takes an exclusive lock on `.smelt/lock` for its duration and releases it on completion or error. A second invocation started while the first is still running fails immediately with:
+
+```
+Error: state locked by PID <n>
+```
+
+rather than silently interleaving writes with the in-flight run. This is expected when two runs are launched concurrently against the same project (e.g. an overlapping cron schedule, or a manual run started while a CI job is still going) — it is not a corruption signal. Wait for the process named by `<n>` to finish, then re-run.
+
+The lock is an OS-level advisory file lock (`flock`), not a hand-rolled PID file: if the holder process is killed or its container crashes, the operating system releases the lock automatically when the process's file descriptors close, so a stuck lock left behind by a dead process is not expected. If a `state locked by PID <n>` error persists after confirming `<n>` is no longer running, that indicates the lock file lives on a filesystem that doesn't honor advisory locks (e.g. certain network mounts) rather than a normal stale-lock condition.
+
+See `docs/specs/run_state.md` §"Locking" for the full semantics.
+
+---
+
+## State isolation per target
+
+Run state lives under `.smelt/targets/<target>/`, keyed by the `--target` a command ran against (default `dev`). A run against `dev` and a run against `prod` never share interval coverage, reconciliation ledgers, deployed-schema snapshots, or run history — each target has its own closed, disjoint state store. This means:
+
+- `smelt run --target prod` and `smelt run --target dev` can each be resumed, inspected, and reasoned about independently; a `dev` backfill can never mask a coverage gap in `prod`.
+- `smelt status`, `smelt history`, and `smelt diff` accept `--target` (default `dev`) and report on that target's state only — pass the target you actually care about, especially in CI where the default `dev` is rarely the one that matters.
+- `.smelt/meta.json` (the layout-version marker) and `.smelt/lock` (the advisory single-writer lock) are the only files shared across every target — see `docs/specs/run_state.md` §"`.smelt/` directory layout".
+
+See `docs/specs/run_state.md` §"`.smelt/` directory layout" for the full on-disk shape.
 
 ---
 
@@ -88,6 +131,37 @@ When the leaf matches multiple entities (e.g. both `silver.events_parsed` and `b
 
 ---
 
+## smelt init
+
+Non-interactively scaffold a minimal, working smelt project.
+
+**Usage:**
+
+```
+smelt init [DIR]
+```
+
+`smelt init` writes a `smelt.yml`, a `models/` directory containing one example model, one seed CSV, and a `.gitignore` excluding `.smelt/` and the database file, to `DIR` (default `.`, created if it doesn't exist). Every file it writes is a fixed, deterministic template — there are no interactive prompts and no flags that change what gets scaffolded beyond the target directory. The scaffolded project builds successfully against DuckDB with no further edits (`smelt build` inside it exits `0`).
+
+`smelt init` refuses to run against a directory that already contains a `smelt.yml`: it exits `2` with a message naming the conflicting file, rather than overwriting or merging. There is deliberately no `--force` flag to override this — run `smelt init` in a fresh directory, or remove the conflicting `smelt.yml` and re-run.
+
+**Exit codes:**
+
+- Exits `0` on a successful scaffold.
+- Exits `2` if `DIR` already contains a `smelt.yml` (usage error — the fix is a different or empty directory, not a retry).
+
+**Examples:**
+
+```bash
+# Scaffold a new project in ./my-project
+smelt init my-project
+
+# Scaffold into the current directory
+smelt init
+```
+
+---
+
 ## smelt run
 
 Run models and materialize them in the target database. This is the primary command for executing your data pipeline.
@@ -108,6 +182,7 @@ smelt run [OPTIONS]
 | `--show-results` | | bool | `false` | Display query results after execution |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each model |
 | `--dry-run` | | bool | `false` | Print the maintenance statements that would run — without executing (see below) |
+| `--show-plan` | | bool | `false` | Print the resolved execution plan (model names + strategies) and exit, without executing. Combine with `--dry-run` to see the plan without any execution side effects. |
 | `--event-time-start` | | string | | Start of event time range for incremental models (ISO 8601: YYYY-MM-DD). Requires `--event-time-end`. |
 | `--event-time-end` | | string | | End of event time range for incremental models (exclusive, ISO 8601: YYYY-MM-DD). Requires `--event-time-start`. |
 | `--start` | | string | | Alias for `--event-time-start` |
@@ -119,9 +194,72 @@ smelt run [OPTIONS]
 | `--auto` | | bool | `false` | Auto mode: process only uncovered intervals since last run |
 | `--allow-column-removal` | | bool | `false` | Allow column removal during schema evolution (otherwise blocked for safety) |
 | `--allow-full-refresh` | | bool | `false` | Allow full table refresh when schema changes cannot be handled with ALTER TABLE (e.g., incompatible type changes, or unsupported operations on Spark+Parquet). See [Schema Evolution](../guide/schema-evolution.md). |
+| `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 | `--since-upstream` | | bool | `false` | Forward propagation: run exactly the partitions dirtied by the declared per-source deltas below, computed through the maintenance-plan propagation graph. See [Forward propagation with `--since-upstream`](#forward-propagation-with---since-upstream). |
 | `--source` | | string[] | | A source **or upstream maintained-model** address whose landed delta is declared via the paired `--landed` flag (repeatable — the Nth `--source` pairs with the Nth `--landed`). Only meaningful with `--since-upstream`. |
 | `--landed` | | string[] | | The landed interval for the paired `--source`: `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`. |
+| `--jobs` | `-j` | integer | _(available parallelism)_ | Maximum number of models to execute concurrently. `--jobs 1` forces strictly serial execution — one model at a time, in the same order as every prior `smelt` release. See [Parallel execution with `--jobs`](#parallel-execution-with---jobs). |
+| `--resume` | | bool | `false` | Resume a previously partially-failed run: skip any model that succeeded last time with an unchanged definition, and rerun everything else. See [`--resume` — continue after a partial failure](#--resume--continue-after-a-partial-failure). |
+
+### Parallel execution with `--jobs`
+
+The run engine (shared by `smelt run`, `smelt build`, and `smelt backbuild`) dispatches models as a topological **wavefront**: a model starts only once every one of its upstream dependencies in the current run has finished, but models with no dependency relationship to each other may run concurrently. `smelt run --jobs` bounds how many models are in flight at once:
+
+- Omitted (the default) — resolves to the host's available parallelism (`std::thread::available_parallelism()`), typically the number of logical CPUs.
+- `--jobs 1` — strictly serial: one model at a time, in `execution_order`. This is the pre-`--jobs` behavior and remains available as an explicit opt-out.
+- `--jobs N` (`N > 1`) — up to `N` models run concurrently, always subject to the dependency graph: an edge `A -> B` guarantees `A` fully completes (including any `smelt.check`s in a `smelt build`) before `B` starts, regardless of `N`.
+
+Progress output, the per-run manifest, and every other run-report artifact are identical regardless of `--jobs` — the run engine buffers each model's progress events internally and replays them in the same deterministic `execution_order` sequence a `--jobs 1` run would have produced, whichever models actually finished first. A failure stops the scheduler from starting further models; any already in flight are allowed to finish, and every model that completed (successfully or not) before the run stopped is still recorded in the manifest.
+
+Concurrency helps most when a project's DAG is wide (many independent models per layer) and when a meaningful share of a run's wall-clock time is spent on work other than the backend query itself (SQL compilation, schema-evolution checks, `smelt.check` execution) — a single-connection backend (e.g. DuckDB) still serializes concurrent query execution against that one connection, so `--jobs` primarily shortens a run by overlapping that surrounding work, and by overlapping models assigned to *different* targets.
+
+### Retrying transient backend failures
+
+`smelt run`, `smelt build`, and `smelt backbuild` automatically retry a model's write step when it fails with a **transient** backend error — a dropped connection, a connection-pool timeout, or similar environmental failure that a fresh attempt against the same input is likely to clear. A flaky connection partway through a long run does not have to fail the whole run.
+
+A retry always re-runs the model's *entire* write step for the attempt that failed — the full drop-and-recreate for a table, one incremental batch's complete DELETE+INSERT, a column-scoped MERGE, or a keyed model's create-or-merge partition write — never a partial slice of it, so a retried model never leaves a half-applied write behind. Coverage is uniform across every write technique a model can dispatch to, including the delta-restricted recompute a model-edge creation trigger can take. Retries use exponential backoff between attempts; the delay is derived deterministically from the run and model identity rather than real-clock jitter, so repeated runs behave predictably.
+
+Only transient failures are retried. A deterministic failure — invalid SQL, a type mismatch, a constraint violation, a missing table, an unsupported dialect feature — fails the model on the first attempt, since retrying cannot change the outcome.
+
+By default, up to 3 attempts are made per write step before the model is reported as failed. To disable retry entirely (fail immediately on the first transient error, matching pre-retry behavior), set `retry_max: 0` on the run request. There is currently no dedicated CLI flag for this; it is available to programmatic consumers of the run engine (e.g. the UI) via the `retry_max`/`retry_backoff_ms` fields on the run request.
+
+### Run report and failure summary
+
+Every `smelt run`/`smelt build`/`smelt backbuild` invocation against a stateful project writes a **run report** alongside its run manifest, at `.smelt/targets/<target>/reports/<run_id>.json` (`docs/specs/run_state.md` §"Run report"). Where the manifest is the durable per-model record `--resume` reads, the report is the human/tooling-facing summary: counts of models by outcome, total duration, and per-model error text for anything that failed. A report is written whether the run succeeds, is cancelled, or aborts, so a partial report is available immediately after a failed run.
+
+When independent models fail in the same run — even concurrently, in the same `--jobs`-scheduled wave — every one of them gets its own recorded error; a second or third failure is never silently downgraded to "skipped". At the end of a failed run, `smelt` prints a failure summary naming every failed model with its first error line and a one-line hint toward the likely next action:
+
+```
+smelt: run 20260720-120001-a1b2c3 failed — 2 model(s) failed:
+  - bad_a: Conversion Error: Could not convert string 'not_a_number' to INT32
+    hint: re-run with -v for the full backend error, or `smelt run --show-plan` to inspect the plan
+  - bad_b: Conversion Error: Could not convert string 'also_not_a_number' to INT32
+    hint: re-run with -v for the full backend error, or `smelt run --show-plan` to inspect the plan
+```
+
+The hint is chosen from a coarse classification of the error text — a compile-time failure (parse/type/reference resolution) points at the model's SQL; a backend execution failure points at `-v`/`--show-plan`; a check/constraint failure points at `smelt check`. Classification is best-effort text matching, not a structured error code, since the underlying error is already flattened to a string by the time the report captures it.
+
+### `--resume` — continue after a partial failure
+
+`smelt run --resume` re-runs a selection that previously failed partway through, skipping models that already succeeded and don't need to run again. A model is skipped when **both** hold: it succeeded in the most recent partially-failed run, and its definition hasn't changed since (same compiled SQL). A model that failed, was skipped, or whose SQL was edited always re-runs — and so does every model downstream of it, since a downstream model's own prior success said nothing about inputs that have since been rebuilt.
+
+```bash
+# A run fails partway through — some models succeeded, one failed, the rest
+# never started.
+smelt run
+# ... "silver.sessions" fails ...
+
+# Fix the underlying issue (bad data, a transient outage, a bug in the
+# model), then resume: already-succeeded upstream models are skipped;
+# "silver.sessions" and everything downstream of it re-run.
+smelt run --resume
+```
+
+The run resumed from is the latest one that either never finished (interrupted by an error or a cancellation) or that did finish but still recorded at least one non-success outcome for a model overlapping the current selection — for example a check failure that skipped that model's downstream dependents without aborting the whole run.
+
+`--resume` refuses — a hard error, not a warning — when there is nothing to resume from: the most recent run for the target completed with every model successful, or no run manifest exists yet at all. This is deliberate: a stale or mistaken `--resume` must never be silently reinterpreted as a full run. Run `smelt run` without `--resume` (or remove `.smelt/`) to start fresh.
+
+A resumed-away model's materialized table and interval-ledger bookkeeping are left completely untouched — `--resume` only decides which models to skip *executing*, it never rewrites or re-derives state for a model it isn't running.
 
 **Selector syntax:**
 
@@ -230,6 +368,7 @@ smelt backbuild [OPTIONS] <SELECTOR> --start <DATE> --end <DATE>
 | `--dry-run` | | bool | `false` | Print the maintenance statements that would run, with per-chunk boundaries — without executing ([details](#dry-run-inspect-the-maintenance-statements-before-they-run)) |
 | `--batch-size` | | integer | | Override batch size in days for backfill chunking |
 | `--per-partition` | | bool | `false` | Force per-partition execution (one query per granularity period) |
+| `--allow-downgrade` | | bool | `false` | Allow incremental models that fail bound derivation to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 
 **Examples:**
 
@@ -280,6 +419,7 @@ The flags below have surprised users in practice; the table records what each on
 | `--exclude` / `-e` | repeatable | Same selector grammar and repetition rule as `--select`. |
 | `--dry-run` | **not on `smelt build`** | Use `smelt run --dry-run` for parse-and-validate-without-executing. There is no project-wide compile-only flag on `build` today. |
 | `--event-time-start` / `--event-time-end` | implemented | ISO-8601 (`2026-03-20` or `2026-03-20T00:00:00Z`). End is exclusive. Both required together for incremental execution. |
+| `--allow-downgrade` | implemented | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL. |
 
 **Usage:**
 
@@ -302,6 +442,7 @@ smelt build [OPTIONS]
 | `--exclude` | `-e` | string[] | | Exclude models from the run (repeatable). Same syntax as `--select`. |
 | `--period` | | string | | Backward resolution: the target output period, `<start>..<end>` (ISO `YYYY-MM-DD`, end exclusive). Requires `--include-upstreams` and a positional target model. See [Backward resolution with `--include-upstreams`](#backward-resolution-with---include-upstreams). |
 | `--include-upstreams` | | bool | `false` | Resolve and build the target model's required upstream slices for `--period` instead of the ordinary seed+run-everything build. Requires `--period`. |
+| `--allow-downgrade` | | bool | `false` | Allow incremental models that fail the safety classifier to fall back to full-table refresh instead of being refused at planning time. A temporary escape hatch while fixing the model SQL, not a normal-operation flag. |
 
 **Examples:**
 
@@ -396,10 +537,14 @@ smelt test [OPTIONS]
 | `--select` | `-s` | string[] | | Filter tests by name (repeatable, substring match) |
 | `--verbose` | `-v` | bool | `false` | Show compiled SQL for each test |
 | `--show-all` | | bool | `false` | Show passing tests in output (default: only failures shown) |
+| `--target` | | string | `dev` | Target environment from smelt.yml — only consulted by singular tests that query real data |
+| `--database` | | path | _(from smelt.yml)_ | DuckDB database file path (overrides smelt.yml) |
+| `--seed` | | integer | | Random seed for property-based tests, for reproducibility |
+| `--json` | | bool | `false` | Output results as JSON for editor integration. Always exits `0`, regardless of test status — a caller must inspect the JSON for pass/fail, not the exit code. |
 
 **Output:**
 
-Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails.
+Test results are printed as PASS/FAIL lines with timing. A summary line shows total counts. The command exits with code 1 if any test fails — except with `--json`, which always exits `0` so an editor or CI step can parse the JSON body regardless of pass/fail status.
 
 ```
 smelt test
@@ -494,6 +639,68 @@ See the [Testing guide](../guide/testing.md) for how to write checks.
 
 ---
 
+## smelt list
+
+List every entity `smelt` discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical `smelt.<path>` form, alongside its kind and, for models, its materialization. Offline: discovery and parsing only, no database connection.
+
+**Usage:**
+
+```
+smelt list [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--select` / `-s` | string (repeatable) | | Narrow the listed model set. Same selector syntax as `smelt run`/`smelt build` |
+| `--exclude` / `-e` | string (repeatable) | | Exclude models from the listed set. Same syntax as `--select` |
+| `--format` | string | `text` | Output format: `text` or `json` |
+
+**Examples:**
+
+```bash
+# List everything in the project
+smelt list
+
+# Narrow to models under a tag
+smelt list --select tag:staging
+
+# Machine-readable output
+smelt list --format json
+```
+
+Exits `0` on success, including an empty (selector-narrowed) result set. Exits `2` on a parse error or an unresolvable/ambiguous selector.
+
+---
+
+## smelt clean
+
+Remove `target/` — the directory `smelt docs generate` and other artifact-producing commands write to. Never touches `.smelt/` state (run manifests, deployed-schema snapshots) or the configured target database.
+
+**Usage:**
+
+```
+smelt clean [OPTIONS]
+```
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+
+**Examples:**
+
+```bash
+smelt clean
+```
+
+Exits `0` whether or not `target/` existed to remove. Exits `1` if `target/` exists but cannot be removed.
+
+---
+
 ## smelt diff
 
 Show pending schema changes between model definitions and deployed state. Compares the inferred schema (from SQL parsing and type inference) against the last deployed schema (stored in `.smelt/schemas/`).
@@ -511,6 +718,7 @@ smelt diff [OPTIONS]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
+| `--target` | | string | `dev` | Target environment from `smelt.yml`. Deployed schemas are recorded per target (see "State isolation per target" below), so `diff` compares against this target's recorded state. |
 | `--select` | `-s` | string[] | | Select models to diff (repeatable). Same selector syntax as `smelt run`. |
 | `--exclude` | `-e` | string[] | | Exclude models from diff (repeatable). Same syntax as `--select`. |
 | `--json` | | bool | `false` | Output as JSON for machine consumption |
@@ -832,6 +1040,7 @@ smelt status [OPTIONS] [MODEL_NAME]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | Target environment from `smelt.yml`. State is partitioned per target (see "State isolation per target" below), so `status` reports coverage for this target's state only. |
 | `--since` | string | | Start of query range for gap detection (ISO 8601: YYYY-MM-DD) |
 | `--until` | string | | End of query range for gap detection (ISO 8601: YYYY-MM-DD, default: today) |
 
@@ -874,6 +1083,7 @@ smelt history [OPTIONS] [MODEL_NAME]
 | Flag | Short | Type | Default | Description |
 |------|-------|------|---------|-------------|
 | `--project-dir` | | path | `.` | Path to smelt project root |
+| `--target` | | string | `dev` | Target environment from `smelt.yml`. Run manifests are recorded per target (see "State isolation per target" below), so `history` reports runs for this target only. |
 | `--limit` | `-l` | integer | `10` | Number of runs to show |
 
 **Examples:**
@@ -1052,6 +1262,90 @@ Inbound edges: sources.raw.events
 
 ---
 
+## smelt bakeoff
+
+Measure the wall-clock cost of every admissible maintenance technique for a model's cells against
+a replayed window of real data, and optionally emit the winning technique as a ready-to-paste
+frontmatter pin. This is the same [`maintenance.cells[].technique`/`prefer` override
+ladder](smelt-yml.md#maintenance-configuration) a live run consults — `smelt bakeoff` measures
+what that ladder would cost under each candidate, it doesn't change what a run does until you
+paste the emitted pin yourself.
+
+**Usage:**
+
+```
+smelt bakeoff <MODEL_NAME> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `MODEL_NAME` | string, required | The incremental model to measure. |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | The declared target to clone for scratch measurement runs. |
+| `--cells <col>@<source>,...` | string[] | every cell with ≥2 admissible techniques | Narrow measurement to specific cells. Repeatable and/or comma-separated. A named cell with only one admissible technique errors — there's nothing to compare. |
+| `--runs N` | u32 | `3` | Splits the driving source's event-time extent into `N` sequential windows and replays them, in order, once per candidate technique. Each replay is a real `execute_project` run against the project's own data, not a synthetic sample. |
+| `--keep` | bool | `false` | Retain the scratch schemas (`smelt_bakeoff_<model>_<technique>`) and their per-target state directories after measurement instead of dropping them. |
+| `--pin` | bool | `false` | Print the winning `cells[]` entry (or a full `maintenance:` block when the model has none) as YAML to stdout. Emit-only — never writes the model's `.sql` file. |
+
+Every cell under measurement runs against a disposable **scratch target**: the chosen `--target`
+is cloned in memory under a synthetic name with schema `smelt_bakeoff_<model>_<technique>` — no
+runtime schema seam is needed, since schema already flows from `config.targets[target].schema` —
+and the scratch schema (plus its state directory) is dropped after measurement unless `--keep`.
+The real target and its state are never touched. After each replayed window, every pair of
+measured techniques' output is cross-checked with `EXCEPT ALL` in both directions; a mismatch
+fails the whole run loudly rather than reporting a cost for a technique whose output diverged.
+
+A model with no cell that has 2+ admissible techniques prints a "nothing to measure" report and
+exits `0` — there is nothing to bake off.
+
+**Examples:**
+
+```bash
+# Measure every multi-technique cell of daily_events_enriched over 3 replayed windows
+smelt bakeoff daily_events_enriched
+
+# Narrow to one cell, replay 5 windows, keep the scratch schemas for inspection
+smelt bakeoff daily_events_enriched --cells user_name@users --runs 5 --keep
+
+# Measure and print the winning technique as a ready-to-paste frontmatter pin
+smelt bakeoff daily_events_enriched --pin
+```
+
+```text
+$ smelt bakeoff daily_events_enriched --runs 2 --pin
+smelt bakeoff report for `daily_events_enriched` (target=dev, runs=2)
+
+cell: columns=["user_name"] on=users trigger=UpstreamMutation
+  - fold             total=   842ms per-run=[421, 421] rows=100000 schema=smelt_bakeoff_daily_events_enriched_fold
+  - recompute        total=  1930ms per-run=[965, 965] rows=100000 schema=smelt_bakeoff_daily_events_enriched_recompute
+  equivalence: OK (EXCEPT ALL empty both directions)
+
+to pin this choice, add to `daily_events_enriched.sql` frontmatter:
+maintenance:
+  cells:
+    - columns: [user_name]
+      on: users
+      technique: fold
+```
+
+The report lists, per measured cell, every admissible technique's total and per-window
+wall-clock cost, the resulting row count, and the scratch schema it ran in; the `equivalence:`
+line confirms every pair of measured variants agreed exactly. With `--pin`, the winning
+technique — lowest total wall-clock across the replayed windows — is printed as YAML you can
+paste directly into the model's `maintenance:` block; see [`cells[].technique` /
+`prefer`](smelt-yml.md#maintenance-configuration) for what pinning it then does at execution. A
+tie keeps the model's current default choice and says so in the report rather than picking
+arbitrarily.
+
+---
+
 ## smelt ui
 
 Start a local web UI for visualizing the model graph and project structure.
@@ -1068,7 +1362,10 @@ smelt ui [OPTIONS]
 |------|------|---------|-------------|
 | `--project-dir` | path | `.` | Path to smelt project root |
 | `--port` | integer | `3000` | Port to serve the UI on |
-| `--host` | string | `127.0.0.1` | Host address to bind to |
+| `--host` | string | `127.0.0.1` | Host address to bind to. Non-loopback addresses require `--allow-remote`. |
+| `--allow-remote` | flag | off | Required to bind `--host` to a non-loopback address |
+
+**Network exposure:** `smelt ui` has no authentication or HTTPS. It is meant to be reached at `http://127.0.0.1:<port>` from the machine running it. Binding to a non-loopback host without `--allow-remote` fails loudly rather than silently binding to loopback instead; with the flag, the server starts and logs a startup warning that it is reachable from other hosts. CORS is restricted to the server's own origin.
 
 **Examples:**
 
@@ -1079,6 +1376,6 @@ smelt ui
 # Start on a custom port
 smelt ui --port 8080
 
-# Bind to all interfaces (for remote access)
-smelt ui --host 0.0.0.0 --port 3000
+# Bind to all interfaces (for remote access) — requires the opt-in
+smelt ui --host 0.0.0.0 --port 3000 --allow-remote
 ```

@@ -204,15 +204,15 @@ reason = "decimal division early-return: Decimal / T or Integer / Decimal → Un
 discriminant = "dynamic"
 
 ["crates/smelt-db/src/type_inference/binary.rs:499"]
-classification = "error"
-reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown(Unresolved); TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule)"
+classification = "legitimate"
+reason = "mixed tz arithmetic: Timestamp{tz=false} - Timestamp{tz=true} → Unknown(Unresolved); TypeMismatch diagnostic emitted by check_mixed_tz_arithmetic_diagnostics (spec §16 strict mixing rule); pairing pinned by check_diagnostics::mixed_tz_subtraction_unknown_is_paired_with_type_mismatch"
 discriminant = "unresolved"
 
 # ── smelt-db / type_inference/collation ──────────────────────────────────────
 
 ["crates/smelt-db/src/type_inference/collation.rs:90"]
-classification = "error"
-reason = "non-binary COLLATE expression: NonPortableCollation diagnostic is emitted by check_collation_diagnostics; Unknown(Unresolved) is the recovery type (§17)"
+classification = "legitimate"
+reason = "non-binary COLLATE expression: NonPortableCollation diagnostic is emitted by check_collation_diagnostics; Unknown(Unresolved) is the recovery type (§17); pairing pinned by check_diagnostics::non_binary_collate_unknown_is_paired_with_non_portable_collation"
 discriminant = "unresolved"
 
 # ── smelt-db / type_inference/dispatch ────────────────────────────────────────

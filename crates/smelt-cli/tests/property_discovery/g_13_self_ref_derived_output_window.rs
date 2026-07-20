@@ -47,8 +47,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [session_start_date]
 ---
 SELECT
   e.session_start_date AS session_start_date,

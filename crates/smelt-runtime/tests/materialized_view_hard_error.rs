@@ -94,6 +94,11 @@ fn make_request(target: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     }
 }
 
@@ -176,4 +181,56 @@ async fn test_materialized_view_hard_errors_on_duckdb() {
         "expected the hard error to point at `refresh: incremental` + `grain: key`, got: {}",
         message
     );
+}
+
+/// `crates/smelt-backend/src/` must not contain a silent materialized-view
+/// fallback surface — the compile-time hard error above is the only path.
+/// A dead `create_materialized_view_as` trait default that silently falls
+/// back to `create_table_as` (with only a `warn!`) would be unreachable in
+/// practice but still a "falling back" surface that violates
+/// `docs/specs/materialized_view.md` §"No silent fallback".
+#[test]
+fn no_silent_fallback_surface_in_backend_crate() {
+    let manifest_dir = Path::new(env!("CARGO_MANIFEST_DIR"));
+    let repo_root = manifest_dir
+        .parent()
+        .and_then(|p| p.parent())
+        .expect("smelt-runtime crate is two levels below repo root");
+    let backend_src = repo_root.join("crates/smelt-backend/src");
+
+    let mut offenders = vec![];
+    for entry in walk_rs_files(&backend_src) {
+        let content = std::fs::read_to_string(&entry).expect("read backend src file");
+        if content.contains("falling back") {
+            offenders.push(format!("{}: contains \"falling back\"", entry.display()));
+        }
+        if content.contains("create_materialized_view_as") {
+            offenders.push(format!(
+                "{}: contains \"create_materialized_view_as\"",
+                entry.display()
+            ));
+        }
+    }
+
+    assert!(
+        offenders.is_empty(),
+        "smelt-backend must not expose a silent materialized-view fallback surface:\n  {}",
+        offenders.join("\n  ")
+    );
+}
+
+fn walk_rs_files(dir: &Path) -> Vec<std::path::PathBuf> {
+    let mut out = vec![];
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.is_dir() {
+            out.extend(walk_rs_files(&path));
+        } else if path.extension().is_some_and(|e| e == "rs") {
+            out.push(path);
+        }
+    }
+    out
 }

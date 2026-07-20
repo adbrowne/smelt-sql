@@ -3,7 +3,7 @@
 //! through the real `smelt` binary.
 //!
 //! Regression: the schema-evolution gate in `execute_project` can only diff
-//! against a stored deployed schema (`.smelt/schemas/<model>.json`), but
+//! against a stored deployed schema (`.smelt/targets/dev/schemas/<model>.json`), but
 //! only the full-refresh execution branch ever saved one. An incremental
 //! model therefore never acquired a baseline: `smelt diff` reported it as
 //! "new" forever, and adding a column to its SELECT crashed the next run
@@ -106,12 +106,12 @@ fn add_column_on_incremental_model_alters_in_place() {
         String::from_utf8_lossy(&build1.stderr),
     );
 
-    let baseline = dir.join(".smelt/schemas/payments.json");
+    let baseline = dir.join(".smelt/targets/dev/schemas/payments.json");
     assert!(
         baseline.exists(),
         "incremental model should persist a deployed-schema baseline after \
-         its first successful build; .smelt/schemas contains: {:?}",
-        std::fs::read_dir(dir.join(".smelt/schemas"))
+         its first successful build; .smelt/targets/dev/schemas contains: {:?}",
+        std::fs::read_dir(dir.join(".smelt/targets/dev/schemas"))
             .map(|d| d
                 .filter_map(|e| e.ok().map(|e| e.file_name()))
                 .collect::<Vec<_>>())

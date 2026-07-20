@@ -67,6 +67,7 @@ pub async fn ui(args: UiArgs) -> Result<()> {
         project_dir,
         args.port,
         &args.host,
+        args.allow_remote,
     )
     .await
 }

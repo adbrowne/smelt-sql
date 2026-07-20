@@ -46,8 +46,8 @@ method = model_name
 
 | Flag | Short | Available on |
 |------|-------|-------------|
-| `--select` | `-s` | `run`, `build`, `diff`, `explain`, `docs generate`, `seed` |
-| `--exclude` | `-e` | `run`, `build`, `diff`, `explain` |
+| `--select` | `-s` | `run`, `build`, `diff`, `explain`, `docs generate`, `seed`, `list` |
+| `--exclude` | `-e` | `run`, `build`, `diff`, `explain`, `list` |
 
 Both flags are repeatable. Each instance adds one selector to the set.
 

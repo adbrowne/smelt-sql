@@ -1,6 +1,7 @@
 pub mod argument_resolution;
 pub mod backend_factory;
 pub mod backend_registry;
+pub mod bakeoff;
 pub mod config;
 pub mod diagnostics_terminal;
 pub mod discovery;
@@ -22,10 +23,10 @@ pub mod test_runner;
 
 pub use backend_registry::BackendRegistry;
 pub use config::{
-    find_project_root, BackendType, BatchedConfig, Config, Materialization, SourcesConfig,
+    find_project_root, BackendType, Config, Materialization, PartitionGrainConfig, SourcesConfig,
 };
 pub use discovery::{ModelDiscovery, ModelFile, ModelKind};
-pub use errors::CliError;
+pub use errors::{exit_code_for, CliError};
 pub use explain::{
     build_explain_output, build_maintenance_plan_report, build_physical_explain,
     ExplainIncremental, ExplainModel, ExplainOutput, ExplainPhysical, ExplainPhysicalNode,

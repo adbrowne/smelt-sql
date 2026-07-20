@@ -158,6 +158,11 @@ pub async fn backbuild(args: BackbuildArgs, scope: Option<&str>) -> Result<()> {
         ephemeral_seed_ctes,
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
 
     let run_id = generate_run_id();

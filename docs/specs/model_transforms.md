@@ -452,9 +452,6 @@ by `docs/plans/20260704-model-updates.md` (design:
   skewing derived `partition_column` can compose with ordered self-referential
   execution at all is undecided; today the combination simply does not widen.
   Tracked in `docs/plans/20260711-derived-output-window.md`.
-- **Delegate-to-native-IVM is partial:** `create_materialized_view_as` currently
-  falls back to a plain table with a warning on backends without native support,
-  rather than hard-erroring per §Constraints.
 - **Change-suppressed MERGE is built for the column-scoped and keyed-fold families; the region
   DELETE+INSERT family stays unconditional.** The column-scoped `MERGE` emitter
   (`smelt_logical::maintenance::emit::emit_column_scoped_merge_suppressed`) and the keyed-fold
@@ -540,7 +537,7 @@ by `docs/plans/20260704-model-updates.md` (design:
 
 ## References
 
-- **Code**: `crates/smelt-backend/src/lib.rs` (`merge_into`, `delete_partitions`, `insert_into_from_query`, `insert_overwrite`, `create_materialized_view_as` trait methods); impls in `crates/smelt-backend-duckdb`, `crates/smelt-backend-spark`; `crates/smelt-runtime/src/transformer.rs` (`inject_source_filters`, `inject_time_filter`, `is_transparent_single_source`); `crates/smelt-runtime/src/compile.rs`.
+- **Code**: `crates/smelt-backend/src/lib.rs` (`merge_into`, `delete_partitions`, `insert_into_from_query`, `insert_overwrite` trait methods); impls in `crates/smelt-backend-duckdb`, `crates/smelt-backend-spark`; `crates/smelt-runtime/src/transformer.rs` (`inject_source_filters`, `inject_time_filter`, `is_transparent_single_source`); `crates/smelt-runtime/src/compile.rs`.
 - **Tests**: the batched per-partition full-refresh-equivalence harness; the cumulative end-state-equivalence harness; the pushdown/clamp unit tests in `smelt-runtime/src/transformer.rs`; the generative soundness oracle.
 - **User docs**: the per-mode refresh pages under `docs-site/docs/`.
 - **Plans (history)**: `docs/plans/20260704-model-updates.md`,

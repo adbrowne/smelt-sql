@@ -18,10 +18,13 @@ use std::time::{Duration as StdDuration, Instant};
 
 use anyhow::{Context, Result};
 use chrono::{NaiveDate, Utc};
+use futures::stream::StreamExt;
 use tokio_util::sync::CancellationToken;
 use tracing::warn;
 
-use smelt_backend::{Backend, Materialization, MaterializationStrategy, PartitionRange};
+use smelt_backend::{
+    Backend, BackendError, Materialization, MaterializationStrategy, PartitionRange,
+};
 use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_planner::Frontmatter;
@@ -29,7 +32,7 @@ use smelt_state::file_store::FileStore;
 use smelt_state::intervals::compute_model_hash;
 use smelt_state::landed_deltas::{record_landing, SourceMutationPosture};
 use smelt_state::reconciliation::{Processed, Region};
-use smelt_state::{ModelRunRecord, RunManifest, TimeRangeRecord};
+use smelt_state::{ModelRunRecord, RunManifest, RunReport, TimeRangeRecord};
 
 use crate::check_runner::{run_single_check, CheckOutcome, CheckStatus};
 use crate::compile::build_source_bound_map;
@@ -59,7 +62,7 @@ struct ModelPlan {
 }
 
 struct IncrementalPlan {
-    config: smelt_core::BatchedConfig,
+    config: smelt_core::PartitionGrainConfig,
     timeseries: smelt_core::config::TimeseriesConfig,
     /// Batches with separate partition and filter ranges (bound-aware windowing).
     batches: Vec<IncrementalBatch>,
@@ -87,6 +90,380 @@ pub trait BackendFactory: Send + Sync {
         target_config: &'a smelt_core::config::Target,
         project_dir: &'a Path,
     ) -> BackendFuture<'a>;
+}
+
+/// Per-model result of one execution unit dispatched by the Phase 5
+/// wavefront scheduler in [`execute_project`]. `Completed` carries every
+/// piece of run-level state the pre-Phase-5 sequential loop mutated
+/// in-place (`manifest`, `check_results`, `skip_set`, row count) so the
+/// scheduler can merge it deterministically once this model's turn comes up
+/// in `execution_order` sequence.
+enum ModelOutcome {
+    Completed(ModelSuccess),
+    Cancelled,
+}
+
+struct ModelSuccess {
+    manifest_entries: HashMap<String, ModelRunRecord>,
+    check_results: Vec<CheckOutcome>,
+    skip_set: HashSet<String>,
+    rows: usize,
+}
+
+/// A single buffered [`RunReporter`] callback, recorded by [`EventSink`]
+/// during one model's (possibly concurrent) execution and replayed onto the
+/// real reporter later, strictly in `execution_order` sequence
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 5: "Buffer per-model
+/// reporter events and flush in `execution_order` sequence").
+enum ReporterEvent {
+    ModelStarted {
+        model_index: usize,
+        models_total: usize,
+    },
+    ModelCompiled {
+        sql: String,
+    },
+    MaintenanceStatements {
+        chunk: Option<crate::reporter::ChunkInfo>,
+        group: smelt_logical::maintenance::emit::StatementGroup,
+    },
+    BatchCompleted {
+        batch_index: usize,
+        batches_total: usize,
+        row_count: usize,
+        duration: StdDuration,
+    },
+    ModelCompleted {
+        row_count: usize,
+        duration: StdDuration,
+    },
+    CheckResult {
+        check: String,
+        status: String,
+        row_count: usize,
+    },
+    ModelRetrying {
+        attempt: u32,
+        retry_max: u32,
+        error: String,
+    },
+}
+
+/// Records [`RunReporter`] callbacks made during one model's execution
+/// instead of forwarding them immediately — the wavefront scheduler may run
+/// several models' execution units concurrently, and forwarding callbacks
+/// as they happen would interleave them nondeterministically. Implements
+/// [`RunReporter`] itself so the (otherwise unmodified) per-model execution
+/// logic can call it under the shadowed name `reporter` with no rewriting.
+#[derive(Default)]
+struct EventSink {
+    events: std::sync::Mutex<Vec<ReporterEvent>>,
+}
+
+impl EventSink {
+    /// Record one event. The single lock site every [`RunReporter`] method
+    /// below routes through, so `EventSink` needs exactly one poisoned-lock
+    /// `.expect` for all of them combined rather than one per method
+    /// (`.claude/hardening-baseline.txt` ratchet — see root `CLAUDE.md`
+    /// §"Fail-loud discipline").
+    fn push(&self, event: ReporterEvent) {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .push(event);
+    }
+
+    /// Number of `ModelRetrying` events buffered for this model — the final
+    /// per-model retry count threaded into its `ModelRunRecord` (`error`/
+    /// `retry_count` fields, `docs/plans/20260719-prod-w2-operability.md`
+    /// Phase 8). Every retry attempt calls `model_retrying` exactly once, so
+    /// this count is exact regardless of whether the model ultimately
+    /// succeeded or failed.
+    fn retry_count(&self) -> u32 {
+        self.events
+            .lock()
+            .expect("EventSink mutex poisoned")
+            .iter()
+            .filter(|e| matches!(e, ReporterEvent::ModelRetrying { .. }))
+            .count() as u32
+    }
+
+    /// Replay every buffered event onto `reporter`, in the order recorded.
+    fn replay(&self, reporter: &dyn RunReporter, run_id: &str, model: &str) {
+        for event in self.events.lock().expect("EventSink mutex poisoned").iter() {
+            match event {
+                ReporterEvent::ModelStarted {
+                    model_index,
+                    models_total,
+                } => reporter.model_started(run_id, model, *model_index, *models_total),
+                ReporterEvent::ModelCompiled { sql } => reporter.model_compiled(run_id, model, sql),
+                ReporterEvent::MaintenanceStatements { chunk, group } => {
+                    reporter.maintenance_statements(run_id, model, chunk.as_ref(), group)
+                }
+                ReporterEvent::BatchCompleted {
+                    batch_index,
+                    batches_total,
+                    row_count,
+                    duration,
+                } => reporter.batch_completed(
+                    run_id,
+                    model,
+                    *batch_index,
+                    *batches_total,
+                    *row_count,
+                    *duration,
+                ),
+                ReporterEvent::ModelCompleted {
+                    row_count,
+                    duration,
+                } => reporter.model_completed(run_id, model, *row_count, *duration),
+                ReporterEvent::CheckResult {
+                    check,
+                    status,
+                    row_count,
+                } => reporter.check_result(run_id, check, status, *row_count),
+                ReporterEvent::ModelRetrying {
+                    attempt,
+                    retry_max,
+                    error,
+                } => reporter.model_retrying(run_id, model, *attempt, *retry_max, error),
+            }
+        }
+    }
+}
+
+impl RunReporter for EventSink {
+    fn model_started(&self, _run_id: &str, _model: &str, model_index: usize, models_total: usize) {
+        self.push(ReporterEvent::ModelStarted {
+            model_index,
+            models_total,
+        });
+    }
+
+    fn model_compiled(&self, _run_id: &str, _model: &str, sql: &str) {
+        self.push(ReporterEvent::ModelCompiled {
+            sql: sql.to_string(),
+        });
+    }
+
+    fn maintenance_statements(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        chunk: Option<&crate::reporter::ChunkInfo>,
+        group: &smelt_logical::maintenance::emit::StatementGroup,
+    ) {
+        self.push(ReporterEvent::MaintenanceStatements {
+            chunk: chunk.cloned(),
+            group: group.clone(),
+        });
+    }
+
+    fn batch_completed(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        batch_index: usize,
+        batches_total: usize,
+        row_count: usize,
+        duration: StdDuration,
+    ) {
+        self.push(ReporterEvent::BatchCompleted {
+            batch_index,
+            batches_total,
+            row_count,
+            duration,
+        });
+    }
+
+    fn model_completed(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        row_count: usize,
+        duration: StdDuration,
+    ) {
+        self.push(ReporterEvent::ModelCompleted {
+            row_count,
+            duration,
+        });
+    }
+
+    fn check_result(&self, _run_id: &str, check: &str, status: &str, row_count: usize) {
+        self.push(ReporterEvent::CheckResult {
+            check: check.to_string(),
+            status: status.to_string(),
+            row_count,
+        });
+    }
+
+    fn model_retrying(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        attempt: u32,
+        retry_max: u32,
+        error: &str,
+    ) {
+        self.push(ReporterEvent::ModelRetrying {
+            attempt,
+            retry_max,
+            error: error.to_string(),
+        });
+    }
+}
+
+/// Default retry bound (`ExecuteRequest::retry_max`) and base backoff, in
+/// milliseconds (`ExecuteRequest::retry_backoff_ms`), used when a request
+/// leaves either field unset (`docs/plans/20260719-prod-w2-operability.md`
+/// Phase 6).
+const DEFAULT_RETRY_MAX: u32 = 3;
+const DEFAULT_RETRY_BACKOFF_MS: u64 = 200;
+
+/// Deterministic backoff delay for retry `attempt` (1-based) of
+/// `model_name` within run `run_id`: exponential backoff off
+/// `base_backoff_ms`, jittered by a stable hash of `(run_id, model_name,
+/// attempt)` — never real-clock entropy (`rand`, `Instant`, `SystemTime`),
+/// so retry timing is reproducible and tests never race a real delay
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6: "jitter from
+/// run_id hash — no `Date::now` coupling in tests").
+fn retry_backoff_delay(
+    base_backoff_ms: u64,
+    attempt: u32,
+    run_id: &str,
+    model_name: &str,
+) -> StdDuration {
+    use std::collections::hash_map::DefaultHasher;
+    use std::hash::{Hash, Hasher};
+
+    // Cap the shift so a pathologically high `retry_max` cannot overflow.
+    let shift = attempt.saturating_sub(1).min(16);
+    let exponential = base_backoff_ms.saturating_mul(1u64 << shift);
+    let mut hasher = DefaultHasher::new();
+    (run_id, model_name, attempt).hash(&mut hasher);
+    let jitter = if base_backoff_ms == 0 {
+        0
+    } else {
+        hasher.finish() % base_backoff_ms
+    };
+    StdDuration::from_millis(exponential.saturating_add(jitter))
+}
+
+/// Resolved retry policy for one model's maintenance write
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). Carries exactly
+/// the fields [`retry_backend_call`] needs so every statement-group-issuing
+/// call site — the incremental/full-refresh dispatch in this module AND the
+/// column-scoped-MERGE (MP11), T3 delta-restricted DeleteInsert, and
+/// windowed-keyed-maintenance (`refresh: keyed`) dispatch in
+/// `maintenance_driver.rs`/`cumulative.rs` — retries a transient backend
+/// error identically, rather than each layer growing its own copy of the
+/// backoff/jitter math. `retry_max: 0` (an operator's `retry_max: 0` request,
+/// or a test that does not exercise retry) makes every retry-guarded call a
+/// single, unretried attempt — behaviourally identical to no retry wrapper
+/// at all.
+pub struct RetryPolicy<'a> {
+    pub retry_max: u32,
+    pub base_backoff_ms: u64,
+    pub run_id: &'a str,
+    pub model_name: &'a str,
+    pub reporter: &'a dyn RunReporter,
+}
+
+impl<'a> RetryPolicy<'a> {
+    /// Resolve a request's `retry_max`/`retry_backoff_ms` (falling back to
+    /// [`DEFAULT_RETRY_MAX`]/[`DEFAULT_RETRY_BACKOFF_MS`]) into a policy for
+    /// `model_name` within `run_id`.
+    pub fn from_request(
+        request: &ExecuteRequest,
+        run_id: &'a str,
+        model_name: &'a str,
+        reporter: &'a dyn RunReporter,
+    ) -> Self {
+        Self {
+            retry_max: request.retry_max.unwrap_or(DEFAULT_RETRY_MAX),
+            base_backoff_ms: request.retry_backoff_ms.unwrap_or(DEFAULT_RETRY_BACKOFF_MS),
+            run_id,
+            model_name,
+            reporter,
+        }
+    }
+}
+
+/// Bounded retry with exponential backoff wrapping a single backend call
+/// whose whole effect is safe to re-issue on a transient failure — one
+/// model's *whole* statement group (drop+create for a full refresh, or one
+/// batch's DELETE+INSERT/MERGE/APPEND), or a maintenance helper that reads a
+/// fact then issues exactly one such statement group (T3 delta-restricted
+/// DeleteInsert, MP11 column-scoped MERGE, `refresh: keyed`'s
+/// create-or-merge write) — never a
+/// partial slice of it, and never an earlier, already-succeeded statement
+/// group belonging to the same model
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6, review checklist
+/// "no partial-write replay hazard"). Each of this function's call sites in
+/// `execute_one_model` passes a closure that re-invokes exactly one such
+/// backend call; the closure itself is idempotent-safe to re-run because it
+/// starts with `DROP ... IF EXISTS` (full refresh) or is a backend-native
+/// transactional DELETE+INSERT/MERGE (incremental) —
+/// `Backend::delete_and_insert_transactional`'s own contract
+/// (`crates/smelt-backend/src/lib.rs`) already guarantees a failed INSERT
+/// rolls back its DELETE, so retrying re-applies the same transaction
+/// rather than compounding a partial write.
+///
+/// Retries only `BackendError::is_transient` failures; a deterministic
+/// SQL/type/constraint error is returned to the caller on the first
+/// attempt, unretried.
+pub(crate) async fn retry_backend_call<T, F, Fut>(
+    policy: &RetryPolicy<'_>,
+    mut call: F,
+) -> Result<T, BackendError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BackendError>>,
+{
+    let mut attempt: u32 = 0;
+    loop {
+        match call().await {
+            Ok(value) => return Ok(value),
+            Err(err) if attempt < policy.retry_max && err.is_transient() => {
+                attempt += 1;
+                policy.reporter.model_retrying(
+                    policy.run_id,
+                    policy.model_name,
+                    attempt,
+                    policy.retry_max,
+                    &err.to_string(),
+                );
+                let delay = retry_backoff_delay(
+                    policy.base_backoff_ms,
+                    attempt,
+                    policy.run_id,
+                    policy.model_name,
+                );
+                if !delay.is_zero() {
+                    tokio::time::sleep(delay).await;
+                }
+            }
+            Err(err) => return Err(err),
+        }
+    }
+}
+
+/// Convenience wrapper over [`retry_backend_call`] for this module's own
+/// call sites, which already hold an [`ExecuteRequest`] rather than a
+/// pre-resolved [`RetryPolicy`].
+async fn retry_statement_group<T, F, Fut>(
+    request: &ExecuteRequest,
+    run_id: &str,
+    model_name: &str,
+    reporter: &dyn RunReporter,
+    call: F,
+) -> Result<T, BackendError>
+where
+    F: FnMut() -> Fut,
+    Fut: std::future::Future<Output = Result<T, BackendError>>,
+{
+    let policy = RetryPolicy::from_request(request, run_id, model_name, reporter);
+    retry_backend_call(&policy, call).await
 }
 
 /// Run the project end-to-end.
@@ -699,9 +1076,11 @@ pub async fn execute_project(
     };
 
     // Build model → all_upstream map for the selected set (needed for
-    // downstream closure computation). Captured here to avoid holding the
-    // graph lock across awaits in the model loop.
-    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks {
+    // downstream closure computation — both the check-skip downstream
+    // closure and, when `request.resume` is set, the `--resume` downstream
+    // closure below). Captured here to avoid holding the graph lock across
+    // awaits in the model loop.
+    let upstream_map: HashMap<String, HashSet<String>> = if request.run_checks || request.resume {
         // graph_lock was already dropped above; we need to re-lock briefly to
         // read all_upstream for each selected model.
         // Actually, graph was dropped before backends were created.
@@ -735,7 +1114,103 @@ pub async fn execute_project(
         total_batches,
     );
 
-    let file_store = FileStore::new(project_dir);
+    let file_store = FileStore::new(project_dir, &request.target);
+
+    // ── `--resume`: locate the run to resume from, fail loud if there is
+    // none ────────────────────────────────────────────────────────────────
+    // `docs/specs/run_state.md` §"`--resume` semantics": the candidate is
+    // the latest manifest for this target with `completed_at: null` (an
+    // incomplete run), OR — since `load_runs` is newest-first — the latest
+    // manifest overall whose model selection overlaps the current one and
+    // that recorded at least one non-`success` outcome (a run that
+    // completed the wavefront scheduler but left some models `skipped`,
+    // e.g. because a check failure skipped their downstream dependents
+    // without aborting the whole run). `--resume` with no such run (the
+    // latest run succeeded cleanly, or no manifest exists at all) is a hard
+    // error, never a silent full run, so a typo'd `--resume` on a clean
+    // project can't be mistaken for "nothing needed doing".
+    let current_selection: HashSet<&str> = model_plans.iter().map(|p| p.name.as_str()).collect();
+    let resume_manifest: Option<RunManifest> = if request.resume {
+        let latest_candidate = file_store
+            .load_runs(None)
+            .context("--resume: failed to load run history")?
+            .into_iter()
+            .find(|m| {
+                m.completed_at.is_none()
+                    || (m
+                        .models
+                        .keys()
+                        .any(|name| current_selection.contains(name.as_str()))
+                        && m.models
+                            .values()
+                            .any(|rec| rec.outcome != smelt_state::RunOutcomeKind::Success))
+            });
+        Some(latest_candidate.ok_or_else(|| {
+            anyhow::anyhow!(
+                "--resume: no partially-failed run found for target '{}' — the most recent \
+                 run (if any) completed successfully, so there is nothing to resume. Run \
+                 without --resume, or remove .smelt/ to start fresh.",
+                request.target
+            )
+        })?)
+    } else {
+        None
+    };
+
+    // Models this run skips because `--resume` found them already
+    // `success` last time with an unchanged `definition_hash`. A model
+    // whose prior outcome was `failed`/`skipped`, whose definition changed,
+    // or that is downstream of any such model always re-runs — computed as
+    // a fixpoint over `upstream_map` (built above whenever `request.resume`
+    // is set) so a re-run never leaves a stale downstream table in place
+    // (`docs/specs/run_state.md` §"`--resume` semantics").
+    let resume_skip_set: HashSet<String> = if let Some(ref prior) = resume_manifest {
+        let mut rerun: HashSet<String> = HashSet::new();
+        for plan in model_plans.iter() {
+            let cur_hash = compute_model_hash(&plan.sql);
+            let stays_skipped = prior.models.get(&plan.name).is_some_and(|rec| {
+                rec.outcome == smelt_state::RunOutcomeKind::Success
+                    && rec.definition_hash == cur_hash
+            });
+            if !stays_skipped {
+                rerun.insert(plan.name.clone());
+            }
+        }
+        loop {
+            let mut added = false;
+            for plan in model_plans.iter() {
+                if rerun.contains(&plan.name) {
+                    continue;
+                }
+                if let Some(ups) = upstream_map.get(&plan.name) {
+                    if ups.iter().any(|u| rerun.contains(u)) {
+                        rerun.insert(plan.name.clone());
+                        added = true;
+                    }
+                }
+            }
+            if !added {
+                break;
+            }
+        }
+        model_plans
+            .iter()
+            .map(|p| p.name.clone())
+            .filter(|n| !rerun.contains(n))
+            .collect()
+    } else {
+        HashSet::new()
+    };
+
+    // Hold the exclusive advisory lock on `.smelt/lock` for the remainder of
+    // this run — every state write below (manifest, intervals,
+    // reconciliation ledger, landed deltas, schema snapshots) happens while
+    // `_state_lock` is alive. Dropping it (on success or any error/early
+    // return from this point on, since it is an ordinary local binding)
+    // releases the lock (`docs/specs/run_state.md` §"Locking").
+    let _state_lock = file_store
+        .lock()
+        .context("failed to acquire the .smelt/ state lock")?;
     let mut manifest = RunManifest {
         run_id: run_id.clone(),
         started_at: run_start,
@@ -744,27 +1219,133 @@ pub async fn execute_project(
     };
 
     let mut total_rows_overall: usize = 0;
+    let models_total = model_plans.len();
 
-    for (model_idx, plan) in model_plans.iter().enumerate() {
+    // Serializes the shared, whole-store-per-write `file_store` sections
+    // (interval store / landed-delta store / reconciliation ledger — each a
+    // single JSON blob covering every model) across concurrently executing
+    // models. Without this, two models completing in the same wave could
+    // each load-modify-save the SAME file and lose one write (a
+    // load-modify-save race, not covered by `_state_lock` — that lock is
+    // single-writer-per-*process*, not single-writer-per-in-process-task).
+    // The backend call itself is NOT covered by this lock — only the cheap
+    // local file I/O is, so it does not serialize the expensive part of a
+    // model's work.
+    let state_io_lock = tokio::sync::Mutex::new(());
+
+    // Every non-`Copy` piece of context the per-model execution unit below
+    // needs is rebound here as a reference so the `move` closure — called
+    // once per model, potentially many times concurrently in flight — can
+    // capture each one BY VALUE as a cheap `Copy` reference instead of
+    // moving the underlying owned data (which would make the closure
+    // `FnOnce`, callable only once). The per-model body keeps referring to
+    // these under their original names (`backends`, `config`, `run_id`,
+    // …) unmodified — only this rebinding needed to change.
+    let cancel = &cancel;
+    let request = &request;
+    let run_id = run_id.as_str();
+    let checks_by_model = &checks_by_model;
+    let upstream_map = &upstream_map;
+    let selected = &selected;
+    let file_store = &file_store;
+    let config = &config;
+    let target_assignments = &target_assignments;
+    let backends = &backends;
+    let compilers = &compilers;
+    let ephemeral_resolvers = &ephemeral_resolvers;
+    let source_infos = &source_infos;
+    let model_by_addr = &model_by_addr;
+    let source_timeseries = &source_timeseries;
+    let source_key_recurrence = &source_key_recurrence;
+    let upstream_schemas_for_bootstrap = &upstream_schemas_for_bootstrap;
+    let db = &db;
+    let state_io_lock = &state_io_lock;
+    let model_plans = &model_plans;
+    let resume_skip_set = &resume_skip_set;
+
+    // ── Per-model execution unit ──────────────────────────────────────────
+    // Runs one model to completion (or cancellation, or failure) and returns
+    // its outcome instead of mutating shared run-level state directly —
+    // the wavefront scheduler below runs many of these concurrently (bounded
+    // by `request.jobs`) and merges outcomes back into `manifest`/
+    // `check_results`/`skip_set`/`total_rows_overall` strictly in
+    // `execution_order` sequence, one model at a time, so a concurrent
+    // scheduling never produces a nondeterministic manifest or reporter
+    // stream (`docs/plans/20260719-prod-w2-operability.md` Phase 5).
+    //
+    // `already_skip` is a snapshot of the run-level `skip_set` taken when
+    // this model's wave started — safe because a wave's members share no
+    // dependency edge with each other, and `skip_set` only ever gains
+    // entries for a check's *downstream* models (`upstream_map`-derived),
+    // so no same-wave sibling can skip-mark another.
+    let execute_one_model = move |model_idx: usize, already_skip: bool| {
+        let plan = &model_plans[model_idx];
+        async move {
+            // `sink` buffers every reporter callback this model's execution
+            // produces; the scheduler replays them onto the real `reporter` only
+            // once this model's turn comes up in `execution_order` sequence.
+            // Shadowing the outer `reporter` binding means the (unmodified)
+            // per-model logic below — inherited from the pre-Phase-5 sequential
+            // loop — calls `sink` under the name `reporter` with no further
+            // rewriting needed. The block's own `?` operator now short-circuits
+            // just THIS model's execution (returning `Err` from this async
+            // block) rather than the whole run — the scheduler treats any `Err`
+            // the same way the pre-Phase-5 loop treated a `return Err(e)`: this
+            // model failed, attributed to its own name.
+            let sink = EventSink::default();
+            let reporter: &dyn RunReporter = &sink;
+            let mut manifest_entries: HashMap<String, ModelRunRecord> = HashMap::new();
+            let mut check_results: Vec<CheckOutcome> = Vec::new();
+            let mut skip_set: HashSet<String> = HashSet::new();
+            let mut total_rows_overall: usize = 0;
+
+            let outcome: Result<ModelOutcome> = async {
         if cancel.is_cancelled() {
-            reporter.run_cancelled(&run_id);
-            return Ok(build_outcome(
-                &run_id,
-                run_start,
-                None,
-                manifest,
-                0,
+            return Ok(ModelOutcome::Cancelled);
+        }
+
+        // ── `--resume`: skip a model that already succeeded last time with
+        // an unchanged definition ─────────────────────────────────────────
+        // No compilation, no backend call, no interval/reconciliation/
+        // landed-delta write — a resumed-away model's materialized state
+        // (and its interval-ledger bookkeeping) is left byte-for-byte
+        // untouched (`docs/specs/run_state.md` §"`--resume` semantics").
+        if resume_skip_set.contains(&plan.name) {
+            tracing::info!(
+                "Skipping model '{}' — succeeded in the run being resumed, definition unchanged",
+                plan.name
+            );
+            manifest_entries.insert(
+                plan.name.clone(),
+                smelt_state::ModelRunRecord {
+                    strategy: "skipped_resume".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
+                },
+            );
+            reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
                 check_results,
-            ));
+                skip_set,
+                rows: 0,
+            }));
         }
 
         // ── Skip set: skip models downstream of a failed error check ─────
-        if request.run_checks && skip_set.contains(&plan.name) {
+        if request.run_checks && already_skip {
             tracing::info!(
                 "Skipping model '{}' — downstream of a failed error-severity check",
                 plan.name
             );
-            manifest.models.insert(
+            manifest_entries.insert(
                 plan.name.clone(),
                 smelt_state::ModelRunRecord {
                     strategy: "skipped_failed_check".to_string(),
@@ -773,13 +1354,22 @@ pub async fn execute_project(
                     row_count: 0,
                     duration_ms: 0,
                     batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
                 },
             );
-            reporter.model_completed(&run_id, &plan.name, 0, std::time::Duration::ZERO);
-            continue;
+            reporter.model_completed(run_id, &plan.name, 0, std::time::Duration::ZERO);
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: 0,
+            }));
         }
 
-        reporter.model_started(&run_id, &plan.name, model_idx, model_plans.len());
+        reporter.model_started(run_id, &plan.name, model_idx, models_total);
 
         let model_start = Instant::now();
         let mut total_rows = 0usize;
@@ -830,9 +1420,11 @@ pub async fn execute_project(
                         );
                         let ddl_backend =
                             ddl_backend_for_dialect(backend.dialect(), table_format, None);
+                        let schema_evolution_retry =
+                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                         match check_and_migrate(
                             backend,
-                            &file_store,
+                            file_store,
                             &db_table_name,
                             &plan.sql,
                             schema,
@@ -843,6 +1435,7 @@ pub async fn execute_project(
                             &column_defaults,
                             &backfill_exprs,
                             Some(&ddl_backend),
+                            &schema_evolution_retry,
                         )
                         .await
                         {
@@ -855,11 +1448,6 @@ pub async fn execute_project(
                                 ) {
                                     Ok(should_refresh) => force_full_refresh = should_refresh,
                                     Err(e) => {
-                                        reporter.run_failed(
-                                            &run_id,
-                                            Some(&plan.name),
-                                            &e.to_string(),
-                                        );
                                         return Err(e);
                                     }
                                 }
@@ -890,24 +1478,61 @@ pub async fn execute_project(
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
 
+            // W10 Phase 4 (`docs/plans/20260720-prod-w10-keyed-mutable-
+            // admission.md`): consult the SAME derived `MaintenancePlan`
+            // the non-keyed incremental branch already does (below, ~L1788)
+            // for a live `ColumnScopedMerge` cell on one of this model's
+            // `explicitly_mutable` sources — the keyed run loop's own
+            // analogue of `resolve_incremental_strategy`. The cumulative
+            // fold above/below still owns the `NewData` (creation/append)
+            // trigger; this owns the `UpstreamMutation` trigger, dispatched
+            // ALONGSIDE it once a live cell resolves and the target table
+            // already exists (never on the creation run — there is nothing
+            // to merge into yet). `table_exists_before_run` is captured
+            // BEFORE the fold below runs (which may itself create the
+            // table on a first run), mirroring the non-keyed branch's own
+            // "did the table exist before THIS run" capture.
+            let clean_sql_for_merge = smelt_parser::strip_frontmatter(&plan.sql).to_string();
+            let (maint_source_facts, explicitly_mutable) =
+                build_maint_source_facts(&plan.model_file, source_infos);
+            let table_exists_before_run = backend
+                .table_exists(schema, &db_table_name)
+                .await
+                .unwrap_or(false);
+            let column_scoped_cell = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
+                    &clean_sql_for_merge,
+                    &db_table_name,
+                    metadata,
+                    &maint_source_facts,
+                    &explicitly_mutable,
+                    backend.capabilities().supports_column_scoped_merge,
+                    &request.technique_overrides,
+                )?,
+                None => None,
+            };
+
             let exec_result = match (start_date, end_date) {
                 (Some(s), Some(e)) => {
                     let time_range = TimeRange {
                         start: s.format("%Y-%m-%d").to_string(),
                         end: e.format("%Y-%m-%d").to_string(),
                     };
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                     crate::cumulative::execute_cumulative_aggregate(
                         backend,
                         &plan.model_file,
-                        &compilers,
+                        compilers,
                         resolver,
                         model_target,
                         schema,
                         &db_table_name,
                         &time_range,
-                        &source_timeseries,
-                        &source_key_recurrence,
+                        source_timeseries,
+                        source_key_recurrence,
                         false,
+                        &retry_policy,
                     )
                     .await
                 }
@@ -932,7 +1557,7 @@ pub async fn execute_project(
                     crate::cumulative::classify_cumulative_sql(
                         &plan.name,
                         &clean_sql,
-                        &source_timeseries,
+                        source_timeseries,
                         model_has_timeseries,
                     )?;
                     let compiled = compiler.compile_with_sql_and_ephemerals(
@@ -969,17 +1594,144 @@ pub async fn execute_project(
             let exec_result = match exec_result {
                 Ok(r) => r,
                 Err(e) => {
-                    reporter.run_failed(&run_id, Some(&plan.name), &e.to_string());
                     return Err(e);
                 }
             };
 
-            total_rows = exec_result.row_count;
-            total_rows_overall += exec_result.row_count;
-            manifest.models.insert(
+            // W10 Phase 4: dispatch the live `UpstreamMutation` cell
+            // resolved above, alongside the cumulative fold that just ran —
+            // "the driver loop becomes the per-cell technique executor"
+            // (`docs/plans/20260707-maintenance-plan-impl.md` MP11), now
+            // extended to the keyed run loop. Never fires on the creation
+            // run (`table_exists_before_run` was captured before the fold
+            // above could have just created the table).
+            let mut used_column_scoped_merge = false;
+            if let Some((source, cell, suppression)) = column_scoped_cell.as_ref() {
+                if table_exists_before_run {
+                    // The mutated dimension's own declared `unique_key`
+                    // (`sources.md` §"Row identity") — same lookup the
+                    // non-keyed incremental branch performs, needed only for
+                    // the horizon-clamped corner's join-contribution proof.
+                    let dimension_unique_key: Vec<String> = source_infos
+                        .iter()
+                        .find(|info| {
+                            let segs = &info.address_segments;
+                            let bare = match segs.split_first() {
+                                Some((first, rest)) if first == "sources" => rest.join("."),
+                                _ => segs.join("."),
+                            };
+                            &bare == source
+                        })
+                        .and_then(|info| info.unique_key.clone())
+                        .unwrap_or_default();
+                    let contribution = if matches!(
+                        cell.partition_local,
+                        smelt_logical::maintenance::PartitionLocal::Yes
+                    ) {
+                        crate::maintenance_driver::dimension_join_contribution(
+                            &clean_sql_for_merge,
+                            source,
+                            &dimension_unique_key,
+                        )
+                    } else {
+                        smelt_logical::analysis::join_shape::ContributionVerdict::Monotone
+                    };
+                    let model_unique_key: Vec<String> = plan
+                        .model_file
+                        .metadata
+                        .as_deref()
+                        .and_then(|m| m.unique_key.clone())
+                        .unwrap_or_default();
+                    let dispatch = crate::maintenance_driver::decide_column_merge_dispatch(
+                        cell,
+                        source,
+                        table_exists_before_run,
+                        !model_unique_key.is_empty(),
+                        &contribution,
+                    );
+                    if let Some(dispatch) = dispatch {
+                        let compiled = compiler.compile_with_sql_and_ephemerals(
+                            &plan.model_file,
+                            schema,
+                            &clean_sql_for_merge,
+                            resolver,
+                        )?;
+                        let (window_start, window_end) = match (start_date, end_date) {
+                            (Some(s), Some(e)) => (
+                                s.format("%Y-%m-%d").to_string(),
+                                e.format("%Y-%m-%d").to_string(),
+                            ),
+                            _ => (String::new(), String::new()),
+                        };
+                        // A bare `grain: key` output has no partition
+                        // column of its own — `column: String::new()` is
+                        // the documented empty-string convention
+                        // `execute_column_scoped_write_with_observed_delta`
+                        // already reads as "no partition column" (T5's
+                        // observed-delta recording still keys on
+                        // `[start, end)` alone).
+                        let window = smelt_backend::PartitionRange {
+                            column: String::new(),
+                            start: window_start,
+                            end: window_end,
+                        };
+                        let retry_policy =
+                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                        let merge_result = match dispatch {
+                            crate::maintenance_driver::ColumnMergeDispatch::Full => {
+                                crate::maintenance_driver::execute_column_scoped_merge_full(
+                                    backend,
+                                    schema,
+                                    &db_table_name,
+                                    &model_unique_key,
+                                    &compiled.sql,
+                                    suppression,
+                                    &window,
+                                    &retry_policy,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?
+                            }
+                            crate::maintenance_driver::ColumnMergeDispatch::Clamped(_) => {
+                                // The horizon-clamped corner needs a
+                                // conv_ts on the output's own partition
+                                // axis — only a composed clock-and-identity
+                                // output that ALSO declares its own
+                                // `timeseries:` establishes one
+                                // (`incremental_models.md` §"Key temporal
+                                // locality"). No derivable keyed cell
+                                // reaches `PartitionLocal::Yes` today (the
+                                // non-keyed branch's own comment on this
+                                // corner: a clocked dimension's scan-bound
+                                // derivation is deferred) — refuse loudly
+                                // rather than silently mis-scoping the
+                                // write.
+                                return Err(anyhow::anyhow!(
+                                    "keyed run path: the horizon-clamped column-scoped MERGE \
+                                     corner is not yet reachable for a grain: key output \
+                                     ('{}') — its scan-bound derivation is deferred",
+                                    plan.name
+                                ));
+                            }
+                        };
+                        used_column_scoped_merge = true;
+                        total_rows = merge_result.row_count;
+                    }
+                }
+            }
+            if !used_column_scoped_merge {
+                total_rows = exec_result.row_count;
+            }
+            total_rows_overall += total_rows;
+            let keyed_strategy_label = if used_column_scoped_merge {
+                "column_scoped_merge".to_string()
+            } else {
+                "cumulative_aggregate".to_string()
+            };
+            manifest_entries.insert(
                 plan.name.clone(),
                 ModelRunRecord {
-                    strategy: "cumulative_aggregate".to_string(),
+                    strategy: keyed_strategy_label,
                     time_range: match (start_date, end_date) {
                         (Some(s), Some(e)) => Some(TimeRangeRecord {
                             start: s.format("%Y-%m-%d").to_string(),
@@ -988,32 +1740,41 @@ pub async fn execute_project(
                         _ => None,
                     },
                     partitions_updated: vec![],
-                    row_count: exec_result.row_count,
+                    row_count: total_rows,
                     duration_ms: model_start.elapsed().as_millis() as u64,
                     batch_safety: Some("cumulative".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Success,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: sink.retry_count(),
                 },
             );
-            reporter.model_completed(&run_id, &plan.name, total_rows, model_start.elapsed());
+            reporter.model_completed(run_id, &plan.name, total_rows, model_start.elapsed());
             // ── Check seam A: cumulative arm ─────────────────────────────────
             if request.run_checks {
                 let (outcomes, to_skip) = run_model_checks(
                     &plan.name,
-                    &checks_by_model,
-                    &compilers,
-                    &backends,
-                    &target_assignments,
-                    &ephemeral_resolvers,
+                    checks_by_model,
+                    compilers,
+                    backends,
+                    target_assignments,
+                    ephemeral_resolvers,
                     config.as_ref(),
-                    &upstream_map,
-                    &selected,
+                    upstream_map,
+                    selected,
                     reporter,
-                    &run_id,
+                    run_id,
                 )
                 .await;
                 check_results.extend(outcomes);
                 skip_set.extend(to_skip);
             }
-            continue;
+            return Ok(ModelOutcome::Completed(ModelSuccess {
+                manifest_entries,
+                check_results,
+                skip_set,
+                rows: total_rows,
+            }));
         }
 
         let result: Result<()> = match plan.incremental.as_ref().filter(|_| !force_full_refresh) {
@@ -1140,7 +1901,7 @@ pub async fn execute_project(
                 // model's own row identity is not a single column — the
                 // batch loop below then always takes the ordinary widened
                 // scan, unchanged from before this phase.
-                let model_edges = model_edges_for(&plan.model_file, &model_by_addr);
+                let model_edges = model_edges_for(&plan.model_file, model_by_addr);
                 let delta_restriction_facts = if model_edges.is_empty() {
                     None
                 } else {
@@ -1185,16 +1946,18 @@ pub async fn execute_project(
                 // only asks which technique the plan admits for the trigger,
                 // exactly like `resolve_incremental_strategy` above does for
                 // the creation trigger.
-                let column_scoped_cell = plan.model_file.metadata.as_deref().and_then(|metadata| {
-                    crate::maintenance_driver::resolve_live_column_scoped_cell(
+                let column_scoped_cell = match plan.model_file.metadata.as_deref() {
+                    Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
                         &sql_for_bounds,
                         &plan.model_file.db_name_owned(),
                         metadata,
                         &maint_source_facts,
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
-                    )
-                });
+                        &request.technique_overrides,
+                    )?,
+                    None => None,
+                };
 
                 let dep_ts: std::collections::HashMap<String, (Vec<String>, String)> =
                     source_timeseries
@@ -1324,13 +2087,14 @@ pub async fn execute_project(
                         .await?;
                     if !table_exists {
                         bootstrap_self_ref_empty_target(
+                            request,
                             backend,
                             schema,
                             &plan.model_file,
                             &plan.name,
-                            &upstream_schemas_for_bootstrap,
+                            upstream_schemas_for_bootstrap,
                             reporter,
-                            &run_id,
+                            run_id,
                         )
                         .await?;
                     }
@@ -1338,15 +2102,7 @@ pub async fn execute_project(
 
                 for (batch_idx, batch) in inc_plan.batches.iter().enumerate() {
                     if cancel.is_cancelled() {
-                        reporter.run_cancelled(&run_id);
-                        return Ok(build_outcome(
-                            &run_id,
-                            run_start,
-                            None,
-                            manifest,
-                            total_rows_overall,
-                            vec![],
-                        ));
+                        return Ok(ModelOutcome::Cancelled);
                     }
 
                     let batch_start_time = Instant::now();
@@ -1415,7 +2171,7 @@ pub async fn execute_project(
                         &filtered_sql,
                         resolver,
                     )?;
-                    reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
+                    reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
                     // The DELETE range must equal exactly what the INSERT writes —
                     // the write window equals the output window
@@ -1460,6 +2216,8 @@ pub async fn execute_project(
                         None
                     };
 
+                    let retry_policy =
+                        RetryPolicy::from_request(request, run_id, &plan.name, reporter);
                     let exec_result = if let Some(dispatch) = column_merge_dispatch.as_ref() {
                         // MP11 (`incremental_models.md` §"Per-cell admission"):
                         // the live `UpstreamMutation` cell resolved to
@@ -1490,6 +2248,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     suppression,
                                     &partition,
+                                    &retry_policy,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1527,6 +2286,7 @@ pub async fn execute_project(
                                     &compiled.sql,
                                     suppression,
                                     &partition,
+                                    &retry_policy,
                                 )
                                 .await
                                 .map_err(|e| anyhow::anyhow!("{}", e))?
@@ -1575,6 +2335,7 @@ pub async fn execute_project(
                                 &partition.start,
                                 &partition.end,
                                 smelt_backend::maintenance_dialect(backend.dialect()),
+                                &retry_policy,
                             )
                             .await
                             .map_err(|e| anyhow::anyhow!("{}", e))?;
@@ -1584,7 +2345,7 @@ pub async fn execute_project(
                             start: partition.start.clone(),
                             end: partition.end.clone(),
                         };
-                        reporter.maintenance_statements(&run_id, &plan.name, Some(&chunk), &group);
+                        reporter.maintenance_statements(run_id, &plan.name, Some(&chunk), &group);
                         let row_count = backend
                             .get_row_count(schema, &plan.model_file.db_name_owned())
                             .await
@@ -1640,7 +2401,7 @@ pub async fn execute_project(
                                 end: partition.end.clone(),
                             };
                             reporter.maintenance_statements(
-                                &run_id,
+                                run_id,
                                 &plan.name,
                                 Some(&chunk),
                                 &group,
@@ -1653,17 +2414,19 @@ pub async fn execute_project(
                             unique_key: inc_plan.config.unique_key.clone(),
                         };
 
-                        backend
-                            .execute_model_incremental(
+                        let db_name = plan.model_file.db_name_owned();
+                        retry_statement_group(request, run_id, &plan.name, reporter, || {
+                            backend.execute_model_incremental(
                                 schema,
-                                &plan.model_file.db_name_owned(),
+                                &db_name,
                                 &compiled.sql,
                                 Materialization::Table,
-                                strategy,
+                                strategy.clone(),
                                 false,
                             )
-                            .await
-                            .map_err(|e| anyhow::anyhow!("{}", e))?
+                        })
+                        .await
+                        .map_err(|e| anyhow::anyhow!("{}", e))?
                     };
 
                     total_rows += exec_result.row_count;
@@ -1671,7 +2434,7 @@ pub async fn execute_project(
 
                     let batch_duration = batch_start_time.elapsed();
                     reporter.batch_completed(
-                        &run_id,
+                        run_id,
                         &plan.name,
                         batch_idx,
                         inc_plan.batches.len(),
@@ -1693,7 +2456,7 @@ pub async fn execute_project(
                 } else {
                     format!("{:?}", resolved_strategy).to_lowercase()
                 };
-                manifest.models.insert(
+                manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
                         strategy: strategy_label,
@@ -1705,6 +2468,10 @@ pub async fn execute_project(
                         row_count: total_rows,
                         duration_ms: model_start.elapsed().as_millis() as u64,
                         batch_safety: Some("incremental".to_string()),
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: sink.retry_count(),
                     },
                 );
 
@@ -1715,11 +2482,20 @@ pub async fn execute_project(
                 // DELETE+INSERT batch would have used) — only the physical
                 // write technique differs, so the interval store's record
                 // stays accurate regardless of which technique wrote it.
-                if let Ok(mut interval_store) = file_store.load_intervals() {
-                    let model_hash = compute_model_hash(&plan.sql);
-                    let intervals = interval_store.get_or_create(&plan.name, &model_hash);
-                    intervals.record_interval(&start_str, &end_str);
-                    let _ = file_store.save_intervals(&interval_store);
+                {
+                    // Whole-store load-modify-save critical section
+                    // (`state_io_lock`, declared before the wavefront
+                    // scheduler) — `intervals.json` is one JSON blob
+                    // covering every model, so two models finishing in the
+                    // same wave must not race a save that silently drops
+                    // the other's write.
+                    let _io_guard = state_io_lock.lock().await;
+                    if let Ok(mut interval_store) = file_store.load_intervals() {
+                        let model_hash = compute_model_hash(&plan.sql);
+                        let intervals = interval_store.get_or_create(&plan.name, &model_hash);
+                        intervals.record_interval(&start_str, &end_str);
+                        let _ = file_store.save_intervals(&interval_store);
+                    }
                 }
 
                 // Per-source landed-delta recording (P10 v1: `docs/specs/sources.md`
@@ -1737,6 +2513,9 @@ pub async fn execute_project(
                 // `LandedDelta::WholeTable` — never a silent no-op
                 // (`incremental_models.md` §"Forward propagation").
                 if !start_str.is_empty() && !end_str.is_empty() {
+                    // Same whole-store critical section rationale as the
+                    // interval store above — `landed_deltas.json`.
+                    let _io_guard = state_io_lock.lock().await;
                     if let Ok(mut landed_deltas) = file_store.load_landed_deltas() {
                         for sf in &maint_source_facts {
                             let posture = if sf.partition_col.is_none() {
@@ -1783,6 +2562,9 @@ pub async fn execute_project(
                 // the column-scoped-merge technique is MP12's job
                 // (`incremental_models.md` §"The reconciliation ledger").
                 if !start_str.is_empty() && !end_str.is_empty() {
+                    // Same whole-store critical section rationale as the
+                    // interval store above — `reconciliation.json`.
+                    let _io_guard = state_io_lock.lock().await;
                     if let Ok(mut reconciliation) = file_store.load_reconciliation_store() {
                         let region = Region::new(start_str.clone(), end_str.clone());
                         let mut read = std::collections::BTreeMap::new();
@@ -1809,7 +2591,7 @@ pub async fn execute_project(
                     &clean_sql,
                     resolver,
                 )?;
-                reporter.model_compiled(&run_id, &plan.name, &compiled.sql);
+                reporter.model_compiled(run_id, &plan.name, &compiled.sql);
 
                 let mat = match plan.materialization {
                     smelt_core::config::Materialization::Table => Materialization::Table,
@@ -1852,24 +2634,23 @@ pub async fn execute_project(
                         .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                     bootstrap_self_ref_empty_target(
+                        request,
                         backend,
                         schema,
                         &plan.model_file,
                         &plan.name,
-                        &upstream_schemas_for_bootstrap,
+                        upstream_schemas_for_bootstrap,
                         reporter,
-                        &run_id,
+                        run_id,
                     )
                     .await?;
 
-                    backend
-                        .insert_into_from_query(
-                            schema,
-                            &plan.model_file.db_name_owned(),
-                            &compiled.sql,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?;
+                    let db_name = plan.model_file.db_name_owned();
+                    retry_statement_group(request, run_id, &plan.name, reporter, || {
+                        backend.insert_into_from_query(schema, &db_name, &compiled.sql)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?;
 
                     let row_count = backend
                         .get_row_count(schema, &plan.model_file.db_name_owned())
@@ -1882,16 +2663,12 @@ pub async fn execute_project(
                         preview: None,
                     }
                 } else {
-                    backend
-                        .execute_model(
-                            schema,
-                            &plan.model_file.db_name_owned(),
-                            &compiled.sql,
-                            mat,
-                            false,
-                        )
-                        .await
-                        .map_err(|e| anyhow::anyhow!("{}", e))?
+                    let db_name = plan.model_file.db_name_owned();
+                    retry_statement_group(request, run_id, &plan.name, reporter, || {
+                        backend.execute_model(schema, &db_name, &compiled.sql, mat, false)
+                    })
+                    .await
+                    .map_err(|e| anyhow::anyhow!("{}", e))?
                 };
 
                 total_rows = exec_result.row_count;
@@ -1913,7 +2690,7 @@ pub async fn execute_project(
                             .flatten()
                             .map(|s| s.version);
                         if let Err(e) = crate::schema_evolution::save_deployed_schema(
-                            &file_store,
+                            file_store,
                             &db_table_name,
                             &plan.sql,
                             &inferred_columns,
@@ -1928,7 +2705,7 @@ pub async fn execute_project(
                     }
                 }
 
-                manifest.models.insert(
+                manifest_entries.insert(
                     plan.name.clone(),
                     ModelRunRecord {
                         strategy: "full_refresh".to_string(),
@@ -1937,6 +2714,10 @@ pub async fn execute_project(
                         row_count: exec_result.row_count,
                         duration_ms: model_start.elapsed().as_millis() as u64,
                         batch_safety: None,
+                        outcome: smelt_state::RunOutcomeKind::Success,
+                        definition_hash: compute_model_hash(&plan.sql),
+                        error: None,
+                        retry_count: sink.retry_count(),
                     },
                 );
 
@@ -1944,10 +2725,7 @@ pub async fn execute_project(
             }
         };
 
-        if let Err(e) = result {
-            reporter.run_failed(&run_id, Some(&plan.name), &e.to_string());
-            return Err(e);
-        }
+        result?;
 
         // ── First-deployment schema baseline (incremental models) ────────
         // The schema-evolution gate above can only diff against a stored
@@ -1973,7 +2751,7 @@ pub async fn execute_project(
                 };
                 if !inferred_columns.is_empty() {
                     if let Err(e) = crate::schema_evolution::save_deployed_schema(
-                        &file_store,
+                        file_store,
                         &db_table_name,
                         &plan.sql,
                         &inferred_columns,
@@ -1986,31 +2764,277 @@ pub async fn execute_project(
         }
 
         let model_duration = model_start.elapsed();
-        reporter.model_completed(&run_id, &plan.name, total_rows, model_duration);
+        reporter.model_completed(run_id, &plan.name, total_rows, model_duration);
         // ── Check seam B: incremental / full-refresh arm ─────────────────────
         if request.run_checks {
             let (outcomes, to_skip) = run_model_checks(
                 &plan.name,
-                &checks_by_model,
-                &compilers,
-                &backends,
-                &target_assignments,
-                &ephemeral_resolvers,
+                checks_by_model,
+                compilers,
+                backends,
+                target_assignments,
+                ephemeral_resolvers,
                 config.as_ref(),
-                &upstream_map,
-                &selected,
+                upstream_map,
+                selected,
                 reporter,
-                &run_id,
+                run_id,
             )
             .await;
             check_results.extend(outcomes);
             skip_set.extend(to_skip);
         }
+
+        Ok(ModelOutcome::Completed(ModelSuccess {
+            manifest_entries,
+            check_results,
+            skip_set,
+            rows: total_rows,
+        }))
+        }
+        .await;
+            (sink, outcome)
+        }
+    };
+
+    // ── Wavefront scheduler ─────────────────────────────────────────────
+    // `jobs` bounds how many models may be IN FLIGHT concurrently; `waves`
+    // (topological layers over the selected set,
+    // `DependencyGraph::execution_waves`) bounds WHICH models may start
+    // concurrently — a model never starts until every selected upstream
+    // dependency's wave has fully drained. Reporter events and manifest
+    // entries are buffered per model (`EventSink`) and flushed strictly in
+    // `execution_order` (`model_plans`) index sequence via `next_flush`, so
+    // the observable output is identical regardless of `jobs` or actual
+    // completion order (`docs/plans/20260719-prod-w2-operability.md` Phase
+    // 5).
+    let jobs: usize = request
+        .jobs
+        .unwrap_or_else(|| {
+            std::thread::available_parallelism()
+                .map(|n| n.get())
+                .unwrap_or(1)
+        })
+        .max(1);
+
+    let selected_names: HashSet<String> = model_plans.iter().map(|p| p.name.clone()).collect();
+    let waves: Vec<Vec<String>> = {
+        let graph_lock_waves = graph.lock().await;
+        graph_lock_waves.execution_waves(&selected_names)?
+    };
+    let index_of: HashMap<&str, usize> = model_plans
+        .iter()
+        .enumerate()
+        .map(|(i, p)| (p.name.as_str(), i))
+        .collect();
+
+    let semaphore = tokio::sync::Semaphore::new(jobs);
+    let mut pending: HashMap<usize, (EventSink, Result<ModelOutcome>)> = HashMap::new();
+    let mut next_flush: usize = 0;
+    let mut cancelled = false;
+    // Every model whose execution raised an error, in flush order — not
+    // just the first. A wave dispatches its models concurrently, so more
+    // than one can fail before the scheduler notices; recording all of them
+    // (rather than first-wins) is what lets the abort path below give every
+    // failing model its own `Failed` manifest entry with its own error text
+    // instead of silently downgrading the rest to `skipped`
+    // (`docs/plans/20260719-prod-w2-operability.md` Phase 8 unblock
+    // decision: "let the in-flight wave finish, record every failure, then
+    // abort").
+    let mut aborted: Vec<(String, anyhow::Error)> = Vec::new();
+
+    macro_rules! flush_ready {
+        () => {
+            while let Some((sink, result)) = pending.remove(&next_flush) {
+                let model_name = &model_plans[next_flush].name;
+                sink.replay(reporter, &run_id, model_name);
+                match result {
+                    Ok(ModelOutcome::Completed(success)) => {
+                        manifest.models.extend(success.manifest_entries);
+                        check_results.extend(success.check_results);
+                        skip_set.extend(success.skip_set);
+                        total_rows_overall += success.rows;
+                    }
+                    Ok(ModelOutcome::Cancelled) => {
+                        cancelled = true;
+                    }
+                    Err(e) => {
+                        aborted.push((model_name.clone(), e));
+                    }
+                }
+                next_flush += 1;
+            }
+        };
+    }
+
+    'waves: for wave in &waves {
+        if cancelled || !aborted.is_empty() {
+            break 'waves;
+        }
+        let mut in_flight = futures::stream::FuturesUnordered::new();
+        for name in wave {
+            let idx = index_of[name.as_str()];
+            let already_skip = request.run_checks && skip_set.contains(name);
+            let sem = &semaphore;
+            let task = execute_one_model(idx, already_skip);
+            in_flight.push(async move {
+                let _permit = sem.acquire().await.expect("semaphore is never closed");
+                let (sink, outcome) = task.await;
+                (idx, sink, outcome)
+            });
+        }
+        while let Some((idx, sink, outcome)) = in_flight.next().await {
+            pending.insert(idx, (sink, outcome));
+        }
+        flush_ready!();
+    }
+    // Final catch-up flush: an aborted/cancelled run may leave a later
+    // wave's already-completed results sitting behind an index whose model
+    // never started (its wave was never scheduled) — still record every
+    // outcome that DID complete
+    // (`docs/plans/20260719-prod-w2-operability.md` Phase 5: "in-flight
+    // models drain; all outcomes recorded").
+    {
+        let mut remaining: Vec<usize> = pending.keys().copied().collect();
+        remaining.sort_unstable();
+        for idx in remaining {
+            if let Some((sink, result)) = pending.remove(&idx) {
+                let model_name = &model_plans[idx].name;
+                sink.replay(reporter, run_id, model_name);
+                match result {
+                    Ok(ModelOutcome::Completed(success)) => {
+                        manifest.models.extend(success.manifest_entries);
+                        check_results.extend(success.check_results);
+                        skip_set.extend(success.skip_set);
+                        total_rows_overall += success.rows;
+                    }
+                    Ok(ModelOutcome::Cancelled) => {
+                        cancelled = true;
+                    }
+                    Err(e) => {
+                        aborted.push((model_name.clone(), e));
+                    }
+                }
+            }
+        }
+    }
+
+    if cancelled {
+        // Persist the manifest even on cancellation — a cancelled run (e.g.
+        // via `smelt-ui`'s stop button, `CancellationToken`) must leave a
+        // resumable manifest exactly like a hard-error abort does, since
+        // `--resume` depends on reading it back
+        // (`docs/specs/run_state.md` §"Run manifest", §"`--resume`
+        // semantics"). Every selected model that never got a manifest entry
+        // (its wave never started, or it was mid-flight when the
+        // cancellation happened) is recorded `skipped` — never a silent
+        // omission.
+        for plan in model_plans.iter() {
+            manifest
+                .models
+                .entry(plan.name.clone())
+                .or_insert_with(|| ModelRunRecord {
+                    strategy: "skipped".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
+                });
+        }
+        // `completed_at` stays `None` — an incomplete run, exactly what
+        // `--resume` looks for.
+        if let Err(e) = file_store.save_run(&manifest) {
+            tracing::warn!("Failed to save run manifest for cancelled run: {}", e);
+        }
+        if let Err(e) = write_run_report(file_store, &manifest) {
+            tracing::warn!("Failed to write run report for cancelled run: {}", e);
+        }
+        reporter.run_cancelled(run_id);
+        return Ok(build_outcome(
+            run_id,
+            run_start,
+            None,
+            manifest,
+            total_rows_overall,
+            vec![],
+        ));
+    }
+    if !aborted.is_empty() {
+        // Persist the manifest even on failure — a run that aborts partway
+        // through must not silently drop the outcomes it DID observe,
+        // since `--resume` depends on reading them back
+        // (`docs/specs/run_state.md` §"Run manifest", §"`--resume`
+        // semantics"). Every model whose execution raised an error this run
+        // gets its own `failed` entry with its own error text (never just
+        // the first — the rest downgraded to `skipped` would silently
+        // discard real failures); every other selected model that never got
+        // a manifest entry (its wave never started, or it was mid-flight
+        // when the abort happened) is `skipped` — every model smelt
+        // considered this run gets an entry, never a silent omission.
+        for (model, error) in &aborted {
+            manifest.models.entry(model.clone()).or_insert_with(|| {
+                let definition_hash = model_plans
+                    .iter()
+                    .find(|p| &p.name == model)
+                    .map(|p| compute_model_hash(&p.sql))
+                    .unwrap_or_default();
+                ModelRunRecord {
+                    strategy: "failed".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: None,
+                    outcome: smelt_state::RunOutcomeKind::Failed,
+                    definition_hash,
+                    error: Some(error.to_string()),
+                    retry_count: 0,
+                }
+            });
+        }
+        for plan in model_plans.iter() {
+            manifest
+                .models
+                .entry(plan.name.clone())
+                .or_insert_with(|| ModelRunRecord {
+                    strategy: "skipped".to_string(),
+                    time_range: None,
+                    partitions_updated: vec![],
+                    row_count: 0,
+                    duration_ms: 0,
+                    batch_safety: Some("skipped".to_string()),
+                    outcome: smelt_state::RunOutcomeKind::Skipped,
+                    definition_hash: compute_model_hash(&plan.sql),
+                    error: None,
+                    retry_count: 0,
+                });
+        }
+        // `completed_at` stays `None` — an incomplete run, exactly what
+        // `--resume` looks for.
+        if let Err(e) = file_store.save_run(&manifest) {
+            tracing::warn!("Failed to save run manifest for failed run: {}", e);
+        }
+        for (model, error) in &aborted {
+            reporter.run_failed(run_id, Some(model), &error.to_string());
+        }
+        if let Err(e) = write_run_report(file_store, &manifest) {
+            tracing::warn!("Failed to write run report for failed run: {}", e);
+        }
+        let (_first_model, first_error) = aborted.into_iter().next().expect("checked non-empty");
+        return Err(first_error);
     }
 
     manifest.completed_at = Some(Utc::now());
     if let Err(e) = file_store.save_run(&manifest) {
         tracing::warn!("Failed to save run manifest: {}", e);
+    }
+    if let Err(e) = write_run_report(file_store, &manifest) {
+        tracing::warn!("Failed to write run report: {}", e);
     }
 
     // Stale schema cleanup: remove .smelt/schemas/<name>.json entries for models
@@ -2033,10 +3057,10 @@ pub async fn execute_project(
     }
 
     let total_duration: StdDuration = execution_start.elapsed();
-    reporter.run_completed(&run_id, total_rows_overall, total_duration);
+    reporter.run_completed(run_id, total_rows_overall, total_duration);
 
     Ok(build_outcome(
-        &run_id,
+        run_id,
         run_start,
         Some(Utc::now()),
         manifest,
@@ -2259,7 +3283,9 @@ fn build_model_plans(
 /// The emitted DDL comes from the pure single-owner emitter
 /// (`smelt_logical::maintenance::emit::emit_create_empty_table`); this
 /// function only resolves inputs, guards, reports, and executes.
+#[allow(clippy::too_many_arguments)]
 async fn bootstrap_self_ref_empty_target(
+    request: &ExecuteRequest,
     backend: &dyn Backend,
     schema: &str,
     model_file: &smelt_core::ModelFile,
@@ -2322,10 +3348,11 @@ async fn bootstrap_self_ref_empty_target(
         smelt_backend::maintenance_dialect(backend.dialect()),
     );
     reporter.maintenance_statements(run_id, model_display_name, None, &group);
-    backend
-        .execute_statement_group(&group)
-        .await
-        .map_err(|e| anyhow::anyhow!("{}", e))?;
+    retry_statement_group(request, run_id, model_display_name, reporter, || {
+        backend.execute_statement_group(&group)
+    })
+    .await
+    .map_err(|e| anyhow::anyhow!("{}", e))?;
     Ok(())
 }
 
@@ -2529,6 +3556,17 @@ pub fn derive_batch_filtered_sql(
         inject_source_filters(&filtered_sql, per_model_source_bounds, run_range)
     };
     Ok(pin_run_deterministic_clocks(&filtered_sql, run_start))
+}
+
+/// Derive a [`RunReport`] from `manifest` and persist it alongside the
+/// manifest at `.smelt/targets/<target>/reports/<run_id>.json`
+/// (`docs/specs/run_state.md` §"Run report"). Called at every one of
+/// `execute_project`'s manifest-save sites — success, cancelled, and
+/// aborted — since a report is due whenever a manifest is, and a report
+/// derived from an incomplete manifest (`completed_at: None`) is still a
+/// meaningful partial summary for `--resume`/tooling to read.
+fn write_run_report(file_store: &FileStore, manifest: &RunManifest) -> Result<()> {
+    file_store.save_report(&RunReport::from_manifest(manifest))
 }
 
 fn build_outcome(

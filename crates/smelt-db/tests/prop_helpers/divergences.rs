@@ -70,6 +70,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::ByDesign,
         },
+        // verified: 2026-07-20 `SELECT SUM(x) FROM (SELECT CAST(1 AS INT) x)` and
+        // the BIGINT variant — Spark's DESCRIBE QUERY reports `bigint` for both,
+        // matching smelt.
         TypeDivergence {
             id: "sum_integer",
             description: "SUM(INTEGER/BIGINT) — smelt infers BigInt, DuckDB returns Decimal(38,0) (HUGEINT via Arrow)",
@@ -81,6 +84,8 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None, // Spark also returns BigInt, matches smelt
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT CAST('a' AS STRING) || CAST('b' AS STRING)`
+        // — Spark's DESCRIBE QUERY reports `string`.
         TypeDivergence {
             id: "string_concat",
             description: "|| operator — smelt infers Text, backends return Varchar/String",
@@ -89,6 +94,8 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Varchar { max_length: None }),
             status: DivergenceStatus::ByDesign,
         },
+        // verified: 2026-07-20 `SELECT UPPER('a')` — Spark's DESCRIBE QUERY
+        // reports `string`.
         TypeDivergence {
             id: "string_functions",
             description: "UPPER/LOWER/etc — smelt infers Text, backends return Varchar/String",
@@ -97,6 +104,8 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Varchar { max_length: None }),
             status: DivergenceStatus::ByDesign,
         },
+        // verified: 2026-07-20 `SELECT CEIL(CAST(1.5 AS DOUBLE))` and the FLOOR
+        // variant — Spark's DESCRIBE QUERY reports `bigint` for both.
         TypeDivergence {
             id: "ceil_floor_double",
             description: "CEIL/FLOOR(DOUBLE) — smelt returns Double (matches DuckDB), Spark returns BigInt",
@@ -105,6 +114,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::BigInt),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT AVG(x) FROM (SELECT CAST(1.5 AS
+        // DECIMAL(10,2)) x)` — Spark's DESCRIBE QUERY reports `decimal(14,6)`,
+        // matched by the wildcard.
         TypeDivergence {
             id: "avg_decimal",
             description:
@@ -118,6 +130,8 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             }),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT MEDIAN(x) FROM (SELECT CAST(1.5 AS
+        // DECIMAL(10,2)) x)` — Spark's DESCRIBE QUERY reports `double`.
         TypeDivergence {
             id: "median_decimal",
             description:
@@ -147,6 +161,13 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         // WITHIN GROUP ORDER BY expression's type through
         // `try_registry_inference`, which is out of scope for the property-test
         // generator work that surfaced them.
+        //
+        // verified: 2026-07-20 `SELECT PERCENTILE_CONT(0.5) WITHIN GROUP (ORDER
+        // BY x) FROM (SELECT CAST(1.5 AS DECIMAL(10,2)) x)` (and the DISC
+        // variant) — Spark's DESCRIBE QUERY reports `double` for both, which
+        // matches smelt's registry-fixed Double, so there is no Spark
+        // divergence even though the DuckDB one (and the underlying KnownBug)
+        // stands.
         TypeDivergence {
             id: "percentile_ordered_set_decimal",
             description: "PERCENTILE_CONT/PERCENTILE_DISC(DECIMAL) WITHIN GROUP — smelt infers \
@@ -161,6 +182,10 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::KnownBug,
         },
+        // verified: 2026-07-20 `SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER
+        // BY x) FROM (SELECT CAST(1 AS INT) x)` — Spark's DESCRIBE QUERY
+        // reports `double`, matching smelt's registry-fixed Double (unlike
+        // DuckDB, which preserves Integer).
         TypeDivergence {
             id: "percentile_disc_integer",
             description: "PERCENTILE_DISC(INTEGER) WITHIN GROUP — smelt infers Double \
@@ -171,6 +196,10 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::KnownBug,
         },
+        // verified: 2026-07-20 `SELECT PERCENTILE_DISC(0.5) WITHIN GROUP (ORDER
+        // BY x) FROM (SELECT CAST(1 AS BIGINT) x)` — Spark's DESCRIBE QUERY
+        // reports `double`, matching smelt's registry-fixed Double (unlike
+        // DuckDB, which preserves BigInt).
         TypeDivergence {
             id: "percentile_disc_bigint",
             description: "PERCENTILE_DISC(BIGINT) WITHIN GROUP — smelt infers Double \
@@ -181,6 +210,10 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: None,
             status: DivergenceStatus::KnownBug,
         },
+        // verified: 2026-07-20 `SELECT SIGN(CAST(1.5 AS DOUBLE))` — Spark's
+        // DESCRIBE QUERY reports `double`. Spark's SIGN is always DOUBLE
+        // regardless of argument type (see sign_integer/sign_bigint/
+        // sign_decimal below — all four confirmed to report `double`).
         TypeDivergence {
             id: "sign_double",
             description:
@@ -190,37 +223,49 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT SIGN(CAST(1 AS INT))` — Spark's DESCRIBE
+        // QUERY reports `double`, not `int`. Corrected from a stale `Integer`
+        // recording: Spark's SIGN always returns DOUBLE, it doesn't preserve
+        // the argument type the way DuckDB's TINYINT-returning `sign` does.
         TypeDivergence {
             id: "sign_integer",
             description:
-                "SIGN(INTEGER) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Integer",
+                "SIGN(INTEGER) — smelt infers SmallInt (matches DuckDB TINYINT), Spark always \
+                returns Double regardless of argument type",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
-            spark_type: Some(DataType::Integer),
+            spark_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT SIGN(CAST(1 AS BIGINT))` — Spark's
+        // DESCRIBE QUERY reports `double`, not `bigint`. Corrected from a stale
+        // `BigInt` recording; see sign_integer above.
         TypeDivergence {
             id: "sign_bigint",
             description:
-                "SIGN(BIGINT) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns BigInt",
+                "SIGN(BIGINT) — smelt infers SmallInt (matches DuckDB TINYINT), Spark always \
+                returns Double regardless of argument type",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
-            spark_type: Some(DataType::BigInt),
+            spark_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT SIGN(CAST(1.5 AS DECIMAL(10,2)))` —
+        // Spark's DESCRIBE QUERY reports `double`, not a Decimal type.
+        // Corrected from a stale Decimal-wildcard recording; see sign_integer
+        // above.
         TypeDivergence {
             id: "sign_decimal",
             description:
-                "SIGN(DECIMAL) — smelt infers SmallInt (matches DuckDB TINYINT), Spark returns Decimal",
+                "SIGN(DECIMAL) — smelt infers SmallInt (matches DuckDB TINYINT), Spark always \
+                returns Double regardless of argument type",
             smelt_type: DataType::SmallInt,
             duckdb_type: None,
-            // Wildcard: Decimal(0,0) matches any Decimal precision/scale
-            spark_type: Some(DataType::Decimal {
-                precision: 0,
-                scale: 0,
-            }),
+            spark_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT CAST(1.5 AS FLOAT)` — Spark's DESCRIBE
+        // QUERY reports `float`.
         TypeDivergence {
             id: "cast_float_as_double",
             description:
@@ -230,6 +275,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Float),
             status: DivergenceStatus::ByDesign,
         },
+        // verified: 2026-07-20 `SELECT CAST('2024-01-02' AS DATE) -
+        // CAST('2024-01-01' AS DATE)` — Spark's DESCRIBE QUERY reports
+        // `interval day`, which maps to smelt's Interval.
         TypeDivergence {
             id: "date_minus_date",
             description: "DATE - DATE — smelt infers Interval (Spark-aligned, the portable \
@@ -271,6 +319,12 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
         // DECIMAL(12,2) (smelt (10,2) — both backends widen precision to hold the
         // integer literal, contrary to the "Spark-aligned" assumption this entry
         // used to make about Spark).
+        //
+        // verified: 2026-07-20 re-ran all three probes above against live
+        // Spark — `... * ...` → decimal(21,4) (matches smelt), `ROUND(...)` →
+        // decimal(9,0) (diverges), `IFNULL(..., 0)` → decimal(12,2) (diverges).
+        // No change from the prior verification; wildcard still covers both
+        // divergent cases.
         TypeDivergence {
             id: "decimal_arithmetic_model",
             description: "smelt uses Spark-aligned decimal growth (spec §15) for multiplication, \
@@ -299,18 +353,27 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             }),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT ROUND(CAST(1 AS INT))` — Spark's
+        // DESCRIBE QUERY reports `int`, not `double`. Corrected from a stale
+        // `None` recording (which assumed Spark matched smelt's Double): Spark
+        // preserves the integer type here, the same as DuckDB, so this is the
+        // same KnownBug surfacing against both backends rather than a
+        // Spark-only match.
         TypeDivergence {
             id: "round_integer",
             description: "ROUND(INTEGER) — smelt's ROUND signature is Double→Double only; \
                 integer inputs are upcast to Double before rounding, so smelt infers Double \
-                while DuckDB preserves the integer type. Propagates to downstream arithmetic \
-                on ROUND outputs (Double+Double in smelt vs Integer+Integer in DuckDB). \
-                Fixing requires a polymorphic ROUND signature.",
+                while DuckDB and Spark both preserve the integer type. Propagates to \
+                downstream arithmetic on ROUND outputs (Double+Double in smelt vs \
+                Integer+Integer in DuckDB/Spark). Fixing requires a polymorphic ROUND \
+                signature.",
             smelt_type: DataType::Double,
             duckdb_type: Some(DataType::Integer),
-            spark_type: None,
+            spark_type: Some(DataType::Integer),
             status: DivergenceStatus::KnownBug,
         },
+        // verified: 2026-07-20 `SELECT CAST('2024-01-01' AS DATE) + INTERVAL
+        // '1' DAY` — Spark's DESCRIBE QUERY reports `date`.
         TypeDivergence {
             id: "date_plus_interval",
             description: "DATE + INTERVAL / DATE - INTERVAL — smelt infers Timestamp (matches \
@@ -325,6 +388,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Date),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT COALESCE(CAST(1 AS FLOAT), CAST(2 AS
+        // DOUBLE))` and the IFNULL variant — Spark's DESCRIBE QUERY reports
+        // `double` for both.
         TypeDivergence {
             id: "float_promotes_to_double_spark",
             description: "FLOAT combined with another numeric type in COALESCE/IFNULL/GREATEST/ \
@@ -336,6 +402,9 @@ pub fn known_divergences() -> Vec<TypeDivergence> {
             spark_type: Some(DataType::Double),
             status: DivergenceStatus::BackendSpecific,
         },
+        // verified: 2026-07-20 `SELECT ROW_NUMBER() OVER (ORDER BY x) FROM
+        // (SELECT 1 x)` and the RANK/DENSE_RANK variants — Spark's DESCRIBE
+        // QUERY reports `int` for all three.
         TypeDivergence {
             id: "row_number_rank_family",
             description: "ROW_NUMBER/RANK/DENSE_RANK — smelt infers BigInt (matches DuckDB \

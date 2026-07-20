@@ -41,7 +41,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
 
     // Build minimal metadata from emitted fields.
     // Note: "incremental" is not a Materialization variant — it's a Table
-    // with an BatchedConfig attached.
+    // with an PartitionGrainConfig attached.
     let materialization = match emitted.materialization.as_str() {
         "table" | "incremental" => Some(Materialization::Table),
         _ => Some(Materialization::View),
@@ -62,6 +62,7 @@ pub fn model_file_from_emitted_def(emitted: &EmittedModelDef, smelt_name: String
             None
         },
         unique_key: None,
+        safety_overrides: None,
         batched: emitted.incremental_config.clone(),
         target: None,
         tags: emitted.tags.clone(),

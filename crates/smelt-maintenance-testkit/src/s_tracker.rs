@@ -25,7 +25,7 @@
 use std::collections::HashSet;
 
 use chrono::NaiveDate;
-use duckdb::Connection;
+use smelt_backend::Backend;
 
 use crate::oracle_modes::OracleMode;
 use crate::recipe::{ModelEdit, ModelRecipe, SourceRecipe};
@@ -137,28 +137,94 @@ impl STracker {
     }
 
     /// Materialize `S_k` (`Self::s_at(k)`) into a fresh `TEMP TABLE
-    /// oracle_<source_name>` on `conn` — the S-restricted oracle's input
-    /// table (design §6: "materializes `S_k` into temp tables").
-    pub fn materialize_s(&self, conn: &Connection, k: usize) -> anyhow::Result<()> {
+    /// oracle_<source_name>` on `backend` — the S-restricted oracle's input
+    /// table (design §6: "materializes `S_k` into temp tables"). Routed
+    /// through [`smelt_backend::Backend::execute_sql`] rather than a raw
+    /// `duckdb::Connection`
+    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2) —
+    /// every real caller passes the SAME `Backend`/connection it will next
+    /// query the materialized temp table through (DuckDB `TEMP TABLE`s are
+    /// scoped to the connection that created them, so a fresh connection per
+    /// call would make the table invisible to the follow-up oracle query).
+    pub async fn materialize_s(&self, backend: &dyn Backend, k: usize) -> anyhow::Result<()> {
         let table = self.oracle_table_name();
-        conn.execute_batch(&format!(
-            "DROP TABLE IF EXISTS {table}; \
-             CREATE TEMP TABLE {table} ({d} DATE, {id} INTEGER, {val} INTEGER);",
-            d = self.source.clock_column,
-            id = self.source.key_column,
-            val = self.source.payload_column,
-        ))?;
+        backend
+            .execute_sql(&format!("DROP TABLE IF EXISTS {table}"))
+            .await
+            .map_err(|e| anyhow::anyhow!("drop stale oracle temp table {table}: {e}"))?;
+        backend
+            .execute_sql(&format!(
+                "CREATE TEMP TABLE {table} ({d} DATE, {id} INTEGER, {val} INTEGER)",
+                d = self.source.clock_column,
+                id = self.source.key_column,
+                val = self.source.payload_column,
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("create oracle temp table {table}: {e}"))?;
         for row in self.s_at(k) {
-            conn.execute(
-                &format!(
+            backend
+                .execute_sql(&format!(
                     "INSERT INTO {table} VALUES (DATE '{}', {}, {})",
                     row.d.format("%Y-%m-%d"),
                     row.id,
                     row.val,
-                ),
-                [],
-            )?;
+                ))
+                .await
+                .map_err(|e| anyhow::anyhow!("insert into oracle temp table {table}: {e}"))?;
         }
+        Ok(())
+    }
+
+    /// Spark/Delta-safe counterpart of [`Self::materialize_s`]
+    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 3):
+    /// Spark SQL has no `CREATE TEMP TABLE` DDL (a DuckDB-ism) — this
+    /// materializes `S_k` as a `CREATE OR REPLACE TEMPORARY VIEW` over a
+    /// `VALUES` table constructor instead, portable ANSI-ish SQL both
+    /// DuckDB and Spark SQL accept identically (a temp view is scoped to the
+    /// session/connection that created it, exactly like DuckDB's `TEMP
+    /// TABLE`, so the same "same backend creates and queries it" contract
+    /// [`Self::materialize_s`]'s doc comment states still applies). Kept as
+    /// a SEPARATE method rather than replacing [`Self::materialize_s`] — the
+    /// DuckDB gate's existing `TEMP TABLE` path is untouched (plan Phase 3
+    /// review checklist: "DuckDB standing gate untouched").
+    pub async fn materialize_s_as_view(
+        &self,
+        backend: &dyn Backend,
+        k: usize,
+    ) -> anyhow::Result<()> {
+        let view = self.oracle_table_name();
+        backend
+            .execute_sql(&format!("DROP VIEW IF EXISTS {view}"))
+            .await
+            .map_err(|e| anyhow::anyhow!("drop stale oracle view {view}: {e}"))?;
+
+        let d = &self.source.clock_column;
+        let id = &self.source.key_column;
+        let val = &self.source.payload_column;
+        let rows = self.s_at(k);
+        let select = if rows.is_empty() {
+            // A zero-row `VALUES` list is invalid SQL on both engines; use a
+            // dummy row (typed the same as a real one) then filter it out —
+            // `WHERE 1 = 0` always parses since the query still has a FROM.
+            format!(
+                "SELECT {d}, {id}, {val} FROM (VALUES (DATE '1970-01-01', 0, 0)) \
+                 AS t({d}, {id}, {val}) WHERE 1 = 0"
+            )
+        } else {
+            let values = rows
+                .iter()
+                .map(|r| format!("(DATE '{}', {}, {})", r.d.format("%Y-%m-%d"), r.id, r.val))
+                .collect::<Vec<_>>()
+                .join(", ");
+            format!("SELECT * FROM (VALUES {values}) AS t({d}, {id}, {val})")
+        };
+
+        backend
+            .execute_sql(&format!(
+                "CREATE OR REPLACE TEMPORARY VIEW {view} AS {select}"
+            ))
+            .await
+            .map_err(|e| anyhow::anyhow!("create oracle view {view}: {e}"))?;
         Ok(())
     }
 

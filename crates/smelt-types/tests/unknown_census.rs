@@ -254,3 +254,23 @@ fn error_classification_implies_unresolved_discriminant() {
         bad.join("\n")
     );
 }
+
+/// The `error` classification exists to flag sites that still need their
+/// `Unknown` paired with a diagnostic; once every such site is pinned by a
+/// standing test the classification should be retired entirely. Zero
+/// `classification = "error"` entries remain in the allowlist.
+#[test]
+fn no_error_classified_sites_remain() {
+    let allowlist = load_allowlist(&allowlist_path());
+    let mut bad: Vec<String> = allowlist
+        .iter()
+        .filter(|(_, e)| e.classification == "error")
+        .map(|(site, _)| site.clone())
+        .collect();
+    bad.sort();
+    assert!(
+        bad.is_empty(),
+        "expected zero classification=\"error\" sites in .claude/unknown-census.toml, found:\n{}",
+        bad.join("\n")
+    );
+}

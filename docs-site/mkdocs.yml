@@ -100,6 +100,8 @@ nav:
     - Functions: guide/functions.md
     - Testing: guide/testing.md
     - Targets & Backends: guide/targets.md
+    - Production Deployment: guide/deployment.md
+    - Orchestration: guide/orchestration.md
     - Web UI: guide/web-ui.md
     - Editor Setup: guide/editor-setup.md
     - Editor Features: guide/editor-features.md
@@ -120,6 +122,9 @@ nav:
     - Sources Configuration: reference/sources-yml.md
     - Timeseries: reference/timeseries.md
     - Key-Grain Patterns: reference/cumulative-aggregate.md
+    - State & Recovery: reference/state.md
+    - Diagnostics: reference/diagnostics.md
+    - smelt explain: reference/smelt-explain.md
     - Language Spec: reference/language.md
   - Developing smelt:
     - Architecture: developing/architecture.md

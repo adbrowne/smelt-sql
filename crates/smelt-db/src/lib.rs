@@ -105,19 +105,28 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
             code: Some(DiagnosticCode::YamlParseError),
             data: None,
         }),
+        // Raised at extraction time (`fold_top_level_safety_overrides`), like
+        // `YamlParseError` above — reuses its `DiagnosticCode` rather than
+        // adding a new catalogue entry for this structural conflict error.
+        MetadataError::SafetyOverridesDoubleDeclared => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::YamlParseError),
+            data: None,
+        }),
         // Handled by dedicated arms in check_file_diagnostics (with precise span
         // anchoring and early returns):
         MetadataError::GeneratesUnknownValue { .. } => None,
         MetadataError::GeneratesMixedWithBareModel { .. } => None,
         // These variants only arise from validate_timeseries on the Ok(Single)
         // path — they are never returned by extract_file_metadata itself:
-        MetadataError::TimeseriesRequiredForBatched => None,
+        MetadataError::TimeseriesRequiredForPartitionGrain => None,
         MetadataError::MalformedTimeseries { .. } => None,
         MetadataError::KeyedForbidsTimeseries => None,
-        MetadataError::KeyedForbidsBatched => None,
-        MetadataError::BatchedRequiresRefreshBatched => None,
+        MetadataError::PartitionGrainRequiresRefreshIncremental => None,
         MetadataError::MaterializedViewForbidsTimeseries => None,
-        MetadataError::MaterializedViewForbidsBatched => None,
+        MetadataError::MaterializedViewForbidsPartitionGrain => None,
         MetadataError::MalformedFunctionalDependency { .. } => None,
         MetadataError::MalformedBoundedDomain { .. } => None,
         MetadataError::GrainRequiredForIncremental => None,
@@ -130,6 +139,12 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
         // exactly like `KeyedForbidsTimeseries` above.
         MetadataError::MaintenanceWritePatternUnavailable { .. } => None,
         MetadataError::MaintenanceWriteAddressingRefused { .. } => None,
+        // Handled by a dedicated arm in check_file_diagnostics: `UnknownColumnTestKind`
+        // is raised by the pure `validate_column_tests` on the `Ok(Single)` path;
+        // `ColumnTestOnUnknownColumn` needs `typed_model_schema` (Salsa), which this
+        // pure mapper does not have.
+        MetadataError::UnknownColumnTestKind { .. } => None,
+        MetadataError::ColumnTestOnUnknownColumn { .. } => None,
     }
 }
 
@@ -1104,7 +1119,7 @@ fn rule_diagnostic_code(code: smelt_logical::RuleDiagnosticCode) -> DiagnosticCo
         R::KeyedSnapshotPostureUnsupported => DiagnosticCode::KeyedSnapshotPostureUnsupported,
         R::KeyedMultipleDrivingSources => DiagnosticCode::KeyedMultipleDrivingSources,
         R::KeyedSqlNotParseable => DiagnosticCode::KeyedSqlNotParseable,
-        R::BatchedNotSafe => DiagnosticCode::BatchedNotSafe,
+        R::PartitionGrainNotSafe => DiagnosticCode::PartitionGrainNotSafe,
         R::EventTimeColumnNotVisibleAtOuterSelect => {
             DiagnosticCode::EventTimeColumnNotVisibleAtOuterSelect
         }
@@ -1881,9 +1896,9 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
         let sql_body = &text[sql_offset..];
         if let Err(ts_err) = smelt_core::metadata::validate_timeseries(metadata, sql_body) {
             let maybe_diag = match &ts_err {
-                smelt_core::metadata::MetadataError::TimeseriesRequiredForBatched => Some((
+                smelt_core::metadata::MetadataError::TimeseriesRequiredForPartitionGrain => Some((
                     ts_err.to_string(),
-                    DiagnosticCode::TimeseriesRequiredForBatched,
+                    DiagnosticCode::TimeseriesRequiredForPartitionGrain,
                 )),
                 smelt_core::metadata::MetadataError::MalformedTimeseries { .. } => {
                     Some((ts_err.to_string(), DiagnosticCode::MalformedTimeseries))
@@ -1898,22 +1913,27 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 // `MetadataError` variant's diagnostic mapping stays
                 // documented at its point of historical use.
                 smelt_core::metadata::MetadataError::KeyedForbidsTimeseries => None,
-                smelt_core::metadata::MetadataError::KeyedForbidsBatched => {
-                    Some((ts_err.to_string(), DiagnosticCode::KeyedForbidsBatched))
-                }
                 // `batched:` without `refresh: batched` maps to the generic
-                // YamlParseError code — no dedicated code exists yet.
-                smelt_core::metadata::MetadataError::BatchedRequiresRefreshBatched => {
+                // YamlParseError code — no dedicated code exists yet. This
+                // is also the only remaining way a `grain: key` model can
+                // still carry an internally-folded `batched` block — the
+                // literal sub-block is refused before a `ModelMetadata`
+                // exists, so the dedicated `KeyedForbidsPartitionGrain` code was
+                // retired outright (`docs/specs/diagnostics.md` §"Keyed
+                // refresh mode").
+                smelt_core::metadata::MetadataError::PartitionGrainRequiresRefreshIncremental => {
                     Some((ts_err.to_string(), DiagnosticCode::YamlParseError))
                 }
                 smelt_core::metadata::MetadataError::MaterializedViewForbidsTimeseries => Some((
                     ts_err.to_string(),
                     DiagnosticCode::MaterializedViewForbidsTimeseries,
                 )),
-                smelt_core::metadata::MetadataError::MaterializedViewForbidsBatched => Some((
-                    ts_err.to_string(),
-                    DiagnosticCode::MaterializedViewForbidsBatched,
-                )),
+                smelt_core::metadata::MetadataError::MaterializedViewForbidsPartitionGrain => {
+                    Some((
+                        ts_err.to_string(),
+                        DiagnosticCode::MaterializedViewForbidsPartitionGrain,
+                    ))
+                }
                 smelt_core::metadata::MetadataError::GrainRequiredForIncremental => Some((
                     ts_err.to_string(),
                     DiagnosticCode::GrainRequiredForIncremental,
@@ -1966,6 +1986,48 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
                 data: None,
             })
             .accumulate(db);
+        }
+
+        // Declarative column test validation (`docs/specs/data_tests.md`
+        // §"Fail-loud validation"). Two checks, run only when at least one
+        // column declares a non-empty `tests` list:
+        //   1. `UnknownColumnTestKind` — pure, from `validate_column_tests`.
+        //   2. `ColumnTestOnUnknownColumn` — needs the inferred output
+        //      schema, so it is made here (not in `smelt-core`) via
+        //      `typed_model_schema`.
+        if metadata.columns.values().any(|c| !c.tests.is_empty()) {
+            if let Err(kind_err) = smelt_core::metadata::validate_column_tests(metadata) {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: kind_err.to_string(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::UnknownColumnTestKind),
+                    data: None,
+                })
+                .accumulate(db);
+            }
+
+            let model_name = metadata.name.as_deref().unwrap_or("<unnamed>");
+            let typed_schema = typed_model_schema(db, workspace, file);
+            let schema_columns: Vec<String> = typed_schema
+                .columns
+                .iter()
+                .map(|c| c.name.clone())
+                .collect();
+            if let Err(col_err) = smelt_core::metadata::validate_column_tests_against_schema(
+                metadata,
+                model_name,
+                &schema_columns,
+            ) {
+                DiagnosticAcc(Diagnostic {
+                    severity: DiagnosticSeverity::Error,
+                    message: col_err.to_string(),
+                    range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+                    code: Some(DiagnosticCode::ColumnTestOnUnknownColumn),
+                    data: None,
+                })
+                .accumulate(db);
+            }
         }
 
         // Timeseries schema invariants (D-52 rules 7 and 8).
@@ -2048,7 +2110,7 @@ pub fn check_file_diagnostics(db: &dyn salsa::Database, workspace: Workspace, fi
             // The opt-in is `refresh: batched`, not the presence of the optional
             // `batched:` block — default to an empty config when the block is
             // absent so a bare `refresh: batched` model still reaches the rule.
-            let default_batched_config = smelt_core::config::BatchedConfig::default();
+            let default_batched_config = smelt_core::config::PartitionGrainConfig::default();
             let ctx = smelt_logical::RuleContext {
                 model_name: &model_name,
                 materialization,

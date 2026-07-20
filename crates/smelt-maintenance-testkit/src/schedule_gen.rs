@@ -433,6 +433,64 @@ pub fn read_source_snapshot(conn: &Connection, source: &SourceRecipe) -> Vec<Gen
     .collect()
 }
 
+/// [`read_source_snapshot`]'s counterpart routed through
+/// [`smelt_backend::Backend::execute_sql`] rather than a raw
+/// `duckdb::Connection` (`docs/plans/20260720-prod-w9-spark-conformance-twin.md`
+/// Phase 3) — needed for a target (Spark) with no `duckdb::Connection` to
+/// read from. Reads `<schema>.sources_<name>` (the caller's schema) rather
+/// than [`read_source_snapshot`]'s hardcoded `main`; both `id`/`val` are cast
+/// to `BIGINT` so the Arrow column type is a stable `Int64Array` regardless
+/// of the backend's native narrower integer width (Spark's `INT` maps to
+/// Arrow `Int32`, unlike DuckDB's own widening behaviour that
+/// [`read_source_snapshot`] relies on).
+pub async fn read_source_snapshot_via_backend(
+    backend: &dyn smelt_backend::Backend,
+    schema: &str,
+    source: &SourceRecipe,
+) -> anyhow::Result<Vec<GenRow>> {
+    let table = format!("{schema}.sources_{}", source.name);
+    let sql = format!(
+        "SELECT CAST({d} AS STRING), CAST({id} AS BIGINT), CAST({val} AS BIGINT) FROM {table} \
+         ORDER BY {d}, {id}",
+        d = source.clock_column,
+        id = source.key_column,
+        val = source.payload_column,
+    );
+    let batches = backend
+        .execute_sql(&sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("read source snapshot {table}: {e}"))?;
+
+    let mut rows = Vec::new();
+    for batch in &batches {
+        let d_col = batch
+            .column(0)
+            .as_any()
+            .downcast_ref::<arrow::array::StringArray>()
+            .ok_or_else(|| anyhow::anyhow!("snapshot date column was not a string array"))?;
+        let id_col = batch
+            .column(1)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("snapshot id column was not Int64"))?;
+        let val_col = batch
+            .column(2)
+            .as_any()
+            .downcast_ref::<arrow::array::Int64Array>()
+            .ok_or_else(|| anyhow::anyhow!("snapshot val column was not Int64"))?;
+        for i in 0..batch.num_rows() {
+            rows.push(GenRow {
+                d: NaiveDate::parse_from_str(d_col.value(i), "%Y-%m-%d").map_err(|e| {
+                    anyhow::anyhow!("parse snapshot date {:?}: {e}", d_col.value(i))
+                })?,
+                id: id_col.value(i),
+                val: val_col.value(i),
+            });
+        }
+    }
+    Ok(rows)
+}
+
 /// Three rows placed relative to one source's derived [`smelt_logical::maintenance::ScanClamp`]
 /// (Phase 6; design §5 "Boundary-value data placement") — never a hand-coded
 /// margin:

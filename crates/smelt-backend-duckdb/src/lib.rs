@@ -1638,27 +1638,27 @@ mod tests {
     /// the IncrementalStrategy enum.
     #[tokio::test]
     async fn test_resolve_strategy_always_delete_insert() {
-        use smelt_backend::BatchedConfig;
-        use smelt_backend::BatchedSafetyOverrides;
+        use smelt_backend::PartitionGrainConfig;
+        use smelt_backend::PartitionGrainSafetyOverrides;
 
         let temp_dir = TempDir::new().unwrap();
         let db_path = temp_dir.path().join("test.duckdb");
         let backend = DuckDbBackend::new(&db_path, "main").await.unwrap();
 
-        let config_with_key = BatchedConfig {
+        let config_with_key = PartitionGrainConfig {
             unique_key: vec!["id".to_string()],
             nondeterministic_columns: vec![],
-            safety_overrides: BatchedSafetyOverrides::default(),
+            safety_overrides: PartitionGrainSafetyOverrides::default(),
         };
         assert_eq!(
             backend.resolve_strategy(&config_with_key),
             smelt_backend::IncrementalStrategy::DeleteInsert,
         );
 
-        let config_without_key = BatchedConfig {
+        let config_without_key = PartitionGrainConfig {
             unique_key: vec![],
             nondeterministic_columns: vec![],
-            safety_overrides: BatchedSafetyOverrides::default(),
+            safety_overrides: PartitionGrainSafetyOverrides::default(),
         };
         assert_eq!(
             backend.resolve_strategy(&config_without_key),

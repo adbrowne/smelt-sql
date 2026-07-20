@@ -20,10 +20,9 @@ timeseries:
 # correlated lookup picking the single most-recently-ended open session for
 # THIS event's own device — deterministic and identical regardless of how
 # the run window is chunked.
-batched:
-  safety_overrides:
-    allow_window_functions: true
-    allow_limit: true
+safety_overrides:
+  allow_window_functions: true
+  allow_limit: true
 ---
 -- One row per session under the same 30-minute inactivity + platform-boundary
 -- rule as `silver.sessions`, but with the **root-anchored cut**: a day-D

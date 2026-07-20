@@ -11,7 +11,7 @@ description = "Backend trait and types for smelt execution engines"
 # Dialect types (lightweight, sync-only)
 smelt-dialect = { path = "../smelt-dialect" }
 
-# Core types (IncrementalStrategy, BatchedConfig)
+# Core types (IncrementalStrategy, PartitionGrainConfig)
 smelt-core = { path = "../smelt-core" }
 
 # Maintenance-statement data model (`MaintenanceStatement`/`StatementGroup`) —

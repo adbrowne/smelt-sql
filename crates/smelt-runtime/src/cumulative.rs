@@ -105,6 +105,7 @@ impl WindowedKeyedRule for CumulativeClassification {
         delta_sql: &str,
         partition_column: &str,
         slice_lower: &str,
+        dialect: MaintenanceDialect,
     ) -> Option<String> {
         let schema_table = format!("{schema}.{table}");
         Some(
@@ -114,6 +115,7 @@ impl WindowedKeyedRule for CumulativeClassification {
                 partition_column,
                 delta_sql,
                 slice_lower,
+                dialect,
             )
             .sql,
         )
@@ -138,6 +140,7 @@ pub async fn execute_cumulative_aggregate(
     source_timeseries: &SourceTimeseriesMap,
     source_key_recurrence: &HashMap<String, smelt_core::sources::KeyRecurrence>,
     verbose: bool,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let model_name = &model.address_segments.join(".");
     let _ = (target, compiler); // reserved for future per-target compiler dispatch
@@ -298,6 +301,7 @@ pub async fn execute_cumulative_aggregate(
 
             Ok(compiled.sql)
         },
+        retry,
     )
     .await
 }

@@ -196,6 +196,49 @@ fn admitted_composed_node_is_not_refused() {
     required_inputs(&edges, "rollup", iv(1, 2)).expect("admitted composed node resolves");
 }
 
+/// Two SUCCESSIVE locality-admitted composed nodes in the same chain —
+/// `source -> composed1 -> composed2 -> rollup` — the recursive shape
+/// `docs/plans/20260719-prod-w8-composed-axes-followups.md` Phase 6 closes
+/// at the graph-assembly layer (`smelt_runtime::propagation::
+/// build_forward_graph` resolving `composed2`'s driving-source granularity
+/// through `composed1`'s own admitted composed output, not only a declared
+/// `sources.*` ref). This test pins the pure composition math those two
+/// edges are fed into once assembled: neither `propagate` nor
+/// `required_inputs` treats a `PartitionGrain::Keyed`-never (both hops
+/// classify by their own declared granularity, mirroring
+/// `composed_node_contributes_edges`) two-hop composed run any differently
+/// from the single-hop case — the adjointness law
+/// `forward(backward(P)) ⊇ P` still holds through both hops.
+#[test]
+fn two_composed_stages_in_a_chain_satisfy_adjointness() {
+    let edges = vec![
+        edge("source", "composed1", 0, 0),
+        edge("composed1", "composed2", 0, 0),
+        edge("composed2", "rollup", 0, 0),
+    ];
+    propagate(&edges, &deltas(&[("source", iv(1, 2))]))
+        .expect("two successive admitted composed nodes must run without refusing");
+    required_inputs(&edges, "rollup", iv(1, 2))
+        .expect("two successive admitted composed nodes must resolve without refusing");
+    assert_forward_backward_containment(&edges, "rollup", iv(100, 103));
+}
+
+/// The same two-composed-stage chain, but the first hop's inbound edge
+/// carries a nonzero route-3-style margin (mirroring
+/// `composed_projection_adjoint`'s route parameterisation) — the widened
+/// projection from the FIRST composed stage must still compose correctly
+/// through the SECOND composed stage's own (exact, zero-margin) edge, and
+/// the adjointness law must hold over the full three-hop chain.
+#[test]
+fn two_composed_stages_adjoint_with_a_widened_first_hop() {
+    let edges = vec![
+        edge("source", "composed1", 3, 1),
+        edge("composed1", "composed2", 0, 0),
+        edge("composed2", "rollup", 0, 0),
+    ];
+    assert_forward_backward_containment(&edges, "rollup", iv(100, 103));
+}
+
 // ---------------------------------------------------------------------------
 // Phase B2 (`docs/plans/20260715-composed-axes-conditional-maintenance.md`):
 // the composed node's own inbound edge carries a REAL route-derived margin

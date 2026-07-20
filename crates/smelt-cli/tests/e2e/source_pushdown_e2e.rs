@@ -206,6 +206,11 @@ async fn incremental_run_pushes_source_filter() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(
@@ -326,6 +331,11 @@ async fn source_pushdown_preserves_correctness() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(
@@ -387,9 +397,8 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  safety_overrides:
-    allow_subqueries: true
+safety_overrides:
+  allow_subqueries: true
 ---
 WITH staged AS (
     SELECT event_date, user_id FROM smelt.sources.events2
@@ -454,6 +463,11 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
     let incremental_outcome = execute_project(
         "cte-pushdown-test".to_string(),
@@ -504,6 +518,11 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
     let full_outcome = execute_project(
         "cte-pushdown-full-refresh-test".to_string(),
@@ -660,6 +679,11 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
     let incremental_outcome = execute_project(
         "union-pushdown-test".to_string(),
@@ -716,6 +740,11 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
     let full_outcome = execute_project(
         "union-pushdown-full-refresh-test".to_string(),

@@ -403,7 +403,7 @@ impl Backend {
                     "generator-body-forbids-model-reflection"
                 }
                 // Timeseries frontmatter validation diagnostic codes.
-                DbCode::TimeseriesRequiredForBatched => "timeseries-required-for-batched",
+                DbCode::TimeseriesRequiredForPartitionGrain => "timeseries-required-for-batched",
                 DbCode::MalformedTimeseries => "malformed-timeseries",
                 DbCode::MalformedFunctionalDependency => "malformed-functional-dependency",
                 DbCode::MalformedBoundedDomain => "malformed-bounded-domain",
@@ -424,10 +424,11 @@ impl Backend {
                 DbCode::KeyedMultipleDrivingSources => "keyed-multiple-driving-sources",
                 DbCode::KeyedSqlNotParseable => "keyed-sql-not-parseable",
                 DbCode::KeyedForbidsTimeseries => "keyed-forbids-timeseries",
-                DbCode::KeyedForbidsBatched => "keyed-forbids-batched",
                 DbCode::MaterializedViewForbidsTimeseries => "materialized-view-forbids-timeseries",
-                DbCode::MaterializedViewForbidsBatched => "materialized-view-forbids-batched",
-                DbCode::BatchedNotSafe => "batched-not-safe",
+                DbCode::MaterializedViewForbidsPartitionGrain => {
+                    "materialized-view-forbids-batched"
+                }
+                DbCode::PartitionGrainNotSafe => "batched-not-safe",
                 // Multi-model section structure diagnostic codes.
                 DbCode::MalformedSectionDelimiter => "malformed-section-delimiter",
                 DbCode::UnclosedFrontmatter => "unclosed-frontmatter",
@@ -460,6 +461,8 @@ impl Backend {
                     "maintenance-write-pattern-unavailable"
                 }
                 DbCode::MaintenanceWriteAddressingRefused => "maintenance-write-addressing-refused",
+                DbCode::UnknownColumnTestKind => "unknown-column-test-kind",
+                DbCode::ColumnTestOnUnknownColumn => "column-test-on-unknown-column",
             };
             NumberOrString::String(code_str.to_string())
         });

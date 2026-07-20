@@ -162,9 +162,10 @@ pub(super) fn validate_materialization_configs(
 /// Returns `None` if no interval history is found.
 pub(super) fn compute_auto_time_range(
     project_dir: &Path,
+    target: &str,
     graph: &DependencyGraph,
 ) -> Option<(String, String)> {
-    let file_store = FileStore::new(project_dir);
+    let file_store = FileStore::new(project_dir, target);
     let interval_store = match file_store.load_intervals() {
         Ok(store) => store,
         Err(e) => {

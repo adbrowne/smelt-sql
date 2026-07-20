@@ -44,6 +44,65 @@ pub struct AppState {
     pub run_event_tx: broadcast::Sender<RunProgressEvent>,
 }
 
+/// True if `host` names a loopback address (`127.0.0.1`, `::1`, `localhost`,
+/// or any IP literal `std::net::IpAddr::is_loopback` accepts).
+pub fn is_loopback_host(host: &str) -> bool {
+    if host.eq_ignore_ascii_case("localhost") {
+        return true;
+    }
+    host.parse::<std::net::IpAddr>()
+        .map(|ip| ip.is_loopback())
+        .unwrap_or(false)
+}
+
+/// Validate a requested bind host before the server starts listening.
+///
+/// Loopback hosts are always allowed. A non-loopback host is refused unless
+/// `allow_remote` is set — `smelt ui` has no authentication, so binding it to
+/// a reachable address is a fail-loud opt-in, never a silent rebind. When the
+/// opt-in is present, a startup warning is emitted so the exposure is visible
+/// in logs.
+pub fn validate_bind_host(host: &str, allow_remote: bool) -> Result<()> {
+    if is_loopback_host(host) {
+        return Ok(());
+    }
+    if !allow_remote {
+        anyhow::bail!(
+            "Refusing to bind smelt ui to non-loopback host '{host}' without --allow-remote. \
+             smelt ui has no authentication — anyone able to reach this address can read and \
+             control your project. Pass --allow-remote to bind anyway.",
+        );
+    }
+    tracing::warn!(
+        "smelt ui is binding to non-loopback host '{host}' (--allow-remote set). \
+         The UI server has no authentication; anyone able to reach this address can read and \
+         control your project.",
+    );
+    Ok(())
+}
+
+/// CORS layer restricted to the server's own origin(s): `http://{host}:{port}`,
+/// plus `http://localhost:{port}` when bound to loopback (browsers commonly
+/// hit the UI via `localhost` even when the server reports its bind address
+/// as `127.0.0.1`).
+pub fn build_cors_layer(host: &str, port: u16) -> CorsLayer {
+    let mut origins = vec![format!("http://{host}:{port}")];
+    if is_loopback_host(host) {
+        let localhost_origin = format!("http://localhost:{port}");
+        if !origins.contains(&localhost_origin) {
+            origins.push(localhost_origin);
+        }
+    }
+    let origins: Vec<axum::http::HeaderValue> =
+        origins.into_iter().filter_map(|o| o.parse().ok()).collect();
+
+    CorsLayer::new()
+        .allow_origin(origins)
+        .allow_methods(tower_http::cors::AllowMethods::any())
+        .allow_headers(tower_http::cors::AllowHeaders::any())
+}
+
+#[allow(clippy::too_many_arguments)]
 pub async fn start_server(
     db: smelt_db::Database,
     config: Config,
@@ -52,7 +111,10 @@ pub async fn start_server(
     project_dir: PathBuf,
     port: u16,
     host: &str,
+    allow_remote: bool,
 ) -> Result<()> {
+    validate_bind_host(host, allow_remote)?;
+
     let (change_tx, _) = broadcast::channel::<ChangeEvent>(64);
     let (run_event_tx, _) = broadcast::channel::<RunProgressEvent>(256);
 
@@ -87,7 +149,7 @@ pub async fn start_server(
         .route("/api/runs/{id}", get(api::get_run))
         .route("/ws", get(ws_handler))
         .fallback(static_handler)
-        .layer(CorsLayer::permissive())
+        .layer(build_cors_layer(host, port))
         .with_state(state);
 
     let addr = format!("{}:{}", host, port);

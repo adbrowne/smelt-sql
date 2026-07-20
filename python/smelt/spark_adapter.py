@@ -18,6 +18,11 @@ class SparkAdapter:
     def __init__(self, connect_url, catalog=None):
         from pyspark.sql import SparkSession
 
+        # Stored verbatim (before being handed to `.remote()`) so tests can
+        # assert token/TLS parameters reach the Spark Connect client
+        # unmodified — no smelt-side parsing or rewriting of the URL.
+        self.connect_url = connect_url
+
         builder = SparkSession.builder
         if connect_url:
             builder = builder.remote(connect_url)

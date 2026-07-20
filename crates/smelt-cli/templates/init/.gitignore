@@ -1,0 +1,5 @@
+# smelt state (run manifests, deployed-schema snapshots) — not build output.
+.smelt/
+
+# The local DuckDB database file this project's dev target writes to.
+dev.duckdb

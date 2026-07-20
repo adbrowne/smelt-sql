@@ -13,6 +13,33 @@ env:
   CARGO_TERM_COLOR: always
 
 jobs:
+  changes:
+    name: Detect Spark-relevant changes
+    runs-on: ubuntu-latest
+    outputs:
+      spark: ${{ steps.filter.outputs.spark }}
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Filter paths
+        uses: dorny/paths-filter@v3
+        id: filter
+        with:
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before || 'HEAD~1') }}
+          filters: |
+            spark:
+              - 'crates/smelt-backend-spark/**'
+              - 'crates/smelt-logical/**'
+              - 'crates/smelt-runtime/**'
+              - 'crates/smelt-cli/tests/*parity*'
+              - 'crates/smelt-types/src/signatures.rs'
+              - 'crates/smelt-db/src/type_inference*/**'
+              - 'crates/smelt-parser/src/**'
+              - 'python/**'
+              - 'scripts/spark-*.sh'
+              - '.github/workflows/compat.yml'
+
   parse-equivalence:
     name: Parse Equivalence Tests (PG + Spark)
     runs-on: ubuntu-latest
@@ -218,8 +245,14 @@ jobs:
   type-property-spark:
     name: Type Property Tests (DuckDB + Spark)
     runs-on: ubuntu-latest
-    # Only run on schedule (nightly) or when explicitly labeled
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+    needs: changes
+    # Run on schedule (nightly), when explicitly labeled, or when this PR/push
+    # touches Spark-relevant paths (type-inference, signature registry, dialect
+    # surface, backend crate)
+    # !cancelled() guards against a `changes`-job failure silently skipping this
+    # job on nightly/labeled runs (a needed job's failure skips dependents unless
+    # the if: carries a status-check function).
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true') }}
 
     env:
       DUCKDB_LIB_DIR: /usr/local/lib
@@ -267,8 +300,14 @@ jobs:
   spark-parity:
     name: Spark Parity Tests (Delta, Docker)
     runs-on: ubuntu-latest
-    # Only run on schedule (nightly) or when explicitly labeled
-    if: github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests')
+    needs: changes
+    # Run on schedule (nightly), when explicitly labeled, or when this PR/push
+    # touches Spark-relevant paths (backend crate, parity tests, type
+    # inference, signature registry, dialect surface)
+    # !cancelled() guards against a `changes`-job failure silently skipping this
+    # job on nightly/labeled runs (a needed job's failure skips dependents unless
+    # the if: carries a status-check function).
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true') }}
 
     env:
       DUCKDB_LIB_DIR: /usr/local/lib
@@ -329,6 +368,76 @@ jobs:
 
       - name: Run Spark parity suite (dual-target + CLI integration)
         run: cargo test -p smelt-cli --features smelt-cli/spark --quiet 2>&1 | tail -40
+
+      - name: Stop Spark Connect
+        if: always()
+        run: bash scripts/spark-down.sh
+
+  maintenance-conformance-spark:
+    name: Maintenance Conformance Spark Twin (Delta, Docker)
+    runs-on: ubuntu-latest
+    needs: changes
+    # Same trigger discipline as spark-parity: nightly, explicitly labeled, or
+    # when this PR/push touches Spark-relevant paths. Gated tier only — the
+    # generative recipe pool over Spark Connect is too slow for per-PR runs.
+    if: ${{ !cancelled() && (github.event_name == 'schedule' || contains(github.event.pull_request.labels.*.name, 'run-docker-tests') || needs.changes.outputs.spark == 'true') }}
+
+    env:
+      DUCKDB_LIB_DIR: /usr/local/lib
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v6
+
+      - name: Install Rust stable
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Setup DuckDB system library
+        uses: ./.github/actions/setup-duckdb
+
+      - name: Set up Python 3.12
+        uses: actions/setup-python@v6
+        with:
+          python-version: "3.12"
+
+      - name: Install pyspark client (pinned 4.0.0)
+        run: |
+          python -m venv --without-pip .smelt-spark-venv
+          curl -sL https://bootstrap.pypa.io/get-pip.py | .smelt-spark-venv/bin/python
+          .smelt-spark-venv/bin/pip install 'pyspark[connect]==4.0.0' pandas pyarrow grpcio grpcio-status protobuf
+
+      - name: Cache Spark Ivy (Delta jars — only downloaded once per version)
+        uses: actions/cache@v5
+        with:
+          path: .smelt-spark-ivy
+          key: spark-ivy-delta-4.0.0
+
+      - name: Cache cargo
+        uses: actions/cache@v5
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-maintenance-conformance-spark-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Pull Spark Docker image (apache/spark:4.0.0)
+        run: docker pull apache/spark:4.0.0
+
+      - name: Start Delta-enabled Spark Connect
+        run: |
+          bash scripts/spark-up.sh
+          echo "SPARK_CONNECT_URL=sc://localhost:15002" >> $GITHUB_ENV
+          echo "SMELT_SPARK_WAREHOUSE=${GITHUB_WORKSPACE}/.smelt-spark-warehouse" >> $GITHUB_ENV
+          _venv="${GITHUB_WORKSPACE}/.smelt-spark-venv/lib/python3.12/site-packages"
+          echo "PYTHONPATH=${GITHUB_WORKSPACE}/python:${_venv}" >> $GITHUB_ENV
+          echo "PYSPARK_PYTHON=${GITHUB_WORKSPACE}/.smelt-spark-venv/bin/python" >> $GITHUB_ENV
+
+      - name: Build maintenance-conformance Spark twin (spark feature)
+        run: cargo build -p smelt-cli --features smelt-cli/spark --test maintenance_conformance_spark
+
+      - name: Run maintenance-conformance Spark twin (reduced sample, single-threaded)
+        run: cargo test -p smelt-cli --features smelt-cli/spark --test maintenance_conformance_spark -- --test-threads=1 2>&1 | tail -60
 
       - name: Stop Spark Connect
         if: always()

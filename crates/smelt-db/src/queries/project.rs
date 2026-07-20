@@ -37,7 +37,7 @@ use crate::{
 pub use smelt_types::{ModelOrigin, ModelRefValue, SourceOrigin, SourceRefValue};
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{BatchedConfig, SeedInfo, SourceInfo, SourcesConfig};
+use smelt_core::{PartitionGrainConfig, SeedInfo, SourceInfo, SourcesConfig};
 use smelt_types::signatures::{FunctionSig, SmeltType};
 
 /// YAML parse error with location information
@@ -699,7 +699,7 @@ pub struct EmittedModelDef {
     /// the file-wide `incremental:` frontmatter is shared by all incremental
     /// emissions from that generator; per-`ModelDef` overrides are not supported
     /// in v1.
-    pub incremental_config: Option<BatchedConfig>,
+    pub incremental_config: Option<PartitionGrainConfig>,
     /// Inherited `timeseries:` block from the generator file's frontmatter,
     /// when `materialization == "incremental"`.  `None` for non-incremental
     /// emissions or when the generator's frontmatter has no `timeseries:` block.
@@ -854,7 +854,7 @@ fn materialise_emitted_model_def(
     generator_file: &Path,
     literal: &RecordLiteral,
     frontmatter_tags: &[String],
-    frontmatter_incremental: Option<&BatchedConfig>,
+    frontmatter_incremental: Option<&PartitionGrainConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
 ) -> Option<EmittedModelDef> {
     let (name, name_span) = extract_modeldef_field_text(literal, "name")?;
@@ -993,7 +993,7 @@ fn evaluate_body_emissions(
     generator_file: &Path,
     body_expr: &Expr,
     frontmatter_tags: &[String],
-    frontmatter_incremental: Option<&BatchedConfig>,
+    frontmatter_incremental: Option<&PartitionGrainConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
     loader_values: &[(String, crate::loader::MetaValue)],
     ctx: &TypeContext,
@@ -1234,7 +1234,7 @@ fn materialise_modeldef_from_lambda_body(
     body: &Expr,
     record_val: &crate::loader::MetaValue,
     frontmatter_tags: &[String],
-    frontmatter_incremental: Option<&BatchedConfig>,
+    frontmatter_incremental: Option<&PartitionGrainConfig>,
     frontmatter_timeseries: Option<&TimeseriesConfig>,
     lambda_bindings: Vec<(String, SmeltType)>,
 ) -> Option<EmittedModelDef> {
@@ -3540,14 +3540,12 @@ mod tests {
     /// reflects the generator file's frontmatter `timeseries:` block.
     #[test]
     fn emitted_incremental_model_inherits_frontmatter_incremental_block() {
-        // Generator file with batched + timeseries frontmatter.
+        // Generator file with timeseries frontmatter.
         let generator = concat!(
             "---\n",
             "generates: models\n",
             "refresh: incremental\n",
             "grain: partition\n",
-            "batched:\n",
-            "  unique_key: [dt]\n",
             "timeseries:\n",
             "  event_time_column: dt\n",
             "  partition_column: dt\n",
@@ -3700,8 +3698,6 @@ mod tests {
             "generates: models\n",
             "refresh: incremental\n",
             "grain: partition\n",
-            "batched:\n",
-            "  unique_key: [dt]\n",
             "timeseries:\n",
             "  event_time_column: dt\n",
             "  partition_column: dt\n",

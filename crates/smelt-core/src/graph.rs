@@ -453,6 +453,48 @@ impl DependencyGraph {
             .collect())
     }
 
+    /// Partition `selected` into topological "waves" for parallel dispatch: a
+    /// wave is the set of models all of whose (selected) upstream
+    /// dependencies are already in an earlier wave, i.e. models with no
+    /// dependency edge to any other model in the same wave. A scheduler may
+    /// safely run every model in one wave concurrently, and must wait for a
+    /// whole wave to finish before starting the next.
+    ///
+    /// Only edges between two models *both present in `selected`* count
+    /// toward wave placement — an upstream model outside `selected` (already
+    /// materialized, out of scope for this run) never delays its downstream.
+    /// Errs identically to [`Self::execution_order`] on a cycle.
+    pub fn execution_waves(&self, selected: &HashSet<String>) -> Result<Vec<Vec<String>>> {
+        // Reuse `execution_order` for cycle detection + a deterministic base
+        // ordering, then layer that ordering by longest-path-from-a-root
+        // distance restricted to `selected`.
+        let order = self.filtered_execution_order(selected)?;
+        let mut wave_of: HashMap<&str, usize> = HashMap::new();
+        for name in &order {
+            let deps = self.get_upstream(name);
+            let wave = deps
+                .iter()
+                .filter(|d| selected.contains(*d))
+                .filter_map(|d| wave_of.get(d.as_str()).copied())
+                .max()
+                .map(|w| w + 1)
+                .unwrap_or(0);
+            wave_of.insert(name.as_str(), wave);
+        }
+        let max_wave = wave_of.values().copied().max();
+        let Some(max_wave) = max_wave else {
+            return Ok(Vec::new());
+        };
+        let mut waves: Vec<Vec<String>> = vec![Vec::new(); max_wave + 1];
+        // Preserve `order`'s relative sequence within each wave for
+        // deterministic scheduling.
+        for name in &order {
+            let w = wave_of[name.as_str()];
+            waves[w].push(name.clone());
+        }
+        Ok(waves)
+    }
+
     pub fn get_model(&self, name: &str) -> Result<&ModelFile> {
         self.models
             .get(name)
@@ -677,6 +719,62 @@ mod tests {
         assert!(err_msg.contains("nonexistent"));
     }
 
+    #[test]
+    fn test_execution_waves_diamond() {
+        // A -> B, A -> C, B -> D, C -> D (diamond): wave0={A}, wave1={B,C},
+        // wave2={D}.
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec!["A"]),
+            make_model("C", vec!["A"]),
+            make_model("D", vec!["B", "C"]),
+        ];
+        let graph = DependencyGraph::build(models, None).unwrap();
+        let selected: HashSet<String> =
+            ["A", "B", "C", "D"].iter().map(|s| s.to_string()).collect();
+        let waves = graph.execution_waves(&selected).unwrap();
+        assert_eq!(waves.len(), 3);
+        assert_eq!(waves[0], vec!["A".to_string()]);
+        let mut wave1 = waves[1].clone();
+        wave1.sort();
+        assert_eq!(wave1, vec!["B".to_string(), "C".to_string()]);
+        assert_eq!(waves[2], vec!["D".to_string()]);
+    }
+
+    #[test]
+    fn test_execution_waves_independent_chains() {
+        // Two independent chains A->B and X->Y: everything with no selected
+        // upstream lands in wave0, deep-2 models in wave1.
+        let models = vec![
+            make_model("A", vec![]),
+            make_model("B", vec!["A"]),
+            make_model("X", vec![]),
+            make_model("Y", vec!["X"]),
+        ];
+        let graph = DependencyGraph::build(models, None).unwrap();
+        let selected: HashSet<String> =
+            ["A", "B", "X", "Y"].iter().map(|s| s.to_string()).collect();
+        let waves = graph.execution_waves(&selected).unwrap();
+        assert_eq!(waves.len(), 2);
+        let mut wave0 = waves[0].clone();
+        wave0.sort();
+        assert_eq!(wave0, vec!["A".to_string(), "X".to_string()]);
+        let mut wave1 = waves[1].clone();
+        wave1.sort();
+        assert_eq!(wave1, vec!["B".to_string(), "Y".to_string()]);
+    }
+
+    #[test]
+    fn test_execution_waves_out_of_selection_upstream_does_not_delay() {
+        // B depends on A, but A is not selected (already materialized) — B
+        // should land in wave0, not wait on an absent A.
+        let models = vec![make_model("A", vec![]), make_model("B", vec!["A"])];
+        let graph = DependencyGraph::build(models, None).unwrap();
+        let selected: HashSet<String> = ["B"].iter().map(|s| s.to_string()).collect();
+        let waves = graph.execution_waves(&selected).unwrap();
+        assert_eq!(waves, vec![vec!["B".to_string()]]);
+    }
+
     /// Layer-prefix refs like `smelt.silver.events_parsed` produce segments
     /// `["silver", "events_parsed"]`. The graph must capture these as canonical
     /// dot-path deps so that UI edges and execution order are correct.
@@ -812,6 +910,7 @@ mod tests {
                     refresh: None,
                     grain: None,
                     unique_key: None,
+                    safety_overrides: None,
                     batched: None,
                     tags: tags.into_iter().map(|t| t.to_string()).collect(),
                     target: None,

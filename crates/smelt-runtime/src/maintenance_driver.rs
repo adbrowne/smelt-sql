@@ -27,8 +27,9 @@ use smelt_logical::analysis::join_shape::{ContributionVerdict, JoinContext};
 use smelt_logical::analysis::source_bounds::BoundResult;
 use smelt_logical::analysis::walk::model_property_vector;
 use smelt_logical::maintenance::choice::{
-    effective_override, resolve_recompute_restriction, resolve_write_suppression,
-    resolve_write_variant, RecomputeRestriction, WriteSuppression,
+    effective_override, resolve_cell_choice, resolve_recompute_restriction,
+    resolve_write_suppression, resolve_write_variant, ChosenTechnique, RecomputeRestriction,
+    WriteSuppression,
 };
 use smelt_logical::maintenance::emit::{
     emit_column_scoped_merge, emit_column_scoped_merge_suppressed, emit_create_table_as,
@@ -184,8 +185,16 @@ pub trait WindowedKeyedRule: Send + Sync {
         delta_sql: &str,
         partition_column: &str,
         slice_lower: &str,
+        dialect: MaintenanceDialect,
     ) -> Option<String> {
-        let _ = (schema, table, delta_sql, partition_column, slice_lower);
+        let _ = (
+            schema,
+            table,
+            delta_sql,
+            partition_column,
+            slice_lower,
+            dialect,
+        );
         None
     }
 }
@@ -221,6 +230,7 @@ pub async fn run_windowed_keyed_maintenance(
     locality: Option<&LocalitySlice>,
     suppression: &WriteSuppression,
     mut compile_step: impl FnMut(&MaintenanceStep) -> Result<String>,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     if let Some(reason) = rule.refuse() {
         bail!(
@@ -334,6 +344,7 @@ pub async fn run_windowed_keyed_maintenance(
                     &delta_sql,
                     partition_column,
                     &slice_lower,
+                    smelt_backend::maintenance_dialect(backend.dialect()),
                 ) {
                     Some(probe_sql) => {
                         let batches = backend.execute_sql(&probe_sql).await.map_err(|e| {
@@ -479,7 +490,11 @@ pub async fn run_windowed_keyed_maintenance(
                         transactional: false,
                     },
                 };
-                backend.execute_statement_group(&group).await.map_err(|e| {
+                crate::execute::retry_backend_call(retry, || {
+                    backend.execute_statement_group(&group)
+                })
+                .await
+                .map_err(|e| {
                     anyhow::anyhow!(
                         "Failed to execute model '{}':\n  SQL: {}\n  Error: {}",
                         model_name,
@@ -590,6 +605,18 @@ pub enum ResolvedTechnique {
     ColumnScopedMerge,
 }
 
+/// Legacy two-way (`RegionRecompute`/`ColumnScopedMerge`) resolver, retained
+/// **only** for `crates/smelt-runtime/tests/technique_lowering.rs`'s narrow
+/// unit coverage of that two-way choice in isolation. It has **zero
+/// production call sites**: the live execute path resolves entirely through
+/// `smelt_logical::maintenance::choice::resolve_cell_choice`, dispatched from
+/// [`resolve_live_column_scoped_cell`] below (Phase 2, `docs/plans/
+/// 20260719-prod-w7-bakeoff.md`). `pub` (not `pub(crate)`) only because
+/// `technique_lowering.rs` is a `tests/` integration test compiled as a
+/// separate crate and needs external visibility; do not add new production
+/// callers — extend `resolve_cell_choice` and thread the result through
+/// `resolve_live_column_scoped_cell` instead.
+///
 /// Resolve which technique executes for `trigger`, mirroring
 /// `incremental_models.md` §"Per-cell admission": a `technique:` pin bypasses
 /// the cost model, **never** admission — pinning `rederive_columns` for a
@@ -636,6 +663,9 @@ pub fn resolve_cell_technique(
 /// existing `pin`-only call sites (and this module's own unit tests) keep
 /// compiling unchanged; production write-pin consultation happens through
 /// this entry point once a caller has a resolved [`WritePattern`] in hand.
+/// Like [`resolve_cell_technique`], this has no production call site — it
+/// exists solely for `technique_lowering.rs`'s two-way unit coverage; the
+/// live path is `resolve_cell_choice` via [`resolve_live_column_scoped_cell`].
 pub fn resolve_cell_technique_with_write_pin(
     plan: &MaintenancePlan,
     trigger: &Trigger,
@@ -701,8 +731,9 @@ pub fn resolve_cell_technique_with_write_pin(
 
 /// Find the first `explicitly_mutable` source whose `Trigger::
 /// UpstreamMutation` cell resolves live to `Technique::ColumnScopedMerge`
-/// (via [`resolve_cell_technique`]) in the model's derived
-/// [`MaintenancePlan`] — the regular incremental execution loop's per-run
+/// (via `smelt_logical::maintenance::choice::resolve_cell_choice`, see below)
+/// in the model's derived [`MaintenancePlan`] — the regular incremental
+/// execution loop's per-run
 /// technique choice (MP11), as distinct from [`resolve_incremental_strategy`]
 /// above, which only maps the creation trigger. Per the "Maintenance-plan
 /// purity" invariant (root `CLAUDE.md`), this calls
@@ -731,6 +762,19 @@ pub fn resolve_cell_technique_with_write_pin(
 /// matched by `PlanCell::group`'s display name — the plan-purity invariant's
 /// "derived once, never re-derived" extends to this lookup, not a second
 /// column-grouping pass.
+///
+/// This is the ladder's single production dispatch site for the
+/// Fold/Recompute/RederiveColumns family dimension
+/// (`smelt_logical::maintenance::choice::resolve_cell_choice`) — a
+/// frontmatter `cells[].technique` hard pin or `cells[].prefer` soft
+/// preference on this trigger's cell is threaded in via
+/// [`effective_override`] and actually consulted, rather than the
+/// pin-less two-way resolver this call site used before (Phase 2,
+/// `docs/plans/20260719-prod-w7-bakeoff.md`). An inadmissible hard pin
+/// surfaces as [`smelt_logical::maintenance::choice::ChoiceRefusal`],
+/// mapped here to a real `Err` — the fail-loud discipline (root
+/// `CLAUDE.md`) forbids silently falling back to region recompute for a
+/// pin the derived plan does not admit.
 pub fn resolve_live_column_scoped_cell(
     sql: &str,
     table: &str,
@@ -738,8 +782,9 @@ pub fn resolve_live_column_scoped_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
-) -> Option<(String, PlanCell, WriteSuppression)> {
-    let result = smelt_db::queries::maintenance::derive_model_maintenance_plan(
+    technique_overrides: &[crate::types::CellTechniqueOverride],
+) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
+    let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
         table,
         metadata,
@@ -759,70 +804,99 @@ pub fn resolve_live_column_scoped_cell(
         // this resolver only inspects mutation-trigger cells, which key
         // temporal locality's routes do not gate.
         &[],
-    )?;
+    ) else {
+        return Ok(None);
+    };
     let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] = metadata
         .maintenance
         .as_ref()
         .map(|m| m.cells.as_slice())
         .unwrap_or(&[]);
-    explicitly_mutable.iter().find_map(|source| {
+    // Request overrides enter the SAME `effective_override` ladder as
+    // frontmatter `cells[]` entries, converted to the matching shape
+    // (`prefer`/`write` left `None` — request scope only carries a hard
+    // technique pin). `matching_cell` (in `smelt-logical`, not touched by
+    // this phase) is first-match-wins, so request overrides are placed
+    // BEFORE the frontmatter cells in the combined slice: that is how
+    // "request scope is narrower than file scope" (`docs/plans/
+    // 20260719-prod-w7-bakeoff.md` Phase 3, decision B1) is realized —
+    // a request override for a cell also pinned in frontmatter is found
+    // first and wins.
+    let request_cells: Vec<smelt_core::config::MaintenanceCellConfig> = technique_overrides
+        .iter()
+        .map(|o| smelt_core::config::MaintenanceCellConfig {
+            columns: o.columns.clone(),
+            on: o.on.clone(),
+            prefer: None,
+            technique: Some(o.technique),
+            write: None,
+        })
+        .collect();
+    let combined_cells: Vec<smelt_core::config::MaintenanceCellConfig> = request_cells
+        .iter()
+        .cloned()
+        .chain(cells_cfg.iter().cloned())
+        .collect();
+    for source in explicitly_mutable {
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
         };
-        // An already-validated `cells[].write` pin for this trigger's cell
-        // (`smelt-db`'s pre-execution diagnostic gate already ran
-        // `resolve_write_pin`'s registry/capability/equivalence checks — an
-        // invalid pin never reaches here, the run would already have been
-        // refused with `MaintenanceWritePatternUnavailable`/
-        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
-        // *name* to its registry entry so `resolve_cell_technique_with_write_pin`
-        // can consult which [`smelt_logical::maintenance::WriteSelection`]
-        // it maps to, never re-deriving admission itself.
-        let write_pin = result.plan.cell_for(&trigger).and_then(|plan_cell| {
-            let pin_name = smelt_db::queries::maintenance::matching_write_pin(
-                plan_cell,
-                &result.column_groups,
-                cells_cfg,
-            )?;
-            smelt_logical::maintenance::lookup_write_pattern(&pin_name)
-        });
-        let resolved = resolve_cell_technique_with_write_pin(
-            &result.plan,
-            &trigger,
-            None,
-            write_pin,
-            backend_supports_column_scoped_merge,
-        )
-        .ok()?;
-        if resolved != ResolvedTechnique::ColumnScopedMerge {
-            return None;
-        }
-        let cell = result.plan.cell_for(&trigger)?.clone();
+        let Some(cell) = result.plan.cell_for(&trigger).cloned() else {
+            continue;
+        };
         let group_columns = result
             .column_groups
             .iter()
             .find(|g| g.name() == cell.group)
             .map(|g| g.columns.clone())
             .unwrap_or_default();
-        let comparability = model_property_vector(sql, &JoinContext::new())
-            .map(|v| v.comparability)
-            .unwrap_or_default();
-        let raw_suppression =
-            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
-        // The override ladder's write-suppression dimension
-        // (`docs/plans/20260715-composed-axes-conditional-maintenance.md`
-        // Phase G1): `defaults.prefer`/`cells[].prefer`/`cells[].technique`
-        // narrowed to this cell's own trigger + column group, exactly the
-        // same ladder `resolve_cell_choice` narrows for family choice.
+        // An already-validated `cells[].write` pin for this trigger's cell
+        // (`smelt-db`'s pre-execution diagnostic gate already ran
+        // `resolve_write_pin`'s registry/capability/equivalence checks — an
+        // invalid pin never reaches here, the run would already have been
+        // refused with `MaintenanceWritePatternUnavailable`/
+        // `MaintenanceWriteAddressingRefused`); this only re-resolves the
+        // *name* to its registry entry so `resolve_cell_choice` can consult
+        // which [`smelt_logical::maintenance::WriteSelection`] it maps to,
+        // never re-deriving admission itself.
+        let write_pin = smelt_db::queries::maintenance::matching_write_pin(
+            &cell,
+            &result.column_groups,
+            cells_cfg,
+        )
+        .and_then(|pin_name| smelt_logical::maintenance::lookup_write_pattern(&pin_name));
+        // The override ladder (`defaults.prefer` → `cells[].prefer` →
+        // `cells[].technique`, narrower scope winning) narrowed to this
+        // cell's own trigger + column group — the SAME `overrides` value
+        // feeds both the family choice below and the write-suppression
+        // variant resolution further down, so a `cells[].technique` entry
+        // naming e.g. `suppress`/`unconditional` for this cell is visible
+        // to both dimensions from one ladder evaluation.
         let overrides = effective_override(
             metadata
                 .maintenance
                 .as_ref()
                 .and_then(|m| m.defaults.as_ref()),
-            cells_cfg,
+            &combined_cells,
             source,
             &group_columns,
         );
+        let chosen = resolve_cell_choice(
+            &result.plan,
+            &trigger,
+            &overrides,
+            write_pin,
+            backend_supports_column_scoped_merge,
+        )
+        .map_err(|refusal| anyhow::anyhow!(refusal.to_string()))?;
+        if chosen != ChosenTechnique::Admitted(Technique::ColumnScopedMerge) {
+            continue;
+        }
+        let comparability = model_property_vector(sql, &JoinContext::new())
+            .map(|v| v.comparability)
+            .unwrap_or_default();
+        let raw_suppression =
+            resolve_write_suppression(&group_columns, &comparability, &cell.row_identity);
         // Fold the first-build/definition-change-backfill posture (or an
         // explicit `prefer`/`technique` override on this dimension) into
         // the proof: a cell admitted but not preferred (`cell.ledger_catch_up`
@@ -833,31 +907,33 @@ pub fn resolve_live_column_scoped_cell(
         // resolver's own rule, never a runtime special case here.
         //
         // A `technique: suppress` pin forcing suppression on over a genuine
-        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the
-        // `write_pin` dimension just above — where `smelt-db`'s
-        // pre-execution diagnostics (`MaintenanceWritePatternUnavailable`/
-        // `MaintenanceWriteAddressingRefused`) already validate `cells[].write`
-        // pins before a run ever reaches this code, making that `.ok()?`
-        // defensive/unreachable — there is currently NO pre-execution
-        // diagnostic gate for this write-*variant* pin dimension
-        // (`technique`/`prefer: suppress`/`unconditional`). So this `.ok()?`
-        // is a REAL silent fallback: an inadmissible variant pin is not
-        // refused here, it just falls through to the safe region-recompute
-        // batch loop below instead of failing the run loudly. This is a
-        // known gap, not by design; see `docs/specs/incremental_models.md`
-        // §"Known Divergences" and
+        // P2/P3 proof failure is a hard `ChoiceRefusal`. Unlike the family
+        // dimension just resolved above — where `resolve_cell_choice`'s
+        // refusal is now a real run error — there is currently NO
+        // pre-execution diagnostic gate for this write-*variant* pin
+        // dimension (`technique`/`prefer: suppress`/`unconditional`). So the
+        // `continue` below on `Err` is a REAL silent fallback: an
+        // inadmissible variant pin is not refused here, it just falls
+        // through to the safe region-recompute batch loop instead of
+        // failing the run loudly. This is a known gap, not by design; see
+        // `docs/specs/incremental_models.md` §"Known Divergences" and
         // `docs/plans/20260715-composed-axes-conditional-maintenance.md`
         // Phase G1 for the tracked follow-up to extend the diagnostic gate
-        // to this dimension.
-        let (suppression, _variant_reason) = resolve_write_variant(
+        // to this dimension — out of scope for Phase 2 of
+        // `docs/plans/20260719-prod-w7-bakeoff.md`, which only wires the
+        // family (Fold/Recompute/RederiveColumns) dimension.
+        let write_variant_result = resolve_write_variant(
             &raw_suppression,
             &cell.trigger,
             cell.ledger_catch_up,
             &overrides,
-        )
-        .ok()?;
-        Some((source.clone(), cell, suppression))
-    })
+        );
+        let Ok((suppression, _variant_reason)) = write_variant_result else {
+            continue;
+        };
+        return Ok(Some((source.clone(), cell, suppression)));
+    }
+    Ok(None)
 }
 
 /// Execute a live `ColumnScopedMerge` cell whose scan locality is an
@@ -889,6 +965,7 @@ pub fn resolve_live_column_scoped_cell(
 /// what a backend executes, matching every other technique in this module
 /// (`docs/specs/incremental_models.md` §"Statement emission (single
 /// owner)").
+#[allow(clippy::too_many_arguments)]
 pub async fn execute_column_scoped_merge_full(
     backend: &dyn Backend,
     schema: &str,
@@ -897,6 +974,7 @@ pub async fn execute_column_scoped_merge_full(
     dimension_batch_sql: &str,
     suppression: &WriteSuppression,
     window: &PartitionRange,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -910,6 +988,7 @@ pub async fn execute_column_scoped_merge_full(
         suppression,
         dialect,
         window,
+        retry,
     )
     .await
     .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
@@ -1038,6 +1117,7 @@ async fn execute_column_scoped_write_with_observed_delta(
     suppression: &WriteSuppression,
     dialect: MaintenanceDialect,
     window: &PartitionRange,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> std::result::Result<(), BackendError> {
     let full_table = format!("{schema}.{table}");
     match suppression {
@@ -1075,17 +1155,19 @@ async fn execute_column_scoped_write_with_observed_delta(
                 &window.end,
                 &changed_keys_query,
             );
-            backend
-                .execute_conditional_write_and_record_observed_delta(
+            crate::execute::retry_backend_call(retry, || {
+                backend.execute_conditional_write_and_record_observed_delta(
                     &ensure_sql,
                     &group,
                     &record_sql,
                 )
-                .await
+            })
+            .await
         }
         WriteSuppression::Unconditional { .. } => {
             let group = emit_column_scoped_merge(&full_table, unique_key, source_select, dialect);
-            backend.execute_statement_group(&group).await
+            crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group))
+                .await
         }
     }
 }
@@ -1486,6 +1568,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
     window_start: &str,
     window_end: &str,
     dialect: MaintenanceDialect,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> std::result::Result<StatementGroup, BackendError> {
     let full_table = format!("{schema}.{table}");
     let closed = skeleton_source_closure.is_some_and(|c| c.is_closed());
@@ -1505,7 +1588,7 @@ pub async fn execute_delete_insert_with_delta_restriction(
         delta.as_deref(),
         dialect,
     );
-    backend.execute_statement_group(&group).await?;
+    crate::execute::retry_backend_call(retry, || backend.execute_statement_group(&group)).await?;
     Ok(group)
 }
 
@@ -1629,6 +1712,7 @@ pub async fn execute_column_scoped_merge(
     dimension_batch_sql: &str,
     suppression: &WriteSuppression,
     window: &PartitionRange,
+    retry: &crate::execute::RetryPolicy<'_>,
 ) -> Result<ExecutionResult> {
     let start = Instant::now();
     let full_table = format!("{schema}.{table}");
@@ -1652,6 +1736,7 @@ pub async fn execute_column_scoped_merge(
         suppression,
         dialect,
         window,
+        retry,
     )
     .await
     .map_err(|e| anyhow::anyhow!("column-scoped MERGE failed for '{full_table}': {e}"))?;
@@ -1836,6 +1921,22 @@ mod tests {
     use smelt_dialect::{BackendCapabilities, SqlDialect};
     use smelt_logical::analysis::source_bounds::Seconds;
     use std::sync::Mutex;
+
+    /// A retry policy that never retries — these unit tests exercise the
+    /// driver against `RecordingBackend`, a synchronous test double, so
+    /// there is no `ExecuteRequest`/run reporter to derive a policy from
+    /// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). Retry
+    /// behaviour itself is covered end-to-end by `tests/retry.rs`.
+    const NO_OP_REPORTER: crate::reporter::NoOpReporter = crate::reporter::NoOpReporter;
+    fn no_retry_policy() -> crate::execute::RetryPolicy<'static> {
+        crate::execute::RetryPolicy {
+            retry_max: 0,
+            base_backoff_ms: 0,
+            run_id: "maintenance-driver-unit-test",
+            model_name: "maintenance-driver-unit-test",
+            reporter: &NO_OP_REPORTER,
+        }
+    }
 
     #[test]
     fn driving_steps_day_granularity_in_temporal_order() {
@@ -2101,6 +2202,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await;
         assert!(result.is_err());
@@ -2130,6 +2232,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap();
@@ -2176,6 +2279,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap();
@@ -2223,6 +2327,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap_err();
@@ -2295,6 +2400,7 @@ mod tests {
                     step.partition_value
                 ))
             },
+            &no_retry_policy(),
         )
         .await
         .unwrap();

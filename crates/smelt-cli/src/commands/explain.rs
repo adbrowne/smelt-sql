@@ -520,11 +520,20 @@ async fn explain_maintenance_plan(
         .get(&target)
         .build_ephemeral_resolver(&ephemeral_models, &schema);
 
-    let unique_key: Vec<String> = model
-        .metadata
-        .as_deref()
-        .and_then(|m| m.batched.as_ref())
-        .map(|b| b.unique_key.clone())
+    // `Config::get_incremental_with_metadata` is the single merge point for
+    // the effective `batched:` config (frontmatter wins wholesale over the
+    // `smelt.yml` model override, `docs/specs/models.md` §"The Relation
+    // Contract") — the same one `smelt-runtime::execute.rs`'s live
+    // `decide_column_merge_dispatch` gate consults, so `--show-sql`'s
+    // rendered statements stay in parity with what a real run would build
+    // (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
+    // report"). Reading `model.metadata.batched` directly here (the prior
+    // shape) missed a `unique_key` declared only via the `smelt.yml`
+    // override — the only surviving frontmatter-external spelling now that
+    // the `.sql` frontmatter `batched:` sub-block is retired.
+    let unique_key: Vec<String> = config
+        .get_incremental_with_metadata(&model.canonical_path(), model.metadata.as_deref())
+        .map(|b| b.unique_key)
         .unwrap_or_default();
 
     let source_timeseries = smelt_runtime::build_source_timeseries_map(&graph, &source_infos);

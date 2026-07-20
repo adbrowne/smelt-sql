@@ -109,7 +109,7 @@ Owned by `docs/specs/timeseries.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `TimeseriesRequiredForBatched` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
+| `TimeseriesRequiredForPartitionGrain` | Error | A model declares `refresh: incremental` + `grain: partition` but has no `timeseries:` block. |
 | `MalformedTimeseries` | Error | The `timeseries:` block parses but violates a structural rule. |
 | `MalformedFunctionalDependency` | Error | A `functional_dependencies:` entry is structurally invalid: an empty `key`/`determines`, a `determines` column also listed in `key`, or a `key`/`determines` column absent from the model's SQL body. |
 | `MalformedBoundedDomain` | Error | A `bounded_domain:` declaration is structurally invalid: a non-positive `max_cardinality` (an absent cap is already a YAML parse error, since the field is required), an empty `column`, or a `column` absent from the model's SQL body. |
@@ -119,14 +119,21 @@ Owned by `docs/specs/timeseries.md`.
 
 ---
 
-### Batched
+### Partition grain
 
 Owned by `docs/specs/incremental_models.md`.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
-| `BatchedNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
+| `PartitionGrainNotSafe` | Warning | A `grain: partition` model's SQL is not batch-safe under the planner's batch safety classifier; execution falls back to a safe chunking strategy. |
 | `EventTimeColumnNotVisibleAtOuterSelect` | Error | A batched model's `event_time_column` is not accessible at the outermost SELECT where the time filter is injected — either because the query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM clause is a subquery that does not project the column. |
+
+A `.sql` frontmatter `batched:` sub-block is refused outright — `YamlParseError` (no dedicated
+code), with a fix-it naming each declared sub-key's top-level replacement and the caller's own
+value under the new spelling (`unique_key` → top-level `unique_key:`, `safety_overrides` →
+top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`;
+`docs/specs/models.md` §"The Relation Contract"). The `smelt.yml` model-override spelling of
+`batched:` is unaffected by this refusal.
 
 ---
 
@@ -134,16 +141,22 @@ Owned by `docs/specs/incremental_models.md`.
 
 Owned by `docs/specs/incremental_models.md`. This family replaces the retired `Cumulative*` and
 `AccumulatingSnapshot*` code families: most codes are renamed 1:1 with their trigger
-unchanged; `CumulativeNoDrivingSource` and `AccumulatingSnapshotUnboundedHorizon` are
-**retired outright, not renamed** (an unclocked model is a legitimate snapshot-reconcile
-posture under `keyed`, not an error, and there is no write-eligibility horizon to bound —
-`incremental_models.md` §Known Divergences "The key grain").
+unchanged; `CumulativeNoDrivingSource`, `AccumulatingSnapshotUnboundedHorizon`, and
+`KeyedForbidsPartitionGrain` are **retired outright, not renamed**:
+- `CumulativeNoDrivingSource`/`AccumulatingSnapshotUnboundedHorizon` — an unclocked model is a
+  legitimate snapshot-reconcile posture under `keyed`, not an error, and there is no
+  write-eligibility horizon to bound (`incremental_models.md` §Known Divergences "The key grain").
+- `KeyedForbidsPartitionGrain` — the literal `batched:` sub-block it named is refused universally, for
+  every grain, at frontmatter parse time (`YamlParseError`, not a dedicated code) — a `grain: key`
+  model can no longer declare the sub-block at all, so the dedicated keyed check is gone rather
+  than reachable. `PartitionGrainRequiresRefreshIncremental` still catches the one surviving way a `grain: key`
+  model can carry an internally-folded `batched` block (via the top-level `safety_overrides:` fold),
+  a strict subset of what that check already covers.
 
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `KeyedRequiresGroupBy` | Error | A `grain: key` model's SELECT has no GROUP BY (key columns are required). |
 | `KeyedForbidsTimeseries` | Error | A `grain: key` model declares a `timeseries:` block but key temporal locality cannot be established — no route applies (`incremental_models.md` §"Key temporal locality"). Names the three routes and the nearest missing fact. Anchored at offset 0. |
-| `KeyedForbidsBatched` | Error | A `grain: key` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 | `KeyedUnknownCombiner` | Error | A `grain: key` model's non-key projection is not a direct call to a catalogued column-family aggregator, or is a composite expression over aggregates. Names the offending expression; a bare column or `ANY_VALUE` under window-forward names `MAX_BY` + an ordering column as the fix. |
 | `KeyedGroupByContainsPartitionColumn` | Error | The `grain: key` model's GROUP BY contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partitioned/batched shape and the key-embedded time-partitioned keyed shape; suggests `refresh: batched` + `timeseries:`, or declaring `timeseries:` to stay keyed. |
 | `KeyedForbidsWindowFunctions` | Error | Window functions (`OVER (...)`) appear in a `grain: key` model's outer body. |
@@ -166,7 +179,7 @@ Owned by `docs/specs/materialized_view.md`.
 | Code | Severity | Trigger |
 |------|----------|---------|
 | `MaterializedViewForbidsTimeseries` | Error | A `refresh: materialized_view` model incorrectly declares a `timeseries:` block. Anchored at offset 0. |
-| `MaterializedViewForbidsBatched` | Error | A `refresh: materialized_view` model incorrectly declares a `batched:` block. Anchored at offset 0. |
+| `MaterializedViewForbidsPartitionGrain` | Error | A `refresh: materialized_view` model incorrectly declares a `batched:` block. Anchored at offset 0. |
 
 ---
 
@@ -183,6 +196,17 @@ Owned by `docs/specs/testing.md`.
 | `NonStandaloneTestModel` | Error | While inlining a whole-query `smelt.test`, an upstream model body cannot compile standalone (per-model config vars, incremental/watermark constructs) and was not mocked via `PASSING`. Advises mocking that dependency via `PASSING`. Anchored at the offending reference. |
 | `CheckHasTestClause` | Error | A `smelt.check` declaration carries a `PASSING` or `EXPECT` clause (valid only on `smelt.test`). Anchored at the offending clause. |
 | `CheckTargetNotBuilt` | Error | A `smelt.check` references a model whose relation does not exist in the configured target (not yet built). Anchored at the reference. |
+
+---
+
+### Declarative column tests
+
+Owned by `docs/specs/data_tests.md`.
+
+| Code | Severity | Trigger |
+|------|----------|---------|
+| `UnknownColumnTestKind` | Error | A `columns.<c>.tests` entry does not match `not_null`, `unique`, `accepted_values`, or `relationships`. Anchored at the offending entry. |
+| `ColumnTestOnUnknownColumn` | Error | A `columns.<c>.tests` entry names a column absent from the model's inferred output schema. Anchored at the column key. |
 
 ---
 

@@ -843,7 +843,7 @@ impl UpstreamSchemas {
             // well inside the cap — but "not expected" is exactly what a
             // guard is for; the cap is a safety bound, not a proof.
             let mut converged = false;
-            const MAX_ROUNDS: usize = 5;
+            const MAX_ROUNDS: usize = 20;
             for _ in 0..MAX_ROUNDS {
                 let provider = StaticRefSchemaProvider {
                     models: &model_schemas,
@@ -2401,6 +2401,7 @@ JOIN smelt.model_b b ON a.id = b.id
                 refresh: None,
                 grain: None,
                 unique_key: None,
+                safety_overrides: None,
                 batched: None,
                 tags: Vec::new(),
                 target: None,

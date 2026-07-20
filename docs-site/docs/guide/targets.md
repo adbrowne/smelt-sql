@@ -96,6 +96,32 @@ targets:
 | `schema` | Yes | Default schema for created tables and views. |
 | `format` | No | Table format: `delta` (default) or `parquet`. See [Delta vs Parquet](#delta-vs-parquet) below. |
 
+#### Secrets and TLS
+
+`connect_url` accepts environment-variable interpolation, so an auth token never has to sit in
+the checked-in `smelt.yml`. Any `${VAR_NAME}` reference inside the string is resolved once at
+config load, from the process environment; a literal `$` that must not trigger a lookup is
+written `$$`. If the referenced variable is unset, config loading fails with a hard error naming
+the variable and the YAML key path (e.g. `targets.prod.connect_url`) — it never silently
+resolves to an empty string.
+
+```yaml
+targets:
+  databricks_prod:
+    type: spark
+    connect_url: "sc://adb-123.4.azuredatabricks.net:443/;token=${DATABRICKS_TOKEN};use_ssl=true"
+    catalog: main
+    schema: analytics
+```
+
+TLS and other connection parameters (`use_ssl`, `token`, etc.) are passed the same way, as part
+of the Spark Connect URL string — smelt does not parse them out or introduce separate YAML keys
+for them. The resolved URL, token included, is handed to the Spark Connect Python client
+unmodified and is never logged.
+
+A `connect_url` holding a literal (non-`${VAR}`) token is a lint-worthy smell: the secret sits in
+the committed YAML in plaintext, which is exactly what interpolation exists to avoid.
+
 #### Delta vs Parquet
 
 The `format:` field selects the Spark table format, which determines which capabilities are available:
@@ -211,6 +237,34 @@ The Spark backend communicates via PySpark over Spark Connect. You need:
 - For **EMR/Dataproc**: ensure Spark Connect is enabled on the cluster
 
 smelt uses PyO3 to call PySpark from Rust. Data is exchanged via Arrow (zero-copy), so there is no serialization overhead for query results.
+
+### Spark CI coverage
+
+A pull request touching Spark-relevant code (the Spark backend crate, Spark/parity integration
+tests, the function-signature registry, type inference, the parser's dialect surface, or the
+Python adapter) automatically runs the Spark parity suite and the Spark type-property suite
+against a live Delta-enabled Spark Connect server before merge. Every other PR gets the full
+Spark job set on the next nightly run, so a regression outside that path filter still surfaces
+within one cycle rather than sitting unnoticed on `main`.
+
+### Known limitations
+
+Full-refresh and view materializations, ephemeral models, and the `batched`/`keyed`/`versioned`
+incremental maintenance techniques are verified on Spark by the same parametrized tests that run
+against DuckDB, plus hand-authored fixed-recipe dual-target parity tests per technique. The
+generative incremental-maintenance sweep (randomized recipe pool, admission-rate statistics,
+DAG-propagation, composed-pool, pinned-hazard, and change-feed-admission legs) also runs against
+a live Spark Connect server in the gated CI tier, driven by the same recipe pool and
+multiset-equivalence oracle as the DuckDB leg. What is **not** covered by that sweep on Spark:
+
+| Area | Status |
+|---|---|
+| `Additive`-combiner keyed/composed folds (e.g. `SUM` across a keyed or composed cumulative fold) | No Spark ledger dialect yet for the never-fold-twice reconciliation ledger; the runtime fails loud rather than silently mishandling it |
+| Feed-declared source recompute, replayed against a change-log oracle (admission is covered) | Oracle-replay machinery is DuckDB-connection-specific; execution-driven leg not yet ported |
+| Probe harness (`window_order_permutations_converge`, write-window byte-equality, technique-pin agreement) | Staging/read-back is DuckDB-connection-specific; not yet generalized to the backend trait |
+| Skeleton-position-add refusal path | No Spark fixture yet |
+| Partition pruning on cross-engine `read_parquet()` reads | Not implemented — every downstream run reads the full Parquet glob (performance gap, not correctness) |
+| Databricks-specific capabilities | Not modeled as a distinct backend; Databricks Connect works via the generic Spark Connect adapter, but Databricks-only behavior isn't verified |
 
 ## Cross-engine data exchange
 

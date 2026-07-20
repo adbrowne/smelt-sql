@@ -27,8 +27,8 @@ pub enum ConfigError {
 /// declared row identity/shape. `MaterializedView` delegates freshness to
 /// the backend's native incremental-view maintenance.
 ///
-/// The former `Batched`/`Keyed` variants are folded into `Incremental` +
-/// `grain:`: `Batched` ≡ `(Incremental, Grain::Partition)`, `Keyed` ≡
+/// The former `batched`/`keyed` mode values are folded into `Incremental` +
+/// `grain:`: `batched` ≡ `(Incremental, Grain::Partition)`, `keyed` ≡
 /// `(Incremental, Grain::Key)`. The bare mode names no longer parse — see
 /// the `Deserialize` impl's fix-it errors.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -114,7 +114,7 @@ impl Serialize for RefreshStrategy {
 /// `refresh: incremental` is set; rejected (hard error) otherwise
 /// (`docs/specs/models.md` §"Refresh axis").
 ///
-/// `Batched` (the former refresh mode) ≡ `Grain::Partition`; `Keyed` ≡
+/// `batched` (the former refresh mode) ≡ `Grain::Partition`; `keyed` ≡
 /// `Grain::Key`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Grain {
@@ -490,11 +490,25 @@ pub struct ModelConfig {
     /// partition-grain dedup aid, never key-addressing).
     #[serde(default, deserialize_with = "crate::sources::opt_string_or_vec")]
     pub unique_key: Option<Vec<String>>,
+    /// Top-level `safety_overrides:` (`docs/specs/models.md` §"The Relation
+    /// Contract") — named escape hatches for the partition-grain safety
+    /// checks, the smelt.yml-side replacement spelling for the
+    /// `batched.safety_overrides` sub-block. Frontmatter's own top-level
+    /// `safety_overrides:` (or its own `batched.safety_overrides` sub-block)
+    /// wins over this wholesale — see
+    /// [`Config::get_incremental_with_metadata`]. When smelt.yml is the only
+    /// side declaring incremental config, this value is folded into the
+    /// effective `batched:` block. Declaring both this key and a non-default
+    /// `batched.safety_overrides` sub-block on the same smelt.yml model
+    /// entry is a hard error, validated in
+    /// [`Config::validate_model_configs`].
+    #[serde(default)]
+    pub safety_overrides: Option<PartitionGrainSafetyOverrides>,
     /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
     /// itself is `refresh: incremental` + `grain: partition`, not the
     /// presence of this block.
     #[serde(default)]
-    pub batched: Option<BatchedConfig>,
+    pub batched: Option<PartitionGrainConfig>,
     #[serde(default)]
     pub tags: Vec<String>,
     /// Target to execute this model on (overrides CLI --target)
@@ -617,7 +631,7 @@ pub enum Granularity {
 /// Each flag allows a specific pattern that is normally rejected
 /// because it can produce different results on partial vs full data.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
-pub struct BatchedSafetyOverrides {
+pub struct PartitionGrainSafetyOverrides {
     #[serde(default)]
     pub allow_window_functions: bool,
     #[serde(default)]
@@ -652,7 +666,7 @@ pub enum IncrementalStrategy {
 
 /// Time-dimension declaration for a model or source output.
 ///
-/// Factored out of `BatchedConfig` so that views, non-batched tables,
+/// Factored out of `PartitionGrainConfig` so that views, non-batched tables,
 /// and external sources can declare a time dimension without opting into
 /// incremental execution. `refresh: incremental` + `grain: partition` consumes this
 /// block; any model
@@ -736,7 +750,7 @@ pub struct BoundedDomain {
 /// the optional knobs (`unique_key`, `safety_overrides`).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub struct BatchedConfig {
+pub struct PartitionGrainConfig {
     /// Columns that uniquely identify a row (backend uses presence to choose strategy)
     #[serde(default)]
     pub unique_key: Vec<String>,
@@ -752,7 +766,7 @@ pub struct BatchedConfig {
     pub nondeterministic_columns: Vec<String>,
     /// Safety overrides for patterns that may diverge on partial data
     #[serde(default)]
-    pub safety_overrides: BatchedSafetyOverrides,
+    pub safety_overrides: PartitionGrainSafetyOverrides,
 }
 
 /// The `maintenance:` block (`incremental_models.md` §Surface "Frontmatter"):
@@ -985,6 +999,137 @@ pub fn parse_active_backends(text: &str) -> Option<Vec<String>> {
     Some(backends)
 }
 
+/// Resolve `${VAR}` environment-variable references in raw `smelt.yml` text,
+/// before it is parsed into a typed `Config` (`smelt_yml.md` §Semantics item
+/// 8 — interpolation runs exactly once, in the config-load pass, before any
+/// other parse-time or semantic validation observes the value).
+///
+/// Walks the generic YAML value tree (not the raw text) so each reference
+/// can be reported against its YAML key path (e.g. `targets.prod.connect_url`).
+/// `$$` is unescaped to a literal `$` in the same pass. Every unresolved
+/// `${VAR}` in the file is collected and reported together — a config with
+/// two missing variables names both, never just the first. `env_lookup` is
+/// injectable so tests don't have to mutate process env.
+///
+/// If `text` does not parse as YAML at all, interpolation is skipped and the
+/// text is returned unchanged — the downstream `Config` parse produces the
+/// real syntax error instead of a confusing interpolation-stage one.
+pub fn interpolate_env_vars(
+    text: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+) -> anyhow::Result<String> {
+    let value: serde_yaml::Value = match serde_yaml::from_str(text) {
+        Ok(v) => v,
+        Err(_) => return Ok(text.to_string()),
+    };
+    let mut missing: Vec<(String, String)> = Vec::new();
+    let interpolated = interpolate_value(value, String::new(), env_lookup, &mut missing);
+    if !missing.is_empty() {
+        let mut detail = String::new();
+        for (var, key_path) in &missing {
+            detail.push_str(&format!(
+                "  ${{{var}}} at `{key_path}` — environment variable `{var}` is not set\n"
+            ));
+        }
+        anyhow::bail!(
+            "smelt.yml: unresolved environment variable reference(s):\n{}",
+            detail.trim_end()
+        );
+    }
+    serde_yaml::to_string(&interpolated)
+        .map_err(|e| anyhow::anyhow!("failed to re-serialize smelt.yml after interpolation: {e}"))
+}
+
+fn interpolate_value(
+    value: serde_yaml::Value,
+    key_path: String,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    missing: &mut Vec<(String, String)>,
+) -> serde_yaml::Value {
+    match value {
+        serde_yaml::Value::String(s) => {
+            serde_yaml::Value::String(interpolate_string(&s, &key_path, env_lookup, missing))
+        }
+        serde_yaml::Value::Mapping(map) => {
+            let mut new_map = serde_yaml::Mapping::new();
+            for (k, v) in map {
+                let child_path = match (k.as_str(), key_path.is_empty()) {
+                    (Some(name), true) => name.to_string(),
+                    (Some(name), false) => format!("{key_path}.{name}"),
+                    (None, _) => key_path.clone(),
+                };
+                let new_v = interpolate_value(v, child_path, env_lookup, missing);
+                new_map.insert(k, new_v);
+            }
+            serde_yaml::Value::Mapping(new_map)
+        }
+        serde_yaml::Value::Sequence(seq) => serde_yaml::Value::Sequence(
+            seq.into_iter()
+                .enumerate()
+                .map(|(i, v)| interpolate_value(v, format!("{key_path}[{i}]"), env_lookup, missing))
+                .collect(),
+        ),
+        other => other,
+    }
+}
+
+/// Interpolate `${VAR}` / unescape `$$` within a single string leaf. Any
+/// unresolved reference is pushed to `missing` (keyed by variable name and
+/// the string's YAML key path) rather than resolved to an empty string.
+fn interpolate_string(
+    s: &str,
+    key_path: &str,
+    env_lookup: &dyn Fn(&str) -> Option<String>,
+    missing: &mut Vec<(String, String)>,
+) -> String {
+    let chars: Vec<char> = s.chars().collect();
+    let mut out = String::with_capacity(s.len());
+    let mut i = 0;
+    while i < chars.len() {
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '$' {
+            out.push('$');
+            i += 2;
+            continue;
+        }
+        if chars[i] == '$' && i + 1 < chars.len() && chars[i + 1] == '{' {
+            if let Some(rel_end) = chars[i + 2..].iter().position(|&c| c == '}') {
+                let name: String = chars[i + 2..i + 2 + rel_end].iter().collect();
+                match env_lookup(&name) {
+                    Some(val) => out.push_str(&val),
+                    None => missing.push((name, key_path.to_string())),
+                }
+                i = i + 2 + rel_end + 1;
+                continue;
+            }
+        }
+        out.push(chars[i]);
+        i += 1;
+    }
+    out
+}
+
+/// Fold a smelt.yml model entry's top-level `safety_overrides:`
+/// ([`ModelConfig::safety_overrides`]) into its `batched:` block
+/// ([`ModelConfig::batched`]), the smelt.yml-side mirror of
+/// `metadata::fold_top_level_safety_overrides` for SQL frontmatter. Called
+/// from [`Config::get_incremental`] / [`Config::get_incremental_with_metadata`]
+/// so every `batched:`-shaped safety-override consumer sees the top-level
+/// spelling identically to the sub-block form.
+///
+/// Declaring both the top-level key and a non-default
+/// `batched.safety_overrides` sub-block on the same smelt.yml model entry is
+/// a conflict, refused fail-loud by
+/// [`Config::validate_model_configs`] — this fold takes the top-level value
+/// when both are present so a caller who bypasses validation still gets a
+/// deterministic (not silently-precedence) result rather than a panic.
+fn fold_smelt_yml_safety_overrides(model_config: &ModelConfig) -> PartitionGrainConfig {
+    let mut batched = model_config.batched.clone().unwrap_or_default();
+    if let Some(top_level) = &model_config.safety_overrides {
+        batched.safety_overrides = top_level.clone();
+    }
+    batched
+}
+
 impl Config {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let config_path = project_dir.join("smelt.yml");
@@ -994,8 +1139,14 @@ impl Config {
                 source: e.into(),
             })?;
 
+        let interpolated = interpolate_env_vars(&content, &|name| std::env::var(name).ok())
+            .map_err(|e| ConfigError::LoadError {
+                path: config_path.clone(),
+                source: e,
+            })?;
+
         let (config, warnings) =
-            Self::parse_with_warnings(&content).map_err(|e| ConfigError::LoadError {
+            Self::parse_with_warnings(&interpolated).map_err(|e| ConfigError::LoadError {
                 path: config_path,
                 source: e.into(),
             })?;
@@ -1186,7 +1337,7 @@ impl Config {
     /// returns `Some(default)`.
     ///
     /// **Precedence**: smelt.yml only (for now).
-    pub fn get_incremental(&self, model_name: &str) -> Option<BatchedConfig> {
+    pub fn get_incremental(&self, model_name: &str) -> Option<PartitionGrainConfig> {
         if !matches!(self.get_refresh(model_name), RefreshStrategy::Incremental)
             || self.get_grain(model_name) != Some(Grain::Partition)
         {
@@ -1195,7 +1346,7 @@ impl Config {
         Some(
             self.models
                 .get(model_name)
-                .and_then(|m| m.batched.clone())
+                .map(fold_smelt_yml_safety_overrides)
                 .unwrap_or_default(),
         )
     }
@@ -1323,7 +1474,7 @@ impl Config {
         &self,
         model_name: &str,
         sql_metadata: Option<&ModelMetadata>,
-    ) -> Option<BatchedConfig> {
+    ) -> Option<PartitionGrainConfig> {
         if !matches!(
             self.get_refresh_with_metadata(model_name, sql_metadata),
             RefreshStrategy::Incremental
@@ -1339,7 +1490,7 @@ impl Config {
         Some(
             self.models
                 .get(model_name)
-                .and_then(|m| m.batched.clone())
+                .map(fold_smelt_yml_safety_overrides)
                 .unwrap_or_default(),
         )
     }
@@ -1354,9 +1505,32 @@ impl Config {
     ) -> Vec<(String, String)> {
         let mut errors = Vec::new();
 
+        // A smelt.yml model entry declaring both the top-level
+        // `safety_overrides:` key and a non-default `batched.safety_overrides`
+        // sub-block names the same fact twice — refuse rather than silently
+        // preferring one, mirroring `MetadataError::SafetyOverridesDoubleDeclared`
+        // for the SQL frontmatter side.
+        for (name, model_config) in &self.models {
+            let sub_block_declared = model_config
+                .batched
+                .as_ref()
+                .is_some_and(|b| b.safety_overrides != PartitionGrainSafetyOverrides::default());
+            if model_config.safety_overrides.is_some() && sub_block_declared {
+                errors.push((
+                    name.to_string(),
+                    "both top-level `safety_overrides:` and `batched.safety_overrides` are \
+                     declared — declare it once (top-level `safety_overrides:` is the \
+                     replacement spelling for `batched.safety_overrides`)"
+                        .to_string(),
+                ));
+            }
+        }
+
         // Collect all model names and their effective materialization + config
-        let mut all_models: HashMap<&str, (Materialization, Option<&BatchedConfig>, Option<&str>)> =
-            HashMap::new();
+        let mut all_models: HashMap<
+            &str,
+            (Materialization, Option<&PartitionGrainConfig>, Option<&str>),
+        > = HashMap::new();
 
         // From smelt.yml
         for (name, model_config) in &self.models {
@@ -1425,6 +1599,131 @@ impl Config {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// `${VAR}` in a target field resolves against a set (injected) variable.
+    #[test]
+    fn env_interpolation_resolves_var() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://${SPARK_HOST}:15002
+"#;
+        let lookup = |name: &str| -> Option<String> {
+            if name == "SPARK_HOST" {
+                Some("spark-cluster.internal".to_string())
+            } else {
+                None
+            }
+        };
+        let resolved =
+            interpolate_env_vars(yaml, &lookup).expect("SPARK_HOST is set, must resolve");
+        let config: Config = serde_yaml::from_str(&resolved).expect("resolved YAML must parse");
+        assert_eq!(
+            config.targets["prod"].connect_url.as_deref(),
+            Some("sc://spark-cluster.internal:15002")
+        );
+    }
+
+    /// A missing variable is a hard error naming both the variable and the
+    /// YAML key path it appears under — never a silent empty string.
+    #[test]
+    fn env_interpolation_missing_var_is_error() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://${SPARK_HOST}:15002
+"#;
+        let lookup = |_: &str| -> Option<String> { None };
+        let err =
+            interpolate_env_vars(yaml, &lookup).expect_err("unset SPARK_HOST must be a hard error");
+        let message = err.to_string();
+        assert!(
+            message.contains("SPARK_HOST"),
+            "error must name the missing variable: {message}"
+        );
+        assert!(
+            message.contains("targets.prod.connect_url"),
+            "error must name the YAML key path: {message}"
+        );
+    }
+
+    /// `$$` unescapes to a literal `$` with no lookup attempted, even when
+    /// no environment variables are set at all.
+    #[test]
+    fn env_interpolation_double_dollar_escapes() {
+        let yaml = r#"
+name: test_project
+targets:
+  dev:
+    type: duckdb
+    database: "cost$$report.duckdb"
+    schema: main
+"#;
+        let lookup = |_: &str| -> Option<String> { None };
+        let resolved =
+            interpolate_env_vars(yaml, &lookup).expect("no ${VAR} reference, must not error");
+        let config: Config = serde_yaml::from_str(&resolved).expect("resolved YAML must parse");
+        assert_eq!(
+            config.targets["dev"].database.as_deref(),
+            Some("cost$report.duckdb")
+        );
+    }
+
+    /// W4·P2: `connect_url`'s token/TLS parameters interpolate like any other
+    /// target field — no bespoke Spark-only interpolation path exists.
+    #[test]
+    fn spark_connect_url_interpolates_env_var() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://h:443/;token=${SMELT_TEST_TOKEN};use_ssl=true
+"#;
+        let lookup = |name: &str| -> Option<String> {
+            if name == "SMELT_TEST_TOKEN" {
+                Some("secret-token".to_string())
+            } else {
+                None
+            }
+        };
+        let resolved =
+            interpolate_env_vars(yaml, &lookup).expect("SMELT_TEST_TOKEN is set, must resolve");
+        let config: Config = serde_yaml::from_str(&resolved).expect("resolved YAML must parse");
+        assert_eq!(
+            config.targets["prod"].connect_url.as_deref(),
+            Some("sc://h:443/;token=secret-token;use_ssl=true")
+        );
+    }
+
+    /// W4·P2: an unset token variable in `connect_url` fails loud, naming the
+    /// variable and the key path — never a silently empty token.
+    #[test]
+    fn spark_connect_url_missing_token_is_error() {
+        let yaml = r#"
+name: test_project
+targets:
+  prod:
+    type: spark
+    connect_url: sc://h:443/;token=${SMELT_TEST_TOKEN};use_ssl=true
+"#;
+        let lookup = |_: &str| -> Option<String> { None };
+        let err = interpolate_env_vars(yaml, &lookup)
+            .expect_err("unset SMELT_TEST_TOKEN must be a hard error");
+        let message = err.to_string();
+        assert!(
+            message.contains("SMELT_TEST_TOKEN"),
+            "error must name the missing variable: {message}"
+        );
+        assert!(
+            message.contains("targets.prod.connect_url"),
+            "error must name the YAML key path: {message}"
+        );
+    }
 
     /// iter-4 issue #1: a smelt.yml without a `version` field must parse
     /// (defaulting to 1) so new users don't trip over a required field that
@@ -1547,32 +1846,38 @@ models:
         );
     }
 
-    /// `refresh: incremental` + `grain: key` models cannot carry a
-    /// `batched:` block. The forbid is enforced in `validate_timeseries` via
-    /// `is_keyed()`. Since `materialization: cumulative_aggregate` is no
-    /// longer accepted, this test uses the new surface
-    /// (`materialization: table` + `refresh: incremental` + `grain: key`).
+    /// `refresh: incremental` + `grain: key` models with an internally-folded
+    /// `batched` block emit `PartitionGrainRequiresRefreshIncremental` — the dedicated
+    /// `KeyedForbidsPartitionGrain` check was removed as unreachable once the
+    /// literal `batched:` sub-block became a parse-time refusal (`is_keyed()`
+    /// implies `!is_partition_grain()`, which is exactly what
+    /// `PartitionGrainRequiresRefreshIncremental` already checks). Since
+    /// `materialization: cumulative_aggregate` is no longer accepted, this
+    /// test uses the new surface (`materialization: table` +
+    /// `refresh: incremental` + `grain: key`).
     #[test]
     fn test_validate_refresh_keyed_forbids_incremental_via_metadata() {
-        use crate::config::{BatchedConfig, BatchedSafetyOverrides, Grain, RefreshStrategy};
+        use crate::config::{
+            Grain, PartitionGrainConfig, PartitionGrainSafetyOverrides, RefreshStrategy,
+        };
         use crate::metadata::{validate_timeseries, MetadataError, ModelMetadata};
 
         let metadata = ModelMetadata {
             materialization: Some(Materialization::Table),
             refresh: Some(RefreshStrategy::Incremental),
             grain: Some(Grain::Key),
-            batched: Some(BatchedConfig {
+            batched: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: incremental + grain: key + batched: must error");
         assert!(
-            matches!(err, MetadataError::KeyedForbidsBatched),
-            "Expected KeyedForbidsBatched, got: {}",
+            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
             err
         );
     }
@@ -1724,8 +2029,11 @@ targets:
         let yaml = r#"
             unique_key: []
         "#;
-        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
-        assert_eq!(config.safety_overrides, BatchedSafetyOverrides::default());
+        let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(
+            config.safety_overrides,
+            PartitionGrainSafetyOverrides::default()
+        );
         assert!(!config.safety_overrides.allow_window_functions);
     }
 
@@ -1734,7 +2042,7 @@ targets:
         let yaml = r#"
             safety_overrides: {}
         "#;
-        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.unique_key.is_empty());
     }
 
@@ -1743,7 +2051,7 @@ targets:
         let yaml = r#"
             safety_overrides: {}
         "#;
-        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
         assert!(config.nondeterministic_columns.is_empty());
     }
 
@@ -1752,7 +2060,7 @@ targets:
         let yaml = r#"
             nondeterministic_columns: [inserted_at, batch_id]
         "#;
-        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(
             config.nondeterministic_columns,
             vec!["inserted_at".to_string(), "batch_id".to_string()]
@@ -1818,7 +2126,7 @@ targets:
               - id
               - source
         "#;
-        let config: BatchedConfig = serde_yaml::from_str(yaml).unwrap();
+        let config: PartitionGrainConfig = serde_yaml::from_str(yaml).unwrap();
         assert_eq!(config.unique_key, vec!["id", "source"]);
     }
 
@@ -2082,10 +2390,10 @@ models:
             "my_model".to_string(),
             ModelMetadata {
                 materialization: Some(Materialization::Ephemeral),
-                batched: Some(BatchedConfig {
+                batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
-                    safety_overrides: BatchedSafetyOverrides::default(),
+                    safety_overrides: PartitionGrainSafetyOverrides::default(),
                 }),
                 ..Default::default()
             },
@@ -2235,10 +2543,10 @@ targets:
             "my_model".to_string(),
             ModelMetadata {
                 materialization: Some(Materialization::Table),
-                batched: Some(BatchedConfig {
+                batched: Some(PartitionGrainConfig {
                     unique_key: vec![],
                     nondeterministic_columns: vec![],
-                    safety_overrides: BatchedSafetyOverrides::default(),
+                    safety_overrides: PartitionGrainSafetyOverrides::default(),
                 }),
                 ..Default::default()
             },
@@ -2249,7 +2557,7 @@ targets:
     }
 
     /// BUG-056: `event_time_column`/`partition_column`/`granularity` are fields
-    /// on `timeseries:`, not `batched:`. Because `BatchedConfig` uses
+    /// on `timeseries:`, not `batched:`. Because `PartitionGrainConfig` uses
     /// `deny_unknown_fields`, putting them under `batched:` must fail at
     /// parse time rather than silently being dropped.
     #[test]

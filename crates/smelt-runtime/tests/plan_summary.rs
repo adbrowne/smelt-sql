@@ -141,6 +141,11 @@ fn dry_run_request(target: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     }
 }
 
@@ -202,7 +207,7 @@ async fn test_plan_summary_lists_strategies() {
 #[tokio::test]
 async fn test_planner_override_applied() {
     use smelt_core::config::{ModelConfig, TimeseriesConfig};
-    use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
+    use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 
     let project_dir = tempfile::tempdir().expect("tempdir");
     let project_dir = project_dir.path();
@@ -236,10 +241,11 @@ SELECT event_date, COUNT(*) AS cnt FROM raw GROUP BY event_date"#;
             refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
             grain: Some(smelt_core::config::Grain::Partition),
             unique_key: None,
-            batched: Some(BatchedConfig {
+            safety_overrides: None,
+            batched: Some(PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: BatchedSafetyOverrides::default(),
+                safety_overrides: PartitionGrainSafetyOverrides::default(),
             }),
             tags: vec![],
             target: None,

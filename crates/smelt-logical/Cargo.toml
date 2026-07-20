@@ -4,6 +4,7 @@ version.workspace = true
 edition.workspace = true
 authors.workspace = true
 license.workspace = true
+publish = false
 description = "Logical model and planner-rule interface for smelt"
 repository = "https://github.com/adbrowne/smelt-sql"
 

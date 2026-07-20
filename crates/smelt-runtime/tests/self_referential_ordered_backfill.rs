@@ -97,8 +97,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [acct_id]
 ---
 WITH joined AS (
     SELECT
@@ -225,6 +223,11 @@ async fn self_referential_backfill_converges_to_sequential_running_balance() {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(

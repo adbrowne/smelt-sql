@@ -28,6 +28,22 @@ use smelt_logical::maintenance::{MaintenancePlan, Trigger};
 use smelt_runtime::maintenance_driver::execute_delete_insert_with_delta_restriction;
 use tempfile::TempDir;
 
+/// A retry policy that never retries — this test exercises the T3
+/// delta-restricted DeleteInsert dispatch directly against a real DuckDB
+/// backend, outside `execute_project`, so there is no `ExecuteRequest`/run
+/// reporter to derive one from (`docs/plans/20260719-prod-w2-operability.md`
+/// Phase 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "web-analytics-session-delta-restriction-test",
+        model_name: "web-analytics-session-delta-restriction-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 /// Real model SQL shape (event-grain enrichment over a session dimension),
 /// column/table names matching `examples/web_analytics/models/silver/
 /// events_enriched.sql` (`event_id`, `device_id`, `session_id`, both upstream
@@ -156,6 +172,7 @@ async fn a_single_redelivered_then_changed_event_recomputes_only_its_own_row() {
         "2026-07-01",
         "2026-07-02",
         MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("delta-restricted recompute executes");
@@ -555,6 +572,11 @@ fn live_request(start: &str, end: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     }
 }
 

@@ -21,12 +21,25 @@ struct Cli {
     #[arg(long, global = true, value_parser = parse_scope)]
     scope: Option<String>,
 
+    /// Log line format: human-readable text, or one parseable JSON object
+    /// per line (for orchestrator/log-aggregator consumption).
+    #[arg(long, global = true, value_enum, default_value_t = LogFormat::Text)]
+    log_format: LogFormat,
+
     #[command(subcommand)]
     command: Commands,
 }
 
+#[derive(Clone, Copy, Debug, clap::ValueEnum)]
+enum LogFormat {
+    Text,
+    Json,
+}
+
 #[derive(Subcommand)]
 enum Commands {
+    /// Non-interactively scaffold a minimal working project
+    Init(InitArgs),
     /// Run models and materialize them in the target database
     Run(RunArgs),
     /// Backbuild: rebuild a target model and all its upstreams for a time range
@@ -47,12 +60,18 @@ enum Commands {
     History(HistoryArgs),
     /// Output model graph and configuration as JSON for orchestrator integration
     Explain(ExplainArgs),
+    /// Measure per-cell maintenance technique cost over replayed windows of real data
+    Bakeoff(BakeoffArgs),
     /// Show pending schema changes between model definitions and deployed state
     Diff(DiffArgs),
     /// Run unit tests for models
     Test(TestArgs),
     /// Run data-quality checks against the configured target
     Check(CheckArgs),
+    /// List discovered project entities (models, seeds, sources, tests, checks)
+    List(ListArgs),
+    /// Remove build artifacts under target/ (never touches state)
+    Clean(CleanArgs),
     /// Generate documentation
     Docs {
         #[command(subcommand)]
@@ -73,6 +92,14 @@ enum DocsCommands {
     },
     /// Explain where the embedded docs live
     Path,
+}
+
+#[derive(Parser)]
+struct InitArgs {
+    /// Target directory to scaffold (created if it doesn't exist).
+    /// Defaults to the current directory. Refused (exit 2) if it already
+    /// contains a smelt.yml — there is no --force to override this.
+    dir: Option<PathBuf>,
 }
 
 #[derive(Parser)]
@@ -174,6 +201,22 @@ struct RunArgs {
     /// (ISO `YYYY-MM-DD`, end exclusive). Repeatable; see `--source`.
     #[arg(long = "landed", requires = "since_upstream")]
     since_upstream_landed: Vec<String>,
+
+    /// Maximum number of models to execute concurrently. Defaults to the
+    /// host's available parallelism. `--jobs 1` forces strictly serial
+    /// execution, one model at a time — a dependency edge always keeps the
+    /// upstream model's completion before its downstream's start
+    /// regardless of this value.
+    #[arg(long = "jobs", short = 'j')]
+    jobs: Option<usize>,
+
+    /// Resume a previously partially-failed run: skip any model that
+    /// succeeded last time with an unchanged definition, rerun everything
+    /// else (plus its downstream dependents). Errors if the most recent run
+    /// completed successfully or no run manifest exists — there is nothing
+    /// to resume from (`docs/specs/run_state.md` §"`--resume` semantics").
+    #[arg(long = "resume")]
+    resume: bool,
 }
 
 #[derive(Parser)]
@@ -241,6 +284,12 @@ struct UiArgs {
     /// Host address to bind to
     #[arg(long, default_value = "127.0.0.1")]
     host: String,
+
+    /// Allow binding to a non-loopback host. The UI server has no
+    /// authentication, so binding it to an address reachable from other
+    /// machines requires this explicit opt-in.
+    #[arg(long = "allow-remote")]
+    allow_remote: bool,
 }
 
 #[derive(Parser)]
@@ -368,6 +417,11 @@ struct StatusArgs {
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
 
+    /// Target environment from smelt.yml — state is partitioned per target,
+    /// so status is reported for this target's state only.
+    #[arg(long, default_value = "dev")]
+    target: String,
+
     /// Specific model to show status for (omit for all)
     model_name: Option<String>,
 
@@ -385,6 +439,11 @@ struct HistoryArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — state is partitioned per target,
+    /// so history is reported for this target's runs only.
+    #[arg(long, default_value = "dev")]
+    target: String,
 
     /// Specific model to show history for (omit for all runs)
     model_name: Option<String>,
@@ -430,6 +489,42 @@ struct ExplainArgs {
 }
 
 #[derive(Parser)]
+struct BakeoffArgs {
+    /// Model to measure
+    model_name: String,
+
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Target environment from smelt.yml to clone for scratch measurement runs.
+    #[arg(long, default_value = "dev")]
+    target: String,
+
+    /// Narrow measurement to specific cells: `<col>@<source>`, repeatable
+    /// and/or comma-separated. Defaults to every cell with 2+ admissible
+    /// techniques.
+    #[arg(long = "cells")]
+    cells: Vec<String>,
+
+    /// Number of sequential replayed windows to slice the driving source's
+    /// event-time extent into.
+    #[arg(long, default_value = "3")]
+    runs: u32,
+
+    /// Retain the scratch schemas (and their per-target state dirs) after
+    /// measurement instead of dropping them.
+    #[arg(long)]
+    keep: bool,
+
+    /// Print the winning technique per measured cell as ready-to-paste
+    /// `cells[]` YAML. Emit-only — never writes the model's `.sql` file.
+    /// Not yet implemented (`docs/plans/20260719-prod-w7-bakeoff.md` Phase 5).
+    #[arg(long)]
+    pin: bool,
+}
+
+#[derive(Parser)]
 pub struct DocsGenerateArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
@@ -453,6 +548,11 @@ struct DiffArgs {
     /// Path to smelt project root
     #[arg(long, default_value = ".")]
     project_dir: PathBuf,
+
+    /// Target environment from smelt.yml — deployed schemas are recorded
+    /// per target, so the diff compares against this target's state.
+    #[arg(long, default_value = "dev")]
+    target: String,
 
     /// Select models to diff (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
     #[arg(long = "select", short = 's')]
@@ -525,17 +625,65 @@ struct CheckArgs {
     verbose: bool,
 }
 
+#[derive(Parser)]
+struct ListArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+
+    /// Select entities to list (repeatable). Supports: model_name, tag:X, +tag:X, tag:X+, +tag:X+
+    #[arg(long = "select", short = 's')]
+    select: Vec<String>,
+
+    /// Exclude entities from the listing (repeatable). Same syntax as --select.
+    #[arg(long = "exclude", short = 'e')]
+    exclude: Vec<String>,
+
+    /// Output format: "text" (default) or "json"
+    #[arg(long, default_value = "text")]
+    format: String,
+}
+
+#[derive(Parser)]
+struct CleanArgs {
+    /// Path to smelt project root
+    #[arg(long, default_value = ".")]
+    project_dir: PathBuf,
+}
+
 #[tokio::main]
-async fn main() -> Result<()> {
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .init();
+    match cli.log_format {
+        LogFormat::Text => {
+            tracing_subscriber::fmt()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .init();
+        }
+        LogFormat::Json => {
+            tracing_subscriber::fmt()
+                .json()
+                .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+                .init();
+        }
+    }
 
     let scope = cli.scope.as_deref();
 
-    match cli.command {
+    // `smelt init` classifies its own error (the non-empty-dir refusal maps
+    // to exit 2, a usage error per `docs/specs/cli.md`) via
+    // `commands::init::exit_code_for` rather than the generic
+    // `smelt_cli::exit_code_for`, since its error type isn't one of the
+    // `ProjectError`/`ConfigError` variants that classifier recognizes.
+    let is_init = matches!(cli.command, Commands::Init(_));
+    // `smelt list` maps parse errors and unresolvable/ambiguous selectors to
+    // exit 2 (usage error) per `docs/specs/cli.md` §"Exit codes" — a distinct
+    // classifier from the generic one, same pattern as `init` above.
+    let is_list = matches!(cli.command, Commands::List(_));
+
+    let result: Result<()> = match cli.command {
+        Commands::Init(args) => commands::init::run(args),
         Commands::Run(args) => commands::run::run(args, scope).await,
         Commands::Backbuild(args) => commands::backbuild::backbuild(args, scope).await,
         Commands::Table(args) => commands::table::table(args, scope).await,
@@ -546,14 +694,32 @@ async fn main() -> Result<()> {
         Commands::Status(args) => commands::status::status(args, scope).await,
         Commands::History(args) => commands::history::history(args, scope).await,
         Commands::Explain(args) => commands::explain::explain(args, scope).await,
+        Commands::Bakeoff(args) => commands::bakeoff::bakeoff(args, scope).await,
         Commands::Diff(args) => commands::diff::diff(args, scope).await,
         Commands::Test(args) => commands::test::run_tests(args).await,
         Commands::Check(args) => commands::check::run_checks(args).await,
+        Commands::List(args) => commands::list::list(args, scope).await,
+        Commands::Clean(args) => commands::clean::clean(args).await,
         Commands::Docs { command } => match command {
             DocsCommands::Generate(args) => commands::docs::generate(args).await,
             DocsCommands::List => commands::docs::list(),
             DocsCommands::Show { topic } => commands::docs::show(&topic),
             DocsCommands::Path => commands::docs::path(),
         },
+    };
+
+    match result {
+        Ok(()) => std::process::ExitCode::SUCCESS,
+        Err(err) => {
+            eprintln!("Error: {err:?}");
+            let code = if is_init {
+                commands::init::exit_code_for(&err)
+            } else if is_list {
+                commands::list::exit_code_for(&err)
+            } else {
+                smelt_cli::exit_code_for(&err)
+            };
+            std::process::ExitCode::from(code)
+        }
     }
 }

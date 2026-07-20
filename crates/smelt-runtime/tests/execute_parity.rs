@@ -155,6 +155,11 @@ fn make_request(target: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     }
 }
 
@@ -250,6 +255,7 @@ async fn test_cli_ui_manifest_parity() {
             refresh: None,
             grain: None,
             unique_key: None,
+            safety_overrides: None,
             batched: None,
             tags: vec![],
             target: None,
@@ -264,6 +270,7 @@ async fn test_cli_ui_manifest_parity() {
             refresh: None,
             grain: None,
             unique_key: None,
+            safety_overrides: None,
             batched: None,
             tags: vec![],
             target: None,
@@ -278,6 +285,7 @@ async fn test_cli_ui_manifest_parity() {
             refresh: None,
             grain: None,
             unique_key: None,
+            safety_overrides: None,
             batched: None,
             tags: vec![],
             target: None,

@@ -16,6 +16,7 @@ anyhow.workspace = true
 thiserror.workspace = true
 sha2 = "0.10"
 tracing.workspace = true
+fs4 = { version = "1.1.0", features = ["sync"] }
 
 [dev-dependencies]
 tempfile = "3.8"

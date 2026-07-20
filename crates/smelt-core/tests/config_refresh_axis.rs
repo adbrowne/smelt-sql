@@ -10,7 +10,7 @@ use smelt_core::metadata::{extract_file_metadata, MetadataError};
 /// the missing key. Frontmatter parsing (`extract_file_metadata`) succeeds —
 /// the cross-field check runs in `validate_timeseries`, the same pure
 /// semantic-validation function that checks the other refresh/grain-adjacent
-/// constraints (`TimeseriesRequiredForBatched`, `KeyedForbidsBatched`, …).
+/// constraints (`TimeseriesRequiredForPartitionGrain`, `KeyedForbidsPartitionGrain`, …).
 #[test]
 fn incremental_requires_grain() {
     let source = r#"---

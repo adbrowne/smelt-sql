@@ -6,9 +6,9 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  nondeterministic_columns:
-    - inserted_at
+columns:
+  inserted_at:
+    contract: plausible
 ---
 
 -- `inserted_at` is an audit stamp: NOW() is frozen once per run (pinned run

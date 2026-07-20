@@ -62,7 +62,7 @@ fn oracle_flags_a_seeded_divergence() {
         .expect("seed a divergence");
     }
 
-    let result = assert_equivalence(&project, &recipe, &tracker, k);
+    let result = rt.block_on(assert_equivalence(&project, &recipe, &tracker, k));
     assert!(
         result.is_err(),
         "oracle failed to flag a seeded divergence — the harness would be silently \

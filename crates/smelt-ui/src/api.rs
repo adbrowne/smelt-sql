@@ -1,15 +1,55 @@
 use std::sync::Arc;
 
-use axum::extract::{Path, State};
+use axum::extract::{Path, Query, State};
 use axum::http::StatusCode;
 use axum::response::IntoResponse;
 use axum::Json;
+use serde::Deserialize;
 
 use smelt_state::file_store::FileStore;
 
 use crate::build;
 use crate::server::AppState;
 use crate::types::*;
+
+/// Query params accepted by the run-history endpoints. `target` defaults to
+/// `"dev"` — the same default `RunExecuteRequest::target` and the CLI's
+/// `--target` use — since `.smelt/` state is partitioned per target
+/// (`docs/specs/run_state.md` §"`.smelt/` directory layout") and history
+/// queries need to name which target's state they're reading.
+#[derive(Deserialize)]
+pub struct TargetQuery {
+    #[serde(default = "default_target_query")]
+    target: String,
+}
+
+fn default_target_query() -> String {
+    "dev".to_string()
+}
+
+/// Validate that `target` is a configured target (fail-loud rather than
+/// silently reading — and reporting empty — state for a target that
+/// doesn't exist in `smelt.yml`).
+fn require_known_target(state: &AppState, target: &str) -> Result<(), (StatusCode, String)> {
+    if state.config.targets.contains_key(target) {
+        Ok(())
+    } else {
+        Err((
+            StatusCode::BAD_REQUEST,
+            format!(
+                "Target '{}' not found in smelt.yml. Available targets: {}",
+                target,
+                state
+                    .config
+                    .targets
+                    .keys()
+                    .cloned()
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            ),
+        ))
+    }
+}
 
 pub async fn get_project(State(state): State<Arc<AppState>>) -> Json<ProjectResponse> {
     let graph = state.graph.lock().await;
@@ -98,8 +138,10 @@ pub async fn get_run_status(State(state): State<Arc<AppState>>) -> Json<RunStatu
 
 pub async fn get_runs(
     State(state): State<Arc<AppState>>,
+    Query(query): Query<TargetQuery>,
 ) -> Result<Json<Vec<RunHistoryEntry>>, impl IntoResponse> {
-    let file_store = FileStore::new(&state.project_dir);
+    require_known_target(&state, &query.target)?;
+    let file_store = FileStore::new(&state.project_dir, &query.target);
     match file_store.load_runs(Some(50)) {
         Ok(manifests) => {
             let entries: Vec<RunHistoryEntry> = manifests
@@ -144,8 +186,10 @@ pub async fn get_runs(
 pub async fn get_run(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
+    Query(query): Query<TargetQuery>,
 ) -> Result<Json<RunHistoryEntry>, impl IntoResponse> {
-    let file_store = FileStore::new(&state.project_dir);
+    require_known_target(&state, &query.target)?;
+    let file_store = FileStore::new(&state.project_dir, &query.target);
     match file_store.load_run(&id) {
         Ok(Some(m)) => {
             let models = m

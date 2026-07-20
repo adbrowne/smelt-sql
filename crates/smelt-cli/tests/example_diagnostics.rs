@@ -2425,7 +2425,7 @@ fn meta_polish_broken_reducer_arity() {
 //   — one broken model that declares `incremental:` without `timeseries:`
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `TimeseriesRequiredForBatched` or `MalformedTimeseries` diagnostic fires
+/// `TimeseriesRequiredForPartitionGrain` or `MalformedTimeseries` diagnostic fires
 /// for the file ending in `expected_file`, and no such diagnostic fires in any
 /// other file in the workspace.
 fn check_workspace_emits_timeseries_diagnostic(
@@ -2438,7 +2438,7 @@ fn check_workspace_emits_timeseries_diagnostic(
     use std::path::Path;
 
     const TIMESERIES_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForPartitionGrain,
         smelt_db::DiagnosticCode::MalformedTimeseries,
     ];
 
@@ -2544,7 +2544,7 @@ fn check_workspace_emits_timeseries_diagnostic(
 }
 
 /// Timeseries TDD: `examples/timeseries_broken_incremental_without_timeseries/` produces
-/// exactly one `TimeseriesRequiredForBatched` diagnostic anchored at
+/// exactly one `TimeseriesRequiredForPartitionGrain` diagnostic anchored at
 /// `models/incremental_without_timeseries.sql`.
 ///
 /// This test verifies that `validate_timeseries` is wired into the production
@@ -2554,23 +2554,30 @@ fn timeseries_broken_incremental_without_timeseries() {
     check_workspace_emits_timeseries_diagnostic(
         "examples/timeseries_broken_incremental_without_timeseries",
         "models/incremental_without_timeseries.sql",
-        smelt_db::DiagnosticCode::TimeseriesRequiredForBatched,
+        smelt_db::DiagnosticCode::TimeseriesRequiredForPartitionGrain,
     );
 }
 
-// ===== BUG-006: KeyedForbidsTimeseries / KeyedForbidsBatched regression =====
+// ===== BUG-006: KeyedForbidsTimeseries regression =====
 //
-// Before the fix, `validate_timeseries` returned these errors but `file_diagnostics`
-// silently dropped them via the `_ => None` catch-all in the match block.
+// Before the fix, `validate_timeseries` returned this error but `file_diagnostics`
+// silently dropped it via the `_ => None` catch-all in the match block.
 //
-// Fixtures:
-//   - `examples/timeseries_broken_cumulative_with_timeseries/`   — KeyedForbidsTimeseries
-//   - `examples/timeseries_broken_cumulative_with_incremental/`  — KeyedForbidsBatched
+// Fixture: `examples/timeseries_broken_cumulative_with_timeseries/` — KeyedForbidsTimeseries
+//
+// The sibling `KeyedForbidsPartitionGrain` regression this helper used to also cover
+// (`examples/timeseries_broken_cumulative_with_incremental/`) was retired
+// outright along with the `KeyedForbidsPartitionGrain` diagnostic code: the literal
+// `batched:` sub-block that fixture relied on to trigger it is now refused
+// universally, for every grain, at frontmatter parse time — a `grain: key`
+// model can no longer declare the sub-block at all, so the dedicated keyed
+// check (and its fixture) is gone rather than migrated
+// (`docs/specs/diagnostics.md` §"Keyed refresh mode").
 
 /// Helper: loads `example_dir` as a workspace and asserts that exactly one
-/// `KeyedForbidsTimeseries` or `KeyedForbidsBatched` diagnostic fires
-/// for the file ending in `expected_file`, and no such diagnostic fires in any other
-/// file in the workspace.
+/// `KeyedForbidsTimeseries` diagnostic fires for the file ending in
+/// `expected_file`, and no such diagnostic fires in any other file in the
+/// workspace.
 fn check_workspace_emits_keyed_frontmatter_diagnostic(
     example_dir: &str,
     expected_file: &str,
@@ -2580,10 +2587,8 @@ fn check_workspace_emits_keyed_frontmatter_diagnostic(
     use smelt_db::{DiagnosticAcc, Workspace};
     use std::path::Path;
 
-    const KEYED_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] = &[
-        smelt_db::DiagnosticCode::KeyedForbidsTimeseries,
-        smelt_db::DiagnosticCode::KeyedForbidsBatched,
-    ];
+    const KEYED_FRONTMATTER_CODES: &[smelt_db::DiagnosticCode] =
+        &[smelt_db::DiagnosticCode::KeyedForbidsTimeseries];
 
     let path = Path::new(env!("CARGO_MANIFEST_DIR"))
         .parent()
@@ -2725,22 +2730,9 @@ fn timeseries_broken_cumulative_with_timeseries() {
     );
 }
 
-/// BUG-006 regression: `examples/timeseries_broken_cumulative_with_incremental/` produces
-/// exactly one `KeyedForbidsBatched` diagnostic from
-/// `models/cumulative_with_incremental.sql`.
-///
-/// Before the fix, `validate_timeseries` returned `KeyedForbidsBatched`
-/// but `file_diagnostics` silently dropped it, so the LSP showed no error even
-/// though keyed models must not declare `batched:` (`incremental_models.md`
-/// §"Key-grain constraints" #1 — "No config block").
-#[test]
-fn timeseries_broken_cumulative_with_incremental() {
-    check_workspace_emits_keyed_frontmatter_diagnostic(
-        "examples/timeseries_broken_cumulative_with_incremental",
-        "models/cumulative_with_incremental.sql",
-        smelt_db::DiagnosticCode::KeyedForbidsBatched,
-    );
-}
+// `timeseries_broken_cumulative_with_incremental` (the `KeyedForbidsPartitionGrain`
+// sibling regression test) and its fixture were removed — see the
+// `check_workspace_emits_keyed_frontmatter_diagnostic` doc comment above.
 
 // ===== Struct-field-type-validation TDD tests =====
 //
@@ -4189,5 +4181,43 @@ fn timeseries_broken_key_per_partition_emits_unsupported_grain() {
             .contains("20260715-composed-axes-conditional-maintenance.md"),
         "message must name the tracking plan: {}",
         target[0].message
+    );
+}
+
+/// `examples/web_analytics/models/silver/events_parsed.sql` uses the
+/// top-level `safety_overrides:` key. Reverting it to the retired
+/// `batched.safety_overrides` sub-block spelling is now a hard parse-time
+/// error, not an accepted alternate spelling — the fix-it names the
+/// top-level replacement carrying the caller's own declared flag
+/// (`docs/specs/models.md` §"The Relation Contract").
+#[test]
+fn events_parsed_reverted_to_batched_sub_block_is_hard_refused() {
+    use std::path::Path;
+
+    let live_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .parent()
+        .unwrap()
+        .parent()
+        .unwrap()
+        .join("examples/web_analytics");
+    let sql_path = live_dir.join("models/silver/events_parsed.sql");
+    let content = std::fs::read_to_string(&sql_path).unwrap();
+    let reverted = content.replacen(
+        "safety_overrides:\n  allow_window_functions: true\n---",
+        "batched:\n  safety_overrides:\n    allow_window_functions: true\n---",
+        1,
+    );
+    assert_ne!(
+        content, reverted,
+        "sanity: the top-level safety_overrides: spelling must be present in the fixture \
+         for this test to exercise a real revert"
+    );
+
+    let err = smelt_core::metadata::extract_file_metadata(&reverted)
+        .expect_err("the reverted batched.safety_overrides sub-block must be hard-refused");
+    let message = err.to_string();
+    assert!(
+        message.contains("safety_overrides") && message.contains("allow_window_functions"),
+        "fix-it must name safety_overrides: and the caller's own declared flag; got: {message}"
     );
 }

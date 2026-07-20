@@ -1,0 +1,10 @@
+name: my-project
+version: 1
+paths:
+  - models
+  - seeds
+targets:
+  dev:
+    type: duckdb
+    database: dev.duckdb
+    schema: main

@@ -12,9 +12,8 @@ timeseries:
 # event_date partition as its original (`docs/specs/datagen.md`
 # §"Redelivery"), so the window never needs to see across a partition
 # boundary to resolve one event_id's duplicates.
-batched:
-  safety_overrides:
-    allow_window_functions: true
+safety_overrides:
+  allow_window_functions: true
 ---
 -- Compose event_ts from the datagen-provided occurrence clock, project the
 -- JSON payload fields as typed columns via parse_event_payload, and

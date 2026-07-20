@@ -204,6 +204,7 @@ Model: silver.events_parsed
      ALTER TABLE main.silver_events_parsed ADD COLUMN is_purchase BOOLEAN
 
 Summary: 1 changed, 0 new, 0 removed, 0 unchanged
+Error: schema changes detected
 ```
 
 The change classifies as **safe**: adding a nullable column needs no

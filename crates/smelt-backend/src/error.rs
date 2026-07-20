@@ -91,6 +91,60 @@ impl BackendError {
         }
     }
 
+    /// Classify this error as transient (worth retrying, unchanged input) or
+    /// deterministic (retrying is pointless — the same input will fail the
+    /// same way).
+    ///
+    /// `docs/plans/20260719-prod-w2-operability.md` Phase 6: bounded retry
+    /// wraps a model's statement-group execution and consults this
+    /// classification to decide whether a failure is worth another attempt.
+    /// This is an explicit, exhaustive match — **not** a string sniff over
+    /// the error message — and deliberately has no wildcard arm: adding a
+    /// new [`BackendError`] variant without adding a corresponding arm here
+    /// is a compile error, forcing every new variant through an explicit
+    /// transient/deterministic decision (the same fail-loud discipline
+    /// `map_metadata_error_to_diagnostic` enforces for `MetadataError` in
+    /// `smelt-db`, see root `CLAUDE.md` §"Fail-loud discipline").
+    ///
+    /// - `ConnectionFailed` — environmental (network blip, connection pool
+    ///   exhaustion, backend not yet accepting connections): transient.
+    /// - `ExecutionFailed` — a SQL statement the backend rejected (syntax,
+    ///   type mismatch, constraint violation, division error, …): the same
+    ///   SQL fails identically on retry, so deterministic.
+    /// - `NotFound` / `SchemaNotFound` — a referenced object genuinely does
+    ///   not exist; retrying without an intervening DDL change cannot help,
+    ///   so deterministic.
+    /// - `UnsupportedFeature` — a dialect gap; retrying cannot change what
+    ///   the backend supports, so deterministic.
+    /// - `NullInNonNullableColumn` — a data-quality violation in the source
+    ///   data itself; retrying re-reads the same violating rows, so
+    ///   deterministic.
+    /// - `ConfigurationError` — a misconfiguration (bad connection string,
+    ///   missing credential, …) that retrying does not fix, so
+    ///   deterministic.
+    /// - `AlreadyReflected` — a deliberate never-fold-twice refusal, not a
+    ///   failure to retry past; deterministic.
+    /// - `Other` — an unclassified `anyhow` error from a backend-specific
+    ///   code path (e.g. seed loading, ledger bookkeeping). Without a typed
+    ///   variant to inspect, treating it as transient would risk masking a
+    ///   deterministic failure behind retries; deterministic is the
+    ///   fail-loud choice — a backend that wants a transient `Other` retried
+    ///   should be given a typed variant instead of relying on this
+    ///   fallback.
+    pub fn is_transient(&self) -> bool {
+        match self {
+            BackendError::ConnectionFailed { .. } => true,
+            BackendError::ExecutionFailed { .. } => false,
+            BackendError::NotFound { .. } => false,
+            BackendError::SchemaNotFound { .. } => false,
+            BackendError::UnsupportedFeature { .. } => false,
+            BackendError::NullInNonNullableColumn { .. } => false,
+            BackendError::ConfigurationError { .. } => false,
+            BackendError::AlreadyReflected { .. } => false,
+            BackendError::Other(_) => false,
+        }
+    }
+
     /// Create a NULL-in-non-nullable-column error.
     pub fn null_in_non_nullable_column(
         schema: impl Into<String>,

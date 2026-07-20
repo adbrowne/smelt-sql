@@ -19,6 +19,7 @@ owners: [andrew]
 
 | Command | Purpose |
 |---------|---------|
+| `smelt init [DIR]` | Non-interactively scaffold a minimal working project in `DIR` (default `.`) |
 | `smelt run` | Execute models in topological order |
 | `smelt build` | Seed then run (convenience wrapper) |
 | `smelt backbuild` | Rebuild a model and its upstreams over a time range |
@@ -30,7 +31,10 @@ owners: [andrew]
 | `smelt type [model]` | Show model function signature (offline) |
 | `smelt status [model]` | Show incremental interval coverage and gaps |
 | `smelt history [model]` | Show past run records |
+| `smelt list` | List discovered project entities (models, seeds, sources, tests, checks) with kind and materialization (offline) |
+| `smelt clean` | Remove build artifacts under `target/` (compiled docs, catalog output); never touches state (`.smelt/`) or the target database |
 | `smelt explain` | Output model graph as JSON for orchestrators |
+| `smelt bakeoff <model>` | Measure per-cell technique cost against a replayed window of real data; `--pin` emits the winning choice |
 | `smelt ui` | Start a local web UI for the model graph |
 | `smelt docs generate` | Generate a data catalog (markdown or JSON) |
 | `smelt docs list` | List embedded documentation topics |
@@ -78,24 +82,34 @@ Three input shapes are accepted:
 **Disambiguation rules:**
 
 - **No scope-expansion fall-through.** When a scope is active, a shorthand argument resolves **only** as `<scope>.<arg>`. If that exact path does not resolve, the command errors; it never silently retries the bare `<arg>` or searches up the scope hierarchy. This is what keeps a passing command stable: adding a top-level entity later can never change which entity a scoped shorthand resolved to. To reach an entity outside the active scope, pass its full path (full-path arguments are honored regardless of scope — see below).
-- **Ambiguity at no-scope resolution.** When the user passes a bare leaf (e.g. `events_parsed`) with no scope and the leaf matches multiple entities (`silver.events_parsed`, `bronze.events_parsed`), the command exits non-zero with a diagnostic listing all matches and a hint to use `--scope` or the full path. The CLI does not silently pick one.
+- **Ambiguity at no-scope resolution.** When the user passes a bare leaf (e.g. `events_parsed`) with no scope and the leaf matches multiple entities (`silver.events_parsed`, `bronze.events_parsed`), the command exits `2` (usage error; see §"Exit codes") with a diagnostic listing all matches and a hint to use `--scope` or the full path. The CLI does not silently pick one.
 - **Cross-scope full paths.** A full-path argument (`bronze.raw_events`) is honored regardless of the active scope. Scope narrows input, never output or cross-references.
 
 **Canonical-display rule.** Every CLI command's output uses the full canonical `smelt.<path>` form for every entity it names — model lists, type signatures, diagnostics, JSON output keys, log lines. Scope changes how the user *types* an identifier; it never changes how the CLI *prints* one. Copy-pasting any printed identifier — including its leading `smelt.` prefix — back into a `--select`, into another command argument, or (minus the prefix) into a model `FROM` clause must produce the same resolution. Because entity arguments strip a leading `smelt.` (see above), the printed `smelt.<path>` form round-trips without edits.
 
 ### Exit codes
 
+This is the normative exit-code contract for every `smelt` subcommand. Every other mention of exit codes in this spec (the `smelt check` exit paragraph below, the no-op/unresolvable-selector table in §"No-op vs unresolvable selector", the `smelt build` lifecycle §"Check" step, and Constraints & Invariants item 6) refers back to this section rather than restating it.
+
 | Code | Meaning |
 |------|---------|
-| `0` | Success — all selected models built/tested/seeded without error |
-| `1` | Execution failure — at least one model failed, test failed, or schema diff detected changes |
-| Non-zero | Configuration error, missing smelt.yml, selector parse error, YAML parse error |
+| `0` | Success. Includes a `warn`-severity `smelt check` violation and an empty-but-valid selection (§"No-op rebuild output") — a build that ran nothing because there was nothing to do is not a failure. |
+| `1` | Detected failure. A failed model build, a failed `smelt test` case, an `error`-severity `smelt check` violation, `smelt diff` detecting a schema change, or `CheckTargetNotBuilt` (a check referencing a model not built in the target). |
+| `2` | Usage error. Malformed CLI arguments (clap-detected), an unresolvable or ambiguous selector/entity argument, a malformed or missing `smelt.yml`, or an unresolvable project/target. |
+
+Codes `1` and `2` are deliberately distinct: `1` means the command ran correctly and *found* a problem in the data or models; `2` means the command could not run at all because its own inputs (flags, config, project structure) were invalid. An orchestrator should treat `1` as "investigate the pipeline" and `2` as "fix the invocation" — retrying a `2` without changing the command is never useful.
 
 **`smelt diff` specifics:** exits `0` if no schema changes are detected; exits `1` if any changes are found (including new or removed models). This makes it suitable as a CI gate.
 
 **`smelt test` specifics:** exits `0` if all tests pass; exits `1` if any test fails.
 
 **`smelt check` specifics:** exits `0` if every `error`-severity check passes (zero violating rows); exits `1` if any `error`-severity check has violations. `warn`-severity checks never affect the exit code — a check with `severity: warn` and violations reports `WARN` and the command still exits `0`. A check whose referenced model is not built in the target fails with `CheckTargetNotBuilt` (exit `1`), never a silent pass.
+
+**`smelt init` specifics:** exits `0` on a successful scaffold. Exits `2` if the target directory already contains a `smelt.yml` (usage error — the fix is a different/empty directory, not a retry of the same command).
+
+**`smelt list` specifics:** exits `0` if discovery and parsing succeed, including when the (possibly selector-narrowed) result set is empty. Exits `2` on a parse error or an unresolvable/ambiguous selector, per the general selector-resolution rule above.
+
+**`smelt clean` specifics:** exits `0` whether or not `target/` existed to remove (removing nothing is not a failure). Exits `1` if `target/` exists but cannot be removed (e.g. a permissions error) — the command ran but failed to do its job, not a malformed invocation.
 
 ### `smelt build` flags
 
@@ -114,6 +128,16 @@ Three input shapes are accepted:
 `--dry-run` does **not** exist on `smelt build`. Use `smelt run --dry-run` to parse and validate without executing.
 
 **`smelt explain` excludes tests.** `smelt explain` (with or without `--json`) filters out all `smelt.test` declarations from its output via the test-kind predicate applied to every discovered entity. Tests never appear in `models`, `execution_order`, or the physical plan section. This filtering is not flag-controlled; it is always active.
+
+### `smelt ui`
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--host` | `127.0.0.1` | Address to bind the UI server to. Loopback addresses (`127.0.0.1`, `::1`, `localhost`) require no further opt-in. |
+| `--port` | `3000` | Port to bind the UI server to. |
+| `--allow-remote` | off | Required to bind `--host` to a non-loopback address. |
+
+`smelt ui` has no authentication and no HTTPS — it is designed to be reached from the machine running it. Binding to a non-loopback host without `--allow-remote` is a hard error naming the flag; smelt never silently falls back to a loopback bind. Passing `--allow-remote` proceeds and logs a startup warning that the server is reachable from other hosts. The CORS policy allows only the server's own origin (`http://{host}:{port}`, plus `http://localhost:{port}` when bound to loopback) — no other origin can read its API responses from a browser.
 
 ### `smelt explain <model>` maintenance-plan report
 
@@ -158,6 +182,22 @@ collapse in plain language rather than printing an indistinguishable single-grou
 
 Omitting the model-name argument keeps the existing whole-project graph behavior described below,
 unchanged.
+
+### `smelt bakeoff <model>` flags
+
+| Flag | Default | Description |
+|------|---------|-------------|
+| `--cells <col>@<source>,...` | every cell with ≥2 admissible techniques | Repeatable/comma-separated. Narrows measurement to the named cells. A named cell with only one admissible technique errors — there is nothing to compare. |
+| `--runs N` | `3` | Splits the driving source's event-time extent into `N` sequential windows and replays each window, in order, once per candidate technique. Each replay is a real `execute_project` run against the project's own data. |
+| `--target <name>` | active target | The declared target to clone for scratch measurement runs. |
+| `--keep` | off | Retain the scratch schemas (`smelt_bakeoff_<model>_<technique>`) after measurement instead of dropping them. |
+| `--pin` | off | Print the winning `cells[]` entry (or a full `maintenance:` block when the model has none) as YAML to stdout. Emit-only — never writes the model's `.sql` file. |
+
+`smelt bakeoff` reports, per measured cell, each admissible technique's wall-clock cost and row
+count across the `--runs` windows, and cross-checks every pair of candidate techniques' output
+per window with `EXCEPT ALL` in both directions, failing loud on a mismatch rather than reporting
+a cost for a technique whose output diverged. See `incremental_models.md` §"CLI" for the full
+scratch-target and pin semantics.
 
 ### `smelt explain --json` output schema
 
@@ -228,11 +268,11 @@ Both messages are emitted to **stderr** so they do not pollute stdout-parsed out
 
 ### No-op vs unresolvable selector
 
-The two empty-output cases are distinct and have different exit codes:
+The two empty-output cases are distinct and have different exit codes (per §"Exit codes"):
 
 | Case | Example | Behaviour | Exit code |
 |------|---------|-----------|-----------|
-| **Unresolvable selector** — an entity-name selector resolves to no entity of any kind | `--select typo_name` (no such model) | Hard "not found" diagnostic (§"Argument resolution algorithm" step 4) | non-zero |
+| **Unresolvable selector** — an entity-name selector resolves to no entity of any kind | `--select typo_name` (no such model) | Hard "not found" diagnostic (§"Argument resolution algorithm" step 4) | `2` (usage error) |
 | **Valid but empty selection** — every selector resolved, but the matched set is empty | `--select tag:nonexistent`, or a valid selector whose models are all up-to-date | `smelt: no models matched the selector(s)` / `smelt: nothing to rebuild` to stderr | `0` |
 
 A typo'd entity name fails loudly rather than silently building nothing; a `tag:`/`generator_file:` selector that legitimately matches no models (per `model_selection.md` §"Tag matching" and `model_selection.md` §"Selection methods") is a quiet no-op.
@@ -263,6 +303,18 @@ A single `smelt build` performs these steps, in order:
 `smelt run` executes the selected models for the requested time range. Incremental models receive a DELETE+INSERT for the given `[start, end)` window.
 
 `smelt backbuild` additionally traverses upstream of the selector target(s) and rebuilds the full dependency chain. It uses the model's batch-safety classification to determine whether the range can be processed in a single query or must be split into per-partition or batched chunks.
+
+### Failure summary
+
+`smelt run` and `smelt build` both print a grouped failure summary to stderr at the end of a failed run, naming every model that failed — not just the first. Independent models that fail in the same `--jobs`-scheduled wave each get their own entry; a second or third failure is never silently downgraded to "skipped" (per `run_state.md` §"Run report"). Each entry carries the model's first error line and a one-line hint toward the likely next action:
+
+```
+smelt: run <run_id> failed — <N> model(s) failed:
+  - <model>: <first line of the recorded error>
+    hint: <next action>
+```
+
+The hint is chosen from a coarse classification of the recorded error text into one of three causes — compile (parse/type/reference resolution failure: points at the model's SQL), execute (the backend rejected the compiled SQL: points at `-v`/`--show-plan`), or check (a constraint/data-quality violation: points at `smelt check`). The classification is a best-effort text match, not a structured error code — nothing upstream of the run report currently tags a failure with its originating stage. A successful run prints no failure block. The failure summary is presentation only: it never changes the run's exit code (`smelt run`/`smelt build` still exit per §"Exit codes").
 
 ### `--dry-run` prints the maintenance statements
 
@@ -358,6 +410,20 @@ The cwd-derived scope is informational at command start and does not change mid-
 
 `smelt check --select` is a **substring match on the check name** (repeatable; a check runs if any `--select` value is a substring of its name). It does not use the full selector syntax — no `tag:`/`generator_file:` methods, no `+` graph operators — and a selection that matches no check prints `No checks matched the selection.` and exits `0` rather than hard-erroring. Unlike the build-integrated check pass (`smelt build` step 7), standalone `smelt check` runs against whatever is currently materialized and applies no downstream skip-cascade — it is a pure validation pass.
 
+### `smelt init` — non-interactive scaffolder
+
+`smelt init [DIR]` writes a minimal, working smelt project to `DIR` (default `.`): a `smelt.yml`, a `models/` directory containing one example model, one seed CSV, and a `.gitignore` that excludes `.smelt/` and the database file. It takes no interactive prompts — every file it writes has a fixed, deterministic template; there is no wizard and no flag that changes what gets scaffolded beyond the target directory. The scaffolded project builds successfully against DuckDB with no further edits (`smelt build` inside the scaffold exits `0`).
+
+`smelt init` refuses to run against a directory that already contains a `smelt.yml`: it exits `2` (usage error) with a message naming the conflicting file, rather than overwriting or merging. There is no `--force` flag to override this — the guidance is to run `smelt init` in a fresh directory, or to remove the conflicting file first and re-run. `DIR` is created if it does not exist; an existing empty or non-project directory is populated in place.
+
+### `smelt list` — enumerate discovered entities
+
+`smelt list` prints every entity `smelt` discovers in the project — models, seeds, sources, tests, and checks — one per line, in canonical `smelt.<path>` form (§"Canonical-display rule"), alongside its kind and, for models, its materialization. `smelt list` is **offline**: it performs discovery and parsing only, the same project-wide scan `smelt explain` uses, and makes no database connection. It accepts the same `--select`/`--exclude` selector flags as `smelt run`/`smelt build` (`model_selection.md`) to narrow the listed set, and respects `--scope` for shorthand selector arguments exactly as every other command does.
+
+### `smelt clean` — remove build artifacts
+
+`smelt clean` removes `target/` — the directory `smelt docs generate` and other artifact-producing commands write to. `smelt clean` **never touches state**: it does not delete `.smelt/` (run manifests, deployed-schema snapshots consumed by `smelt diff`, or any other versioned state directory), and it does not connect to or modify the configured target database. Only regenerable build output is in scope for removal — the same distinction `incremental_models.md`'s maintenance state draws between *derived, disposable output* and *state a subsequent run depends on to behave correctly*. `smelt clean` is safe to run at any time without affecting incremental correctness or losing run history.
+
 ### `smelt docs generate` output
 
 With `--format markdown` (default):
@@ -405,7 +471,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 3. **`smelt diff` requires no live connection.** It must work in offline environments (CI without DB credentials).
 4. **`smelt test` runs on in-memory DuckDB.** Tests never touch the project's configured target database.
 5. **`smelt explain --json` schema is append-stable.** Fields may be added; existing fields must not be renamed or removed without a major version bump.
-6. **Exit codes are meaningful.** `0` = success; `1` = detected failure or change; non-zero = error. Scripts should check exit codes, not stdout patterns.
+6. **Exit codes are meaningful.** See §"Exit codes" for the full contract. Scripts should check exit codes, not stdout patterns.
 7. **`--dry-run` does not exist on `smelt build`.** It exists on `smelt run` and `smelt backbuild` only.
 8. **`--show-plan` requires a positional model-file argument.** Absence is a hard error, not a fallback to project-wide mode.
 9. **Multi-value flags are repetition-based.** `--select`, `--exclude`, and similar flags must not silently split internal whitespace into multiple values.
@@ -414,10 +480,13 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 12. **Scoped shorthand has no fall-through.** With a scope active, a shorthand argument resolves only as `<scope>.<arg>`; it never silently retries the bare `<arg>`. Reaching an entity outside the scope requires a full path. Adding a new entity (at any level) never changes which entity a previously-passing command resolved to.
 13. **`paths:` is a strip-list, not a scan gate.** Discovery walks every non-excluded subdirectory under the project root; `paths:` only strips address prefixes (`architecture.md` §"Resolution: `smelt.<path>` is the universal addressing scheme"). The cwd-derived scope is computed by the same strip-prefix rule, and the CLI defines no separate per-kind scan paths.
 14. **`smelt check` runs against the configured target.** Checks assert on real built data; a check passes iff its failing-rows query returns zero rows. `error`-severity violations set exit `1` and block models downstream of the checked model during `smelt build`; `warn`-severity violations do neither. A check on an unbuilt model is `CheckTargetNotBuilt`, never a silent pass.
+15. **`smelt init` never overwrites an existing project.** A target directory already containing a `smelt.yml` is refused (exit `2`) rather than merged or overwritten; there is no `--force` escape hatch.
+16. **`smelt list` is offline.** Like `smelt diff`/`smelt table`/`smelt type`, `smelt list` performs discovery and parsing only and makes no database connection.
+17. **`smelt clean` never touches state.** It removes only `target/` build artifacts. It must never delete or modify `.smelt/` (run manifests, deployed-schema snapshots) or connect to the configured target database.
 
 ## Known Divergences / Open Questions
 
-- **Exit code standardization incomplete.** Configuration errors, YAML parse failures, and selector parse errors exit with non-zero codes but the exact code is not consistently `2` or any defined value distinct from `1`. Exit code meaning for "user/config error" is not defined.
+- **Selector/target usage errors still exit `1`, not `2`.** §"Exit codes" defines `2` for every usage/config error, including an unresolvable or ambiguous selector/entity argument and an unresolvable `--target`. A malformed or missing `smelt.yml` and an unresolvable project root correctly exit `2` — `main` classifies the returned error via its source chain. Selector resolution (`argument_resolution::ResolutionError`) and `--target` validation, however, are erased to an untyped `anyhow` string at each call site before reaching `main`, so they still fall through to the `1` default. Closing this remaining gap needs `ResolutionError` (and an equivalent typed error for unresolvable `--target`) to stay classifiable all the way to `main`. Tracked in `docs/plans/20260719-prod-w1-fail-loud.md`.
 - **`smelt test --select` selector-syntax rollout.** `smelt test --select` is specified to use the full selector syntax (§"`smelt test` isolation"), consistent with every other command. Any remaining substring-match behaviour in the implementation is an unlanded gap, not the intended contract.
 - **`smelt explain` physical section gating.** The `physical` section of the explain output is documented as present, but the condition that triggers its inclusion (`--show-physical` flag?) is not clearly surfaced in the CLI help or user guide.
 - **`.smelt/schemas/` not documented.** The schema state directory that `smelt diff` reads from is not documented in user-facing docs. Its format, update timing, and lifecycle are not specified.
@@ -425,7 +494,7 @@ Documentation is embedded in the binary at build time. `smelt docs list` enumera
 - **No project-wide compile-only flag (TB-3).** `smelt build --dry-run` does not exist; `smelt build --show-plan` requires a positional model-file argument. There is no single command to compile every model and show the plan without executing. Two candidate resolutions: (1) extend `--show-plan` to accept no positional argument for project-wide output, or (2) add `smelt build --dry-run` mirroring `smelt run --dry-run` semantics across the seed→run lifecycle.
 - **`--select` whitespace handling is unspecified.** `--select "a b"` produces a single literal selector `"a b"` that silently matches nothing. Whether this should be an error or a warning is open; current behavior is silent.
 - **Manifest format and `.smelt/` layout pre-`run_state.md`.** Manifest format, `.smelt/` directory layout, run IDs, parallelism semantics, and failure recovery are not specified. `smelt status` and `smelt history` Surface descriptions in this spec name commands but defer their on-disk format to a future `run_state.md`. Behaviour is implementation-defined until then. (See `architecture.md` §"Specs not yet authored".)
-- **Most of the maintenance CLI surface is specified but not wired into the CLI parser.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`incremental_models.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for both `sources.*` refs and refs to another maintained model in the workspace: the graph builder (`build_forward_graph`) routes a maintained-model upstream through the SAME edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`) that produces the creation cells `smelt explain` reports, so a model-edge clamp in the propagation graph agrees with the clamp `smelt explain` shows for the same edge, and an underivable upstream clock is a `MaintenanceReachNotDerivable` refusal (contributing no walkable edge) rather than a permissive whole-table synthesis. `--source` accepts a maintained-model address as the delta origin (validated through the canonical `resolve_ref_path` resolver — an address that is neither a declared source nor a maintained model is a named error), and the origin model itself is never re-run. What remains is that `execute.rs`'s technique resolution does not yet key off a model-ref cell (`incremental_models.md` §"Known Divergences"). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is still unwired; tracked in `docs/plans/20260707-maintenance-plan-impl.md` phase MP13. `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
+- **The maintenance CLI surface is landed; one technique-resolution gap remains.** `smelt run --since-upstream --source <address> --landed <start>..<end>` (`incremental_models.md` §"CLI") is landed: `RunArgs` accepts the repeatable `--source`/`--landed` pair, forward-propagates the declared per-source deltas through the real per-workspace propagation graph (`smelt_runtime::propagation`), prints the dirty set, and runs exactly the propagated `(model, region)` pairs through `execute_project`. The propagation graph's edges are derived from every model's own `MaintenancePlan` scan clamps — the same clamp the maintenance SQL itself sizes — for both `sources.*` refs and refs to another maintained model in the workspace: the graph builder (`build_forward_graph`) routes a maintained-model upstream through the SAME edge-aware plan derivation (`derive_model_maintenance_plan_with_edges`) that produces the creation cells `smelt explain` reports, so a model-edge clamp in the propagation graph agrees with the clamp `smelt explain` shows for the same edge, and an underivable upstream clock is a `MaintenanceReachNotDerivable` refusal (contributing no walkable edge) rather than a permissive whole-table synthesis. `--source` accepts a maintained-model address as the delta origin (validated through the canonical `resolve_ref_path` resolver — an address that is neither a declared source nor a maintained model is a named error), and the origin model itself is never re-run. What remains is that `execute.rs`'s technique resolution does not yet key off a model-ref cell (`incremental_models.md` §"Known Divergences"). `smelt build <model> --period <start>..<end> --include-upstreams` (backward resolution) is also landed: `BuildArgs` accepts the positional target model plus `--period`/`--include-upstreams`, resolves the required per-ancestor slices and the ancestor-first/target-last build order over the SAME propagation graph (`smelt_runtime::propagation::resolve_build_plan`, backed by `smelt_logical::maintenance::propagate::required_inputs`), prints the resolved-slices report, and builds exactly that set through `execute_project`. `smelt bakeoff <model> [--cells ...]` (per-cell technique cost measurement, with `--pin`) is landed — see §"`smelt bakeoff <model>` flags" above and `incremental_models.md` §"CLI". `smelt explain <model>`'s plan report is landed — see §"`smelt explain <model>` maintenance-plan report" below.
 - **The keyed-grain fold-candidate detector admits only a single aggregate projection.** The
   per-model maintenance-plan derivation (`smelt-db`'s `maintenance_plan_report`) resolves a
   `smelt.<path>` ref to another maintained model in the same project into a creation-trigger cell

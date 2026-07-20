@@ -24,7 +24,8 @@
 //!    ```
 
 use crate::config::{
-    BatchedConfig, DataLatency, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
+    DataLatency, Materialization, PartitionGrainConfig, PartitionGrainSafetyOverrides,
+    RefreshStrategy, StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::de::Error as _;
@@ -191,12 +192,15 @@ pub struct ModelMetadata {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub timeseries: Option<TimeseriesConfig>,
 
-    /// `batched:` block — optional configuration (`unique_key`,
-    /// `safety_overrides`) layered on top of the `refresh: batched` selector.
-    /// Selection itself is `refresh: batched` (`refresh` field below), not the
-    /// presence of this block.
+    /// Internal representation for the folded safety-override facts every
+    /// existing safety check reads. The literal `batched:` YAML sub-block is
+    /// retired — declaring it in `.sql` frontmatter is a hard parse-time
+    /// error naming the replacement keys (`docs/specs/models.md` §"The
+    /// Relation Contract"). This field is populated only by
+    /// `fold_top_level_safety_overrides` from the top-level
+    /// `safety_overrides:` key, never directly deserialized from user YAML.
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub batched: Option<BatchedConfig>,
+    pub batched: Option<PartitionGrainConfig>,
 
     /// Target to execute this model on (overrides smelt.yml and CLI --target)
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -289,14 +293,28 @@ pub struct ModelMetadata {
     /// for a one-element list. Together with `timeseries:` (the clock),
     /// this is the declared surface that determines `grain` — `grain:`
     /// itself is only a check-only assertion (see [`ModelMetadata::grain`]).
-    /// Distinct from the `batched:` sub-block's `unique_key` (a
-    /// partition-grain dedup aid, never key-addressing).
+    /// The retired `batched.unique_key` sub-block spelling (a partition-grain
+    /// dedup aid, never key-addressing) is refused at parse time; this is the
+    /// only surface for a declared `unique_key` now.
     #[serde(
         default,
         skip_serializing_if = "Option::is_none",
         deserialize_with = "crate::sources::opt_string_or_vec"
     )]
     pub unique_key: Option<Vec<String>>,
+
+    /// Top-level `safety_overrides:` (`docs/specs/models.md` §"The Relation
+    /// Contract") — named escape hatches for the partition-grain safety
+    /// checks. The `batched.safety_overrides` sub-block spelling this
+    /// replaces is retired — declaring it is a parse-time hard error (see
+    /// `batched_subblock_fixit_message`). Same precedence as `unique_key:`:
+    /// SQL frontmatter wins over the `smelt.yml` model override when both
+    /// set it. Consumed and cleared during extraction
+    /// (`fold_top_level_safety_overrides`) into the internal
+    /// [`ModelMetadata::batched`] representation every existing safety check
+    /// already reads.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_overrides: Option<PartitionGrainSafetyOverrides>,
 
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
@@ -477,8 +495,8 @@ pub enum MetadataError {
     },
 
     /// A model declares `refresh: batched` without a sibling `timeseries:` block.
-    #[error("TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
-    TimeseriesRequiredForBatched,
+    #[error("TimeseriesRequiredForPartitionGrain: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity")]
+    TimeseriesRequiredForPartitionGrain,
 
     /// The `timeseries:` block violates a structural rule.
     #[error("MalformedTimeseries: {message}")]
@@ -499,15 +517,19 @@ pub enum MetadataError {
     #[error("KeyedForbidsTimeseries: key temporal locality could not be established for this `timeseries:` block")]
     KeyedForbidsTimeseries,
 
-    /// A model declares `refresh: incremental` + `grain: key` (or another
-    /// keyed-output mode) and a `batched:` block.
-    #[error("KeyedForbidsBatched: keyed and partition-grain incremental are different refresh strategies with different equivalence contracts — pick one (see docs/specs/incremental_models.md)")]
-    KeyedForbidsBatched,
-
     /// A model declares a `batched:` block without `refresh: incremental` +
     /// `grain: partition`.
-    #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
-    BatchedRequiresRefreshBatched,
+    #[error("PartitionGrainRequiresRefreshIncremental: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
+    PartitionGrainRequiresRefreshIncremental,
+
+    /// A model declares both the top-level `safety_overrides:` key and a
+    /// non-default `batched.safety_overrides` sub-block. The two spellings
+    /// are the same fact (`docs/specs/models.md` §"The Relation Contract");
+    /// declaring both is refused rather than silently picking one — mirrors
+    /// `SourceError::LatenessDoubleDeclared`'s conflict-error shape for a
+    /// declared-in-two-places fact.
+    #[error("SafetyOverridesDoubleDeclared: both top-level `safety_overrides:` and `batched.safety_overrides` are declared — declare it once (top-level `safety_overrides:` is the replacement spelling for `batched.safety_overrides`)")]
+    SafetyOverridesDoubleDeclared,
 
     /// A model declares `refresh: materialized_view` and a `timeseries:` block.
     /// Like `keyed`, the engine-maintained output is a keyed lookup with
@@ -519,8 +541,8 @@ pub enum MetadataError {
     /// A model declares `refresh: materialized_view` and a `batched:` block.
     /// The engine, not smelt, owns freshness for this mode — there is no
     /// smelt-driven batch loop to configure.
-    #[error("MaterializedViewForbidsBatched: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
-    MaterializedViewForbidsBatched,
+    #[error("MaterializedViewForbidsPartitionGrain: refresh: materialized_view models must not declare a `batched:` block — the engine owns freshness for this mode, not smelt's batch loop")]
+    MaterializedViewForbidsPartitionGrain,
 
     /// A `functional_dependencies:` entry is structurally invalid: an empty
     /// `key`/`determines`, a `determines` column also listed in `key`
@@ -593,6 +615,140 @@ pub enum MetadataError {
         pattern: String,
         why: String,
     },
+
+    /// A `columns.<c>.tests` entry does not match one of the four recognized
+    /// kinds (`not_null`, `unique`, `accepted_values`, `relationships`) —
+    /// including a misspelled kind name or an unrecognized parameterized
+    /// form. Raised by [`validate_column_tests`], a pure frontmatter
+    /// validator (`docs/specs/data_tests.md` §"Fail-loud validation").
+    #[error("UnknownColumnTestKind: column '{column}' has a `tests` entry '{entry}' which is not one of the recognized kinds (not_null, unique, accepted_values, relationships)")]
+    UnknownColumnTestKind { column: String, entry: String },
+
+    /// A `columns.<c>.tests` entry names a column `<c>` absent from the
+    /// model's inferred output schema. Not raised by a pure frontmatter
+    /// validator — the column-presence check needs the model's inferred
+    /// schema, which this crate does not have, so it is made by
+    /// `smelt-db`'s `check_file_diagnostics` (which has `typed_model_schema`
+    /// in scope) and surfaced from there, the same pattern as
+    /// `KeyedForbidsTimeseries`/`MaintenanceWritePatternUnavailable` above.
+    /// The variant is kept here so `MetadataError` stays the shared
+    /// vocabulary every consumer's exhaustive match already handles
+    /// (`docs/specs/data_tests.md` §"Fail-loud validation" — the deliberate
+    /// contrast with the silent-drop rule for other `columns:` keys).
+    #[error("ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema")]
+    ColumnTestOnUnknownColumn { model: String, column: String },
+}
+
+/// Build the fix-it message for a refused `batched:` sub-block, naming each
+/// replacement key the caller should use instead — carrying the caller's own
+/// values, not a generic template (`docs/specs/models.md` §"The Relation
+/// Contract", `docs/specs/incremental_models.md` §Known Divergences "The
+/// partition grain").
+///
+/// `raw_value` is the still-unvalidated YAML value under the `batched:` key.
+/// When it deserializes cleanly into [`PartitionGrainConfig`], each declared sub-key
+/// is named with its own value under the replacement spelling
+/// (`unique_key` -> top-level `unique_key:`; `safety_overrides` -> top-level
+/// `safety_overrides:`; each `nondeterministic_columns` entry `<c>` ->
+/// `columns.<c>.contract: plausible`). When the raw value doesn't
+/// deserialize (e.g. a legacy nested field like `event_time_column`), the
+/// message still names the three replacement keys generically — the
+/// structural error itself is reported separately by the caller.
+fn batched_subblock_fixit_message(raw_value: &serde_yaml::Value) -> String {
+    let header = "the `batched:` sub-block has been removed — declare each key at the \
+                  model's top level instead:";
+    let cfg = match serde_yaml::from_value::<PartitionGrainConfig>(raw_value.clone()) {
+        Ok(cfg) => cfg,
+        Err(_) => {
+            return format!(
+                "{header}\n  - `batched.unique_key` -> top-level `unique_key:`\n  - \
+                 `batched.safety_overrides` -> top-level `safety_overrides:`\n  - \
+                 `batched.nondeterministic_columns: [c]` -> `columns.c.contract: plausible`"
+            );
+        }
+    };
+
+    let mut lines = vec![header.to_string()];
+    if !cfg.unique_key.is_empty() {
+        lines.push(format!(
+            "  - `batched.unique_key: {:?}` -> top-level `unique_key: {:?}`",
+            cfg.unique_key, cfg.unique_key
+        ));
+    }
+    if cfg.safety_overrides != PartitionGrainSafetyOverrides::default() {
+        let mut flags = Vec::new();
+        if cfg.safety_overrides.allow_window_functions {
+            flags.push("allow_window_functions: true");
+        }
+        if cfg.safety_overrides.allow_having {
+            flags.push("allow_having: true");
+        }
+        if cfg.safety_overrides.allow_limit {
+            flags.push("allow_limit: true");
+        }
+        if cfg.safety_overrides.allow_subqueries {
+            flags.push("allow_subqueries: true");
+        }
+        if cfg.safety_overrides.allow_nondeterministic {
+            flags.push("allow_nondeterministic: true");
+        }
+        if cfg.safety_overrides.allow_distinct {
+            flags.push("allow_distinct: true");
+        }
+        lines.push(format!(
+            "  - `batched.safety_overrides: {{{}}}` -> top-level `safety_overrides: {{{}}}`",
+            flags.join(", "),
+            flags.join(", ")
+        ));
+    }
+    for col in &cfg.nondeterministic_columns {
+        lines.push(format!(
+            "  - `batched.nondeterministic_columns: [{col}]` -> `columns.{col}.contract: plausible`"
+        ));
+    }
+    if lines.len() == 1 {
+        lines.push("  (the block declared no sub-keys — remove it entirely)".to_string());
+    }
+    lines.join("\n")
+}
+
+/// Fold the top-level `safety_overrides:` frontmatter key
+/// ([`ModelMetadata::safety_overrides`]) into the internal `batched:`
+/// representation ([`ModelMetadata::batched`]) so every existing
+/// `batched:`-shaped safety check — `KeyedForbidsPartitionGrain`,
+/// `PartitionGrainRequiresRefreshIncremental`, `MaterializedViewForbidsPartitionGrain`, and the
+/// safety-override consumers in `smelt_logical::rules::incremental` — sees
+/// the top-level spelling identically to the sub-block form, with zero
+/// changes to those consumers (`docs/specs/models.md` §"The Relation
+/// Contract"). Called once, right after a `ModelMetadata` is deserialized
+/// from frontmatter, before it is handed to any caller.
+///
+/// A model that declares both the top-level key and a non-default
+/// `batched.safety_overrides` sub-block is refused
+/// (`MetadataError::SafetyOverridesDoubleDeclared`) — the two spellings name
+/// the same fact, so silently preferring one would hide the caller's intent.
+/// A `batched.safety_overrides` left at its all-`false` default is not
+/// treated as "declared" for this check, mirroring how an omitted sub-block
+/// is indistinguishable from an explicitly empty one.
+fn fold_top_level_safety_overrides(metadata: &mut ModelMetadata) -> Result<(), MetadataError> {
+    let Some(top_level) = metadata.safety_overrides.take() else {
+        return Ok(());
+    };
+    match &mut metadata.batched {
+        Some(existing) if existing.safety_overrides != PartitionGrainSafetyOverrides::default() => {
+            return Err(MetadataError::SafetyOverridesDoubleDeclared);
+        }
+        Some(existing) => {
+            existing.safety_overrides = top_level;
+        }
+        None => {
+            metadata.batched = Some(PartitionGrainConfig {
+                safety_overrides: top_level,
+                ..Default::default()
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -624,12 +780,12 @@ fn frontmatter_has_generates(source: &str) -> bool {
 /// Rules checked (per `models.md` §"Constraint violations", `timeseries.md` §Semantics):
 /// - `refresh: incremental` without `grain:` → `GrainRequiredForIncremental`
 /// - `grain:` without `refresh: incremental` → `GrainRequiresIncremental`
-/// - `refresh: incremental` + `grain: partition` without `timeseries:` → `TimeseriesRequiredForBatched`
-/// - `batched:` block without `refresh: incremental` + `grain: partition` → `BatchedRequiresRefreshBatched`
+/// - `refresh: incremental` + `grain: partition` without `timeseries:` → `TimeseriesRequiredForPartitionGrain`
+/// - `batched:` block without `refresh: incremental` + `grain: partition` → `PartitionGrainRequiresRefreshIncremental`
 /// - `timeseries:` on `materialization: ephemeral` or `test` → `MalformedTimeseries`
 /// - Legacy nested form (`event_time_column` inside `batched:`) was removed;
 ///   its presence in the YAML block now produces a YAML parse error (unknown field)
-///   rather than a custom diagnostic, because `BatchedConfig` no longer
+///   rather than a custom diagnostic, because `PartitionGrainConfig` no longer
 ///   declares those fields.
 /// - `partition_column` absent from the SQL body SELECT aliases → `MalformedTimeseries`
 pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(), MetadataError> {
@@ -692,12 +848,15 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
         }
     }
 
-    // Rule: keyed forbids batched: — enforced here so the diagnostic
-    // fires alongside the other materialization-block constraints.
-    // Triggered by `refresh: incremental` + `grain: key`.
-    if metadata.is_keyed() && metadata.batched.is_some() {
-        return Err(MetadataError::KeyedForbidsBatched);
-    }
+    // A `grain: key` model can no longer declare the `batched:` sub-block at
+    // all — the literal key is refused at parse time (`extract_single_model`
+    // / `extract_multi_model`), before a `ModelMetadata` value even exists.
+    // The only way `metadata.batched` can still be `Some` here is via the
+    // top-level `safety_overrides:` fold (`fold_top_level_safety_overrides`);
+    // that case is a strict subset of the `PartitionGrainRequiresRefreshIncremental`
+    // check below (`is_keyed()` implies `!is_partition_grain()`), so a
+    // dedicated `KeyedForbidsPartitionGrain` check here would be unreachable and was
+    // removed (`docs/specs/diagnostics.md` §"Keyed refresh mode").
 
     // Keyed + timeseries: is NOT rejected here. Admission depends on
     // whether key temporal locality can be established (three routes:
@@ -714,7 +873,7 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     // Rule: materialized_view forbids batched: — the engine owns freshness
     // for this mode; there is no smelt-driven batch loop to configure.
     if metadata.is_materialized_view() && metadata.batched.is_some() {
-        return Err(MetadataError::MaterializedViewForbidsBatched);
+        return Err(MetadataError::MaterializedViewForbidsPartitionGrain);
     }
 
     // Rule: materialized_view forbids timeseries: — like keyed, the
@@ -752,15 +911,15 @@ pub fn validate_timeseries(metadata: &ModelMetadata, sql_body: &str) -> Result<(
     }
 
     // Rule: batched: block without refresh: incremental + grain: partition →
-    // BatchedRequiresRefreshBatched
+    // PartitionGrainRequiresRefreshIncremental
     if metadata.batched.is_some() && !metadata.is_partition_grain() {
-        return Err(MetadataError::BatchedRequiresRefreshBatched);
+        return Err(MetadataError::PartitionGrainRequiresRefreshIncremental);
     }
 
     // Rule: refresh: incremental + grain: partition without timeseries: →
-    // TimeseriesRequiredForBatched
+    // TimeseriesRequiredForPartitionGrain
     if metadata.is_partition_grain() && metadata.timeseries.is_none() {
-        return Err(MetadataError::TimeseriesRequiredForBatched);
+        return Err(MetadataError::TimeseriesRequiredForPartitionGrain);
     }
 
     let ts = match &metadata.timeseries {
@@ -969,6 +1128,130 @@ pub fn validate_bounded_domains(
                 bd.column
             ),
         });
+    }
+    Ok(())
+}
+
+/// Validate `columns.<c>.tests` entries structurally: every entry must match
+/// one of the four recognized kinds (`not_null`, `unique`, `accepted_values`,
+/// `relationships`), and a parameterized entry must carry the recognized
+/// parameter shape.
+///
+/// Pure function — operates only on the already-parsed `ModelMetadata`.
+/// Deliberately does **not** check that a tested column exists in the
+/// model's inferred output schema — that check needs the inferred schema,
+/// which this crate does not have; it is made downstream by `smelt-db`
+/// (`MetadataError::ColumnTestOnUnknownColumn`). See
+/// `docs/specs/data_tests.md` §"Fail-loud validation".
+///
+/// Rules checked:
+/// - `not_null` / `unique` as a bare string list entry.
+/// - `{accepted_values: [<literal>, ...]}` — a non-empty list value.
+/// - `{relationships: {to: <model>, field: <column>}}` — a map value
+///   carrying both a `to` and a `field` string key.
+/// - Anything else (misspelled kind, unrecognized parameterized key, a
+///   multi-key parameterized entry, or a malformed `accepted_values`/
+///   `relationships` shape) → `UnknownColumnTestKind`.
+pub fn validate_column_tests(metadata: &ModelMetadata) -> Result<(), MetadataError> {
+    for (column, col_meta) in &metadata.columns {
+        for test in &col_meta.tests {
+            validate_one_column_test(column, test)?;
+        }
+    }
+    Ok(())
+}
+
+fn validate_one_column_test(column: &str, test: &ColumnTest) -> Result<(), MetadataError> {
+    match test {
+        ColumnTest::Simple(name) => match name.as_str() {
+            "not_null" | "unique" => Ok(()),
+            other => Err(MetadataError::UnknownColumnTestKind {
+                column: column.to_string(),
+                entry: other.to_string(),
+            }),
+        },
+        ColumnTest::Parameterized(params) => {
+            // A single-key entry is the only recognized parameterized shape;
+            // reject multi-key entries (e.g. accidentally merged
+            // `- {accepted_values: [...], relationships: {...}}`).
+            if params.len() != 1 {
+                return Err(MetadataError::UnknownColumnTestKind {
+                    column: column.to_string(),
+                    entry: format!("{:?}", params.keys().collect::<Vec<_>>()),
+                });
+            }
+            let Some((kind, value)) = params.iter().next() else {
+                // Unreachable in practice (params.len() == 1 checked just
+                // above), but avoids a production `.expect(` — fail loud
+                // with the same diagnostic rather than panicking.
+                return Err(MetadataError::UnknownColumnTestKind {
+                    column: column.to_string(),
+                    entry: "<empty parameterized test entry>".to_string(),
+                });
+            };
+            match kind.as_str() {
+                "accepted_values" => match value {
+                    serde_yaml::Value::Sequence(seq) if !seq.is_empty() => Ok(()),
+                    _ => Err(MetadataError::UnknownColumnTestKind {
+                        column: column.to_string(),
+                        entry: "accepted_values (must be a non-empty list)".to_string(),
+                    }),
+                },
+                "relationships" => {
+                    let has_field = |name: &str| {
+                        value
+                            .as_mapping()
+                            .and_then(|m| m.get(serde_yaml::Value::String(name.to_string())))
+                            .and_then(|v| v.as_str())
+                            .is_some_and(|s| !s.is_empty())
+                    };
+                    if has_field("to") && has_field("field") {
+                        Ok(())
+                    } else {
+                        Err(MetadataError::UnknownColumnTestKind {
+                            column: column.to_string(),
+                            entry: "relationships (must be a map with non-empty `to` and `field`)"
+                                .to_string(),
+                        })
+                    }
+                }
+                other => Err(MetadataError::UnknownColumnTestKind {
+                    column: column.to_string(),
+                    entry: other.to_string(),
+                }),
+            }
+        }
+    }
+}
+
+/// Validate that every `columns.<c>.tests`-bearing column name exists in the
+/// model's inferred output schema (`schema_columns`).
+///
+/// Pure function — takes the schema as plain data (a column-name slice)
+/// rather than any Salsa/schema type, so this crate stays free of a
+/// `smelt-db` dependency. The caller (`smelt-db`'s `check_file_diagnostics`)
+/// supplies `schema_columns` from `typed_model_schema`.
+///
+/// This is a deliberate **contrast** with the rest of the `columns:` map: a
+/// `description` (or other non-`tests` key) on a column absent from the
+/// inferred schema is silently dropped from catalog output, because a stale
+/// description is inert. A stale or misspelled *test* is not inert — see
+/// `docs/specs/data_tests.md` §"Fail-loud validation".
+pub fn validate_column_tests_against_schema(
+    metadata: &ModelMetadata,
+    model_name: &str,
+    schema_columns: &[String],
+) -> Result<(), MetadataError> {
+    for (column, col_meta) in &metadata.columns {
+        if col_meta.tests.is_empty() {
+            continue;
+        }
+        if !schema_columns.iter().any(|c| c == column) {
+            return Err(MetadataError::ColumnTestOnUnknownColumn {
+                model: model_name.to_string(),
+                column: column.clone(),
+            });
+        }
     }
     Ok(())
 }
@@ -1253,8 +1536,8 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
             } else if key_str == "incremental" {
                 return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                     "the `incremental:` block has been removed — use `refresh: incremental` + \
-                     `grain: partition` + an optional `batched:` block instead (see \
-                     docs/specs/incremental_models.md)",
+                     `grain: partition` with the top-level `unique_key:` / `safety_overrides:` \
+                     keys as needed instead (see docs/specs/incremental_models.md)",
                 )));
             // `refresh: cumulative` is a hard error pointing at the renamed
             // value, not a silently-stripped unknown value — the resilient
@@ -1265,6 +1548,14 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 {
                     return Err(MetadataError::YamlParseError(e));
                 }
+            // The `batched:` sub-block is retired outright — a hard error
+            // naming each replacement key with the caller's own values, never
+            // a silent strip (`docs/specs/models.md` §"The Relation
+            // Contract").
+            } else if key_str == "batched" {
+                return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                    batched_subblock_fixit_message(value),
+                )));
             }
         }
 
@@ -1273,16 +1564,18 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
             Err(_) => {
                 // Strip known keys whose invalid values are surfaced as diagnostics
                 // by smelt-db (MalformedTimeseries, etc.) so the model is still
-                // discoverable.
+                // discoverable. `batched` is never reached here — it always
+                // errors above before this fallback runs.
                 let mut fallback = model_map;
                 fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
-                fallback.remove(serde_yaml::Value::String("batched".to_string()));
                 fallback.remove(serde_yaml::Value::String("refresh".to_string()));
                 fallback.remove(serde_yaml::Value::String("grain".to_string()));
                 serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
             }
         }
     };
+
+    fold_top_level_safety_overrides(&mut metadata)?;
 
     // Populate the derived `check` config for check declarations.
     metadata.check = check_config;
@@ -1377,8 +1670,15 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 } else if key_str == "incremental" {
                     return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
                         "the `incremental:` block has been removed — use `refresh: incremental` + \
-                         `grain: partition` + an optional `batched:` block instead (see \
-                         docs/specs/incremental_models.md)",
+                         `grain: partition` with the top-level `unique_key:` / `safety_overrides:` \
+                         keys as needed instead (see docs/specs/incremental_models.md)",
+                    )));
+                // The `batched:` sub-block is retired outright — a hard error
+                // naming each replacement key with the caller's own values,
+                // never a silent strip.
+                } else if key_str == "batched" {
+                    return Err(MetadataError::YamlParseError(serde_yaml::Error::custom(
+                        batched_subblock_fixit_message(value),
                     )));
                 }
             }
@@ -1386,15 +1686,18 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
             match serde_yaml::from_value(serde_yaml::Value::Mapping(validated_map.clone())) {
                 Ok(m) => m,
                 Err(_) => {
+                    // `batched` is never reached here — it always errors
+                    // above before this fallback runs.
                     let mut fallback = validated_map;
                     fallback.remove(serde_yaml::Value::String("timeseries".to_string()));
-                    fallback.remove(serde_yaml::Value::String("batched".to_string()));
                     fallback.remove(serde_yaml::Value::String("refresh".to_string()));
                     fallback.remove(serde_yaml::Value::String("grain".to_string()));
                     serde_yaml::from_value(serde_yaml::Value::Mapping(fallback)).unwrap_or_default()
                 }
             }
         };
+
+        fold_top_level_safety_overrides(&mut metadata)?;
 
         // Set model name from delimiter
         metadata.name = Some(model_name);
@@ -1475,6 +1778,83 @@ fn parse_section_delimiter(line: &str, line_number: usize) -> Result<String, Met
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// All four `columns.<c>.tests` kinds, including the parameterized
+    /// forms, parse into `ColumnTest` and pass `validate_column_tests`
+    /// (`docs/specs/data_tests.md` §Surface).
+    #[test]
+    fn parses_column_tests_list() {
+        let source = r#"---
+name: orders
+columns:
+  order_id:
+    tests:
+      - not_null
+      - unique
+  status:
+    tests:
+      - accepted_values: ['pending', 'shipped', 'cancelled']
+  customer_id:
+    tests:
+      - relationships:
+          to: customers
+          field: id
+---
+SELECT order_id, status, customer_id FROM raw_orders"#;
+
+        let result = extract_file_metadata(source).unwrap();
+        let metadata = match result {
+            FileMetadata::Single { metadata, .. } => metadata,
+            other => panic!("Expected Single variant, got {:?}", other),
+        };
+
+        let order_id_tests = &metadata.columns.get("order_id").unwrap().tests;
+        assert_eq!(
+            order_id_tests,
+            &vec![
+                ColumnTest::Simple("not_null".to_string()),
+                ColumnTest::Simple("unique".to_string()),
+            ]
+        );
+
+        let status_tests = &metadata.columns.get("status").unwrap().tests;
+        assert_eq!(status_tests.len(), 1);
+        assert!(matches!(status_tests[0], ColumnTest::Parameterized(_)));
+
+        let customer_id_tests = &metadata.columns.get("customer_id").unwrap().tests;
+        assert_eq!(customer_id_tests.len(), 1);
+        assert!(matches!(customer_id_tests[0], ColumnTest::Parameterized(_)));
+
+        validate_column_tests(&metadata).expect("all four kinds should validate cleanly");
+    }
+
+    /// A misspelled/unrecognized `tests` entry is a hard `MetadataError`
+    /// (`docs/specs/data_tests.md` §"Fail-loud validation").
+    #[test]
+    fn unknown_test_kind_is_metadata_error() {
+        let mut columns = HashMap::new();
+        columns.insert(
+            "order_id".to_string(),
+            ColumnMetadata {
+                tests: vec![ColumnTest::Simple("nut_null".to_string())],
+                ..Default::default()
+            },
+        );
+        let metadata = ModelMetadata {
+            name: Some("orders".to_string()),
+            columns,
+            ..Default::default()
+        };
+
+        let err = validate_column_tests(&metadata)
+            .expect_err("misspelled test kind must be a hard error");
+        assert!(
+            matches!(err, MetadataError::UnknownColumnTestKind { .. }),
+            "Expected UnknownColumnTestKind, got: {}",
+            err
+        );
+        assert!(err.to_string().contains("nut_null"));
+    }
 
     #[test]
     fn test_no_frontmatter() {
@@ -2056,7 +2436,7 @@ FROM smelt.orders_raw"#;
     }
 
     /// A `.sql` file declaring `refresh: batched` with no `timeseries:` produces
-    /// `TimeseriesRequiredForBatched` from `validate_timeseries`.
+    /// `TimeseriesRequiredForPartitionGrain` from `validate_timeseries`.
     #[test]
     fn test_batched_without_timeseries_errors() {
         // Build a ModelMetadata with refresh: batched but no timeseries
@@ -2069,8 +2449,8 @@ FROM smelt.orders_raw"#;
         let err = validate_timeseries(&metadata, "SELECT event_date FROM foo")
             .expect_err("must error when refresh: batched has no timeseries:");
         assert!(
-            matches!(err, MetadataError::TimeseriesRequiredForBatched),
-            "Expected TimeseriesRequiredForBatched, got: {}",
+            matches!(err, MetadataError::TimeseriesRequiredForPartitionGrain),
+            "Expected TimeseriesRequiredForPartitionGrain, got: {}",
             err
         );
     }
@@ -2087,14 +2467,14 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig::default()),
+            batched: Some(crate::config::PartitionGrainConfig::default()),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT dt FROM foo")
             .expect_err("must error when batched: has no refresh: batched");
         assert!(
-            matches!(err, MetadataError::BatchedRequiresRefreshBatched),
-            "Expected BatchedRequiresRefreshBatched, got: {}",
+            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
             err
         );
     }
@@ -2115,10 +2495,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec!["order_ts".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2147,10 +2527,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec!["order_date".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2179,10 +2559,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec!["order_id".to_string()],
                 nondeterministic_columns: vec!["order_id".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2211,10 +2591,10 @@ FROM smelt.orders_raw"#;
                 week_start: None,
                 assert_monotonic: false,
             }),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec!["order_id".to_string()],
                 nondeterministic_columns: vec!["inserted_at".to_string()],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
@@ -2404,10 +2784,10 @@ SELECT dt FROM foo"#;
         );
     }
 
-    /// A `.sql` file declaring `event_time_column` inside `batched:` has a
-    /// bad nested value (BatchedConfig has deny_unknown_fields). The recovery
-    /// path strips `batched:` and returns Ok with partial metadata.
-    /// Discovery is resilient; smelt-db surfaces a MalformedTimeseries diagnostic.
+    /// A `.sql` file declaring the legacy nested form (`event_time_column`
+    /// inside `batched:`) is now caught by the blanket `batched:` sub-block
+    /// retirement — a hard error, not a resilient strip. The sub-block key's
+    /// mere presence is refused before its nested shape is ever inspected.
     #[test]
     fn test_legacy_nested_form_errors() {
         let source = r#"---
@@ -2420,23 +2800,129 @@ batched:
   granularity: day
 ---
 SELECT dt FROM foo"#;
-        let result = extract_file_metadata(source);
+        let err = extract_file_metadata(source)
+            .expect_err("the `batched:` sub-block is refused regardless of its nested shape");
+        let message = err.to_string();
         assert!(
-            result.is_ok(),
-            "discovery must be resilient to bad nested fields; got: {:?}",
-            result.unwrap_err()
+            message.contains("batched:") && message.contains("removed"),
+            "error must name the retired `batched:` sub-block; got: {}",
+            message
         );
-        // The batched block is stripped in recovery; materialization is kept.
-        if let Ok(FileMetadata::Single { metadata, .. }) = result {
-            assert_eq!(
-                metadata.materialization,
-                Some(crate::config::Materialization::Table)
-            );
-            assert!(
-                metadata.batched.is_none(),
-                "malformed batched block must be stripped in recovery"
-            );
-        }
+    }
+
+    /// `batched.unique_key: [...]` is refused with a fix-it naming the
+    /// top-level `unique_key:` replacement carrying the caller's own values —
+    /// never a generic template (`docs/specs/models.md` §"The Relation
+    /// Contract").
+    #[test]
+    fn test_batched_unique_key_fixit_carries_caller_values() {
+        let source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+batched:
+  unique_key: [order_id, order_date]
+---
+SELECT dt FROM foo"#;
+        let err = extract_file_metadata(source)
+            .expect_err("batched.unique_key: must be refused with a fix-it");
+        let message = err.to_string();
+        assert!(
+            message.contains("unique_key")
+                && message.contains("order_id")
+                && message.contains("order_date"),
+            "fix-it must name unique_key: and the caller's own values; got: {}",
+            message
+        );
+    }
+
+    /// `batched.safety_overrides: {...}` is refused with a fix-it naming the
+    /// top-level `safety_overrides:` replacement carrying the caller's own
+    /// declared flags.
+    #[test]
+    fn test_batched_safety_overrides_fixit_carries_caller_values() {
+        let source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+batched:
+  safety_overrides:
+    allow_having: true
+    allow_limit: true
+---
+SELECT dt FROM foo"#;
+        let err = extract_file_metadata(source)
+            .expect_err("batched.safety_overrides: must be refused with a fix-it");
+        let message = err.to_string();
+        assert!(
+            message.contains("safety_overrides")
+                && message.contains("allow_having")
+                && message.contains("allow_limit"),
+            "fix-it must name safety_overrides: and the caller's own declared flags; got: {}",
+            message
+        );
+    }
+
+    /// `batched.nondeterministic_columns: [c]` is refused with a fix-it
+    /// naming `columns.c.contract: plausible` for each of the caller's own
+    /// listed columns.
+    #[test]
+    fn test_batched_nondeterministic_columns_fixit_carries_caller_values() {
+        let source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: ts
+  partition_column: dt
+  granularity: day
+batched:
+  nondeterministic_columns: [foo, bar]
+---
+SELECT dt, foo, bar FROM foo"#;
+        let err = extract_file_metadata(source)
+            .expect_err("batched.nondeterministic_columns: must be refused with a fix-it");
+        let message = err.to_string();
+        assert!(
+            message.contains("columns.foo.contract: plausible"),
+            "fix-it must name columns.foo.contract: plausible; got: {}",
+            message
+        );
+        assert!(
+            message.contains("columns.bar.contract: plausible"),
+            "fix-it must name columns.bar.contract: plausible; got: {}",
+            message
+        );
+    }
+
+    /// An empty `batched: {}` block (no sub-keys at all) is still refused —
+    /// the literal key's mere presence is the retirement trigger, not any
+    /// particular sub-key.
+    #[test]
+    fn test_empty_batched_block_still_refused() {
+        let source = r#"---
+materialization: table
+refresh: incremental
+grain: key
+batched: {}
+---
+SELECT device_id, COUNT(*) AS n FROM foo GROUP BY device_id"#;
+        let err =
+            extract_file_metadata(source).expect_err("empty batched: {} must still be refused");
+        let message = err.to_string();
+        assert!(
+            message.contains("batched:") && message.contains("removed"),
+            "error must name the retired `batched:` sub-block; got: {}",
+            message
+        );
     }
 
     /// `materialization: ephemeral` + `timeseries:` is `MalformedTimeseries`.
@@ -2575,26 +3061,32 @@ GROUP BY device_id, user_id"#;
         );
     }
 
-    /// A model with `refresh: keyed` + a `batched:` block
-    /// emits `KeyedForbidsBatched`.
+    /// A `grain: key` model with an internally-folded `batched` block (the
+    /// only way one can still reach `validate_timeseries` now that the
+    /// literal `batched:` sub-block is refused at parse time) emits
+    /// `PartitionGrainRequiresRefreshIncremental` — the dedicated `KeyedForbidsPartitionGrain`
+    /// check was removed as unreachable, since `is_keyed()` implies
+    /// `!is_partition_grain()` and that's exactly what
+    /// `PartitionGrainRequiresRefreshIncremental` already checks
+    /// (`docs/specs/diagnostics.md` §"Keyed refresh mode").
     #[test]
-    fn test_keyed_forbids_batched() {
+    fn test_keyed_with_batched_block_is_batched_requires_refresh_batched() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::Incremental),
             grain: Some(crate::config::Grain::Key),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: keyed + batched: must error");
         assert!(
-            matches!(err, MetadataError::KeyedForbidsBatched),
-            "Expected KeyedForbidsBatched, got: {}",
+            matches!(err, MetadataError::PartitionGrainRequiresRefreshIncremental),
+            "Expected PartitionGrainRequiresRefreshIncremental, got: {}",
             err
         );
     }
@@ -2654,24 +3146,24 @@ GROUP BY device_id, user_id"#;
     }
 
     /// A model with `refresh: materialized_view` + a `batched:` block
-    /// emits `MaterializedViewForbidsBatched`.
+    /// emits `MaterializedViewForbidsPartitionGrain`.
     #[test]
     fn test_materialized_view_forbids_batched() {
         let metadata = ModelMetadata {
             materialization: Some(crate::config::Materialization::Table),
             refresh: Some(crate::config::RefreshStrategy::MaterializedView),
-            batched: Some(crate::config::BatchedConfig {
+            batched: Some(crate::config::PartitionGrainConfig {
                 unique_key: vec![],
                 nondeterministic_columns: vec![],
-                safety_overrides: crate::config::BatchedSafetyOverrides::default(),
+                safety_overrides: crate::config::PartitionGrainSafetyOverrides::default(),
             }),
             ..Default::default()
         };
         let err = validate_timeseries(&metadata, "SELECT * FROM foo")
             .expect_err("refresh: materialized_view + batched: must error");
         assert!(
-            matches!(err, MetadataError::MaterializedViewForbidsBatched),
-            "Expected MaterializedViewForbidsBatched, got: {}",
+            matches!(err, MetadataError::MaterializedViewForbidsPartitionGrain),
+            "Expected MaterializedViewForbidsPartitionGrain, got: {}",
             err
         );
     }

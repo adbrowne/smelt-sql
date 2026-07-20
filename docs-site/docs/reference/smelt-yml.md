@@ -30,6 +30,8 @@ targets:
 
 You can define multiple targets and select one at runtime with the `--target` CLI flag (default: `dev`).
 
+**State isolation per target.** Run state (interval coverage, reconciliation ledgers, deployed-schema snapshots, run history) is stored under `.smelt/targets/<target_name>/`, so each target has its own closed, disjoint state store — a `dev` run can never mask a coverage gap in `prod`, and vice versa. See `docs/reference/cli.md` §"State isolation per target" and `docs/specs/run_state.md` §"`.smelt/` directory layout" for the full on-disk shape.
+
 ### DuckDB Target
 
 | Field | Type | Required | Description |
@@ -93,6 +95,21 @@ targets:
     format: delta  # default; can also be "parquet"
 ```
 
+### Environment interpolation
+
+Any string value anywhere in `smelt.yml` may reference an environment variable with `${VAR_NAME}`. The reference is resolved once, at config load, before validation — this is how secrets (a Spark `connect_url`, a warehouse credential) stay out of the checked-in file. Write `$$` for a literal `$` that must not trigger a lookup.
+
+```yaml
+targets:
+  spark_prod:
+    type: spark
+    connect_url: ${SPARK_CONNECT_URL}   # e.g. sc://spark.internal:15002 from CI secrets
+    catalog: spark_catalog
+    schema: main
+```
+
+If `SPARK_CONNECT_URL` is unset, loading the config fails immediately with an error naming both the variable and the key path (`targets.spark_prod.connect_url`) — it never silently resolves to an empty string. When a config references more than one missing variable, every one of them is reported together, not just the first.
+
 ---
 
 ## Materialization Types
@@ -133,8 +150,10 @@ models:
     target: <target_name>
     refresh: incremental
     unique_key: [<column>, ...]
+    safety_overrides:
+      # safety-override fields...
     batched:
-      # batched fields...
+      unique_key: [<column>, ...]  # MERGE-dedup-only key — see the callout below
 ```
 
 `refresh: incremental` is admitted on the two **shape-defining facts** alone — a `timeseries:` block (the clock) and/or a top-level `unique_key:` (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. `grain:` itself is never required to admit a model — it is an optional, **check-only** `partition` / `key` / `key_per_partition` label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.
@@ -148,9 +167,10 @@ models:
 | `target` | string | no | _(CLI default)_ | Override which target to execute this model on |
 | `timeseries` | object | no | | Time-dimension declaration — the **clock** shape-defining fact (see [Timeseries Configuration](#timeseries-configuration)) |
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
-| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from the `batched:` sub-block's `unique_key` (a partition-grain dedup aid, never identity). |
+| `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from `batched.unique_key` below (a partition-grain MERGE-dedup key, never identity). |
 | `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
-| `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
+| `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. Declaring both this key and a non-default `batched.safety_overrides` on the same `smelt.yml` model entry is an error — declare it once. |
+| `batched` | object | no | | `smelt.yml`-only preference block carrying `unique_key` — a MERGE-dedup key for a partition-shaped output, distinct from the identity-conferring top-level `unique_key:` above (see the callout in [Incremental Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
 
@@ -216,20 +236,24 @@ models:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
+    safety_overrides:
+      allow_window_functions: false
     batched:
       unique_key:
         - transaction_id
-      safety_overrides:
-        allow_window_functions: false
 ```
+
+!!! note "`batched:` is `smelt.yml`-only"
+    The `.sql` frontmatter `batched:` sub-block is retired outright — declaring it in a model file is a hard parse-time error naming the top-level replacement for each key you wrote (`unique_key` → top-level `unique_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`). Declaring the *identity* fact this way makes the output key-shaped (see [Incremental models](../guide/incremental-models.md)), which a row-shaped model with no `GROUP BY` cannot become. `smelt.yml`'s `models.<name>.batched:` block above is a **separate, still-supported** mechanism carrying a MERGE-dedup-only `unique_key` (and `nondeterministic_columns`, since per-column `contract:` is SQL-frontmatter-only) for exactly that case — a partition-shaped model whose column-scoped MERGE technique needs a row key without becoming key-addressed.
 
 #### Incremental Fields
 
 | Field | Type | Required | Default | Description |
 |-------|------|----------|---------|-------------|
-| `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
-| `nondeterministic_columns` | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
-| `safety_overrides` | object | no | _(all false)_ | Override safety checks for patterns that may produce different results on partial data (see [Safety Overrides](#safety-overrides)) |
+| `unique_key` (under `batched:`) | string[] | no | `[]` | A MERGE-dedup key for a partition-shaped output — never the identity-conferring fact top-level `unique_key:` is. When present, the backend may choose a column-scoped MERGE strategy instead of DELETE+INSERT for a mutable-dimension cell. |
+| `nondeterministic_columns` (under `batched:`) | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
+
+`safety_overrides` is a top-level model key (see [Model Fields](#model-fields) and [Safety Overrides](#safety-overrides) below), not part of this `batched:` block.
 
 #### Safety Overrides
 
@@ -246,7 +270,7 @@ Smelt validates incremental models to ensure they produce the same results wheth
 
 ### Maintenance Configuration
 
-`maintenance:` is a sibling of `timeseries:`/`batched:` in SQL frontmatter (it is not a `smelt.yml` per-model field). It constrains the derived maintenance plan — the per-`(column-group × trigger)` cell matrix `smelt explain <model>` prints — without ever choosing a strategy the derivation didn't already admit.
+`maintenance:` is a sibling of `timeseries:` in SQL frontmatter (it is not a `smelt.yml` per-model field). It constrains the derived maintenance plan — the per-`(column-group × trigger)` cell matrix `smelt explain <model>` prints — without ever choosing a strategy the derivation didn't already admit.
 
 ```yaml
 maintenance:
@@ -268,7 +292,29 @@ The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, 
 
 A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
 
-`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` primarily choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). The same keys also carry a `suppress`/`unconditional` value that steers the orthogonal [conditional-write](../guide/incremental-models.md#conditional-writes) dimension: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — `prefer: suppress`/`prefer: unconditional` nudge the default without ever refusing, and `technique: suppress`/`technique: unconditional` force it, refusing loudly if the proof itself never admitted suppression. This ladder only drives the live run path for `ColumnScopedMerge` cells today; a `KeyedFold` cell's `refresh: keyed` executor still always honours a proven `Suppressed` verdict unconditionally, regardless of trigger or override — `smelt explain` resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.
+`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` primarily choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). This family choice is live: a `technique:` pin is a hard override that a run honours directly (bypassing the cost-model default, never bypassing admission — an inadmissible pin fails the run loudly, naming the cell), and `prefer:` nudges the same default without ever refusing. There is no separate config surface for this — the same keys drive both a live run's resolution and [`smelt bakeoff`](cli.md#smelt-bakeoff)'s offline measurement of what each admissible technique costs.
+
+The same keys also carry a `suppress`/`unconditional` value that steers the orthogonal [conditional-write](../guide/incremental-models.md#conditional-writes) dimension: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — `prefer: suppress`/`prefer: unconditional` nudge the default without ever refusing, and `technique: suppress`/`technique: unconditional` force it, refusing loudly if the proof itself never admitted suppression. This suppression ladder only drives the live run path for `ColumnScopedMerge` cells today; a `KeyedFold` cell's `refresh: keyed` executor still always honours a proven `Suppressed` verdict unconditionally, regardless of trigger or override — `smelt explain` resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.
+
+#### Pinning a measured technique
+
+[`smelt bakeoff <model> --pin`](cli.md#smelt-bakeoff) measures every admissible technique for a
+cell against replayed windows of real data and prints the cheapest one as a ready-to-paste
+`cells[]` entry — the same shape as the block above, with `technique:` set to the winner. The
+command never edits the `.sql` file itself; paste the printed block into the model's
+frontmatter yourself:
+
+```yaml
+maintenance:
+  cells:
+    - columns: [user_name]
+      on: users
+      technique: fold
+```
+
+Once pasted, the pin is an ordinary override, re-validated through admission on every compile —
+if the plan later stops admitting that technique for the cell (e.g. a schema change removes the
+proof it relied on), the next compile fails loud rather than silently reverting to the default.
 
 #### `cells[].write` — the physical addressing pin
 
@@ -299,13 +345,13 @@ Smelt validates model configurations and reports errors or warnings:
 
 **Errors (block execution):**
 
-- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `batched:` block
+- Ephemeral models cannot declare `refresh: incremental` / `grain:` / a `smelt.yml` `batched:` block
 - Ephemeral models cannot have a target override
 
 **Warnings (printed to stderr):**
 
 - View models with `refresh:` set (the refresh axis only applies to stored tables)
-- `refresh: materialized_view` models with a `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
+- `refresh: materialized_view` models with a `smelt.yml` `batched:` block (materialized views are refreshed atomically by the engine, not smelt's incremental loop)
 
 ---
 
@@ -357,7 +403,7 @@ models:
   transactions:
     materialization: table
 
-  # Incremental model (grain: partition) — timeseries: and batched: are sibling keys
+  # Incremental model (grain: partition)
   daily_revenue:
     materialization: table
     refresh: incremental

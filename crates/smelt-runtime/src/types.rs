@@ -109,10 +109,83 @@ pub struct ExecuteRequest {
     /// Skipped during serde: `ModelFile` is a runtime type, not a wire type.
     #[serde(skip)]
     pub checks: Vec<ModelFile>,
+
+    /// Maximum number of models to execute concurrently. `None` (the
+    /// default) resolves to the host's available parallelism at run time;
+    /// `Some(1)` forces strictly serial execution, one model at a time, in
+    /// `execution_order` — the pre-Phase-5 behaviour. A DAG-independent
+    /// (unrelated) pair of models may run concurrently whenever `jobs > 1`;
+    /// a dependency edge always keeps the upstream model's completion
+    /// strictly before its downstream's start regardless of `jobs`.
+    #[serde(default)]
+    pub jobs: Option<usize>,
+
+    /// Maximum retry attempts for a transient backend failure
+    /// (`BackendError::is_transient`) hit while executing one model's
+    /// statement group — the whole group (drop+create, or a batch's
+    /// DELETE+INSERT/MERGE) is re-run, never a partial slice of it, so a
+    /// retry can never leave a half-applied write behind
+    /// (`docs/plans/20260719-prod-w2-operability.md` Phase 6). `None` (the
+    /// default) resolves to 3 attempts. `Some(0)` disables retry entirely —
+    /// the first transient failure fails the model immediately, matching
+    /// pre-Phase-6 behaviour. A deterministic (non-transient) error is never
+    /// retried regardless of this value.
+    #[serde(default)]
+    pub retry_max: Option<u32>,
+
+    /// Base backoff, in milliseconds, for the exponential-backoff delay
+    /// between retry attempts (`delay = retry_backoff_ms * 2^(attempt-1) +
+    /// jitter`; jitter is derived deterministically from a hash of
+    /// `(run_id, model_name, attempt)` — never `Instant::now`/`SystemTime`,
+    /// so retry delays are reproducible in tests). `None` (the default)
+    /// resolves to 200ms.
+    #[serde(default)]
+    pub retry_backoff_ms: Option<u64>,
+
+    /// Resume a previously partially-failed run for this target: a selected
+    /// model is skipped when it succeeded in the most recent incomplete run
+    /// (the latest manifest with `completed_at: null`) with an unchanged
+    /// `definition_hash`; everything else — a model that was `failed` or
+    /// `skipped`, whose definition changed, or that is downstream of any
+    /// such model — re-runs. `false` (the default) is a plain full run.
+    /// Refuses (`execute_project` returns `Err`) when there is no
+    /// incomplete run to resume from, rather than silently running
+    /// everything (`docs/specs/run_state.md` §"`--resume` semantics").
+    #[serde(default)]
+    pub resume: bool,
+
+    /// Request-scoped hard pins for `smelt bakeoff`'s offline forcing seam
+    /// (`docs/plans/20260719-prod-w7-bakeoff.md` Phase 3): each entry forces
+    /// one cell's technique for this run only. Entries enter the choice
+    /// ladder narrower than any frontmatter `maintenance.cells[]` pin for
+    /// the same cell — a request override for a cell also pinned in
+    /// frontmatter wins — but admission is still enforced exactly like a
+    /// frontmatter pin: an override naming a technique the derived plan did
+    /// not admit refuses loud, never silently substitutes. Empty (the
+    /// default) leaves resolution byte-identical to a request with no
+    /// overrides at all.
+    #[serde(default)]
+    pub technique_overrides: Vec<CellTechniqueOverride>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// One request-scoped hard pin — see [`ExecuteRequest::technique_overrides`].
+/// Mirrors `smelt_core::config::MaintenanceCellConfig`'s `columns`/`on`
+/// matching shape but carries only a hard `technique` pin (no soft
+/// `prefer`, no `write` addressing pin — those stay frontmatter-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellTechniqueOverride {
+    /// Names any member of the derived column group this override
+    /// addresses — same matching rule as `MaintenanceCellConfig::columns`.
+    pub columns: Vec<String>,
+    /// The trigger this override targets: a `<source-address>` or the
+    /// literal `backfill`.
+    pub on: String,
+    /// The hard-pinned technique. Bypasses the cost model, never admission.
+    pub technique: smelt_core::config::CellTechnique,
 }
 
 /// Outcome of a completed run. The runtime returns this from

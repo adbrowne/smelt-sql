@@ -643,8 +643,8 @@ pub enum DiagnosticCode {
     // ── Timeseries diagnostic codes ──────────────────────────────────────────
     /// A model declares `refresh: batched` without a sibling `timeseries:` block.
     /// Anchored at the top of the file (line 0, column 0).
-    /// Message: "TimeseriesRequiredForBatched: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
-    TimeseriesRequiredForBatched,
+    /// Message: "TimeseriesRequiredForPartitionGrain: model declares `refresh: batched` but has no `timeseries:` block — add a `timeseries:` block with event_time_column, partition_column, and granularity"
+    TimeseriesRequiredForPartitionGrain,
     /// The `timeseries:` block parses but violates a structural rule.
     /// Anchored at the top of the file (line 0, column 0).
     /// Message: "MalformedTimeseries: {message}"
@@ -674,6 +674,19 @@ pub enum DiagnosticCode {
     /// `unique_key:`). Anchored at the top of the file (line 0, column 0).
     /// Message: "GrainAssertionMismatch: declared `grain: {asserted}` disagrees with the grain derived from the declared shape facts (`grain: {derived}`) — fix the `grain:` assertion or the facts it derives from"
     GrainAssertionMismatch,
+
+    // ── Declarative column test diagnostic codes (docs/specs/data_tests.md) ──
+    /// A `columns.<c>.tests` entry does not match `not_null`, `unique`,
+    /// `accepted_values`, or `relationships`. Anchored at the offending
+    /// entry (currently the top of the file — precise per-entry anchoring
+    /// is not yet wired).
+    /// Message: "UnknownColumnTestKind: column '{column}' has a `tests` entry '{entry}' which is not one of the recognized kinds (not_null, unique, accepted_values, relationships)"
+    UnknownColumnTestKind,
+    /// A `columns.<c>.tests` entry names a column absent from the model's
+    /// inferred output schema. Anchored at the column key (currently the
+    /// top of the file — precise per-entry anchoring is not yet wired).
+    /// Message: "ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema"
+    ColumnTestOnUnknownColumn,
 
     // ── VALUES/CTE alias-column-list diagnostic codes ────────────────────────
     /// Emitted when the alias column list in `(VALUES …) AS t(c₁, c₂, …)` or
@@ -728,10 +741,6 @@ pub enum DiagnosticCode {
     /// partition column by default; the rule reads it from the driving
     /// source. Anchored at offset 0. Error severity.
     KeyedForbidsTimeseries,
-    /// A `refresh: keyed` model incorrectly declares a `batched:` block.
-    /// The two refresh strategies have different equivalence contracts; pick one.
-    /// Anchored at offset 0. Error severity.
-    KeyedForbidsBatched,
     /// A `refresh: materialized_view` model incorrectly declares a
     /// `timeseries:` block. Like `keyed`, the engine-maintained output
     /// has no partition column. Anchored at offset 0. Error severity.
@@ -739,11 +748,11 @@ pub enum DiagnosticCode {
     /// A `refresh: materialized_view` model incorrectly declares a
     /// `batched:` block. The engine, not smelt, owns freshness for this
     /// mode. Anchored at offset 0. Error severity.
-    MaterializedViewForbidsBatched,
+    MaterializedViewForbidsPartitionGrain,
     /// Advisory (`Warning`): a `batched` model's SQL is not batch-safe
     /// under the planner's batch safety classifier (the build does not
     /// hard-refuse — its dispatch falls back to a safe chunking strategy).
-    BatchedNotSafe,
+    PartitionGrainNotSafe,
     /// An incremental model's `event_time_column` is not accessible at the
     /// outermost SELECT where the time filter is injected — either because the
     /// query is a set operation (UNION/INTERSECT/EXCEPT) or because the FROM

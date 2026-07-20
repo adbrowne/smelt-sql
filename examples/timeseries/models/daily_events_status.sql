@@ -6,14 +6,17 @@ timeseries:
   partition_column: event_date
   event_time_column: event_timestamp
   granularity: day
-batched:
-  # `event_id` is the fact source's own declared `unique_key`
-  # (`models/sources/raw/events.yml`) and, since this model neither
-  # aggregates nor fans the join out, still uniquely identifies each output
-  # row — the row identity the horizon-clamped column-scoped `MERGE` (MP11's
-  # `PartitionLocal::Yes` corner) keys on when a `raw.user_status` mutation
-  # drives the `{status}` cell.
-  unique_key: [event_id]
+# `event_id` is the fact source's own declared `unique_key`
+# (`models/sources/raw/events.yml`) — but a `grain: partition` output has no
+# top-level `unique_key:` slot of its own (declaring one makes an output
+# key-shaped, `docs/specs/models.md` §"The Relation Contract"), so this
+# cell's own row identity resolves `WholeRow`, not a declared key. That is
+# still the correct row identity for MP11's horizon-clamped column-scoped
+# `MERGE` (`PartitionLocal::Yes` corner) when a `raw.user_status` mutation
+# drives the `{status}` cell — the retired `batched.unique_key: [event_id]`
+# spelling this model used to carry here never fed row-identity derivation
+# for a partition-grain output either (`derive::ModelInputs::declared_unique_key`
+# is empty for every `Grain::Partition`), so dropping it changes nothing.
 ---
 -- Fact (events) enriched with a CLOCKED, mutable dimension
 -- (raw.user_status) — the genuine scan-clamp corner (`PartitionLocal::Yes`)

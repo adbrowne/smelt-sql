@@ -1,6 +1,6 @@
 // Re-export all config types from smelt-core
 pub use smelt_core::{
-    BackendType, BatchedConfig, Config, Granularity, Materialization, ModelConfig, Target,
+    BackendType, Config, Granularity, Materialization, ModelConfig, PartitionGrainConfig, Target,
 };
 
 // Re-export project discovery

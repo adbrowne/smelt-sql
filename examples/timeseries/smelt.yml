@@ -41,3 +41,24 @@ models:
       # In production: would use watermarks, lookback windows, etc.
   cube_metrics:
     materialization: table
+  daily_events_status:
+    # `event_id` is the fact source's own declared `unique_key`
+    # (`models/sources/raw/events.yml`) and, since this model neither
+    # aggregates nor fans the join out, still uniquely identifies each
+    # output row. The `.sql` frontmatter `batched:` sub-block this used to
+    # carry `unique_key` under is retired (`docs/specs/models.md` §"The
+    # Relation Contract"); a top-level `unique_key:` in `.sql` frontmatter
+    # is the *identity* fact instead (grain-determining, requiring an
+    # aggregated `GROUP BY` body for a clocked model), which this row-shaped
+    # join is not — so the MERGE-dedup-only `batched.unique_key` spelling
+    # stays declared here, in the `smelt.yml` model override the sub-block
+    # retirement does not touch.
+    batched:
+      unique_key: [event_id]
+  daily_events_enriched:
+    # See `daily_events_status`'s comment above — the same MERGE-dedup-only
+    # `batched.unique_key`, kept in `smelt.yml` since this model's own
+    # row-shaped join cannot become the composed key+clock shape (no
+    # `GROUP BY` to satisfy `KeyedRequiresGroupBy`).
+    batched:
+      unique_key: [event_id]

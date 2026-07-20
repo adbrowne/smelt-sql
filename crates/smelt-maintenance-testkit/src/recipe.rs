@@ -36,6 +36,55 @@ pub fn arb_payload_value() -> impl Strategy<Value = i64> {
     -PAYLOAD_BOUND..=PAYLOAD_BOUND
 }
 
+/// Which backend a staged Link-C project targets
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2). Selects
+/// both `render::render_smelt_yml_for`'s emitted target block and
+/// `LinkCProject::run_with_target`'s backend factory arm. `DuckDb` is the
+/// only variant ever constructed today — `SparkDelta` exists so the seam is
+/// in place ahead of the Spark arm a later phase of that plan wires up;
+/// selecting it from `run_with_target` is `unimplemented!()` until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConformanceTarget {
+    DuckDb,
+    SparkDelta,
+}
+
+/// Dedicated Spark/Delta schema the generative conformance harness's Spark
+/// twin stages every case into (`docs/plans/20260720-prod-w9-spark-conformance-twin.md`
+/// Phase 3) — isolated from every other Spark integration test's own schema
+/// (`spark_smoke.rs`'s `analytics`, `cross_engine_parity.rs`'s own schemas),
+/// so a stale table from an unrelated suite can never collide with a
+/// generated recipe's deterministic model/source names.
+pub const SPARK_CONFORMANCE_SCHEMA: &str = "smelt_conf_gen";
+
+/// The Spark Connect URL the conformance harness's Spark arms connect to:
+/// `SPARK_CONNECT_URL` from the environment (`scripts/spark-env.sh`'s
+/// convention, mirroring `crates/smelt-cli/tests/common/mod.rs::spark_connect_url`),
+/// falling back to the default local Spark Connect port when unset. Callers
+/// that reach the Spark arm at all have already checked
+/// `SPARK_CONNECT_URL.is_some()` (the harness's skip-when-unset gate), so
+/// this fallback is only ever exercised by a caller that bypassed that
+/// check — it fails loud on connect rather than silently targeting nothing.
+pub fn spark_connect_url() -> String {
+    std::env::var("SPARK_CONNECT_URL").unwrap_or_else(|_| "sc://localhost:15002".to_string())
+}
+
+/// The Delta warehouse directory the conformance harness's Spark arms write
+/// managed tables to: `SMELT_SPARK_WAREHOUSE` from the environment
+/// (`scripts/spark-env.sh`'s convention) when set, otherwise a directory
+/// sibling to `db_path` (this module's pre-Phase-3 fallback, kept for a
+/// caller with no env var set).
+pub fn spark_warehouse_dir(db_path: &std::path::Path) -> std::path::PathBuf {
+    std::env::var("SMELT_SPARK_WAREHOUSE")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(|_| {
+            db_path
+                .parent()
+                .unwrap_or_else(|| std::path::Path::new("."))
+                .join("spark_warehouse")
+        })
+}
+
 /// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
 /// Phase 4; design §6 "mixed models"). Phase 1-3's pool is exclusively
 /// [`SourcePosture::AppendOnly`] (the fixed `events(d, id, val)` shape);
@@ -524,14 +573,18 @@ impl AdversarialLeafRecipe {
     }
 
     /// The full model file contents: frontmatter (`timeseries:` + `refresh:
-    /// incremental` + `grain: partition` + `batched.unique_key`) followed by
-    /// [`Self::model_body`] — the same shape
-    /// [`crate::render::render_model_file`] produces for [`ModelRecipe`].
+    /// incremental` + `grain: partition`) followed by [`Self::model_body`] —
+    /// the same shape [`crate::render::render_model_file`] produces for
+    /// [`ModelRecipe`]. The retired `batched.unique_key` sub-block this used
+    /// to carry [`Self::unique_key`] under is gone — it never fed
+    /// row-identity derivation for a `Grain::Partition` output anyway
+    /// (`derive::ModelInputs::declared_unique_key` is empty for every
+    /// `Grain::Partition`), so dropping it changes no derived maintenance
+    /// plan.
     pub fn model_file(&self) -> String {
         let d = &self.source.clock_column;
-        let unique_key = self.unique_key().join(", ");
         format!(
-            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\n---\n{body}\n",
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n---\n{body}\n",
             body = self.model_body(),
         )
     }
@@ -634,15 +687,19 @@ impl MutableEnrichedRecipe {
     }
 
     /// The full model file contents: frontmatter (`timeseries:` + `refresh:
-    /// incremental` + `grain: partition` + `batched.unique_key` +
+    /// incremental` + `grain: partition` +
     /// `maintenance.scan_bounds.per_source.<dim>.allow_full_scan: true`,
     /// mirroring `daily_events_enriched.sql`'s own frontmatter) followed by
-    /// [`Self::model_body`].
+    /// [`Self::model_body`]. The retired `batched.unique_key` sub-block this
+    /// used to carry [`Self::unique_key`] under is gone — it never fed
+    /// row-identity derivation for a `Grain::Partition` output anyway
+    /// (`derive::ModelInputs::declared_unique_key` is empty for every
+    /// `Grain::Partition`), so dropping it changes no derived maintenance
+    /// plan.
     pub fn model_file(&self) -> String {
         let d = &self.fact.clock_column;
-        let unique_key = self.unique_key().join(", ");
         format!(
-            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{unique_key}]\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
+            "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nmaintenance:\n  scan_bounds:\n    per_source:\n      {dim_name}:\n        allow_full_scan: true\n---\n{body}\n",
             dim_name = self.dimension.name,
             body = self.model_body(),
         )

@@ -39,7 +39,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
     use smelt_cli::{
         argument_resolution::{compute_scope, resolve_selector_args},
         backend_factory::CliBackendFactory,
-        reporter::CliReporter,
+        reporter::{print_failure_summary, CliReporter},
         Config, ModelDiscovery, SourcesConfig,
     };
     use smelt_core::graph::DependencyGraph;
@@ -176,6 +176,11 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         ephemeral_seed_ctes,
         run_checks: true,
         checks: check_files,
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     };
 
     let run_id = generate_run_id();
@@ -198,7 +203,14 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         &reporter,
         CancellationToken::new(),
     )
-    .await?;
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            print_failure_summary(&project_dir, &args.target, &run_id);
+            return Err(e);
+        }
+    };
 
     report_check_results(&outcome.check_results)
 }
@@ -264,7 +276,9 @@ fn report_check_results(results: &[CheckOutcome]) -> Result<()> {
     );
 
     if fail_count > 0 {
-        std::process::exit(1);
+        return Err(
+            smelt_cli::CliError::DetectedFailure(format!("{fail_count} check(s) failed")).into(),
+        );
     }
 
     Ok(())
@@ -395,6 +409,11 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
             run_checks: false,
             checks: Vec::new(),
+            jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

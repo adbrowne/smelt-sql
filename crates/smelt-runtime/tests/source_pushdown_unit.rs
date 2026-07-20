@@ -11,7 +11,7 @@
 //! correctly and that the wiring (tested in the e2e test) is correct.
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
+use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_runtime::windowing::compute_incremental_windows;
 use smelt_runtime::{build_source_bound_map, inject_source_filters, SourceBound, TimeRange};
 use std::collections::HashMap;
@@ -167,10 +167,10 @@ fn skewed_batch_scan_sized_from_output_window() {
         week_start: None,
         assert_monotonic: false,
     };
-    let inc = BatchedConfig {
+    let inc = PartitionGrainConfig {
         unique_key: vec![],
         nondeterministic_columns: vec![],
-        safety_overrides: BatchedSafetyOverrides::default(),
+        safety_overrides: PartitionGrainSafetyOverrides::default(),
     };
     let range = TimeRange {
         start: "2026-04-10".to_string(),

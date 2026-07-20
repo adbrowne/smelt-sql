@@ -47,13 +47,13 @@ assert it where smelt can hold us to the location, in the model's
 frontmatter:
 
 ```yaml
-batched:
-  safety_overrides:
-    allow_window_functions: true
+safety_overrides:
+  allow_window_functions: true
 ```
 
-(`batched:` is the frontmatter section governing how a model behaves when
-maintained in time-bounded batches; safety overrides live under it.)
+(`safety_overrides:` is the top-level frontmatter key naming escape hatches
+for the partition-grain safety checks that would otherwise refuse a pattern
+like a window function over a redelivery-dedup window.)
 
 The override is a signed statement, sitting next to the window function
 it excuses, with a comment explaining why it's safe (see the stage-3

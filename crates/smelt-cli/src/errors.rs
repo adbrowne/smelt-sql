@@ -56,4 +56,32 @@ pub enum CliError {
 
     #[error("No seed files found in seed paths: {}", paths.join(", "))]
     NoSeedsFound { paths: Vec<String> },
+
+    /// A command ran to completion but detected a failure in the data or
+    /// models being processed (a failed build/test/check, a schema diff).
+    /// Distinct from a usage/config error: see [`exit_code_for`].
+    #[error("{0}")]
+    DetectedFailure(String),
+}
+
+/// Classify a top-level command error into the exit code contract in
+/// `docs/specs/cli.md` §"Exit codes": `2` for usage/config errors (the
+/// command could not run at all because its own inputs were invalid), `1`
+/// for everything else (the command ran and found a problem).
+///
+/// `anyhow::Error::downcast_ref` searches the entire source chain (not just
+/// the outermost wrapper), so this classifies correctly even though every
+/// call site attaches `.with_context(...)` on top of the originating error.
+pub fn exit_code_for(err: &anyhow::Error) -> u8 {
+    if err
+        .downcast_ref::<smelt_core::project::ProjectError>()
+        .is_some()
+        || err
+            .downcast_ref::<smelt_core::config::ConfigError>()
+            .is_some()
+    {
+        2
+    } else {
+        1
+    }
 }

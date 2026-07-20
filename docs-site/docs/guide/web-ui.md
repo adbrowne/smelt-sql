@@ -14,15 +14,26 @@ By default, the UI is served at `http://127.0.0.1:3000`.
 
 | Flag | Default | Description |
 |---|---|---|
-| `--host` | `127.0.0.1` | Host address to bind to. |
+| `--host` | `127.0.0.1` | Host address to bind to. Binding to a non-loopback address requires `--allow-remote`. |
 | `--port` | `3000` | Port to serve the UI on. |
+| `--allow-remote` | off | Required to bind `--host` to a non-loopback address; see [Network exposure](#network-exposure). |
 | `--project-dir` | `.` | Path to the smelt project root. |
 
-Example with custom host and port:
+Example with a custom port on loopback (no extra flag needed):
 
 ```bash
-smelt ui --host 0.0.0.0 --port 8080
+smelt ui --port 8080
 ```
+
+Example binding to all interfaces, which requires the explicit opt-in:
+
+```bash
+smelt ui --host 0.0.0.0 --port 8080 --allow-remote
+```
+
+## Network exposure
+
+`smelt ui` has no authentication and no HTTPS. It is designed to be used from the machine running it, over `http://127.0.0.1:<port>`. Anyone who can reach the bound address can read your project's models and trigger runs, so binding to a non-loopback host (`0.0.0.0`, a LAN IP, etc.) always requires `--allow-remote` — without it, `smelt ui` refuses to start rather than silently falling back to loopback — and logs a startup warning once bound. If you need remote access, prefer tunneling over SSH or a VPN to a loopback bind rather than exposing the server directly.
 
 ## Features
 

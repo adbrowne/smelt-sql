@@ -125,6 +125,24 @@ pub trait RunReporter: Send + Sync {
     /// A `smelt.check` executed during `smelt build`. `status` is one of
     /// `"pass"`, `"fail"`, `"warn"`, or `"target_not_built"`.
     fn check_result(&self, _run_id: &str, _check: &str, _status: &str, _row_count: usize) {}
+
+    /// A model's statement-group execution hit a transient backend error
+    /// (`BackendError::is_transient`) and is about to retry the whole group
+    /// after a backoff delay (`docs/plans/20260719-prod-w2-operability.md`
+    /// Phase 6). `attempt` is 1-based (this is the Nth retry); `retry_max`
+    /// is the configured bound; `error` is the transient failure's display
+    /// message. Called after the failed attempt and before the delayed
+    /// re-attempt. Default: no-op; `smelt run`/`smelt build` verbose output
+    /// and retry tests are the consumers.
+    fn model_retrying(
+        &self,
+        _run_id: &str,
+        _model: &str,
+        _attempt: u32,
+        _retry_max: u32,
+        _error: &str,
+    ) {
+    }
 }
 
 /// No-op reporter: discards all events. Used by tests and by run paths that

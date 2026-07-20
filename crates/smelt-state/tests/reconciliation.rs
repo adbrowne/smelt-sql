@@ -176,7 +176,7 @@ fn entries_keyed_region_by_group() {
 #[test]
 fn reconciliation_store_roundtrips_through_file_store() {
     let dir = TempDir::new().unwrap();
-    let store = FileStore::new(dir.path());
+    let store = FileStore::new(dir.path(), "dev");
 
     let mut reconciliation = store.load_reconciliation_store().unwrap();
     let region = Region::new("2026-01-01", "2026-01-10");
@@ -340,8 +340,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 ---
 SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
 "#,
@@ -485,7 +483,7 @@ SELECT d, SUM(val) AS total FROM smelt.sources.events GROUP BY d
         // (2) The runtime wrote a reconciliation-ledger entry per window at
         // the same call site it writes `IntervalStore` — real wiring, not a
         // hand-built ledger.
-        let file_store = FileStore::new(&project_dir);
+        let file_store = FileStore::new(&project_dir, "dev");
         let reconciliation = file_store
             .load_reconciliation_store()
             .expect("load reconciliation store written by execute_project");

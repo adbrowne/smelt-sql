@@ -667,7 +667,22 @@ pub fn emit_recurrence_bound_probe(
     partition_column: &str,
     delta_select: &str,
     slice_lower: &str,
+    dialect: MaintenanceDialect,
 ) -> MaintenanceStatement {
+    // The unsized string-cast type name and the "join sampled keys into one
+    // string" aggregate both vary by dialect: DuckDB accepts an unsized
+    // `VARCHAR` and has `STRING_AGG`; Spark SQL requires a length on
+    // `VARCHAR` (`DATATYPE_MISSING_SIZE`) and has no `STRING_AGG` — its
+    // unsized string type is `STRING`, and the equivalent join-aggregate is
+    // `CONCAT_WS(', ', COLLECT_LIST(...))`. Confirmed live against Spark
+    // (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5).
+    let (cast_type, sample_expr) = match dialect {
+        MaintenanceDialect::DuckDb => ("VARCHAR", "STRING_AGG(violation_key, ', ')".to_string()),
+        MaintenanceDialect::Spark => (
+            "STRING",
+            "CONCAT_WS(', ', COLLECT_LIST(violation_key))".to_string(),
+        ),
+    };
     let key_list = key.join(", ");
     let join_cond = key
         .iter()
@@ -676,7 +691,7 @@ pub fn emit_recurrence_bound_probe(
         .join(" AND ");
     let key_concat = key
         .iter()
-        .map(|k| format!("CAST(target.{k} AS VARCHAR)"))
+        .map(|k| format!("CAST(target.{k} AS {cast_type})"))
         .collect::<Vec<_>>()
         .join(" || '|' || ");
     let safe_lower = slice_lower.replace('\'', "''");
@@ -688,7 +703,7 @@ pub fn emit_recurrence_bound_probe(
             WHERE target.{partition_column} < '{safe_lower}'\
          ) \
          SELECT COUNT(*) AS violation_count, \
-                (SELECT STRING_AGG(violation_key, ', ') FROM \
+                (SELECT {sample_expr} FROM \
                  (SELECT violation_key FROM __recurrence_violations LIMIT 5) AS __sample) \
                  AS sample_keys \
          FROM __recurrence_violations"
@@ -747,11 +762,23 @@ pub fn emit_count_preservation_probe(
 pub fn emit_create_table_as(
     table: &str,
     select_sql: &str,
-    _dialect: MaintenanceDialect,
+    dialect: MaintenanceDialect,
 ) -> StatementGroup {
+    // Every step after this bootstrap CREATE for a merge-based cell (keyed
+    // fold, column-scoped merge) is a `MERGE INTO`, which Spark refuses
+    // against a plain (default-format, non-Delta) managed table — so the
+    // bootstrap itself must specify `USING DELTA` on Spark. DuckDB has no
+    // such format clause. `MaintenanceDialect::Spark` covers only the
+    // merge-capable Spark family (see `smelt_backend::maintenance_dialect`),
+    // so this is never reached for the cross-engine Parquet read path
+    // (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 4).
+    let using_clause = match dialect {
+        MaintenanceDialect::DuckDb => "",
+        MaintenanceDialect::Spark => " USING DELTA",
+    };
     StatementGroup {
         statements: vec![MaintenanceStatement::new(format!(
-            "CREATE TABLE {table} AS {select_sql}"
+            "CREATE TABLE {table}{using_clause} AS {select_sql}"
         ))],
         transactional: false,
     }

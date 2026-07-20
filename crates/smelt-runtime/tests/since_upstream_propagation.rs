@@ -416,6 +416,151 @@ fn composed_node_in_the_chain() {
         .expect("a delta on the composed node's driving source must propagate through it");
 }
 
+/// Build a throwaway `smelt_db::Database`/`Workspace` over `project_dir` and
+/// return the `SourceFile` handle for `models/<model_name>.sql`, so a test
+/// can call `smelt_db::maintenance_plan_report` — the SAME non-Salsa
+/// derivation `smelt explain` reads — exactly like production does. Mirrors
+/// `smelt-maintenance-testkit::verdict::build_db_and_target`'s Salsa setup
+/// (out of this phase's critical files, so inlined here rather than taken as
+/// a new dev-dependency).
+fn build_db_and_target(
+    project_dir: &Path,
+    model_name: &str,
+) -> (
+    smelt_db::Database,
+    smelt_db::Workspace,
+    smelt_db::SourceFile,
+) {
+    let discovery = ModelDiscovery::new(project_dir.to_path_buf(), vec!["models".to_string()]);
+    let sql_models = discovery.discover_models().expect("discover models");
+    let target_path = project_dir.join(format!("models/{model_name}.sql"));
+
+    let mut db = smelt_db::Database::default();
+    let project = db.set_project_input(project_dir.to_path_buf(), String::new());
+    let mut target: Option<smelt_db::SourceFile> = None;
+    let source_files: Vec<_> = sql_models
+        .iter()
+        .map(|m| {
+            let file =
+                db.set_source_file(m.path.clone(), m.content.clone(), project_dir.to_path_buf());
+            if m.path == target_path {
+                target = Some(file);
+            }
+            file
+        })
+        .collect();
+    db.set_workspace(source_files, vec![project]);
+    let workspace = db.workspace();
+    let target = target.unwrap_or_else(|| {
+        panic!(
+            "staged model {model_name:?} (expected at {}) not found among discovered models",
+            target_path.display()
+        )
+    });
+    (db, workspace, target)
+}
+
+/// Phase 6 (`docs/plans/20260719-prod-w8-composed-axes-followups.md`): the
+/// recursive composed-driving-source case — a `grain: key` + `timeseries:`
+/// model whose driving ref is *another maintained model's own* locality-
+/// admitted composed output, not a declared `sources.*` entry.
+/// `examples/timeseries` already carries this shape:
+/// `raw.transactions -> user_daily_spend [grain: key, route 1] ->
+/// user_spend_running_total [grain: key, route 1]` — `user_spend_running_total`
+/// reads `smelt.user_daily_spend` (itself a composed node) as its own
+/// driving source. Before this phase, `build_forward_graph`'s driving-source
+/// granularity candidate set only ever looked at declared `sources.*` refs
+/// (see the now-removed doc comment at the old call site), so
+/// `user_spend_running_total` could never resolve a `driving_source_granularity`
+/// and its own key-temporal-locality gate refused — it fell back to a bare
+/// `PartitionGrain::Keyed` node in the graph even though `smelt explain`
+/// (via `smelt_db::maintenance_plan_report`, which already threads a
+/// model's own composed-output candidates via `model_source_granularities`)
+/// admits it. This test asserts parity between the two: `smelt explain`'s
+/// verdict for `user_spend_running_total` is "locality admitted, Day
+/// granularity", and `build_forward_graph` must construct the
+/// `user_daily_spend -> user_spend_running_total` edge at that SAME declared
+/// granularity — never re-deriving the admission itself.
+#[test]
+fn recursive_composed_driving_source_reaches_the_same_verdict_as_smelt_explain() {
+    let project_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("../../examples/timeseries")
+        .canonicalize()
+        .expect("examples/timeseries exists");
+
+    // The `smelt explain` verdict: the real Salsa-backed derivation
+    // `maintenance_plan_report` calls, never re-derived by this test.
+    let (db, workspace, target) = build_db_and_target(&project_dir, "user_spend_running_total");
+    let report = smelt_db::maintenance_plan_report(&db, workspace, target).unwrap_or_else(|| {
+        panic!(
+            "user_spend_running_total must derive a maintenance plan (refresh: incremental, \
+             grain: key)"
+        )
+    });
+    let key_locality = report.plan.key_locality.as_ref().unwrap_or_else(|| {
+        panic!(
+            "smelt explain must admit key temporal locality for user_spend_running_total via \
+             route 1 (key-embedded) over its composed driving source user_daily_spend: {:?}",
+            report.plan
+        )
+    });
+    assert!(
+        matches!(
+            key_locality.slice,
+            smelt_logical::maintenance::locality::LocalitySlice::Window { .. }
+        ),
+        "user_spend_running_total's own (user_id, spend_date) GROUP BY admits route 1 \
+         (key-embedded, exact projection — LocalitySlice::Window), not a recurrence-bounded \
+         route: {:?}",
+        key_locality.slice
+    );
+
+    // The graph-layer verdict: `build_forward_graph` must construct the
+    // SAME edge, at the SAME (Day) granularity — not refuse the node as a
+    // bare `PartitionGrain::Keyed` hop.
+    let discovery = ModelDiscovery::new(project_dir.clone(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(&project_dir, &["models".to_string()]);
+    let edges = build_forward_graph(&models, &source_infos).expect(
+        "the graph must build without MaintenanceGraphUnsupportedNode: user_spend_running_total \
+         is a locality-admitted composed node driven by another composed node's output, not a \
+         bare keyed refusal",
+    );
+
+    let inbound = edges
+        .iter()
+        .find(|e| e.upstream == "user_daily_spend" && e.downstream == "user_spend_running_total")
+        .unwrap_or_else(|| {
+            panic!(
+                "expected an edge from the composed driving source user_daily_spend into \
+                 user_spend_running_total: {edges:?}"
+            )
+        });
+    assert_eq!(
+        inbound.downstream_grain,
+        smelt_logical::maintenance::propagate::PartitionGrain::Day,
+        "user_spend_running_total must classify by its OWN declared Day granularity — the same \
+         granularity smelt explain's admitted verdict carries — never PartitionGrain::Keyed: \
+         {inbound:?}"
+    );
+
+    // The whole graph propagates a delta through both composed hops without
+    // refusing.
+    let order: Vec<String> = models
+        .iter()
+        .map(|m| m.canonical_path())
+        .filter(|a| a == "user_daily_spend" || a == "user_spend_running_total")
+        .collect();
+    let deltas = vec![SourceDelta {
+        source: "raw.transactions".to_string(),
+        landed: smelt_logical::maintenance::propagate::DayInterval::new(20, 21),
+    }];
+    plan_since_upstream(&models, &source_infos, &order, &deltas).expect(
+        "a delta on raw.transactions must propagate through both composed hops \
+         (user_daily_spend then user_spend_running_total)",
+    );
+}
+
 /// Phase B2: a locality-admitted composed node whose own SQL reads a
 /// **nonzero** lookback window against its driving source (route 1
 /// key-embedded, mirroring `examples/timeseries`'s own `user_spend_rollup.sql`
@@ -1047,4 +1192,75 @@ fn decode_observed_delta_row(batches: &[arrow::array::RecordBatch]) -> ObservedD
         };
     }
     panic!("expected exactly one row in the observed-delta batches");
+}
+
+/// Regression for the reviewer finding on Phase 6
+/// (`docs/plans/20260719-prod-w8-composed-axes-followups.md`): `derive_clamp_
+/// and_locality`'s fixed-point loop over composed-source candidates
+/// documents an "N maintained models converges within N passes" argument
+/// that assumes an acyclic model-ref graph. `build_forward_graph` only
+/// refuses a literal self-reference (a model naming itself) before this
+/// call, not a longer cycle among maintained `grain: key` composed models —
+/// and this call site runs before `DependencyGraph::execution_order()` (the
+/// real cycle detector). Two `grain: key` composed models whose driving refs
+/// point at each other, each with its own directly-clocked declared source
+/// at a DIFFERENT granularity than the other's admitted output, oscillate
+/// forever: each pass, admitting `a` (Day) makes `b`'s candidate set
+/// ambiguous (`raw_b`: Month + `a`: Day) so `b` stops admitting, which drops
+/// `a` from `b`'s candidates and lets `b` re-admit (Month) next pass, which
+/// in turn makes `a`'s own candidate set ambiguous — a period-2 oscillation
+/// the consecutive-state equality check can never observe as convergence.
+/// This must return an `Err` (the iteration cap) rather than hang.
+#[test]
+fn cyclic_composed_model_refs_return_an_error_instead_of_hanging() {
+    let tmp = tempfile::TempDir::new().unwrap();
+    let root = tmp.path();
+    smelt_yml(root);
+    write(
+        root,
+        "models/sources/raw_a.yml",
+        "description: raw_a\ncolumns:\n- name: k\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         - name: v\n  type: INTEGER\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n",
+    );
+    write(
+        root,
+        "models/sources/raw_b.yml",
+        "description: raw_b\ncolumns:\n- name: k\n  type: INTEGER\n- name: d\n  type: DATE\n\
+         - name: v\n  type: INTEGER\n\
+         mutation_profile:\n  kind: append_only\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: month\n",
+    );
+    write(
+        root,
+        "models/a.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: day\n---\n\
+         SELECT k, d, SUM(v) AS v\nFROM smelt.sources.raw_a\n\
+         WHERE k IN (SELECT k FROM smelt.b)\nGROUP BY 1, 2\n",
+    );
+    write(
+        root,
+        "models/b.sql",
+        "---\nmaterialization: table\nrefresh: incremental\ngrain: key\n\
+         timeseries:\n  partition_column: d\n  event_time_column: d\n  granularity: month\n---\n\
+         SELECT k, d, SUM(v) AS v\nFROM smelt.sources.raw_b\n\
+         WHERE k IN (SELECT k FROM smelt.a)\nGROUP BY 1, 2\n",
+    );
+
+    let discovery = ModelDiscovery::new(root.to_path_buf(), vec!["models".to_string()]);
+    let models = discovery.discover_models().expect("discover models");
+    let source_infos = discover_source_infos(root, &["models".to_string()]);
+
+    let result = build_forward_graph(&models, &source_infos);
+    let err = result.expect_err(
+        "a cyclic model-ref graph between two mutually-referencing grain: key composed models \
+         must fail loud (the iteration cap), not silently succeed or hang",
+    );
+    let message = err.to_string();
+    assert!(
+        message.contains("did not converge") || message.contains("cycle"),
+        "expected the iteration-cap error to name non-convergence/cycle, got: {message}"
+    );
 }

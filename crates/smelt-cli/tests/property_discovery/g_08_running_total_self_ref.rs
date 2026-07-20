@@ -331,8 +331,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 ---
 SELECT d, balance FROM (
   SELECT
@@ -421,8 +419,6 @@ timeseries:
   granularity: day
 refresh: incremental
 grain: partition
-batched:
-  unique_key: [d]
 ---
 SELECT d, balance FROM (
   SELECT

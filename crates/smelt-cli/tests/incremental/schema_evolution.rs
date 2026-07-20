@@ -5,6 +5,23 @@ use super::*;
 use smelt_state::file_store::FileStore;
 use smelt_state::schema_tracking::{DeployedColumn, DeployedSchema};
 
+/// A retry policy that never retries — these tests drive
+/// `check_and_migrate` directly against a real DuckDB backend rather than
+/// through `execute_project`, so there is no `ExecuteRequest`/run reporter to
+/// derive a policy from (`docs/plans/20260719-prod-w2-operability.md` Phase
+/// 6). `retry_max: 0` keeps behaviour identical to before retry coverage was
+/// extended to this call site.
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "schema-evolution-test",
+        model_name: "schema-evolution-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 #[tokio::test]
 async fn test_schema_evolution_add_column_then_continue_incremental() -> Result<()> {
     let (_dir, backend) = setup_backend().await?;
@@ -71,7 +88,7 @@ async fn test_schema_evolution_add_column_then_continue_incremental() -> Result<
 #[tokio::test]
 async fn test_schema_diff_detection() -> Result<()> {
     let (dir, _backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Save initial schema
     let v1 = DeployedSchema {
@@ -129,7 +146,7 @@ async fn test_schema_diff_detection() -> Result<()> {
 #[tokio::test]
 async fn test_schema_first_deployment_no_diff() -> Result<()> {
     let (dir, _backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // No prior schema → first deployment
     let loaded = file_store.load_schema("brand_new_model")?;
@@ -216,7 +233,7 @@ fn extract_count(batch: &arrow::array::RecordBatch) -> i64 {
 #[tokio::test]
 async fn test_e2e_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Create table with a struct column
     backend
@@ -275,6 +292,7 @@ async fn test_e2e_struct_field_addition() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None, // DuckDB default
+        &no_retry_policy(),
     )
     .await?;
 
@@ -312,7 +330,7 @@ async fn test_e2e_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_array_element_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Create table with integer array
     backend
@@ -356,6 +374,7 @@ async fn test_e2e_array_element_widening() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -378,7 +397,7 @@ async fn test_e2e_array_element_widening() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Create a table (using DuckDB as execution backend, but testing with Spark DDL backend)
     backend
@@ -429,6 +448,7 @@ async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         Some(&ddl_backend),
+        &no_retry_policy(),
     )
     .await?;
 
@@ -450,7 +470,7 @@ async fn test_e2e_spark_parquet_blocked_without_flag() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -497,6 +517,7 @@ async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         Some(&ddl_backend),
+        &no_retry_policy(),
     )
     .await?;
 
@@ -515,7 +536,7 @@ async fn test_e2e_spark_parquet_allowed_with_flag() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_complex_type_schema_persistence() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Create table with complex types
     backend
@@ -578,7 +599,7 @@ async fn test_e2e_complex_type_schema_persistence() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_nested_type_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Create table with struct column containing INTEGER field
     backend
@@ -637,6 +658,7 @@ async fn test_e2e_nested_type_widening() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None, // DuckDB default
+        &no_retry_policy(),
     )
     .await?;
 
@@ -673,7 +695,7 @@ async fn test_e2e_nested_type_widening() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_incompatible_type_triggers_full_refresh() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -715,6 +737,7 @@ async fn test_e2e_incompatible_type_triggers_full_refresh() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -736,7 +759,7 @@ async fn test_e2e_incompatible_type_triggers_full_refresh() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -778,6 +801,7 @@ async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -801,7 +825,7 @@ async fn test_e2e_map_key_change_triggers_full_refresh() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_struct_field_removal() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -859,6 +883,7 @@ async fn test_e2e_struct_field_removal() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -897,7 +922,7 @@ async fn test_e2e_struct_field_removal() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_value_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -939,6 +964,7 @@ async fn test_e2e_map_value_widening() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -962,7 +988,7 @@ async fn test_e2e_map_value_widening() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1004,6 +1030,7 @@ async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1040,7 +1067,7 @@ async fn test_e2e_array_of_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_nested_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1082,6 +1109,7 @@ async fn test_e2e_nested_struct_field_addition() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1115,7 +1143,7 @@ async fn test_e2e_nested_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1183,6 +1211,7 @@ async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1211,7 +1240,7 @@ async fn test_e2e_multiple_changes_one_migration() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     // Create table with v1 schema and insert multiple rows
     backend
@@ -1271,6 +1300,7 @@ async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1361,7 +1391,7 @@ async fn test_e2e_struct_pack_data_correctness() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1403,6 +1433,7 @@ async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1441,7 +1472,7 @@ async fn test_e2e_deeply_nested_struct_widen_and_add() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1483,6 +1514,7 @@ async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1516,7 +1548,7 @@ async fn test_e2e_struct_with_array_field_widen() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1558,6 +1590,7 @@ async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 
@@ -1594,7 +1627,7 @@ async fn test_e2e_map_value_struct_field_addition() -> Result<()> {
 #[tokio::test]
 async fn test_e2e_map_value_type_widening() -> Result<()> {
     let (dir, backend) = setup_backend().await?;
-    let file_store = FileStore::new(dir.path());
+    let file_store = FileStore::new(dir.path(), "dev");
 
     backend
         .execute_sql(
@@ -1635,6 +1668,7 @@ async fn test_e2e_map_value_type_widening() -> Result<()> {
         &std::collections::HashMap::new(),
         &std::collections::HashMap::new(),
         None,
+        &no_retry_policy(),
     )
     .await?;
 

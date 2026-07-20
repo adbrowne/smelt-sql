@@ -3,7 +3,7 @@ use chrono::Utc;
 use smelt_cli::{
     argument_resolution::{compute_scope, resolve_selector_args},
     backend_factory::CliBackendFactory,
-    reporter::{format_strategy, CliReporter},
+    reporter::{format_strategy, print_failure_summary, CliReporter},
     Config, ModelDiscovery, SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
@@ -167,7 +167,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ));
     }
     let (auto_start, auto_end) = if args.auto && effective_start.is_none() {
-        compute_auto_time_range(&project_dir, &graph)
+        compute_auto_time_range(&project_dir, &args.target, &graph)
             .map_or((None, None), |(s, e)| (Some(s), Some(e)))
     } else {
         (None, None)
@@ -212,6 +212,11 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         ephemeral_seed_ctes,
         run_checks: false,
         checks: vec![],
+        jobs: args.jobs,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: args.resume,
+        technique_overrides: vec![],
     };
 
     let run_id = generate_run_id();
@@ -234,7 +239,14 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         &reporter,
         CancellationToken::new(),
     )
-    .await?;
+    .await;
+    let outcome = match outcome {
+        Ok(outcome) => outcome,
+        Err(e) => {
+            print_failure_summary(&project_dir, &args.target, &run_id);
+            return Err(e);
+        }
+    };
 
     // --show-plan works in both dry-run and live-run modes.
     if args.show_plan {
@@ -400,6 +412,11 @@ async fn run_since_upstream(
             ephemeral_seed_ctes: ephemeral_seed_ctes.clone(),
             run_checks: false,
             checks: Vec::new(),
+            jobs: args.jobs,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

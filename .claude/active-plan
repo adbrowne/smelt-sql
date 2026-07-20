@@ -1,4 +1,4 @@
-# Active multi-session plan pointer (branch worktree-roadmap_todo)
+# Active multi-session plan pointer (branch worktree-production)
 #
 # Read by the autonomy loop's iteration prompt (.claude/scripts/autonomy-loop.sh)
 # and by a fresh-context Claude that typed `continue` after `/clear`.
@@ -9,31 +9,46 @@
 # under unified mode (the registry table wins) — kept for fresh-context flows.
 #
 # ─────────────────────────────────────────────────────────────────────────────
-# THIS BRANCH runs the QUALITY-GRIND programme ONLY (adopted 2026-07-18).
-# It deliberately diverges from main's active-plan (which drives the
-# maintenance-conformance programme in a DIFFERENT worktree). Two loops run
-# concurrently; this one must never pick up the other's master. On merge
-# conflicts with origin/main over this file, keep THIS branch's version
-# (the quality-grind pointer).
+# THIS BRANCH runs the PRODUCTION-READINESS (v0.5) programme (adopted
+# 2026-07-19). It may diverge from main's active-plan (other worktrees drive
+# other programmes). On merge conflicts with origin/main over this file, keep
+# THIS branch's version (the production-readiness pointer).
 #
-# ACTIVE (2026-07-18): the quality-grind programme — small root-caused fixes
-# (parser ledger categories, TABLESAMPLE ordering, VALUES arity, UTF-8
-# positions, registry gaps, doc gaps) then generator coverage + planner/logical
-# consolidation + bench-regression profiling. Registry-driven, no probe rows.
-#   Master:   docs/plans/20260718-quality-grind.md
-#   Sub-plans: docs/plans/20260718-quality-grind-t1.md (12 phases)
-#              docs/plans/20260718-quality-grind-t2.md (9 phases)
-#              docs/plans/20260718-quality-grind-t3.md (3 phases — ratified decisions)
-# Tier 3 decision items live in the master's "## Tier 3 — decision queue" —
-# the loop NEVER picks those up.
+# ACTIVE (2026-07-19): the production-readiness (v0.5) programme. Design:
+# docs/research/20260719-production-release-review.md. Master (registry-driven,
+# no probe rows): docs/plans/20260719-production-readiness.md. Registered
+# sub-plans run in registry order:
+#   W1 fail-loud closure + exit codes   (20260719-prod-w1-fail-loud.md)
+#   W2 operability: env interpolation, state locking/versioning, per-target
+#      state, DAG-parallel execution, retry, --resume, run reports
+#                                       (20260719-prod-w2-operability.md)
+#   W4 Spark first-class push           (20260719-prod-w4-spark.md)
+#   W3 adoption: smelt init, declarative tests, list/clean, failure UX
+#                                       (20260719-prod-w3-adoption.md)
+#   W5 release engineering              (20260719-prod-w5-release-eng.md)
+#   W6 production docs                  (20260719-prod-w6-docs.md)
+#   W7 smelt bakeoff                    (20260719-prod-w7-bakeoff.md — un-defers
+#      ROADMAP §10, decisions B1–B4 in the sub-plan; runs after W2)
+#   W8 composed-axes follow-ups         (20260719-prod-w8-composed-axes-followups.md —
+#      deferred-item sweep from the 20260715 plan)
+#   W9 Spark conformance twin           (20260720-prod-w9-spark-conformance-twin.md —
+#      dual-execution generative harness; D1 promotion criterion; phases 3–6 need
+#      live Spark, block without it)
+# Decisions D1–D5 (Spark evidence-based label, merge #163/#164 first,
+# smelt-native declarative tests, minimal per-target state, t2 P9 resolved)
+# are recorded in the master's Decisions table.
+# PRE-FLIGHT (done 2026-07-19): PRs #163 + #164 merged; worktree-production
+# rebased on post-merge main before launch.
 #
 # PREREQUISITE: DUCKDB_LIB_DIR + LD_LIBRARY_PATH exported into the loop env
-# (unset → DuckDB legs skip green, which is a silent hole — the parser
-# differential and property-oracle gates are DuckDB-backed).
+# (unset → DuckDB legs skip green, a silent hole). W4's Spark phases need a
+# live Delta-enabled Spark Connect server (bash scripts/spark-up.sh +
+# source scripts/spark-env.sh); they must emit <<PHASE_BLOCKED>> when
+# SPARK_CONNECT_URL is unset, never skip green.
 # ─────────────────────────────────────────────────────────────────────────────
-master_plan: docs/plans/20260718-quality-grind.md
-active_subplan: docs/plans/20260718-quality-grind-t1.md
+master_plan: docs/plans/20260719-production-readiness.md
+active_subplan: docs/plans/20260719-prod-w1-fail-loud.md
 
 # Back-compat aliases (older fresh-context flows read these names).
-in_repo_plan: docs/plans/20260718-quality-grind.md
-meta_plan: docs/plans/20260718-quality-grind.md
+in_repo_plan: docs/plans/20260719-production-readiness.md
+meta_plan: docs/plans/20260719-production-readiness.md

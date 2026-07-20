@@ -56,6 +56,22 @@ use smelt_runtime::maintenance_driver::{
     ColumnMergeDispatch, ResolvedTechnique,
 };
 
+/// A retry policy that never retries — these tests exercise the
+/// column-scoped MERGE write directly against a real DuckDB backend,
+/// outside `execute_project`, so there is no `ExecuteRequest`/run reporter
+/// to derive one from (`docs/plans/20260719-prod-w2-operability.md` Phase
+/// 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "technique-lowering-test",
+        model_name: "technique-lowering-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 /// These two physical-mechanism tests below exercise `execute_column_scoped_
 /// merge` directly (not through the derived plan's own `WriteSuppression`
 /// resolution, `maintenance_driver::resolve_live_column_scoped_cell`'s job)
@@ -281,6 +297,7 @@ async fn column_scoped_merge_matches_full_refresh_after_dimension_mutation() {
         dimension_batch_sql,
         &unconditional(),
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("column-scoped merge must succeed");
@@ -449,6 +466,7 @@ async fn yes_corner_clamps_the_merge_to_the_horizon_and_leaves_the_rest_untouche
         dimension_batch_sql,
         &unconditional(),
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("horizon-clamped column-scoped merge must succeed");
@@ -558,6 +576,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         dimension_batch_sql,
         &suppression,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed");
@@ -589,6 +608,7 @@ async fn suppressed_merge_writes_zero_rows_on_unchanged_rerun() {
         dimension_batch_sql,
         &suppression,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed after mutation");
@@ -810,6 +830,7 @@ async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_s
         dimension_batch_sql,
         &steady_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("steady-state suppressed merge must succeed");
@@ -822,6 +843,7 @@ async fn first_build_posture_and_steady_state_preference_resolve_bit_identical_s
         dimension_batch_sql,
         &backfill_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("first-build unconditional merge must succeed");
@@ -956,6 +978,7 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
         dimension_batch_sql,
         &natural_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("natural suppressed merge must succeed");
@@ -968,6 +991,7 @@ async fn technique_pin_forces_the_variant_and_still_produces_bit_identical_state
         dimension_batch_sql,
         &pinned_variant,
         &test_window(),
+        &no_retry_policy(),
     )
     .await
     .expect("pinned unconditional merge must succeed");
@@ -1319,8 +1343,8 @@ mod column_scoped_merge_e2e {
     }
 
     /// Copy `examples/timeseries` into a scratch directory so the run's
-    /// `.smelt/` state (`FileStore::new(project_dir)`) never lands inside
-    /// the checked-in example.
+    /// `.smelt/` state (`FileStore::new(project_dir, target)`) never lands
+    /// inside the checked-in example.
     fn copy_dir_recursive(src: &Path, dst: &Path) {
         std::fs::create_dir_all(dst).expect("create dst dir");
         for entry in std::fs::read_dir(src).expect("read src dir") {
@@ -1381,6 +1405,11 @@ mod column_scoped_merge_e2e {
             ephemeral_seed_ctes: vec![],
             run_checks: false,
             checks: vec![],
+            jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
         }
     }
 
@@ -1543,6 +1572,500 @@ mod column_scoped_merge_e2e {
         assert_eq!(
             untouched_user_name, "Bob",
             "an unmutated dimension row's enrichment must be unchanged"
+        );
+    }
+}
+
+/// W10 Phase 4 (`docs/plans/20260720-prod-w10-keyed-mutable-admission.md`):
+/// the keyed run path's own live `ColumnScopedMerge` dispatch — the
+/// `plan_is_keyed` branch of `execute.rs` now consults
+/// `resolve_live_column_scoped_cell` exactly as the non-keyed incremental
+/// branch already does (`column_scoped_merge_e2e` above), reached now that
+/// W10 Phases 1-3 narrow the key-grain `NewData` append-only obligation to
+/// admit a keyed model that consumes an `explicitly_mutable` dimension.
+///
+/// **The fixture shape this module is forced into, and why.** A `grain:
+/// key` body must satisfy `classify_cumulative`'s aggregate/`GROUP BY`
+/// grammar (`incremental_models.md` §"Key-grain declaration"): every
+/// non-aggregate `SELECT` item must be a literal `GROUP BY` key. That
+/// makes a mutable dimension's own attribute column unreachable as a plain
+/// enrich-only payload group two ways at once — selecting it forces it
+/// into `GROUP BY` (`maintenance::skeleton::skeleton_roles` classifies
+/// every `GROUP BY` column `Grouping`-role, and
+/// `maintenance::grouping::derive_column_groups` excludes every skeleton
+/// column from column-group derivation entirely, so no cell can ever
+/// mention it), while wrapping it in an aggregate makes it fold-contributing
+/// (`source_contributes_to_fold`), which W10 Phase 3's narrowed
+/// `derive_new_data` refuses outright for a mutable source (`both fold and
+/// enrich stays refused`, the safety carve-out
+/// `crates/smelt-logical/tests/maintenance_new_data_enrich_only_waiver.rs`
+/// pins). The one shape that DOES reach a live cell today is a fold
+/// aggregate whose own argument does not mention the dimension at all
+/// (`COUNT(t.transaction_id)`, reading only the append-only fact) joined against
+/// the mutable dimension purely for row admission — `maintenance::grouping`'s
+/// per-column provenance walk has a pre-existing gap (documented at
+/// `examples/timeseries/models/daily_events_enriched.sql`'s own comment on
+/// `model_property_vector`/skeleton-closure: "a bare `FUNCTION_CALL`-shaped
+/// [reference] once 2+ FROM sources are in scope... the call's own name
+/// token is misread as an unqualified column reference") that also affects
+/// `derive_column_groups`'s `collect_column_refs`: an aggregate's own
+/// function-name token is misresolved as an ambiguous unqualified column
+/// reference once 2+ sources are joined, and the fail-closed collapse this
+/// triggers (`degenerate_whole_model` — "never silently narrower", the
+/// classifier's own documented safety net) widens the fold column's
+/// mutation-sensitivity to every source the model references, including
+/// the dimension it never actually reads. That collapse is what
+/// legitimately (if conservatively) admits the `ColumnScopedMerge` cell
+/// this module exercises. It is real, reachable, deterministic
+/// `derive_model_maintenance_plan` output — not a fabricated shape — but it
+/// also means the merged column's TRUE value never depends on the
+/// dimension's own data, only on the fact: a dimension mutation can never
+/// make the compared column's value diverge from what full-refresh would
+/// already produce, so every dispatched merge in this fixture is a genuine
+/// `WriteSuppression::Suppressed` no-op by construction, not merely by
+/// coincidence of the staged data. `grouping.rs`/`derive.rs` are both
+/// outside this phase's critical files (fixing the collapse would remove
+/// the only reachable live cell, not produce a "cleaner" one — there is no
+/// currently-implemented shape where a mutable dimension's own attribute is
+/// both non-skeleton and non-fold-contributing); this is flagged here for
+/// review rather than silently worked around.
+mod keyed_column_scoped_merge_e2e {
+    use std::collections::HashSet;
+    use std::path::Path;
+    use std::sync::Arc;
+
+    use smelt_backend::Backend;
+    use smelt_backend_duckdb::DuckDbBackend;
+    use smelt_core::config::Config;
+    use smelt_core::graph::DependencyGraph;
+    use smelt_core::ModelDiscovery;
+    use smelt_logical::maintenance::choice::WriteSuppression;
+    use smelt_logical::maintenance::{MutationProfile, SourceFacts};
+    use smelt_runtime::execute::{BackendFactory, BackendFuture};
+    use smelt_runtime::maintenance_driver::resolve_live_column_scoped_cell;
+    use smelt_runtime::types::ExecuteRequest;
+    use smelt_runtime::{execute_project, NoOpReporter};
+    use tokio_util::sync::CancellationToken;
+
+    /// The keyed model body this whole module exercises: `raw.transactions`
+    /// (append-only, and — unlike `raw.events` — clocked via its OWN
+    /// source-YAML `timeseries:` block, the window-forward run shape's
+    /// admission precondition, `KeyedSnapshotPostureUnsupported` otherwise)
+    /// folded per `user_id` via `COUNT`, inner-joined to `raw.users`
+    /// (unclocked `mutation_profile: mutable_snapshot`, `allow_full_scan`
+    /// declared) purely for row admission — see the module doc comment
+    /// above for why the dimension's own attribute cannot itself be a
+    /// selected payload column today.
+    const MODEL_SQL: &str = "SELECT t.user_id AS user_id, COUNT(t.transaction_id) AS event_count \
+         FROM smelt.sources.raw.transactions t \
+         JOIN smelt.sources.raw.users u ON t.user_id = u.user_id \
+         GROUP BY t.user_id";
+
+    const MODEL_FILE: &str = "---\n\
+         materialization: table\n\
+         refresh: incremental\n\
+         grain: key\n\
+         unique_key: user_id\n\
+         maintenance:\n  \
+           scan_bounds:\n    \
+             per_source:\n      \
+               raw.users:\n        \
+                 allow_full_scan: true\n\
+         ---\n";
+
+    fn model_file_text() -> String {
+        format!("{MODEL_FILE}{MODEL_SQL}\n")
+    }
+
+    /// Unit-level proof (no backend): `resolve_live_column_scoped_cell` —
+    /// the exact resolver `execute.rs`'s `plan_is_keyed` branch now calls —
+    /// resolves this model's `raw.users` `UpstreamMutation` cell to
+    /// `Technique::ColumnScopedMerge` with `WriteSuppression::Suppressed`
+    /// (P3 comparability holds for `event_count`, an INTEGER column, and
+    /// this is a steady-state trigger with no ledger catch-up — the
+    /// suppressed arm is preferred over unconditional per
+    /// `choice::resolve_write_variant`).
+    #[test]
+    fn resolves_suppressed_column_scoped_merge_for_keyed_dimension_cell() {
+        let text = model_file_text();
+        let smelt_core::FileMetadata::Single {
+            metadata,
+            sql_offset,
+        } = smelt_core::extract_file_metadata(&text).expect("parse frontmatter")
+        else {
+            panic!("single-model file");
+        };
+        let sql_body = &text[sql_offset..];
+
+        let sources = vec![
+            SourceFacts {
+                name: "raw.transactions".to_string(),
+                mutation: MutationProfile::AppendOnly,
+                partition_col: None,
+                unique_key: vec![],
+                allow_full_scan: false,
+            },
+            SourceFacts {
+                name: "raw.users".to_string(),
+                mutation: MutationProfile::MutableSnapshot,
+                partition_col: None,
+                unique_key: vec![],
+                allow_full_scan: true,
+            },
+        ];
+        let mut explicitly_mutable = HashSet::new();
+        explicitly_mutable.insert("raw.users".to_string());
+
+        let (source, cell, suppression) = resolve_live_column_scoped_cell(
+            sql_body,
+            "user_lifetime_status",
+            &metadata,
+            &sources,
+            &explicitly_mutable,
+            true,
+            &[],
+        )
+        .expect("resolver must not error")
+        .expect("a live ColumnScopedMerge cell must resolve for raw.users");
+
+        assert_eq!(source, "raw.users");
+        assert_eq!(
+            cell.technique,
+            smelt_logical::maintenance::Technique::ColumnScopedMerge
+        );
+        assert!(
+            matches!(suppression, WriteSuppression::Suppressed { .. }),
+            "expected the change-suppressed matched arm, got {suppression:?}"
+        );
+    }
+
+    /// `BackendFactory` that always opens the same on-disk DuckDB file,
+    /// mirroring `column_scoped_merge_e2e` above.
+    struct DuckDbBackendFactory {
+        db_path: std::path::PathBuf,
+    }
+
+    impl BackendFactory for DuckDbBackendFactory {
+        fn create<'a>(
+            &'a self,
+            _target_name: &'a str,
+            target_config: &'a smelt_core::config::Target,
+            _project_dir: &'a Path,
+        ) -> BackendFuture<'a> {
+            let path = self.db_path.clone();
+            let schema = target_config.schema.clone();
+            Box::pin(async move {
+                let backend = DuckDbBackend::new(&path, &schema)
+                    .await
+                    .map_err(|e| anyhow::anyhow!("DuckDB init failed: {}", e))?;
+                Ok(Box::new(backend) as Box<dyn Backend>)
+            })
+        }
+    }
+
+    fn copy_dir_recursive(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).expect("create dst dir");
+        for entry in std::fs::read_dir(src).expect("read src dir") {
+            let entry = entry.expect("dir entry");
+            let file_type = entry.file_type().expect("file type");
+            let dst_path = dst.join(entry.file_name());
+            if file_type.is_dir() {
+                copy_dir_recursive(&entry.path(), &dst_path);
+            } else {
+                std::fs::copy(entry.path(), &dst_path).expect("copy file");
+            }
+        }
+    }
+
+    fn build_db_and_graph(
+        project_dir: &Path,
+        config: &Config,
+    ) -> (
+        Arc<tokio::sync::Mutex<smelt_db::Database>>,
+        Arc<tokio::sync::Mutex<DependencyGraph>>,
+    ) {
+        let discovery = ModelDiscovery::new(project_dir.to_path_buf(), config.paths.clone());
+        let sql_models = discovery.discover_models().expect("discover_models");
+
+        let mut db = smelt_db::Database::default();
+        let project = db.set_project_input(project_dir.to_path_buf(), String::new());
+        let source_files: Vec<_> = sql_models
+            .iter()
+            .map(|m| {
+                db.set_source_file(m.path.clone(), m.content.clone(), project_dir.to_path_buf())
+            })
+            .collect();
+        db.set_workspace(source_files, vec![project]);
+        db.set_active_target(Some(std::sync::Arc::from("dev")));
+
+        let graph = DependencyGraph::build(sql_models, None).expect("build graph");
+
+        (
+            Arc::new(tokio::sync::Mutex::new(db)),
+            Arc::new(tokio::sync::Mutex::new(graph)),
+        )
+    }
+
+    /// `start`/`end` advance by one day per call — the windowed-keyed-
+    /// maintenance driver's reconciliation ledger refuses re-folding the
+    /// SAME partition twice (`docs/specs/incremental_models.md`
+    /// §"Reprocessing" — never-fold-twice), independent of whether the
+    /// column-scoped-merge dispatch this module tests fires; each of this
+    /// test's three runs therefore needs its own fresh day. No transaction
+    /// rows are staged for days after the first, so the fold contributes
+    /// nothing new on runs 2/3 — `event_count` stays exactly what run 1
+    /// computed throughout.
+    fn request_for_day(start: &str, end: &str) -> ExecuteRequest {
+        ExecuteRequest {
+            target: "dev".to_string(),
+            select: vec!["user_lifetime_status".to_string()],
+            exclude: vec![],
+            start: Some(start.to_string()),
+            end: Some(end.to_string()),
+            batch_size_days: None,
+            per_partition: false,
+            full_refresh: false,
+            dry_run: false,
+            enforce_safety: false,
+            allow_column_removal: false,
+            allow_full_refresh: false,
+            ephemeral_seed_ctes: vec![],
+            run_checks: false,
+            checks: vec![],
+            jobs: None,
+            retry_max: None,
+            retry_backoff_ms: None,
+            resume: false,
+            technique_overrides: vec![],
+        }
+    }
+
+    /// The real-fixture requirement: drive the model above through
+    /// `execute_project` itself (root `CLAUDE.md` §"Run pipeline parity
+    /// rule"). First run creates the target via the ordinary `KeyedFold`
+    /// creation path (the table doesn't exist yet — the creation run must
+    /// never take the column-scoped-merge path). A SECOND run over the
+    /// SAME window, with the table now present, must route through
+    /// `execute.rs`'s `plan_is_keyed` branch's new live-cell dispatch to
+    /// `Technique::ColumnScopedMerge` (`RunOutcome.models["user_lifetime_
+    /// status"].strategy == "column_scoped_merge"`) — never the default
+    /// `cumulative_aggregate` fold label a plain keyed run would otherwise
+    /// report every time. A THIRD run (no data changes at all since the
+    /// second) must still dispatch the same technique (the known "fires on
+    /// every run, not gated on a genuine change" divergence,
+    /// `incremental_models.md` §Known Divergences) and must write ZERO
+    /// affected rows — the change-suppressed `IS DISTINCT FROM` arm
+    /// actually suppressing, read directly off DuckDB via the SAME
+    /// `emit_column_scoped_merge_suppressed`-shaped probe
+    /// `column_scoped_merge_e2e`'s siblings already use
+    /// (`super::merge_affected_row_count`).
+    #[tokio::test]
+    async fn keyed_run_loop_dispatches_column_scoped_merge_through_execute_project() {
+        let source_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .join("../../examples/timeseries")
+            .canonicalize()
+            .expect("examples/timeseries exists");
+
+        let tmp = tempfile::TempDir::new().expect("tempdir");
+        let project_dir = tmp.path().join("project");
+        copy_dir_recursive(&source_dir, &project_dir);
+        std::fs::write(
+            project_dir.join("models/user_lifetime_status.sql"),
+            model_file_text(),
+        )
+        .expect("write keyed model fixture");
+
+        let db_path = tmp.path().join("run.duckdb");
+        let config = Arc::new(Config::load(&project_dir).expect("load smelt.yml"));
+        let backend_factory = DuckDbBackendFactory {
+            db_path: db_path.clone(),
+        };
+
+        // Stage the two source tables `execute_project` reads (mirrors
+        // `column_scoped_merge_e2e`'s own staging, but over `raw.transactions`
+        // — clocked via its OWN source-YAML `timeseries:` block, unlike
+        // `raw.events`, whose clock is only ever declared on a downstream
+        // MODEL's frontmatter — this fixture declares none) — the CSV seed
+        // loader is a separate CLI-level step `execute_project` itself does
+        // not perform.
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("open duckdb");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_transactions (transaction_id INTEGER, \
+                     user_id INTEGER, amount DECIMAL(10,2), transaction_timestamp TIMESTAMP, \
+                     transaction_type VARCHAR)",
+                )
+                .await
+                .expect("create transactions source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_transactions VALUES \
+                     (1, 1, 10.00, TIMESTAMP '2025-01-10 08:00:00', 'purchase'), \
+                     (2, 2, 20.00, TIMESTAMP '2025-01-10 09:00:00', 'purchase')",
+                )
+                .await
+                .expect("seed transactions");
+            backend
+                .execute_sql(
+                    "CREATE TABLE main.sources_raw_users (user_id INTEGER, user_name VARCHAR, \
+                     signup_date DATE)",
+                )
+                .await
+                .expect("create users source table");
+            backend
+                .execute_sql(
+                    "INSERT INTO main.sources_raw_users VALUES \
+                     (1, 'Alice', DATE '2025-01-01'), (2, 'Bob', DATE '2025-01-02')",
+                )
+                .await
+                .expect("seed users");
+        }
+
+        // First run: creation. Must not take the column-scoped-merge path.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-1".to_string(),
+                request_for_day("2025-01-10", "2025-01-11"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("first run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_ne!(
+                record.strategy, "column_scoped_merge",
+                "the creation run must not take the column-scoped merge path — the target \
+                 doesn't exist yet"
+            );
+        }
+
+        // Mutate the dimension in place — mirrors `column_scoped_merge_e2e`'s
+        // own narrative even though (per the module doc comment) this
+        // fixture's merged column never actually depends on the mutated
+        // value.
+        {
+            let backend = DuckDbBackend::new(&db_path, "main")
+                .await
+                .expect("reopen duckdb");
+            backend
+                .execute_sql(
+                    "UPDATE main.sources_raw_users SET user_name = 'Alicia' WHERE user_id = 1",
+                )
+                .await
+                .expect("mutate dimension");
+        }
+
+        // Second run: the live cell dispatches.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-2".to_string(),
+                request_for_day("2025-01-11", "2025-01-12"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("second run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(
+                record.strategy, "column_scoped_merge",
+                "a live UpstreamMutation cell must dispatch the keyed run loop through the \
+                 column-scoped MERGE technique (W10 Phase 4), not the default cumulative-fold \
+                 label a plain keyed run would otherwise report"
+            );
+        }
+
+        let conn = duckdb::Connection::open(&db_path).expect("reconnect");
+        let (user1_count, user2_count): (i64, i64) = {
+            let c1: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 1",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 1 event_count");
+            let c2: i64 = conn
+                .query_row(
+                    "SELECT event_count FROM main.user_lifetime_status WHERE user_id = 2",
+                    [],
+                    |row| row.get(0),
+                )
+                .expect("read user 2 event_count");
+            (c1, c2)
+        };
+        assert_eq!(
+            (user1_count, user2_count),
+            (1, 1),
+            "the column-scoped MERGE must not corrupt the fact-derived event_count — both \
+             users still show exactly the one event staged for them"
+        );
+
+        // Third run: no data change since run 2 at all. The dispatch still
+        // fires (known divergence — unconditional per-run dispatch), but
+        // the change-suppressed arm must write zero affected rows.
+        {
+            let (db, graph) = build_db_and_graph(&project_dir, &config);
+            let outcome = execute_project(
+                "run-3".to_string(),
+                request_for_day("2025-01-12", "2025-01-13"),
+                Arc::clone(&config),
+                graph,
+                db,
+                &project_dir,
+                &backend_factory,
+                &NoOpReporter,
+                CancellationToken::new(),
+            )
+            .await
+            .expect("third run must succeed");
+            let record = outcome
+                .models
+                .get("user_lifetime_status")
+                .expect("user_lifetime_status ran");
+            assert_eq!(record.strategy, "column_scoped_merge");
+        }
+
+        let backend = DuckDbBackend::new(&db_path, "main")
+            .await
+            .expect("reopen duckdb for probe");
+        let recompute_sql = MODEL_SQL
+            .replace(
+                "smelt.sources.raw.transactions",
+                "main.sources_raw_transactions",
+            )
+            .replace("smelt.sources.raw.users", "main.sources_raw_users");
+        let source_subquery = format!("({recompute_sql}) recomputed");
+        let affected = super::merge_affected_row_count(
+            &backend,
+            "main.user_lifetime_status",
+            &source_subquery,
+            &["user_id"],
+            &["event_count"],
+        )
+        .await;
+        assert_eq!(
+            affected, 0,
+            "an unchanged redelivery must write zero rows through the change-suppressed arm"
         );
     }
 }

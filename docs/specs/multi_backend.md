@@ -77,6 +77,35 @@ reject the model — the dialect printer **lowers** the logical construct to an 
 physical form the backend accepts. A capability flag set to `false` is an instruction to the
 printer to lower, never a reason to emit invalid SQL or to surface a user-facing error.
 
+**Supported-surface statement.** Dual-target parity covers: full-refresh table and view
+materializations, ephemeral (CTE-inlined) models, and the `batched`/`keyed`/`versioned`
+incremental maintenance legs — each exercised on both DuckDB and Spark by the same parametrized
+CLI integration tests, plus the DuckDB-anchored `maintenance_conformance` suite (`smelt-cli`
+crate) for the maintenance legs specifically. `refresh: materialized_view` is excluded: no
+backend advertises `supports_native_ivm` today (see §"Output-schema type conformance"), so the
+mode hard-errors on every backend and there is nothing to verify. Databricks-specific behaviour
+beyond what the generic Spark Connect adapter exercises is excluded (see §Known Divergences).
+
+**Generative equivalence coverage.** The equivalence invariant
+(`incremental_models.md` §"The equivalence invariant") is verified generatively — not just by
+fixed-recipe parity tests — on every supported backend, via a single dual-execution harness that
+owns the recipe pool, run schedules, and multiset-comparison oracle; the backend under test is a
+parameter, not a duplicated implementation. On DuckDB this runs per-PR as
+`cargo test -p smelt-cli --test maintenance_conformance`. On Spark this runs in the gated tier
+(see "CI tiering" below) as `cargo test -p smelt-cli --features smelt-cli/spark --test
+maintenance_conformance_spark`, with a reduced deterministic case count; rollout across the
+recipe pool is tracked incrementally, with any leg still DuckDB-only recorded in §Known
+Divergences until it lands.
+
+**CI tiering.** Two tiers enforce the supported surface. A **per-PR tier** — gated on the PR's
+changed paths touching Spark-relevant code (the Spark backend crate, Spark/parity integration
+tests, the function-signature registry, type inference, the parser's dialect surface, or the
+Python adapter) — runs `spark-parity` and `type-property-spark`. A **nightly tier** runs the
+full Spark job set (including the corpus-driven `spark-integration` parser-compat job)
+unconditionally, and is also reachable on demand via the `run-docker-tests` PR label. A Spark
+regression outside the per-PR path filter still surfaces within one nightly cycle rather than
+sitting unnoticed on `main` indefinitely.
+
 ### Output-schema type conformance
 Where a backend's native return type for an expression differs from smelt's inferred type, a
 model's **output columns** are reconciled to the inferred type: the compiled SQL is wrapped in an
@@ -163,6 +192,26 @@ the first statement a fresh session issues — on backends whose `setCurrentData
 fails for a missing schema (Spark Connect raises `[SCHEMA_NOT_FOUND]`), that ordering bug blocks
 every model on first run. The flag is `true` for every backend today; the conformance suite
 asserts each constructor sets it and that a first-run model against a fresh schema succeeds.
+
+### Connection security
+A backend target's connection string may need secrets (an auth token) or TLS parameters that
+must not live in the checked-in `smelt.yml`. These are carried as `${ENV_VAR}` references inside
+the `connect_url` string, resolved by the config-load interpolation pass (`smelt_yml.md`
+§"Environment interpolation") — this spec adds no second interpolation mechanism. Token and TLS
+settings are passed as Spark Connect URL parameters, never as new YAML keys:
+
+```yaml
+targets:
+  databricks:
+    type: spark
+    connect_url: "sc://host:443/;token=${DATABRICKS_TOKEN};use_ssl=true"
+```
+
+The interpolated URL — token and all — passes to the Spark Connect Python client
+(`builder.remote(connect_url)`) unmodified; smelt never parses out or stores the token
+separately, and never logs the resolved URL. A `connect_url` holding a literal (non-`${VAR}`)
+token is a lint-worthy smell: the secret sits in the committed YAML in plaintext, exactly what
+the interpolation mechanism exists to prevent.
 
 ### Loading data into a backend
 Loading external rows into a backend (seeds, test fixtures, an Arrow batch) must not assume the
@@ -277,6 +326,29 @@ resolves nested widening to a table rewrite.
   performance gap, not a correctness one. Deferred.
 - **Databricks** is not yet a distinct backend; the Spark adapter can attach to Databricks
   Connect but Databricks-specific capability differences are not modelled.
+- **The `spark_type` divergence ledger.** The ledger in
+  `crates/smelt-db/tests/prop_helpers/divergences.rs` (23 entries) has been re-verified entry by
+  entry against a live Spark Connect server: every recorded `spark_type` (both `Some` claims and
+  `None` "matches smelt" claims) was checked against `DESCRIBE QUERY` output for the entry's
+  representative expression, corrected where stale (e.g. `SIGN`'s Spark return type is always
+  `Double` regardless of argument type, not the argument's own type as previously recorded), and
+  confirmed by a 1000-case property soak with zero new unregistered divergences. Per-PR gating on
+  Spark-relevant paths (§"CI tiering" above) is in place as of `.github/workflows/compat.yml`'s
+  `changes` job.
+- **The generative maintenance-conformance oracle is dual-backend.** The dual-execution harness
+  (see §"Generative equivalence coverage") runs the same recipe pool, run schedules, and
+  multiset-equivalence oracle against a live Spark Connect server in the gated CI tier
+  (`cargo test -p smelt-cli --features smelt-cli/spark --test maintenance_conformance_spark`),
+  covering the append-only, keyed, mutable, redelivery, interleave, boundary, schema-evolution,
+  composed-pool, DAG-propagation, pinned-hazard, and change-feed-admission legs. A small number of
+  legs remain DuckDB-only for reasons independent of this rollout, not because the Spark twin
+  hasn't landed: `Additive`-combiner keyed/composed folds have no Spark ledger dialect yet for the
+  never-fold-twice reconciliation ledger (the runtime fails loud rather than mishandling it); the
+  probe harness (`probes.rs`) and the feed-declared-source execution-driven leg (as opposed to its
+  admission check, which is covered) still stage through a raw DuckDB connection rather than the
+  backend trait. Full per-leg disposition is tracked in the gap table in
+  `docs/plans/20260719-prod-w4-spark.md`; the remaining DuckDB-only legs are follow-up work, not
+  blockers to the supported-vs-beta label decision.
 
 ## References
 

@@ -247,7 +247,7 @@ fn upstream_ref(dag: &DagRecipe, up: Upstream) -> String {
 /// (this module wrote the SQL), used both by [`render_node_body`] and by
 /// [`fetch_node_multiset`] to build a column-exact comparison query without
 /// any runtime schema introspection.
-fn node_output_columns(dag: &DagRecipe, node: &DagNode) -> Vec<String> {
+pub fn node_output_columns(dag: &DagRecipe, node: &DagNode) -> Vec<String> {
     let d = dag.source.clock_column.clone();
     let id = dag.source.key_column.clone();
     let val = dag.source.payload_column.clone();
@@ -307,11 +307,16 @@ pub fn render_node_file(dag: &DagRecipe, idx: usize) -> String {
     let node = &dag.nodes[idx];
     let body = render_node_body(dag, idx);
     match &node.grain {
-        NodeGrain::Partition { unique_key } => {
+        NodeGrain::Partition { unique_key: _ } => {
+            // The retired `batched.unique_key` sub-block this used to carry
+            // `unique_key` under is gone — it never fed row-identity
+            // derivation for a `Grain::Partition` output anyway
+            // (`derive::ModelInputs::declared_unique_key` is empty for
+            // every `Grain::Partition`), so dropping it changes no derived
+            // maintenance plan.
             let d = &dag.source.clock_column;
-            let key = unique_key.join(", ");
             format!(
-                "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\nbatched:\n  unique_key: [{key}]\n---\n{body}\n"
+                "---\ntimeseries:\n  event_time_column: {d}\n  partition_column: {d}\n  granularity: day\nrefresh: incremental\ngrain: partition\n---\n{body}\n"
             )
         }
         NodeGrain::Key => {
@@ -500,6 +505,160 @@ pub fn classify_node(project: &LinkCProject, model_name: &str) -> anyhow::Result
             Ok(Verdict::Refused(named))
         }
     }
+}
+
+/// [`stage_dag`] generalised over [`crate::recipe::ConformanceTarget`]
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 5):
+/// `DuckDb` delegates straight to [`stage_dag`]; `SparkDelta` stages every
+/// node's model file + the driving source's YAML + a Spark-targeted
+/// `smelt.yml`, then creates the physical source table (and drops any stale
+/// node/source table from a prior run first — drop-before-seed idempotency,
+/// mirroring [`crate::render::stage_for_target`]'s convention) through a
+/// direct Spark/Delta connection to `crate::recipe::SPARK_CONFORMANCE_SCHEMA`.
+#[cfg(feature = "spark")]
+pub fn stage_dag_for_target(
+    dag: &DagRecipe,
+    project_dir: &Path,
+    db_path: &Path,
+    target: crate::recipe::ConformanceTarget,
+) -> anyhow::Result<LinkCProject> {
+    match target {
+        crate::recipe::ConformanceTarget::DuckDb => stage_dag(dag, project_dir, db_path),
+        crate::recipe::ConformanceTarget::SparkDelta => {
+            std::fs::create_dir_all(project_dir.join("models/sources"))?;
+            for idx in 0..dag.nodes.len() {
+                std::fs::write(
+                    project_dir.join(format!("models/{}.sql", dag.nodes[idx].name)),
+                    render_node_file(dag, idx),
+                )?;
+            }
+            std::fs::write(
+                project_dir.join(format!("models/sources/{}.yml", dag.source.name)),
+                dag.source.source_yaml(),
+            )?;
+            std::fs::write(
+                project_dir.join("smelt.yml"),
+                crate::render::render_smelt_yml_for(target, db_path),
+            )?;
+
+            reset_and_create_spark_dag_tables(db_path, dag)?;
+
+            LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+        }
+    }
+}
+
+#[cfg(feature = "spark")]
+fn reset_and_create_spark_dag_tables(db_path: &Path, dag: &DagRecipe) -> anyhow::Result<()> {
+    let db_path = db_path.to_path_buf();
+    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let source_table = format!("{schema}.sources_{}", dag.source.name);
+    let column_defs = format!(
+        "{d} DATE, {id} INT, {val} INT",
+        d = dag.source.clock_column,
+        id = dag.source.key_column,
+        val = dag.source.payload_column,
+    );
+    let node_tables: Vec<String> = dag
+        .nodes
+        .iter()
+        .map(|n| format!("{schema}.{}", n.name))
+        .collect();
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = crate::link_c_harness::open_spark_conformance_backend(&db_path).await?;
+        for table in &node_tables {
+            smelt_backend::Backend::execute_sql(
+                backend.as_ref(),
+                &format!("DROP TABLE IF EXISTS {table}"),
+            )
+            .await
+            .map_err(|e| anyhow::anyhow!("drop stale Spark DAG node table {table}: {e}"))?;
+        }
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("DROP TABLE IF EXISTS {source_table}"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("drop stale Spark DAG source table {source_table}: {e}"))?;
+        smelt_backend::Backend::execute_sql(
+            backend.as_ref(),
+            &format!("CREATE TABLE {source_table} ({column_defs}) USING DELTA"),
+        )
+        .await
+        .map_err(|e| anyhow::anyhow!("create Spark DAG source table {source_table}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
+}
+
+/// [`insert_rows`] generalised over `&dyn Backend` (plan Phase 5): appends
+/// `rows` into `dag`'s physical source table via `Backend::execute_sql`
+/// (Delta `INSERT INTO`) rather than a raw `duckdb::Connection` — never a
+/// host-filesystem load path.
+#[cfg(feature = "spark")]
+pub async fn insert_rows_via_backend(
+    backend: &dyn smelt_backend::Backend,
+    dag: &DagRecipe,
+    rows: &[(chrono::NaiveDate, i64, i64)],
+) -> anyhow::Result<()> {
+    if rows.is_empty() {
+        return Ok(());
+    }
+    let values: Vec<String> = rows
+        .iter()
+        .map(|(d, id, val)| format!("(DATE '{}', {id}, {val})", d.format("%Y-%m-%d")))
+        .collect();
+    backend
+        .execute_sql(&format!(
+            "INSERT INTO {}.sources_{} VALUES {}",
+            crate::recipe::SPARK_CONFORMANCE_SCHEMA,
+            dag.source.name,
+            values.join(", ")
+        ))
+        .await
+        .map_err(|e| anyhow::anyhow!("insert DAG source rows on Spark: {e}"))?;
+    Ok(())
+}
+
+/// [`fetch_node_multiset`] generalised over `&dyn Backend` (plan Phase 5):
+/// same column-exact, no-runtime-introspection comparison primitive, read
+/// back via `Backend::execute_sql` and cast to Spark's unsized `STRING`
+/// (DuckDB's unsized `VARCHAR` is refused by Spark's parser —
+/// `DATATYPE_MISSING_SIZE`, the same dialect gap
+/// `emit_recurrence_bound_probe` had) rather than DuckDB's `VARCHAR`.
+#[cfg(feature = "spark")]
+pub async fn fetch_node_multiset_via_backend(
+    backend: &dyn smelt_backend::Backend,
+    dag: &DagRecipe,
+    idx: usize,
+    where_clause: Option<&str>,
+) -> anyhow::Result<Vec<Vec<String>>> {
+    let node = &dag.nodes[idx];
+    let cols = node_output_columns(dag, node);
+    let cast_list = cols
+        .iter()
+        .map(|c| format!("CAST({c} AS STRING) AS {c}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let schema = crate::recipe::SPARK_CONFORMANCE_SCHEMA;
+    let sql = match where_clause {
+        Some(w) => format!("SELECT {cast_list} FROM {schema}.{} WHERE {w}", node.name),
+        None => format!("SELECT {cast_list} FROM {schema}.{}", node.name),
+    };
+    let batches = backend
+        .execute_sql(&sql)
+        .await
+        .map_err(|e| anyhow::anyhow!("fetch_node_multiset_via_backend {sql:?}: {e}"))?;
+    let rows_as_maps = smelt_runtime::check_runner::batches_to_rows(&batches);
+    let mut rows: Vec<Vec<String>> = rows_as_maps
+        .into_iter()
+        .map(|r| {
+            cols.iter()
+                .map(|c| r.get(c).cloned().unwrap_or_default())
+                .collect()
+        })
+        .collect();
+    rows.sort();
+    Ok(rows)
 }
 
 #[cfg(test)]

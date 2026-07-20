@@ -17,7 +17,7 @@ owners: [andrew]
 >
 > **Timeless-oracle rule.** This spec describes the feature as if it has always existed. Implementation status lives in §Known Divergences (behaviour + plan link) or §References → Plans (history).
 >
-> **Status: experimental.** The partition grain's DuckDB DELETE+INSERT path is implemented and tested; `refresh: incremental` + `grain: partition` is the live surface (`refresh: batched` is a hard error with a fix-it; the `batched:` sub-block still parses as the profile's local options block — §Known Divergences). The key grain's additive-fold and extremal/lattice-fold families are implemented against the windowed-keyed-maintenance driver; the overwrite, once-write, and plain-overwrite families, the snapshot-reconcile run shape, and the time-partitioned (key temporal locality) output are specified ahead of implementation, and the transactional merge ledger is built on DuckDB only (§Known Divergences). `versioning: interval` is specified ahead of implementation and does not parse today (§Known Divergences).
+> **Status: experimental.** The partition grain's DuckDB DELETE+INSERT path is implemented and tested; `refresh: incremental` + `grain: partition` is the live surface (`refresh: batched` is a hard error with a fix-it; the `.sql` frontmatter `batched:` sub-block is retired outright — a hard error with a per-key fix-it — the `smelt.yml` model-override spelling of `batched:` still parses — §Known Divergences). The key grain's additive-fold and extremal/lattice-fold families are implemented against the windowed-keyed-maintenance driver; the overwrite, once-write, and plain-overwrite families, the snapshot-reconcile run shape, and the time-partitioned (key temporal locality) output are specified ahead of implementation, and the transactional merge ledger is built on DuckDB only (§Known Divergences). `versioning: interval` is specified ahead of implementation and does not parse today (§Known Divergences).
 
 ## Surface
 
@@ -440,8 +440,30 @@ Keyed **plus** a validity interval. The stored table carries the projected colum
   intended default posture once trusted. Prints the dirty set before acting.
 - `smelt build <model> --period <start>..<end> --include-upstreams` — backward resolution: print
   the per-ancestor required slices and build order; optionally execute the bounded build.
-- `smelt bakeoff <model> [--cells ...]` — materialise each admissible technique for a cell over a
-  representative window and report measured cost; `--pin` writes the choice as a `cells[]` entry.
+- `smelt bakeoff <model> [--cells <col>@<source>,...] [--runs N] [--target <name>] [--keep]
+  [--pin]` — measures every admissible technique for a set of cells against a representative
+  window of real data and reports cost. `--cells` defaults to every cell with two or more
+  admissible techniques (a cell with only one admissible technique has nothing to bake off).
+  `--runs N` (default 3) splits the driving source's event-time extent into `N` sequential
+  windows and replays them in order per technique — each replay is a real `execute_project` run
+  against the project's actual data, not a synthetic sample. Each technique under measurement
+  runs against a scratch target: the chosen target is cloned in-memory under a synthetic name
+  with schema `smelt_bakeoff_<model>_<technique>` (no runtime schema seam — schema already flows
+  from `config.targets[target].schema`), dropped after measurement unless `--keep`. After each
+  window, the measured techniques' output rows are cross-checked against each other with
+  `EXCEPT ALL` in both directions — the equivalence invariant bakeoff exists to exploit, verified
+  rather than assumed. `--target` selects which declared target to clone (defaults to the
+  active target). `--pin` emits the winning `cells[]` entry (or a complete `maintenance:` block
+  when the model has none) as ready-to-paste YAML on stdout — it never rewrites the model's
+  `.sql` file; the user reviews and commits the pin themselves. A pin, once applied, is an
+  ordinary override re-validated through admission on every compile: an inadmissible pin fails
+  loud rather than silently running.
+
+`cells[].technique` pins and `defaults.prefer`/`cells[].prefer` preferences are honoured at
+execution — the same choice ladder (`resolve_cell_choice`/`effective_override`,
+§"Validator, not chooser") that governs `smelt bakeoff`'s measurement targets also resolves the
+technique a live run uses, and admission still binds: an override can never select an
+inadmissible technique.
 
 #### Partition-grain run flags
 
@@ -471,11 +493,10 @@ smelt run       [selectors]                                                     
 ### Diagnostics
 
 All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Partition-grain
-rejections surface as `TimeseriesRequiredForBatched` (missing `timeseries:` block — the rule is
-`models.md` §"Constraint violations"), `BatchedNotSafe` (the batch-safety classifier,
+rejections surface as `TimeseriesRequiredForPartitionGrain` (missing `timeseries:` block — the rule is
+`models.md` §"Constraint violations"), `PartitionGrainNotSafe` (the batch-safety classifier,
 §"Batch safety classification"), and `EventTimeColumnNotVisibleAtOuterSelect`
-(§"Event-time outer-visibility (partition-grain-local)"); the first two code names retain the
-retired mode spellings (§Known Divergences → "The partition grain").
+(§"Event-time outer-visibility (partition-grain-local)").
 
 #### The `Maintenance*` family
 
@@ -1107,7 +1128,7 @@ Snapshot-reconcile models keep no ledger — each run is a self-contained reconc
 
 #### Admission matrix (column family × source shape)
 
-Which families a model may use depends on its run shape. This is the key-grain instance of §"Per-cell admission": each cell in the matrix below is that framework's obligations 2 ("faithful fold") and 3 ("combiner algebra class") discharged for one `(column family × run shape)` pair — fold families consume **events** (each row contributes exactly once, satisfying the faithful-fold obligation only under a replayable, retraction-free feed); overwrite families consume **observations** (each row supersedes, so they discharge the obligation only under the snapshot's current-state semantics, never a fold). The matrix is checked per column:
+Which families a model may use depends on its run shape. This is the key-grain instance of §"Per-cell admission": each cell in the matrix below is that framework's obligations 2 ("faithful fold") and 3 ("combiner algebra class") discharged for one `(column family × run shape)` pair — fold families consume **events** (each row contributes exactly once, satisfying the faithful-fold obligation only under a replayable, retraction-free feed); overwrite families consume **observations** (each row supersedes, so they discharge the obligation only under the snapshot's current-state semantics, never a fold). The obligation binds **fold-contributing sources** — a source whose rows the cumulative combiner actually folds — not every source the model's `FROM` clause names; see the scope note below the table for sources that are merely enrich-joined. The matrix is checked per column:
 
 | Column family | window-forward (clocked source) | snapshot-reconcile (mutable snapshot) |
 |---|---|---|
@@ -1118,6 +1139,8 @@ Which families a model may use depends on its run shape. This is the key-grain i
 | plain overwrite | ✗ — order-dependent over events (fails obligation 3; `KeyedUnknownCombiner` names the `MAX_BY` fix) | ✓ (obligation 3, current-snapshot semantics) |
 
 The three snapshot ✗ cells marked *observer semantics* are not double-count hazards — those families re-merge safely — they are **equivalence failures**: `MIN(price)` folded over successive snapshots computes *min ever observed* while a full refresh over the current snapshot computes the *current* min; `MAX_BY(attr, updated_at)` retains a stale incumbent forever if a mutation regresses the ordering value; `COALESCE`-once-write captures *first observed*, unrecoverable from the current snapshot. Each is a different contract (a history *observation*, not a recomputation) and is refused (`KeyedSnapshotSourceUnsupportedColumn`) rather than admitted silently — obligation 2 fails closed, never approximated.
+
+**Scope: fold-contributing sources, not every referenced source.** A window-forward model's non-driving sources are not automatically held to the same append-only/replayable obligation as the driving source — the obligation binds each **fold-contributing source**, one whose columns feed an aggregate the cumulative combiner folds. A mutable source the model consumes **only** through a covered enrichment cell (an `UpstreamMutation`-triggered column-scoped `MERGE`, §Known Divergences) is admitted regardless of its own mutation profile: its post-creation mutations are maintained by that separate cell, so the fold's replayable-feed obligation never reaches it. A source that is **both** a fold input and a mutable enrichment stays refused — its folded contribution really is un-retractable, and admission fails closed (`MaintenanceNoAdmissibleTechnique`) rather than approximating which of a source's columns are "safe."
 
 #### End-state equivalence: the SQL is the oracle
 
@@ -1333,7 +1356,13 @@ relationship (`10` §2).
 **Offline cost measurement is first-class.** Because per-cell technique choice is
 contract-preserving at fixed `S`, smelt may measure alternative physical plans over real data
 offline and pin the cheapest (`smelt bakeoff`) — a capability per-query optimisers structurally
-lack (01 §11).
+lack (01 §11). The measurement is real, not simulated: each candidate technique executes the
+project's actual `execute_project` pipeline against a representative window of the project's own
+data, redirected to a disposable scratch schema, so the reported cost reflects what the
+technique would actually do in production. Pinning is deliberately a human act, never an
+automatic one — `--pin` only emits the winning choice as YAML for review; applying it is a
+separate, explicit step, and the pin remains subject to the same admission proof as any other
+override once applied.
 
 **One invariant, not two; addressing is the real axis — and it is per-cell.** An earlier cut split
 the contract into "per-partition equivalence" (partition grain) and "end-state equivalence" (key
@@ -1735,14 +1764,22 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   (`Backend::supports_column_scoped_merge`) into an executable choice — a pin naming a cell the
   plan did not admit, or a capability gap on the backend, refuses rather than silently falling
   back — and `execute_column_scoped_merge` performs the targeted `MERGE` against a real backend.
-  The regular incremental run loop (`smelt-runtime::execute_project`) dispatches into the
-  column-scoped `MERGE` automatically on every run once the plan admits a mutation cell for one
-  of the model's `explicitly_mutable` sources AND the target table already exists — no explicit
-  "a mutation happened" signal is required to reach the technique; `resolve_live_column_scoped_cell`
-  re-derives the same plan every run and the batch loop reads its verdict (exercised end-to-end
-  in `crates/smelt-runtime/tests/technique_lowering.rs::column_scoped_merge_e2e` against the
-  real `examples/timeseries/models/daily_events_enriched.sql` fact+dimension fixture, which
-  drives the accepted-full-scan corner below). Two distinct physical corners exist for a live
+  Both the partition-grain incremental run loop and the keyed run loop (`smelt-runtime::
+  execute_project`) dispatch into the column-scoped `MERGE` automatically on every run once the
+  plan admits a mutation cell for one of the model's `explicitly_mutable` sources AND the target
+  table already exists — no explicit "a mutation happened" signal is required to reach the
+  technique; `resolve_live_column_scoped_cell` re-derives the same plan every run and each run
+  loop's batch dispatch reads its verdict, exercised end-to-end on the partition-grain run loop
+  in `crates/smelt-runtime/tests/technique_lowering.rs::column_scoped_merge_e2e` against the real
+  `examples/timeseries/models/daily_events_enriched.sql` fact+dimension fixture, which drives the
+  accepted-full-scan corner below. The keyed run loop is proven the same way, on the same corner:
+  a `grain: key` model folding an append-only, self-clocked fact per its declared `unique_key` and
+  inner-joined to an `explicitly_mutable`, `allow_full_scan` dimension purely for row admission
+  reaches `ColumnScopedMerge` end-to-end through `execute_project`
+  (`crates/smelt-runtime/tests/technique_lowering.rs::keyed_column_scoped_merge_e2e::keyed_run_loop_dispatches_column_scoped_merge_through_execute_project`),
+  with the fold-contribution admission narrowing above being what makes a keyed model carrying a
+  covered mutable enrichment source reachable in the first place; that coverage's own scope limit
+  is recorded below (§Known Divergences). Two distinct physical corners exist for a live
   cell, chosen by `maintenance_driver::decide_column_merge_dispatch` from the cell's
   `partition_local` verdict: the accepted-full-scan corner (`PartitionLocal::No`, an unclocked
   dimension the operator declared `allow_full_scan` for) is the one currently reachable from any
@@ -1774,6 +1811,31 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
+- **The keyed run loop's suppression and technique-selection dispatch is now covered
+  generatively, not only by one hand-built fixture; the underlying provenance gap that makes
+  every dispatched merge a structural no-op is unchanged.** `keyed_column_scoped_merge_e2e`
+  (previous bullet) was originally the only proof of the keyed run loop's `ColumnScopedMerge`
+  dispatch; `crates/smelt-cli/tests/maintenance_conformance/gate.rs`'s
+  `keyed_enriched_recipe_admits_suppressed_column_scoped_merge` (a structural leg: the derived
+  plan admits the cell and resolves `WriteSuppression::Suppressed` with zero admission-blocking
+  diagnostics) and `keyed_enriched_pool_upholds_equivalence_with_zero_write_redelivery` (an
+  equivalence leg: a generated fact-window schedule plus a genuine zero-change redelivery step,
+  driven through the real `execute_project` pipeline and checked against a full-refresh oracle
+  after every step) now exercise the same dispatch generatively over a fixed `grain: key`
+  fact-plus-enrich-only-dimension shape. Every merge either leg drives is still a
+  `WriteSuppression::Suppressed` no-op by construction: the fold reads only the append-only fact
+  (e.g. `COUNT(fact.val)`), never the joined dimension's own attribute, so a dimension mutation
+  can never change the compared column's value. This is forced by a pre-existing gap in
+  `smelt_logical::maintenance::grouping::collect_column_refs` — once 2+ `FROM` sources are joined,
+  an aggregate's own function-name token is misread as an ambiguous unqualified column reference,
+  and the fail-closed `degenerate_whole_model` collapse this triggers is what admits the cell at
+  all (it widens the fold column's mutation-sensitivity to every referenced source, including the
+  dimension it never reads). Until that provenance gap is fixed, no fixture — hand-built or
+  generated — can drive the keyed run loop's dispatch through a case where the merged value
+  genuinely changes — the sibling non-keyed test
+  (`column_scoped_merge_e2e::column_scoped_merge_dispatches_through_execute_project`) does assert
+  a changed value lands, but the keyed path has no equivalent. Tracked by
+  `docs/plans/20260720-prod-w10-keyed-mutable-admission.md`.
 - **Statement emission is single-owner for the region-recompute, keyed-fold, and
   column-scoped-MERGE families, and both the conformance gate and `--show-sql` are wired to
   prove/print it.** The region `DELETE`+`INSERT` pair (`IncrementalStrategy::DeleteInsert`) is
@@ -2122,7 +2184,7 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   doesn't have). Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The conditional variant now enters the override ladder; `smelt bakeoff` remains unwired.**
+- **The conditional variant now enters the override ladder; `smelt bakeoff` is landed.**
   `resolve_write_suppression`'s `Suppressed` verdict no longer means "always emit the
   change-suppressed matched arm whenever it's proven" — `maintenance::choice::resolve_write_variant`
   folds a structural preference rule alongside the already-proven verdict: a steady-state trigger
@@ -2161,10 +2223,12 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   obey. A `technique: unconditional` pin forces the plain matched arm off suppression even for a
   steady-state trigger, and never refuses (the plain matched arm is always safe). The soft
   `prefer: suppress`/`prefer: unconditional` values nudge the same default without ever refusing.
-  `smelt bakeoff`, the statistics-driven cost model the ladder's `prefer: auto`/no-override
-  default ultimately answers to, remains entirely unwired (tracked by
-  `docs/plans/20260707-maintenance-plan-impl.md` MP13), so absent an explicit pin/preference on
-  this dimension, today's default is still the structural rule above, not a measured one.
+  `smelt bakeoff` (`docs/plans/20260719-prod-w7-bakeoff.md`), the measured-cost surface the
+  ladder's `prefer: auto`/no-override default ultimately could answer to, measures technique
+  family cost (fold vs. region recompute vs. rederiving columns) and emits a pin for a human to
+  apply; it does not measure or feed this orthogonal write-suppression dimension, so absent an
+  explicit pin/preference on this dimension, today's default is still the structural rule above,
+  not a measured one.
   Whether a future cost model needs region-level change-ratio statistics from prior observed
   deltas (rather than the structural steady-state/first-build rule alone) to refine this choice
   further is an open question, not scoped work.
@@ -2175,9 +2239,10 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`).
   `docs-site/docs/reference/cli.md` now documents `--since-upstream` (forward propagation) and
   `--include-upstreams` (backward resolution) under `smelt run`/`smelt build`, plus
-  `smelt explain`'s cell/clamp/ledger report and `--show-sql`; the `maintenance:` frontmatter
-  block is documented in `docs-site/docs/reference/smelt-yml.md`. What is still not yet
-  covered — because the underlying surface doesn't exist yet — is `smelt bakeoff`.
+  `smelt explain`'s cell/clamp/ledger report and `--show-sql`, and `smelt bakeoff`'s grammar and
+  report anatomy; the `maintenance:` frontmatter block, including the now-live
+  `cells[].technique`/`prefer` override wiring and the `--pin` paste workflow, is documented in
+  `docs-site/docs/reference/smelt-yml.md`.
 - **A group merged across two mutable inputs has no group-merge-provenance policy.** Per-cell
   admission today checks obligations 4/5 (bounded reach/footprint) the same way regardless of
   whether a column group's `mutation_sensitivity` set came from ONE input or several — a
@@ -2218,16 +2283,16 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
 ### The partition grain
 
-- **The mode value is cut; the sub-block remains.** `refresh: batched` is a hard error with a fix-it naming `refresh: incremental` + `grain: partition` (`crates/smelt-core/src/config.rs`); the `batched:` sub-block (`batched.unique_key`, `batched.nondeterministic_columns`, `batched.safety_overrides`) is still the live surface for those options and is refused without `refresh: incremental` + `grain: partition` (`crates/smelt-core/src/metadata.rs`). Top-level `unique_key`/`safety_overrides` do not yet parse; `columns.<c>.contract` does (`models.md` §Known Divergences). The `smelt migrate` assist does not exist. Delivered/tracked by `docs/plans/20260707-maintenance-plan-impl.md`.
-- **`nondeterministic_columns` predates `columns.<c>.contract`.** The pre-cut `batched.nondeterministic_columns` list and the target `columns.<c>.contract: plausible` declaration are the same mechanism under two surfaces; the column-scoped `contract` key is owned by `models.md` §"`columns:` — column metadata" (semantics: this spec). The `columns.<c>.contract` key parses today; the pre-cut list form remains the live surface inside the `batched:` sub-block (previous divergence).
-- **Diagnostic-code and config-type spellings still carry the pre-cut mode names.** The diagnostic codes (`TimeseriesRequiredForBatched`, `BatchedNotSafe`, `KeyedForbidsBatched`) and config types (`BatchedConfig`, `BatchedSafetyOverrides`) retain the retired "batched" spelling, and `crates/smelt-logical/src/rules/incremental.rs` carries the rule module. A pure internal rename is deferred. (An earlier divergence entry also listed a `CumulativeForbidsBatched` code; it no longer exists — the two-peer-mode conflict it guarded is no longer expressible now that `grain` is a single enum value.)
+- **The mode value is cut and the sub-block is retired.** `refresh: batched` is a hard error with a fix-it naming `refresh: incremental` + `grain: partition` (`crates/smelt-core/src/config.rs`; delivered by `docs/plans/20260707-maintenance-plan-impl.md`). The `.sql` frontmatter `batched:` sub-block (`batched.unique_key`, `batched.nondeterministic_columns`, `batched.safety_overrides`) is refused outright — a hard `YamlParseError` naming each declared sub-key's top-level replacement and the caller's own value under the new spelling (`unique_key` → top-level `unique_key:`, `safety_overrides` → top-level `safety_overrides:`, `nondeterministic_columns` → `columns.<c>.contract: plausible`; `crates/smelt-core/src/metadata.rs`; `models.md` §"The Relation Contract"). The `smelt migrate` assist does not exist — a three-key mechanical rename does not justify inventing one; the fix-it prints the exact replacement YAML instead. Delivered by `docs/plans/20260719-prod-w8-composed-axes-followups.md`.
+- **A row-shaped partition-grain model's MERGE-dedup key has no `.sql` frontmatter home.** Declaring the identity fact via top-level `unique_key:` makes an output key-shaped (`models.md` §"The Relation Contract") — a shape a row-shaped body with no `GROUP BY` cannot occupy (`KeyedRequiresGroupBy`). A model that needs a per-row identity for its column-scoped `MERGE` technique (`decide_column_merge_dispatch`'s `model_declares_unique_key` gate) without becoming key-addressed declares it via the `smelt.yml` model override's `models.<name>.batched.unique_key` instead — untouched by the `.sql` frontmatter sub-block's retirement, since it is a different parsing path (`crates/smelt-core/src/config.rs`). Whether this MERGE-dedup concept deserves its own top-level `.sql` frontmatter spelling (distinct from the identity-conferring `unique_key:`) is open; tracked by `docs/plans/20260719-prod-w8-composed-axes-followups.md`.
+- **`nondeterministic_columns` predates `columns.<c>.contract`.** The retired `batched.nondeterministic_columns` list and the `columns.<c>.contract: plausible` declaration are the same mechanism under two surfaces; the column-scoped `contract` key is owned by `models.md` §"`columns:` — column metadata" (semantics: this spec). `columns.<c>.contract` is the only surviving spelling in `.sql` frontmatter; the `smelt.yml` model override's `batched.nondeterministic_columns` sub-block remains a separate, still-parsing spelling (per-column `contract:` is `.sql`-frontmatter-only, `smelt-yml.md` §"Layer split: smelt.yml vs SQL frontmatter").
 - **One non-hot classification call site still reads the outer SQL body.** The bound-`NotDerivable` refusal gate (`derive_model_source_bounds`, pure planner) classifies on the outer `model.sql`; a lookback living only inside a function body with no outer Form B filter is the sole case that would behave differently, and none exists in the repo. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
 - **Window-function batch-safety check runs on unexpanded outer SQL.** `find_inadmissible_over` scans the outer model SQL before function expansion, so an `OVER` clause inside a `smelt.define` body is invisible to it. Tracked in `docs/plans/20260530-thread-fn-registry-classification.md`.
 - **Per-source clamp observability partly emitted.** `smelt explain --json` reports `source_partition_col` and `(before, after)` offsets but does not yet resolve the run-relative scan window even when a run window is supplied; the editor-hover readout is not yet implemented (LSP hover is type/column/ref oriented). Both are specified ahead of a plan.
 - **Per-column `data_latency` not implemented.** Late-arriving-data automation is deferred; the two interim mitigations (Semantics §"First-run and backfill") are the only options.
 - **Non-deterministic row-set-membership or grouping is out of scope.** Always rejected regardless of `columns.<c>.contract`; reconciling frozen-per-window membership against a full refresh needs its own design (research §9.1a).
 - **CTE-only `event_time_column` references not yet detected.** Constraint 11 is enforced for direct-subquery FROM clauses and set operations; a CTE alias that does not project `event_time_column` is not yet caught and fails at DuckDB execution. Tracked in `docs/plans/20260616-smelt-feedback-fixes.md`.
-- **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+batched, and batched-only paths are unified around `BatchedConfig` but the CLI dispatch is still tri-modal; should converge.
+- **Three execution paths in `crates/smelt-cli/src/main.rs`.** Legacy, optimizer+batched, and batched-only paths are unified around `PartitionGrainConfig` but the CLI dispatch is still tri-modal; should converge.
 - **Schema evolution is unspecified.** A `partition_column` rename or output schema change has no defined handling today.
 - **`smelt.metric()` interaction.** The interaction between metric expansion and time-filter injection is not fully spelled out for partition-grain models consuming metrics.
 - **Generator-emitted partition-grain models are landed.** A `ModelDef` emitted by a generator (`meta_language.md`) may carry the partition-grain frontmatter and is subject to every rule here on equal terms. Per-`ModelDef` overrides are not part of the closed field set in v1. Tracked in `docs/plans/20260509-meta-language-overall.md`.
@@ -2237,7 +2302,7 @@ This section captures the partition-grain-**specific** rationale; the rationale 
 
 ### The key grain
 
-- **The pre-cut surface is removed.** The surface described above (`refresh: incremental` + `grain: key`, top-level `unique_key`) is what parses today; `refresh: keyed` (like `refresh: cumulative`) is a hard error with a fix-it pointing at `refresh: incremental` with the matching `grain:` (`crates/smelt-core/src/config.rs`; `models.md` §Known Divergences). `KeyedForbidsBatched` remains live in one form: a `grain: key` model declaring a `batched:` sub-block is refused (`crates/smelt-core/src/metadata.rs`); the historical grain-conflict form (`refresh: keyed` + `refresh: batched` as peer values) is no longer expressible since `grain` is a single enum value. Delivered by `docs/plans/20260707-maintenance-plan-impl.md`.
+- **The pre-cut surface is removed.** The surface described above (`refresh: incremental` + `grain: key`, top-level `unique_key`) is what parses today; `refresh: keyed` (like `refresh: cumulative`) is a hard error with a fix-it pointing at `refresh: incremental` with the matching `grain:` (`crates/smelt-core/src/config.rs`; `models.md` §Known Divergences); the historical grain-conflict form (`refresh: keyed` + `refresh: batched` as peer values) is no longer expressible since `grain` is a single enum value. Delivered by `docs/plans/20260707-maintenance-plan-impl.md`. The dedicated `KeyedForbidsPartitionGrain` diagnostic that once caught a `grain: key` model declaring the `batched:` sub-block is retired outright, not renamed: the literal sub-block is refused for every grain at frontmatter parse time (see "The partition grain" above), so a `grain: key` model can no longer declare it at all — the one surviving way a `grain: key` model can still carry an internally-folded `batched` block (via the top-level `safety_overrides:` fold) is already caught by `PartitionGrainRequiresRefreshIncremental`, a strict superset of the old check's condition.
 - **The classifier covers only the direct-monoid families.** The classifier seed (`crates/smelt-logical/src/rules/cumulative.rs`, emitting the `Keyed*` diagnostic family), the windowed-keyed-maintenance driver (`crates/smelt-runtime/src/maintenance_driver.rs`), and the per-window `merge_into` execution (`crates/smelt-runtime/src/cumulative.rs`) admit only the additive-fold and extremal/lattice-fold families. The classifier union (overwrite, once-write, and plain-overwrite families) and the run-shape/posture derivation that distinguishes window-forward from snapshot-reconcile are unbuilt (decision record: `docs/research/20260705-keyed-collapse-application.md`; tracking plan: `docs/plans/20260705-keyed-collapse.md`).
 - **The transactional merge ledger is built on DuckDB only.** Every additive-graded keyed-merge step folds its delta identity into a warehouse-resident per-delta ledger table in the same transaction as the merge (`smelt_backend::Backend::fold_ledger_delta`; DDL/DML in `smelt_state::ddl_duckdb`); a repeat delta violates the table's `PRIMARY KEY` and refuses the run (`KeyedReprocessedWindow`) before the action runs a second time. An idempotent-only cell never creates the table. The DuckDB dialect is the only substrate implemented; an additive-graded cell on another backend fails loudly (`UnsupportedFeature`) rather than being handed SQL it cannot run (§Known Divergences).
 - **The snapshot-reconcile executor is unbuilt.** Until it lands, an unclocked keyed model (zero timeseries-tagged sources in the FROM clause) is refused fail-loud with a not-yet-supported diagnostic (`KeyedSnapshotPostureUnsupported`) naming the delivering plan — it is not treated as a model error.
@@ -2479,7 +2544,7 @@ relied on until it graduates into `§Surface`/`§Semantics` via its own spec dif
 ### The partition grain
 
 - **Code**:
-  - `crates/smelt-core/src/config.rs` — `BatchedConfig`, `Granularity`, `Weekday`
+  - `crates/smelt-core/src/config.rs` — `PartitionGrainConfig`, `Granularity`, `Weekday`
   - `crates/smelt-core/src/metadata.rs` — frontmatter extraction, `ModelMetadata`
   - `crates/smelt-logical/src/rules/incremental.rs` — partition-grain detection + safety checks (in `smelt-logical`; `smelt-planner` re-exports)
   - `crates/smelt-logical/src/types.rs` — safety-override types

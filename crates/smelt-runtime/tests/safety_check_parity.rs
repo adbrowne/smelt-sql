@@ -11,7 +11,7 @@
 //!    unless `allow_column_removal = true`.
 
 use smelt_core::config::TimeseriesConfig;
-use smelt_core::{BatchedConfig, BatchedSafetyOverrides, Granularity};
+use smelt_core::{Granularity, PartitionGrainConfig, PartitionGrainSafetyOverrides};
 use smelt_planner::{ModelGraph, ModelInfo};
 use smelt_runtime::safety::{
     check_bound_derivation, check_planner_safety, should_force_full_refresh,
@@ -30,11 +30,11 @@ fn make_ts(event_col: &str, partition_col: &str) -> TimeseriesConfig {
     }
 }
 
-fn make_inc() -> BatchedConfig {
-    BatchedConfig {
+fn make_inc() -> PartitionGrainConfig {
+    PartitionGrainConfig {
         unique_key: vec![],
         nondeterministic_columns: vec![],
-        safety_overrides: BatchedSafetyOverrides::default(),
+        safety_overrides: PartitionGrainSafetyOverrides::default(),
     }
 }
 

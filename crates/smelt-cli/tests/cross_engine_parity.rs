@@ -149,3 +149,51 @@ fn duckdb_reads_spark_model_via_parquet() {
         "DuckDB duckdb_side should have Spark model row [42], got: {rows:?}"
     );
 }
+
+/// W4·P2: `connect_url` built from an env-interpolated port (`${SMELT_SPARK_PORT}`)
+/// resolves at config-load time and the run succeeds against the live server —
+/// proving the CLI's config-load interpolation pass (not a Spark-only mechanism)
+/// covers the Spark target's `connect_url` end to end.
+#[test]
+fn spark_target_via_interpolated_url() {
+    if !cfg!(feature = "spark") {
+        eprintln!("spark feature not enabled — skipping spark_target_via_interpolated_url");
+        return;
+    }
+    let Some(_connect_url) = spark_connect_url() else {
+        eprintln!("SPARK_CONNECT_URL unset — skipping spark_target_via_interpolated_url");
+        return;
+    };
+
+    let tmp = TempDir::new().unwrap();
+    let root = tmp.path().join("interpolated_url_proj");
+    std::fs::create_dir_all(root.join("models")).unwrap();
+
+    let port = std::env::var("SMELT_SPARK_PORT").unwrap_or_else(|_| "15002".to_string());
+
+    let yml = "name: interpolated_url_proj\nversion: 1\npaths:\n  - models\ntargets:\n  spark:\n    type: spark\n    connect_url: sc://localhost:${SMELT_SPARK_PORT}\n    catalog: spark_catalog\n    schema: smelt_cross_p2_interp\n    format: parquet\ndefault_materialization: table\n";
+    std::fs::write(root.join("smelt.yml"), yml).unwrap();
+    std::fs::write(
+        root.join("models").join("interp_model.sql"),
+        "---\ntarget: spark\nmaterialization: table\n---\nSELECT CAST(1 AS BIGINT) AS n\n",
+    )
+    .unwrap();
+
+    let mut cmd = std::process::Command::new(env!("CARGO_BIN_EXE_smelt"));
+    cmd.args([
+        "run",
+        "--project-dir",
+        root.to_str().unwrap(),
+        "--target",
+        "spark",
+    ]);
+    cmd.env("SPARK_CONNECT_URL", spark_connect_url().unwrap());
+    cmd.env("SMELT_SPARK_PORT", &port);
+    let out = cmd.output().expect("failed to spawn `smelt run`");
+    assert!(
+        out.status.success(),
+        "smelt run failed with an interpolated connect_url.\nstdout: {}\nstderr: {}",
+        String::from_utf8_lossy(&out.stdout),
+        String::from_utf8_lossy(&out.stderr)
+    );
+}

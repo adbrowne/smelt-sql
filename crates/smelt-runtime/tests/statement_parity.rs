@@ -55,6 +55,21 @@ use smelt_runtime::maintenance_driver::{driving_steps, run_windowed_keyed_mainte
 use smelt_runtime::types::ExecuteRequest;
 use tokio_util::sync::CancellationToken;
 
+/// A retry policy that never retries — the maintenance-driver call sites
+/// this suite exercises directly (outside `execute_project`) have no
+/// `ExecuteRequest`/run reporter to derive one from
+/// (`docs/plans/20260719-prod-w2-operability.md` Phase 6).
+const NO_OP_REPORTER: smelt_runtime::NoOpReporter = smelt_runtime::NoOpReporter;
+fn no_retry_policy() -> smelt_runtime::RetryPolicy<'static> {
+    smelt_runtime::RetryPolicy {
+        retry_max: 0,
+        base_backoff_ms: 0,
+        run_id: "statement-parity-test",
+        model_name: "statement-parity-test",
+        reporter: &NO_OP_REPORTER,
+    }
+}
+
 /// Wraps a real [`DuckDbBackend`], delegating every call, but recording the
 /// [`StatementGroup`] passed to `execute_statement_group` — the single
 /// point every emitted maintenance statement flows through on its way to
@@ -412,6 +427,11 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     }
 }
 
@@ -617,8 +637,6 @@ async fn self_referential_bootstrap_statements_come_from_the_emitter() {
          \x20\x20partition_column: d\n\
          \x20\x20event_time_column: d\n\
          \x20\x20granularity: day\n\
-         batched:\n\
-         \x20\x20unique_key: [d]\n\
          ---\n\
          SELECT d, balance FROM (\n\
          \x20\x20SELECT\n\
@@ -1279,6 +1297,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
             why: "test asserts the unconditional checked-merge shape".to_string(),
         },
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect("day 1 create must succeed");
@@ -1310,6 +1329,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
             why: "test asserts the unconditional checked-merge shape".to_string(),
         },
         compile_step,
+        &no_retry_policy(),
     )
     .await
     .expect("in-bound redelivery must merge cleanly");
@@ -1330,6 +1350,7 @@ async fn recurrence_bound_probe_and_checked_merge_come_from_the_emitters() {
         "last_seen_date",
         delta_select,
         "2026-01-30",
+        MaintenanceDialect::DuckDb,
     );
     assert_eq!(
         probe_sql, &expected_probe.sql,
@@ -1401,6 +1422,11 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
         ephemeral_seed_ctes: vec![],
         run_checks: false,
         checks: vec![],
+        jobs: None,
+        retry_max: None,
+        retry_backoff_ms: None,
+        resume: false,
+        technique_overrides: vec![],
     }
 }
 
@@ -1647,6 +1673,7 @@ async fn suppressed_column_scoped_merge_statements_come_from_the_emitter() {
         dimension_batch_sql,
         &suppression,
         &window,
+        &no_retry_policy(),
     )
     .await
     .expect("suppressed column-scoped merge must succeed");
@@ -2368,6 +2395,7 @@ async fn delta_restricted_recompute_statements_come_from_the_emitter() {
         "2026-07-01",
         "2026-07-02",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("delta-restricted recompute must succeed");
@@ -2446,6 +2474,7 @@ async fn open_closure_recompute_statements_come_from_the_unrestricted_emitter() 
         "2026-07-01",
         "2026-07-02",
         smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
+        &no_retry_policy(),
     )
     .await
     .expect("unrestricted recompute must succeed");
