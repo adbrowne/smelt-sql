@@ -71,8 +71,11 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 | 2     | done    | 42147964 | 2026-07-20 |
 | 3     | done    | (this commit) | 2026-07-20 |
 | 4     | done    | (this commit) | 2026-07-20 |
-| 5     | blocked |        | 2026-07-20 |
+| 5a    | pending |        |      |
+| 5b    | pending |        |      |
 | 6     | done    | 31e297e6 | 2026-07-20 |
+
+*(Phase 5 was reshaped 2026-07-20 into 5a + 5b after the original "no production code expected" scoping was proven unsatisfiable — see "## Blocked phases". 5a is the production dispatch change that makes `Suppressed` reachable for a generatable recipe; 5b is the original generative conformance leg, now satisfiable on top of 5a.)*
 
 ### Phase 1: Spec diff — sub-block retirement surface
 
@@ -179,30 +182,104 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 
 **Commit.** `refactor: rename surviving pre-cut batched spellings to partition-grain vocabulary`
 
-### Phase 5: Generative conformance leg for change-suppressed column-scoped MERGE
+### Phase 5a: Dispatch change-suppressed column-scoped MERGE on the keyed run path
 
-**Goal.** Close the source plan's C4 deferred item: at least one generated conformance recipe resolves `RowIdentity` to a proven grain key, so `resolve_write_suppression` genuinely admits `Suppressed` inside `maintenance_conformance`, and the suppressed-vs-full-refresh equivalence is proven generatively — not only on the hand-built `statement_parity`/`technique_lowering` fixtures.
+**Goal.** A composed clock-and-identity **keyed** model (`grain: key`) that enriches from an
+`explicitly_mutable` dimension declared `allow_full_scan` maintains its dimension-driven column
+group via the change-suppressed column-scoped `MERGE` **at runtime**, reaching `Suppressed` when P2
+(the model's declared `unique_key` → `RowIdentity::Key`) and P3 (per-column change comparability)
+both hold. This closes the runtime dispatch gap that makes the original Phase 5 unsatisfiable: the
+derivation already produces the `Technique::ColumnScopedMerge` cell carrying `RowIdentity::Key` for
+this shape, but `execute.rs`'s keyed branch returns before the suppression path is ever consulted.
+The spec (`incremental_models.md` §"Per-cell write addressing", §"What the composed shape uniquely
+enables") already describes this behaviour as live — this phase is a **Known-Divergence closure**,
+not new normative surface.
 
-**Pre-conditions.** Phases 2–3 merged if the recipe declares `unique_key` via frontmatter staged by the generator (use the top-level spelling).
+**Root cause (verified 2026-07-20, see "## Blocked phases").**
+- `execute.rs` `plan_is_keyed` branch (~L1471–1616) routes every `grain: key` model to
+  `cumulative::execute_cumulative_aggregate` and returns (~L1610) **before** the incremental branch's
+  `resolve_live_column_scoped_cell` call (`maintenance_driver.rs:769`, invoked from `execute.rs` ~L1788).
+- So a keyed model's `UpstreamMutation` `ColumnScopedMerge` cell — which *does* carry
+  `RowIdentity::Key` (via `ModelInputs::declared_unique_key`, `derive.rs:466`) and survives derivation
+  when the mutable source is declared `allow_full_scan` (`derive_mutation`, `derive.rs:802`+, pushes the
+  cell at ~L873–884) — is never dispatched, and `Suppressed` is never reached generatively.
+- The partition path *does* dispatch column-scoped MERGE (tested by `technique_lowering.rs::column_scoped_merge_e2e`),
+  but there P2 is structurally `RowIdentity::WholeRow` (empty `JoinContext` in `row_identity`,
+  `derive.rs:41`/573), so `resolve_write_suppression` (`choice.rs:385`) forces `Unconditional`.
+
+**Chosen reshape — Candidate (b), runtime-only.** Consult `resolve_live_column_scoped_cell` for the
+keyed model's `explicitly_mutable` sources inside the keyed branch and dispatch the resolved
+column-scoped `MERGE` (with its `WriteSuppression`) alongside the cumulative fold, reusing the
+existing resolver and the single-owner `smelt-logical::maintenance::emit` column-scoped-merge
+emitters. Explicitly **not** touching derivation (`derive.rs`) — the cell is already produced — and
+**not** the alternative (Candidate a: threading `SourceFacts`/`JoinContext` into P2 for
+`Grain::Partition` enrichment joins), which perturbs the single shared P2 identity project-wide and
+needs a new source-level `unique_key` surface. Rejected as larger blast radius for the same one-shape goal.
+
+**Pre-conditions.** W8 phases 1–4 done (they are). DuckDB backend only — no Spark needed for this phase.
+
+**TDD tests to write first.**
+- `crates/smelt-runtime/tests/technique_lowering.rs` (a sibling of `column_scoped_merge_e2e`) — a keyed
+  (`grain: key`) model enriching from a mutable dimension declared `allow_full_scan`: after a dimension
+  mutation that genuinely changes a compared column, the dimension-driven column is column-scoped-merged
+  and the **`Suppressed`** arm (`IS DISTINCT FROM`) executes; a no-change redelivery writes nothing.
+  Assert the technique reached is `ColumnScopedMerge` + `Suppressed` (not the cumulative fold, not
+  `Unconditional`). This is the red test — it fails today because the keyed branch returns early.
+
+**Implementation shape.**
+- `crates/smelt-runtime/src/execute.rs`, `plan_is_keyed` branch: before the unconditional return
+  (~L1610), for the keyed model's `explicitly_mutable` sources, call `resolve_live_column_scoped_cell`
+  exactly as the incremental branch does (~L1788) and dispatch the column-scoped `MERGE` (with its
+  resolved `WriteSuppression`) when a live mutation cell resolves and the target table exists. The
+  cumulative fold still owns the creation/append (`NewData`) trigger; the column-scoped merge owns the
+  `UpstreamMutation` trigger — both can run in one keyed run.
+- `crates/smelt-runtime/src/cumulative.rs` — a dispatch helper if cleaner, or keep dispatch in
+  `execute.rs`. **No new emit code** — reuse the existing single-owner emitters (statement-parity gate).
+
+**Critical files (allowed to touch).** `crates/smelt-runtime/src/execute.rs`,
+`crates/smelt-runtime/src/cumulative.rs`, `crates/smelt-runtime/src/maintenance_driver.rs` (only if a
+small shared helper is needed), the runtime test above. **Not** `derive.rs`, **not** the emit layer.
+
+**Spec increment (pre-authorized).** `docs/specs/incremental_models.md` §Known Divergences — the entry
+that scopes the live column-scoped-`MERGE` dispatch to the partition/incremental path (around "The
+regular incremental run loop … dispatches into the column-scoped `MERGE` automatically … the one
+currently reachable") is **narrowed**: the keyed run path now dispatches it too, so `Suppressed` is
+reachable on a generatable keyed shape. Locate the exact entry with one targeted read; edit its text
+only (timeless — describe behaviour, not this phase).
+
+**Review checklist** (material findings only):
+- [ ] The keyed model + mutable dim + `allow_full_scan` reaches `ColumnScopedMerge` + `Suppressed` at runtime (the e2e Suppressed assertion)
+- [ ] No-change redelivery writes nothing (suppression actually suppresses)
+- [ ] The creation/append fold still runs on the keyed path — standing keyed conformance legs stay green
+- [ ] `statement_parity` + `technique_lowering` standing gates green (single-owner emission preserved)
+- [ ] No change to `derive.rs` or the emit layer
+
+**Commit.** `feat(runtime): dispatch change-suppressed column-scoped MERGE on the keyed run path`
+
+### Phase 5b: Generative conformance leg for change-suppressed column-scoped MERGE
+
+**Goal.** Close the source plan's C4 deferred item: at least one generated conformance recipe resolves `RowIdentity` to a proven grain key, so `resolve_write_suppression` genuinely admits `Suppressed` inside `maintenance_conformance`, and the suppressed-vs-full-refresh equivalence is proven generatively — not only on the hand-built `statement_parity`/`technique_lowering` fixtures. Satisfiable **on top of Phase 5a** (which makes `Suppressed` reachable at runtime for a keyed recipe); this phase adds no production code.
+
+**Pre-conditions.** **Phase 5a done** (the runtime dispatch is what makes the suppressed arm reachable for a generated recipe). Phases 2–3 done (top-level `unique_key:` frontmatter staged by the generator).
 
 **TDD tests to write first.**
 - `crates/smelt-cli/tests/maintenance_conformance/gate.rs` — a structural leg asserting the recipe pool contains at least one recipe whose derived plan admits `Technique::ColumnScopedMerge` with `Suppressed` resolved (guards against the leg silently degrading back to `Unconditional`-only, the exact failure mode the source plan recorded).
 - `crates/smelt-cli/tests/maintenance_conformance` — the equivalence run over the new recipe family: after every step, including an unchanged-input redelivery step (the zero-write case), state equals the full-refresh oracle.
 
-**Implementation shape.** Extend `MutableEnrichedRecipe` (or add a sibling recipe) so the generated model declares a top-level `unique_key:` that P2 accepts as the declared-key rung of row identity — the narrow cut the source plan names, versus proving identity through joins (stays deferred, see Scope). The redelivery step must be a genuine no-change delta so the suppression arm executes.
+**Implementation shape.** Add a recipe (or extend the pool) whose model is the **keyed** shape Phase 5a dispatches: `grain: key` (top-level `unique_key:`) enriching from a mutable-snapshot dimension declared `allow_full_scan`, so P2 gets `RowIdentity::Key` for free and the runtime reaches the suppressed column-scoped MERGE. The redelivery step must be a genuine no-change delta so the suppression arm executes. Runs on DuckDB (and, via W9's backend seam, dual-backend where Spark is live).
 
 **Critical files (allowed to touch in this phase).**
-- `crates/smelt-cli/tests/maintenance_conformance/**` — recipe + gate legs only. No production code expected; if suppression admission turns out to need a production fix, stop and reshape (that is a new finding, not this phase's scope).
+- `crates/smelt-cli/tests/maintenance_conformance/**` — recipe + gate legs only. No production code expected (Phase 5a already landed it); if admission still falls short, that is a new finding against 5a, not new scope here.
 
 **Docs touched.** *(timeless)*
-- `docs/specs/incremental_models.md` — the divergence/caveat text that scoped the conformance evidence to hand-built fixtures is updated to claim the generative leg.
+- `docs/specs/incremental_models.md` — the conformance-posture caveat that scoped the C4/E4 evidence to hand-built fixtures is narrowed: the change-suppressed column-scoped MERGE now has its generative equivalence leg.
 
 **Review checklist** (material findings only):
 - [ ] The structural leg fails if no recipe admits `Suppressed` (verified by temporarily breaking admission)
 - [ ] The equivalence leg includes the zero-write redelivery step
-- [ ] No production code changed
+- [ ] No production code changed in this phase
 
-**Commit.** `test(conformance): generative suppressed-MERGE equivalence leg via declared-key recipe`
+**Commit.** `test(conformance): generative suppressed-MERGE equivalence leg via keyed declared-key recipe`
 
 ### Phase 6: Recursive composed driving source in `build_forward_graph`
 
@@ -241,6 +318,8 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 - `Grain::Key` recipes get `RowIdentity::Key` for free (even through a join) but their maintenance is never dispatched through the `ColumnScopedMerge` suppression path at runtime: `execute.rs`'s `plan_is_keyed` branch (~line 1471) routes every `grain: key` model to `cumulative::execute_cumulative_aggregate` and returns before reaching `resolve_live_column_scoped_cell` (`maintenance_driver.rs:769`); `cumulative.rs` has no handling of `UpstreamMutation`/`ColumnScopedMerge`/mutable dimensions at all.
 
 Candidate reshapes (neither attempted — both are production changes, not test-only): (a) thread `SourceFacts`/`JoinContext` facts into row-identity derivation for external-source enrichment joins on `Grain::Partition`; (b) wire `ColumnScopedMerge` dispatch into `execute_cumulative_aggregate` for `Grain::Key` models. Filed as a new finding for human triage; Phase 5 stays `blocked` until reshaped by a human (new plan phase or a follow-up sub-plan).
+
+**RESOLVED 2026-07-20 — reshaped into Phase 5a + 5b.** A follow-up code investigation confirmed both gaps and one additional favourable fact the original block note did not establish: derivation **already produces** a `Technique::ColumnScopedMerge` cell carrying `RowIdentity::Key` for a `Grain::Key` model enriching from a mutable dimension declared `allow_full_scan` (`derive_mutation` at `derive.rs:802`+ is grain-agnostic; the cell survives because `allow_full_scan` skips the `ScanUnbounded` refusal, and `declared_unique_key` at `derive.rs:466` supplies the key). So candidate (b) is **runtime-only** — no derivation change — and candidate (a)'s shared-P2 blast radius is avoided. Phase 5a lands the `execute.rs` keyed-branch dispatch that consumes that cell (making `Suppressed` reachable), and Phase 5b is the original generative conformance leg, now satisfiable on top of 5a. Rows 5a/5b are `pending`.
 
 ## Verification
 
