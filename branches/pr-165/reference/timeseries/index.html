@@ -2998,7 +2998,7 @@
 <td>The <code>timeseries:</code> block parses but violates a structural rule — unknown key, <code>granularity</code> not in the enum, <code>partition_column</code> absent from the model's SQL body, <code>week_start</code> set without <code>granularity: week</code>, or <code>timeseries:</code> on an <code>ephemeral</code> / <code>test</code> model.</td>
 </tr>
 <tr>
-<td><code>TimeseriesRequiredForBatched</code></td>
+<td><code>TimeseriesRequiredForPartitionGrain</code></td>
 <td>Error</td>
 <td>A model declares <code>refresh: incremental</code> + <code>grain: partition</code> but has no <code>timeseries:</code> block.</td>
 </tr>
