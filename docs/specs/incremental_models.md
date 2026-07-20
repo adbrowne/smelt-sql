@@ -2150,8 +2150,7 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   doesn't have). Mechanisms and sequencing:
   `docs/research/20260715-conditional-maintenance-without-cdf.md`;
   `docs/plans/20260715-composed-axes-conditional-maintenance.md`.
-- **The conditional variant now enters the override ladder; `smelt bakeoff` is specified but not
-  yet implemented.**
+- **The conditional variant now enters the override ladder; `smelt bakeoff` is landed.**
   `resolve_write_suppression`'s `Suppressed` verdict no longer means "always emit the
   change-suppressed matched arm whenever it's proven" — `maintenance::choice::resolve_write_variant`
   folds a structural preference rule alongside the already-proven verdict: a steady-state trigger
@@ -2190,11 +2189,12 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   obey. A `technique: unconditional` pin forces the plain matched arm off suppression even for a
   steady-state trigger, and never refuses (the plain matched arm is always safe). The soft
   `prefer: suppress`/`prefer: unconditional` values nudge the same default without ever refusing.
-  `smelt bakeoff`, the measured-cost surface the ladder's `prefer: auto`/no-override default
-  ultimately could answer to, does not yet feed this write-suppression dimension automatically —
-  it measures and emits a pin for a human to apply (tracked by
-  `docs/plans/20260719-prod-w7-bakeoff.md`), so absent an explicit pin/preference on this
-  dimension, today's default is still the structural rule above, not a measured one.
+  `smelt bakeoff` (`docs/plans/20260719-prod-w7-bakeoff.md`), the measured-cost surface the
+  ladder's `prefer: auto`/no-override default ultimately could answer to, measures technique
+  family cost (fold vs. region recompute vs. rederiving columns) and emits a pin for a human to
+  apply; it does not measure or feed this orthogonal write-suppression dimension, so absent an
+  explicit pin/preference on this dimension, today's default is still the structural rule above,
+  not a measured one.
   Whether a future cost model needs region-level change-ratio statistics from prior observed
   deltas (rather than the structural steady-state/first-build rule alone) to refine this choice
   further is an open question, not scoped work.
@@ -2205,9 +2205,10 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   (`docs/research/20260705-refresh-as-maintenance-plan/07-example-catalogue.md`).
   `docs-site/docs/reference/cli.md` now documents `--since-upstream` (forward propagation) and
   `--include-upstreams` (backward resolution) under `smelt run`/`smelt build`, plus
-  `smelt explain`'s cell/clamp/ledger report and `--show-sql`; the `maintenance:` frontmatter
-  block is documented in `docs-site/docs/reference/smelt-yml.md`. What is still not yet
-  covered — because the underlying surface doesn't exist yet — is `smelt bakeoff`.
+  `smelt explain`'s cell/clamp/ledger report and `--show-sql`, and `smelt bakeoff`'s grammar and
+  report anatomy; the `maintenance:` frontmatter block, including the now-live
+  `cells[].technique`/`prefer` override wiring and the `--pin` paste workflow, is documented in
+  `docs-site/docs/reference/smelt-yml.md`.
 - **A group merged across two mutable inputs has no group-merge-provenance policy.** Per-cell
   admission today checks obligations 4/5 (bounded reach/footprint) the same way regardless of
   whether a column group's `mutation_sensitivity` set came from ONE input or several — a

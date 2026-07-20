@@ -1262,6 +1262,90 @@ Inbound edges: sources.raw.events
 
 ---
 
+## smelt bakeoff
+
+Measure the wall-clock cost of every admissible maintenance technique for a model's cells against
+a replayed window of real data, and optionally emit the winning technique as a ready-to-paste
+frontmatter pin. This is the same [`maintenance.cells[].technique`/`prefer` override
+ladder](smelt-yml.md#maintenance-configuration) a live run consults — `smelt bakeoff` measures
+what that ladder would cost under each candidate, it doesn't change what a run does until you
+paste the emitted pin yourself.
+
+**Usage:**
+
+```
+smelt bakeoff <MODEL_NAME> [OPTIONS]
+```
+
+**Arguments:**
+
+| Argument | Type | Description |
+|----------|------|-------------|
+| `MODEL_NAME` | string, required | The incremental model to measure. |
+
+**Flags:**
+
+| Flag | Type | Default | Description |
+|------|------|---------|-------------|
+| `--project-dir` | path | `.` | Path to smelt project root |
+| `--target` | string | `dev` | The declared target to clone for scratch measurement runs. |
+| `--cells <col>@<source>,...` | string[] | every cell with ≥2 admissible techniques | Narrow measurement to specific cells. Repeatable and/or comma-separated. A named cell with only one admissible technique errors — there's nothing to compare. |
+| `--runs N` | u32 | `3` | Splits the driving source's event-time extent into `N` sequential windows and replays them, in order, once per candidate technique. Each replay is a real `execute_project` run against the project's own data, not a synthetic sample. |
+| `--keep` | bool | `false` | Retain the scratch schemas (`smelt_bakeoff_<model>_<technique>`) and their per-target state directories after measurement instead of dropping them. |
+| `--pin` | bool | `false` | Print the winning `cells[]` entry (or a full `maintenance:` block when the model has none) as YAML to stdout. Emit-only — never writes the model's `.sql` file. |
+
+Every cell under measurement runs against a disposable **scratch target**: the chosen `--target`
+is cloned in memory under a synthetic name with schema `smelt_bakeoff_<model>_<technique>` — no
+runtime schema seam is needed, since schema already flows from `config.targets[target].schema` —
+and the scratch schema (plus its state directory) is dropped after measurement unless `--keep`.
+The real target and its state are never touched. After each replayed window, every pair of
+measured techniques' output is cross-checked with `EXCEPT ALL` in both directions; a mismatch
+fails the whole run loudly rather than reporting a cost for a technique whose output diverged.
+
+A model with no cell that has 2+ admissible techniques prints a "nothing to measure" report and
+exits `0` — there is nothing to bake off.
+
+**Examples:**
+
+```bash
+# Measure every multi-technique cell of daily_events_enriched over 3 replayed windows
+smelt bakeoff daily_events_enriched
+
+# Narrow to one cell, replay 5 windows, keep the scratch schemas for inspection
+smelt bakeoff daily_events_enriched --cells user_name@users --runs 5 --keep
+
+# Measure and print the winning technique as a ready-to-paste frontmatter pin
+smelt bakeoff daily_events_enriched --pin
+```
+
+```text
+$ smelt bakeoff daily_events_enriched --runs 2 --pin
+smelt bakeoff report for `daily_events_enriched` (target=dev, runs=2)
+
+cell: columns=["user_name"] on=users trigger=UpstreamMutation
+  - fold             total=   842ms per-run=[421, 421] rows=100000 schema=smelt_bakeoff_daily_events_enriched_fold
+  - recompute        total=  1930ms per-run=[965, 965] rows=100000 schema=smelt_bakeoff_daily_events_enriched_recompute
+  equivalence: OK (EXCEPT ALL empty both directions)
+
+to pin this choice, add to `daily_events_enriched.sql` frontmatter:
+maintenance:
+  cells:
+    - columns: [user_name]
+      on: users
+      technique: fold
+```
+
+The report lists, per measured cell, every admissible technique's total and per-window
+wall-clock cost, the resulting row count, and the scratch schema it ran in; the `equivalence:`
+line confirms every pair of measured variants agreed exactly. With `--pin`, the winning
+technique — lowest total wall-clock across the replayed windows — is printed as YAML you can
+paste directly into the model's `maintenance:` block; see [`cells[].technique` /
+`prefer`](smelt-yml.md#maintenance-configuration) for what pinning it then does at execution. A
+tie keeps the model's current default choice and says so in the report rather than picking
+arbitrarily.
+
+---
+
 ## smelt ui
 
 Start a local web UI for visualizing the model graph and project structure.

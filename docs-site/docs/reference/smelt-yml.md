@@ -285,7 +285,29 @@ The most common use is `scan_bounds.per_source.<source>.allow_full_scan: true`, 
 
 A project-level `maintenance.scan_bounds` block in `smelt.yml`'s top level sets the baseline; a per-model `maintenance:` block in the SQL frontmatter refines it (narrower wins).
 
-`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` primarily choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). The same keys also carry a `suppress`/`unconditional` value that steers the orthogonal [conditional-write](../guide/incremental-models.md#conditional-writes) dimension: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — `prefer: suppress`/`prefer: unconditional` nudge the default without ever refusing, and `technique: suppress`/`technique: unconditional` force it, refusing loudly if the proof itself never admitted suppression. This ladder only drives the live run path for `ColumnScopedMerge` cells today; a `KeyedFold` cell's `refresh: keyed` executor still always honours a proven `Suppressed` verdict unconditionally, regardless of trigger or override — `smelt explain` resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.
+`maintenance.defaults.prefer`, `maintenance.cells[].prefer`, and `maintenance.cells[].technique` primarily choose among the *techniques* a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). This family choice is live: a `technique:` pin is a hard override that a run honours directly (bypassing the cost-model default, never bypassing admission — an inadmissible pin fails the run loudly, naming the cell), and `prefer:` nudges the same default without ever refusing. There is no separate config surface for this — the same keys drive both a live run's resolution and [`smelt bakeoff`](cli.md#smelt-bakeoff)'s offline measurement of what each admissible technique costs.
+
+The same keys also carry a `suppress`/`unconditional` value that steers the orthogonal [conditional-write](../guide/incremental-models.md#conditional-writes) dimension: whether a `ColumnScopedMerge`/`KeyedFold` cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — `prefer: suppress`/`prefer: unconditional` nudge the default without ever refusing, and `technique: suppress`/`technique: unconditional` force it, refusing loudly if the proof itself never admitted suppression. This suppression ladder only drives the live run path for `ColumnScopedMerge` cells today; a `KeyedFold` cell's `refresh: keyed` executor still always honours a proven `Suppressed` verdict unconditionally, regardless of trigger or override — `smelt explain` resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.
+
+#### Pinning a measured technique
+
+[`smelt bakeoff <model> --pin`](cli.md#smelt-bakeoff) measures every admissible technique for a
+cell against replayed windows of real data and prints the cheapest one as a ready-to-paste
+`cells[]` entry — the same shape as the block above, with `technique:` set to the winner. The
+command never edits the `.sql` file itself; paste the printed block into the model's
+frontmatter yourself:
+
+```yaml
+maintenance:
+  cells:
+    - columns: [user_name]
+      on: users
+      technique: fold
+```
+
+Once pasted, the pin is an ordinary override, re-validated through admission on every compile —
+if the plan later stops admitting that technique for the cell (e.g. a schema change removes the
+proof it relied on), the next compile fails loud rather than silently reverting to the default.
 
 #### `cells[].write` — the physical addressing pin
 

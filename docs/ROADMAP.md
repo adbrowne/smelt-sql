@@ -88,13 +88,13 @@ Third backend after DuckDB and Spark. Deprioritized earlier in favor of Spark, n
 
 Deeper Databricks integration beyond the existing Spark / Databricks-Connect path, treated as low priority. The long-deferred **Metrics DSL** (`smelt.metric()`) is folded in here: Databricks now ships first-class **metrics views**, so the concrete, testable goal is that smelt metric definitions are compatible with — and can target — Databricks metrics views. That compatibility test is the forcing function that gives the Metrics DSL a real spec to hit; absent that, the Metrics DSL stays low priority and is tracked here rather than as its own item.
 
-### 10. 🔄 `smelt bakeoff` CLI (planned — production-readiness W7)
-
-The maintenance-plan programme's cost-model override ladder (`crates/smelt-logical/src/maintenance/choice.rs` — `ChosenTechnique`, `resolve_cell_choice`, the override ladder, `ChoiceRefusal`) is landed and tested. The `smelt bakeoff <model> [--cells ...] [--pin]` CLI was deferred out of MP13 (2026-07-10) on three open design questions; those are now resolved (July 19, 2026) and the work is scaffolded as production-readiness sub-plan **W7**: [`docs/plans/20260719-prod-w7-bakeoff.md`](plans/20260719-prod-w7-bakeoff.md). Resolutions (Decisions B1–B4 there): (1) technique forcing goes through the front door — wire the choice ladder into the runtime driver (also fixing that frontmatter `technique:` pins are currently parsed but ignored at execution) plus an `ExecuteRequest.technique_overrides` seam; scratch redirect is a synthetic in-memory target with its own schema, no runtime schema seam needed; (2) `--pin` is **emit-only** per the K6 design — it prints the winning `cells[]` YAML for the user to review and commit, never rewriting the `.sql`; (3) in-process testability follows the `explain.rs` precedent — a `pub mod bakeoff` engine in `smelt-cli`'s lib with a thin private command shim. Original deferral writeup: [`docs/plans/20260707-maintenance-plan-impl.md`](plans/20260707-maintenance-plan-impl.md) §"Blocked phases".
-
 ---
 
 ## Recently Completed
+
+### ~~`smelt bakeoff` CLI~~ ✅ (July 20, 2026)
+
+The maintenance-plan programme's cost-model override ladder (`crates/smelt-logical/src/maintenance/choice.rs` — `ChosenTechnique`, `resolve_cell_choice`, the override ladder, `ChoiceRefusal`) now drives both live runs and offline measurement: [`docs/plans/20260719-prod-w7-bakeoff.md`](plans/20260719-prod-w7-bakeoff.md). `smelt-runtime`'s maintenance driver resolves `cells[].technique`/`prefer` through the same ladder `smelt explain` reports (frontmatter pins are honoured at execution, not just parsed); `ExecuteRequest.technique_overrides` gives an in-process forcing seam that never bypasses admission. `smelt bakeoff <model> [--cells <col>@<source>,...] [--runs N] [--target <name>] [--keep] [--pin]` measures every admissible technique for a cell over `--runs` replayed windows of real data, each technique landing in its own scratch schema (`smelt_bakeoff_<model>_<technique>`, dropped unless `--keep`) and cross-checked against its siblings with `EXCEPT ALL`; `--pin` emits the winning `cells[]` entry as ready-to-paste YAML, never writing the model's `.sql` file. See [`docs-site/docs/reference/cli.md`](../docs-site/docs/reference/cli.md#smelt-bakeoff) and [`docs/specs/incremental_models.md`](specs/incremental_models.md#cli).
 
 ### ~~Composed Axes (Key + Time) and Conditional Maintenance~~ ✅ (July 19, 2026)
 
