@@ -2448,6 +2448,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#pinning-a-measured-technique" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pinning a measured technique
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#cellswrite-the-physical-addressing-pin" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3041,6 +3052,17 @@
     <span class="md-ellipsis">
       
         Maintenance Fields
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
+  <a href="#pinning-a-measured-technique" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Pinning a measured technique
       
     </span>
   </a>
@@ -3669,15 +3691,31 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 </tbody>
 </table>
 <p>A project-level <code>maintenance.scan_bounds</code> block in <code>smelt.yml</code>'s top level sets the baseline; a per-model <code>maintenance:</code> block in the SQL frontmatter refines it (narrower wins).</p>
-<p><code>maintenance.defaults.prefer</code>, <code>maintenance.cells[].prefer</code>, and <code>maintenance.cells[].technique</code> primarily choose among the <em>techniques</em> a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). The same keys also carry a <code>suppress</code>/<code>unconditional</code> value that steers the orthogonal <a href="../../guide/incremental-models/#conditional-writes">conditional-write</a> dimension: whether a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — <code>prefer: suppress</code>/<code>prefer: unconditional</code> nudge the default without ever refusing, and <code>technique: suppress</code>/<code>technique: unconditional</code> force it, refusing loudly if the proof itself never admitted suppression. This ladder only drives the live run path for <code>ColumnScopedMerge</code> cells today; a <code>KeyedFold</code> cell's <code>refresh: keyed</code> executor still always honours a proven <code>Suppressed</code> verdict unconditionally, regardless of trigger or override — <code>smelt explain</code> resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.</p>
-<h4 id="cellswrite-the-physical-addressing-pin"><code>cells[].write</code> — the physical addressing pin<a class="headerlink" href="#cellswrite-the-physical-addressing-pin" title="Permanent link">&para;</a></h4>
-<p><code>maintenance.cells[].write</code> is a separate axis from <code>prefer</code>/<code>technique</code>: it pins <em>how</em> a cell physically locates the rows it writes (region <code>DELETE</code>+<code>INSERT</code>, keyed <code>MERGE</code>, column-scoped <code>MERGE</code>, in-place <code>UPDATE</code>, full rebuild, or a backend-contributed pattern), not which technique family runs.</p>
+<p><code>maintenance.defaults.prefer</code>, <code>maintenance.cells[].prefer</code>, and <code>maintenance.cells[].technique</code> primarily choose among the <em>techniques</em> a cell's derived plan admits (fold vs. region recompute vs. rederiving columns). This family choice is live: a <code>technique:</code> pin is a hard override that a run honours directly (bypassing the cost-model default, never bypassing admission — an inadmissible pin fails the run loudly, naming the cell), and <code>prefer:</code> nudges the same default without ever refusing. There is no separate config surface for this — the same keys drive both a live run's resolution and <a href="../cli/#smelt-bakeoff"><code>smelt bakeoff</code></a>'s offline measurement of what each admissible technique costs.</p>
+<p>The same keys also carry a <code>suppress</code>/<code>unconditional</code> value that steers the orthogonal <a href="../../guide/incremental-models/#conditional-writes">conditional-write</a> dimension: whether a <code>ColumnScopedMerge</code>/<code>KeyedFold</code> cell's matched arm is suppressed for unchanged rows. By default this follows a structural rule (a steady-state trigger prefers suppression; a first-build/backfill trigger prefers the plain matched arm), never bypassing the underlying row-identity/column-comparability proof — <code>prefer: suppress</code>/<code>prefer: unconditional</code> nudge the default without ever refusing, and <code>technique: suppress</code>/<code>technique: unconditional</code> force it, refusing loudly if the proof itself never admitted suppression. This suppression ladder only drives the live run path for <code>ColumnScopedMerge</code> cells today; a <code>KeyedFold</code> cell's <code>refresh: keyed</code> executor still always honours a proven <code>Suppressed</code> verdict unconditionally, regardless of trigger or override — <code>smelt explain</code> resolves and prints the ladder's answer for it, but that answer doesn't yet reach the live keyed-fold write.</p>
+<h4 id="pinning-a-measured-technique">Pinning a measured technique<a class="headerlink" href="#pinning-a-measured-technique" title="Permanent link">&para;</a></h4>
+<p><a href="../cli/#smelt-bakeoff"><code>smelt bakeoff &lt;model&gt; --pin</code></a> measures every admissible technique for a
+cell against replayed windows of real data and prints the cheapest one as a ready-to-paste
+<code>cells[]</code> entry — the same shape as the block above, with <code>technique:</code> set to the winner. The
+command never edits the <code>.sql</code> file itself; paste the printed block into the model's
+frontmatter yourself:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="nt">maintenance</span><span class="p">:</span>
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="w">  </span><span class="nt">cells</span><span class="p">:</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">columns</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">amount</span><span class="p p-Indicator">]</span>
-<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">      </span><span class="nt">on</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backfill</span>
-<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">      </span><span class="nt">technique</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">recompute</span>
-<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="w">      </span><span class="nt">write</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">region</span>
+<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">columns</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">user_name</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="w">      </span><span class="nt">on</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">users</span>
+<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="w">      </span><span class="nt">technique</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">fold</span>
+</code></pre></div>
+<p>Once pasted, the pin is an ordinary override, re-validated through admission on every compile —
+if the plan later stops admitting that technique for the cell (e.g. a schema change removes the
+proof it relied on), the next compile fails loud rather than silently reverting to the default.</p>
+<h4 id="cellswrite-the-physical-addressing-pin"><code>cells[].write</code> — the physical addressing pin<a class="headerlink" href="#cellswrite-the-physical-addressing-pin" title="Permanent link">&para;</a></h4>
+<p><code>maintenance.cells[].write</code> is a separate axis from <code>prefer</code>/<code>technique</code>: it pins <em>how</em> a cell physically locates the rows it writes (region <code>DELETE</code>+<code>INSERT</code>, keyed <code>MERGE</code>, column-scoped <code>MERGE</code>, in-place <code>UPDATE</code>, full rebuild, or a backend-contributed pattern), not which technique family runs.</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="nt">maintenance</span><span class="p">:</span>
+<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="w">  </span><span class="nt">cells</span><span class="p">:</span>
+<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="w">    </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="nt">columns</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">amount</span><span class="p p-Indicator">]</span>
+<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a><span class="w">      </span><span class="nt">on</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">backfill</span>
+<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="w">      </span><span class="nt">technique</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">recompute</span>
+<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="w">      </span><span class="nt">write</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">region</span>
 </code></pre></div>
 <p><code>write:</code> is an <strong>open name</strong>, not a sealed keyword set — it resolves against a registry of currently-known write patterns, and the set grows as backends contribute new ones. A pin is validated, never silently honoured or downgraded:</p>
 <ul>
@@ -3702,61 +3740,61 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <hr />
 <h2 id="complete-example">Complete Example<a class="headerlink" href="#complete-example" title="Permanent link">&para;</a></h2>
 <p>The following is a fully annotated <code>smelt.yml</code> based on the timeseries example project:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="c1"># Project identity</span>
-<a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt_examples</span>
-<a id="__codelineno-10-3" name="__codelineno-10-3" href="#__codelineno-10-3"></a><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
-<a id="__codelineno-10-4" name="__codelineno-10-4" href="#__codelineno-10-4"></a>
-<a id="__codelineno-10-5" name="__codelineno-10-5" href="#__codelineno-10-5"></a><span class="c1"># Workspace-relative directories scanned for project files (.sql, .py, .csv, .yml).</span>
-<a id="__codelineno-10-6" name="__codelineno-10-6" href="#__codelineno-10-6"></a><span class="c1"># Default: [&quot;models&quot;]. Kind is determined by file format/content, not by directory.</span>
-<a id="__codelineno-10-7" name="__codelineno-10-7" href="#__codelineno-10-7"></a><span class="nt">paths</span><span class="p">:</span>
-<a id="__codelineno-10-8" name="__codelineno-10-8" href="#__codelineno-10-8"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">models</span>
-<a id="__codelineno-10-9" name="__codelineno-10-9" href="#__codelineno-10-9"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">seeds</span>
-<a id="__codelineno-10-10" name="__codelineno-10-10" href="#__codelineno-10-10"></a>
-<a id="__codelineno-10-11" name="__codelineno-10-11" href="#__codelineno-10-11"></a><span class="c1"># Execution environments</span>
-<a id="__codelineno-10-12" name="__codelineno-10-12" href="#__codelineno-10-12"></a><span class="nt">targets</span><span class="p">:</span>
-<a id="__codelineno-10-13" name="__codelineno-10-13" href="#__codelineno-10-13"></a><span class="w">  </span><span class="c1"># Local development with DuckDB (default target)</span>
-<a id="__codelineno-10-14" name="__codelineno-10-14" href="#__codelineno-10-14"></a><span class="w">  </span><span class="nt">dev</span><span class="p">:</span>
-<a id="__codelineno-10-15" name="__codelineno-10-15" href="#__codelineno-10-15"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">duckdb</span>
-<a id="__codelineno-10-16" name="__codelineno-10-16" href="#__codelineno-10-16"></a><span class="w">    </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">target/dev.duckdb</span>
-<a id="__codelineno-10-17" name="__codelineno-10-17" href="#__codelineno-10-17"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
-<a id="__codelineno-10-18" name="__codelineno-10-18" href="#__codelineno-10-18"></a>
-<a id="__codelineno-10-19" name="__codelineno-10-19" href="#__codelineno-10-19"></a><span class="w">  </span><span class="c1"># Remote Spark cluster</span>
-<a id="__codelineno-10-20" name="__codelineno-10-20" href="#__codelineno-10-20"></a><span class="w">  </span><span class="nt">spark</span><span class="p">:</span>
-<a id="__codelineno-10-21" name="__codelineno-10-21" href="#__codelineno-10-21"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark</span>
-<a id="__codelineno-10-22" name="__codelineno-10-22" href="#__codelineno-10-22"></a><span class="w">    </span><span class="nt">connect_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sc://localhost:15002</span>
-<a id="__codelineno-10-23" name="__codelineno-10-23" href="#__codelineno-10-23"></a><span class="w">    </span><span class="nt">catalog</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark_catalog</span>
-<a id="__codelineno-10-24" name="__codelineno-10-24" href="#__codelineno-10-24"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
-<a id="__codelineno-10-25" name="__codelineno-10-25" href="#__codelineno-10-25"></a>
-<a id="__codelineno-10-26" name="__codelineno-10-26" href="#__codelineno-10-26"></a><span class="c1"># Default materialization for models not explicitly configured</span>
-<a id="__codelineno-10-27" name="__codelineno-10-27" href="#__codelineno-10-27"></a><span class="nt">default_materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">view</span>
-<a id="__codelineno-10-28" name="__codelineno-10-28" href="#__codelineno-10-28"></a>
-<a id="__codelineno-10-29" name="__codelineno-10-29" href="#__codelineno-10-29"></a><span class="c1"># Per-model configuration</span>
-<a id="__codelineno-10-30" name="__codelineno-10-30" href="#__codelineno-10-30"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-10-31" name="__codelineno-10-31" href="#__codelineno-10-31"></a><span class="w">  </span><span class="c1"># Simple table materialization</span>
-<a id="__codelineno-10-32" name="__codelineno-10-32" href="#__codelineno-10-32"></a><span class="w">  </span><span class="nt">users</span><span class="p">:</span>
-<a id="__codelineno-10-33" name="__codelineno-10-33" href="#__codelineno-10-33"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-10-34" name="__codelineno-10-34" href="#__codelineno-10-34"></a>
-<a id="__codelineno-10-35" name="__codelineno-10-35" href="#__codelineno-10-35"></a><span class="w">  </span><span class="nt">events</span><span class="p">:</span>
-<a id="__codelineno-10-36" name="__codelineno-10-36" href="#__codelineno-10-36"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-10-37" name="__codelineno-10-37" href="#__codelineno-10-37"></a>
-<a id="__codelineno-10-38" name="__codelineno-10-38" href="#__codelineno-10-38"></a><span class="w">  </span><span class="nt">user_activity</span><span class="p">:</span>
-<a id="__codelineno-10-39" name="__codelineno-10-39" href="#__codelineno-10-39"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-10-40" name="__codelineno-10-40" href="#__codelineno-10-40"></a>
-<a id="__codelineno-10-41" name="__codelineno-10-41" href="#__codelineno-10-41"></a><span class="w">  </span><span class="nt">transactions</span><span class="p">:</span>
-<a id="__codelineno-10-42" name="__codelineno-10-42" href="#__codelineno-10-42"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-10-43" name="__codelineno-10-43" href="#__codelineno-10-43"></a>
-<a id="__codelineno-10-44" name="__codelineno-10-44" href="#__codelineno-10-44"></a><span class="w">  </span><span class="c1"># Incremental model (grain: partition) — timeseries: and batched: are sibling keys</span>
-<a id="__codelineno-10-45" name="__codelineno-10-45" href="#__codelineno-10-45"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
-<a id="__codelineno-10-46" name="__codelineno-10-46" href="#__codelineno-10-46"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-10-47" name="__codelineno-10-47" href="#__codelineno-10-47"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>
-<a id="__codelineno-10-48" name="__codelineno-10-48" href="#__codelineno-10-48"></a><span class="w">    </span><span class="nt">grain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">partition</span>
-<a id="__codelineno-10-49" name="__codelineno-10-49" href="#__codelineno-10-49"></a><span class="w">    </span><span class="nt">timeseries</span><span class="p">:</span>
-<a id="__codelineno-10-50" name="__codelineno-10-50" href="#__codelineno-10-50"></a><span class="w">      </span><span class="nt">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction_timestamp</span><span class="w">  </span><span class="c1"># column in SOURCE data (WHERE filter)</span>
-<a id="__codelineno-10-51" name="__codelineno-10-51" href="#__codelineno-10-51"></a><span class="w">      </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">revenue_date</span><span class="w">             </span><span class="c1"># column in OUTPUT (DELETE target)</span>
-<a id="__codelineno-10-52" name="__codelineno-10-52" href="#__codelineno-10-52"></a><span class="w">      </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
-<a id="__codelineno-10-53" name="__codelineno-10-53" href="#__codelineno-10-53"></a>
-<a id="__codelineno-10-54" name="__codelineno-10-54" href="#__codelineno-10-54"></a><span class="w">  </span><span class="nt">cube_metrics</span><span class="p">:</span>
-<a id="__codelineno-10-55" name="__codelineno-10-55" href="#__codelineno-10-55"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="c1"># Project identity</span>
+<a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="nt">name</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">smelt_examples</span>
+<a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="nt">version</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">1</span>
+<a id="__codelineno-11-4" name="__codelineno-11-4" href="#__codelineno-11-4"></a>
+<a id="__codelineno-11-5" name="__codelineno-11-5" href="#__codelineno-11-5"></a><span class="c1"># Workspace-relative directories scanned for project files (.sql, .py, .csv, .yml).</span>
+<a id="__codelineno-11-6" name="__codelineno-11-6" href="#__codelineno-11-6"></a><span class="c1"># Default: [&quot;models&quot;]. Kind is determined by file format/content, not by directory.</span>
+<a id="__codelineno-11-7" name="__codelineno-11-7" href="#__codelineno-11-7"></a><span class="nt">paths</span><span class="p">:</span>
+<a id="__codelineno-11-8" name="__codelineno-11-8" href="#__codelineno-11-8"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">models</span>
+<a id="__codelineno-11-9" name="__codelineno-11-9" href="#__codelineno-11-9"></a><span class="w">  </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">seeds</span>
+<a id="__codelineno-11-10" name="__codelineno-11-10" href="#__codelineno-11-10"></a>
+<a id="__codelineno-11-11" name="__codelineno-11-11" href="#__codelineno-11-11"></a><span class="c1"># Execution environments</span>
+<a id="__codelineno-11-12" name="__codelineno-11-12" href="#__codelineno-11-12"></a><span class="nt">targets</span><span class="p">:</span>
+<a id="__codelineno-11-13" name="__codelineno-11-13" href="#__codelineno-11-13"></a><span class="w">  </span><span class="c1"># Local development with DuckDB (default target)</span>
+<a id="__codelineno-11-14" name="__codelineno-11-14" href="#__codelineno-11-14"></a><span class="w">  </span><span class="nt">dev</span><span class="p">:</span>
+<a id="__codelineno-11-15" name="__codelineno-11-15" href="#__codelineno-11-15"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">duckdb</span>
+<a id="__codelineno-11-16" name="__codelineno-11-16" href="#__codelineno-11-16"></a><span class="w">    </span><span class="nt">database</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">target/dev.duckdb</span>
+<a id="__codelineno-11-17" name="__codelineno-11-17" href="#__codelineno-11-17"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+<a id="__codelineno-11-18" name="__codelineno-11-18" href="#__codelineno-11-18"></a>
+<a id="__codelineno-11-19" name="__codelineno-11-19" href="#__codelineno-11-19"></a><span class="w">  </span><span class="c1"># Remote Spark cluster</span>
+<a id="__codelineno-11-20" name="__codelineno-11-20" href="#__codelineno-11-20"></a><span class="w">  </span><span class="nt">spark</span><span class="p">:</span>
+<a id="__codelineno-11-21" name="__codelineno-11-21" href="#__codelineno-11-21"></a><span class="w">    </span><span class="nt">type</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark</span>
+<a id="__codelineno-11-22" name="__codelineno-11-22" href="#__codelineno-11-22"></a><span class="w">    </span><span class="nt">connect_url</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">sc://localhost:15002</span>
+<a id="__codelineno-11-23" name="__codelineno-11-23" href="#__codelineno-11-23"></a><span class="w">    </span><span class="nt">catalog</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">spark_catalog</span>
+<a id="__codelineno-11-24" name="__codelineno-11-24" href="#__codelineno-11-24"></a><span class="w">    </span><span class="nt">schema</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">main</span>
+<a id="__codelineno-11-25" name="__codelineno-11-25" href="#__codelineno-11-25"></a>
+<a id="__codelineno-11-26" name="__codelineno-11-26" href="#__codelineno-11-26"></a><span class="c1"># Default materialization for models not explicitly configured</span>
+<a id="__codelineno-11-27" name="__codelineno-11-27" href="#__codelineno-11-27"></a><span class="nt">default_materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">view</span>
+<a id="__codelineno-11-28" name="__codelineno-11-28" href="#__codelineno-11-28"></a>
+<a id="__codelineno-11-29" name="__codelineno-11-29" href="#__codelineno-11-29"></a><span class="c1"># Per-model configuration</span>
+<a id="__codelineno-11-30" name="__codelineno-11-30" href="#__codelineno-11-30"></a><span class="nt">models</span><span class="p">:</span>
+<a id="__codelineno-11-31" name="__codelineno-11-31" href="#__codelineno-11-31"></a><span class="w">  </span><span class="c1"># Simple table materialization</span>
+<a id="__codelineno-11-32" name="__codelineno-11-32" href="#__codelineno-11-32"></a><span class="w">  </span><span class="nt">users</span><span class="p">:</span>
+<a id="__codelineno-11-33" name="__codelineno-11-33" href="#__codelineno-11-33"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+<a id="__codelineno-11-34" name="__codelineno-11-34" href="#__codelineno-11-34"></a>
+<a id="__codelineno-11-35" name="__codelineno-11-35" href="#__codelineno-11-35"></a><span class="w">  </span><span class="nt">events</span><span class="p">:</span>
+<a id="__codelineno-11-36" name="__codelineno-11-36" href="#__codelineno-11-36"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+<a id="__codelineno-11-37" name="__codelineno-11-37" href="#__codelineno-11-37"></a>
+<a id="__codelineno-11-38" name="__codelineno-11-38" href="#__codelineno-11-38"></a><span class="w">  </span><span class="nt">user_activity</span><span class="p">:</span>
+<a id="__codelineno-11-39" name="__codelineno-11-39" href="#__codelineno-11-39"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+<a id="__codelineno-11-40" name="__codelineno-11-40" href="#__codelineno-11-40"></a>
+<a id="__codelineno-11-41" name="__codelineno-11-41" href="#__codelineno-11-41"></a><span class="w">  </span><span class="nt">transactions</span><span class="p">:</span>
+<a id="__codelineno-11-42" name="__codelineno-11-42" href="#__codelineno-11-42"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+<a id="__codelineno-11-43" name="__codelineno-11-43" href="#__codelineno-11-43"></a>
+<a id="__codelineno-11-44" name="__codelineno-11-44" href="#__codelineno-11-44"></a><span class="w">  </span><span class="c1"># Incremental model (grain: partition) — timeseries: and batched: are sibling keys</span>
+<a id="__codelineno-11-45" name="__codelineno-11-45" href="#__codelineno-11-45"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
+<a id="__codelineno-11-46" name="__codelineno-11-46" href="#__codelineno-11-46"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
+<a id="__codelineno-11-47" name="__codelineno-11-47" href="#__codelineno-11-47"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>
+<a id="__codelineno-11-48" name="__codelineno-11-48" href="#__codelineno-11-48"></a><span class="w">    </span><span class="nt">grain</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">partition</span>
+<a id="__codelineno-11-49" name="__codelineno-11-49" href="#__codelineno-11-49"></a><span class="w">    </span><span class="nt">timeseries</span><span class="p">:</span>
+<a id="__codelineno-11-50" name="__codelineno-11-50" href="#__codelineno-11-50"></a><span class="w">      </span><span class="nt">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction_timestamp</span><span class="w">  </span><span class="c1"># column in SOURCE data (WHERE filter)</span>
+<a id="__codelineno-11-51" name="__codelineno-11-51" href="#__codelineno-11-51"></a><span class="w">      </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">revenue_date</span><span class="w">             </span><span class="c1"># column in OUTPUT (DELETE target)</span>
+<a id="__codelineno-11-52" name="__codelineno-11-52" href="#__codelineno-11-52"></a><span class="w">      </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
+<a id="__codelineno-11-53" name="__codelineno-11-53" href="#__codelineno-11-53"></a>
+<a id="__codelineno-11-54" name="__codelineno-11-54" href="#__codelineno-11-54"></a><span class="w">  </span><span class="nt">cube_metrics</span><span class="p">:</span>
+<a id="__codelineno-11-55" name="__codelineno-11-55" href="#__codelineno-11-55"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
 </code></pre></div>
 
 
