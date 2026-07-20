@@ -72,7 +72,7 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 | 3     | done    | (this commit) | 2026-07-20 |
 | 4     | done    | (this commit) | 2026-07-20 |
 | 5a    | blocked |        |      |
-| 5b    | pending |        |      |
+| 5b    | blocked |        |      |
 | 6     | done    | 31e297e6 | 2026-07-20 |
 
 *(Phase 5 was reshaped 2026-07-20 into 5a + 5b after the original "no production code expected" scoping was proven unsatisfiable — see "## Blocked phases". 5a is the production dispatch change that makes `Suppressed` reachable for a generatable recipe; 5b is the original generative conformance leg, now satisfiable on top of 5a.)*
@@ -325,6 +325,8 @@ only (timeless — describe behaviour, not this phase).
 Candidate reshapes (neither attempted — both are production changes, not test-only): (a) thread `SourceFacts`/`JoinContext` facts into row-identity derivation for external-source enrichment joins on `Grain::Partition`; (b) wire `ColumnScopedMerge` dispatch into `execute_cumulative_aggregate` for `Grain::Key` models. Filed as a new finding for human triage; Phase 5 stays `blocked` until reshaped by a human (new plan phase or a follow-up sub-plan).
 
 **RESOLVED 2026-07-20 — reshaped into Phase 5a + 5b.** A follow-up code investigation confirmed both gaps and one additional favourable fact the original block note did not establish: derivation **already produces** a `Technique::ColumnScopedMerge` cell carrying `RowIdentity::Key` for a `Grain::Key` model enriching from a mutable dimension declared `allow_full_scan` (`derive_mutation` at `derive.rs:802`+ is grain-agnostic; the cell survives because `allow_full_scan` skips the `ScanUnbounded` refusal, and `declared_unique_key` at `derive.rs:466` supplies the key). So candidate (b) is **runtime-only** — no derivation change — and candidate (a)'s shared-P2 blast radius is avoided. Phase 5a lands the `execute.rs` keyed-branch dispatch that consumes that cell (making `Suppressed` reachable), and Phase 5b is the original generative conformance leg, now satisfiable on top of 5a. Rows 5a/5b are `pending`.
+
+**2026-07-20 — Phase 5b** ("Generative conformance leg for change-suppressed column-scoped MERGE"): blocked transitively on Phase 5a. This phase's own "Pre-conditions" line states "Phase 5a done (the runtime dispatch is what makes the suppressed arm reachable for a generated recipe)" — but 5a's row is `blocked` (see the 2026-07-20 Phase 5a entry above: `derive_new_data`'s `Grain::Key` admission unconditionally refuses any `grain: key` model referencing a non-append-only source, independent of `allow_full_scan`, so the runtime dispatch fix has no reachable red test yet). Without 5a's dispatch landed, no keyed recipe can reach a live `Suppressed` `ColumnScopedMerge` cell through the real pipeline, so 5b's structural admission leg has nothing to assert against. No production or test code touched this iteration. Unblocks automatically once a human lands the 5a′ admission-narrowing follow-up (option (b) in the Phase 5a entry) and flips 5a back to `pending`/`done`.
 
 ## Verification
 
