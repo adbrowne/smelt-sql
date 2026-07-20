@@ -3081,6 +3081,11 @@
 <td>Columns for row-level merge (optional, <code>grain: partition</code> only)</td>
 </tr>
 <tr>
+<td><code>safety_overrides</code></td>
+<td>object</td>
+<td>Named escape hatches for the partition-grain safety checks (<code>grain: partition</code> only). See <a href="../../reference/smelt-yml/#safety-overrides">smelt.yml reference — Safety Overrides</a>.</td>
+</tr>
+<tr>
 <td><code>schema_evolution</code></td>
 <td>object</td>
 <td>Schema-change strategy for incremental models. Controls how smelt handles output schema changes (e.g., <code>alter_and_backfill</code> or <code>full_refresh</code>). See <a href="../schema-evolution/">Schema Evolution</a>.</td>

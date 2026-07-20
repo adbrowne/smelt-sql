@@ -3395,8 +3395,10 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <a id="__codelineno-4-5" name="__codelineno-4-5" href="#__codelineno-4-5"></a><span class="w">    </span><span class="nt">target</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">&lt;target_name&gt;</span>
 <a id="__codelineno-4-6" name="__codelineno-4-6" href="#__codelineno-4-6"></a><span class="w">    </span><span class="nt">refresh</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">incremental</span>
 <a id="__codelineno-4-7" name="__codelineno-4-7" href="#__codelineno-4-7"></a><span class="w">    </span><span class="nt">unique_key</span><span class="p">:</span><span class="w"> </span><span class="p p-Indicator">[</span><span class="nv">&lt;column&gt;</span><span class="p p-Indicator">,</span><span class="w"> </span><span class="nv">...</span><span class="p p-Indicator">]</span>
-<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
-<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">      </span><span class="c1"># batched fields...</span>
+<a id="__codelineno-4-8" name="__codelineno-4-8" href="#__codelineno-4-8"></a><span class="w">    </span><span class="nt">safety_overrides</span><span class="p">:</span>
+<a id="__codelineno-4-9" name="__codelineno-4-9" href="#__codelineno-4-9"></a><span class="w">      </span><span class="c1"># safety-override fields...</span>
+<a id="__codelineno-4-10" name="__codelineno-4-10" href="#__codelineno-4-10"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
+<a id="__codelineno-4-11" name="__codelineno-4-11" href="#__codelineno-4-11"></a><span class="w">      </span><span class="c1"># batched fields...</span>
 </code></pre></div>
 <p><code>refresh: incremental</code> is admitted on the two <strong>shape-defining facts</strong> alone — a <code>timeseries:</code> block (the clock) and/or a top-level <code>unique_key:</code> (the identity). Declaring one or both is enough; declaring neither is a hard error naming what's missing. <code>grain:</code> itself is never required to admit a model — it is an optional, <strong>check-only</strong> <code>partition</code> / <code>key</code> / <code>key_per_partition</code> label the two facts derive; write it only when you want the friendly name in frontmatter, and it errors if it disagrees with what the facts derive.</p>
 <h3 id="model-fields">Model Fields<a class="headerlink" href="#model-fields" title="Permanent link">&para;</a></h3>
@@ -3459,6 +3461,13 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td>no</td>
 <td></td>
 <td>Optional check-only assertion — <code>partition</code>, <code>key</code>, or <code>key_per_partition</code> — validated against the label <code>timeseries:</code>/<code>unique_key:</code> derive; never a driver</td>
+</tr>
+<tr>
+<td><code>safety_overrides</code></td>
+<td>object</td>
+<td>no</td>
+<td><em>(all false)</em></td>
+<td>Named escape hatches for the partition-grain safety checks (see <a href="#safety-overrides">Safety Overrides</a>). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as <code>unique_key:</code>. Declaring both this key and the <code>batched.safety_overrides</code> sub-block on the same model is an error — declare it once.</td>
 </tr>
 <tr>
 <td><code>batched</code></td>
@@ -3555,11 +3564,11 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">      </span><span class="nt">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction_timestamp</span>
 <a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="w">      </span><span class="nt">partition_column</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">revenue_date</span>
 <a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">      </span><span class="nt">granularity</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">day</span>
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
-<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">      </span><span class="nt">unique_key</span><span class="p">:</span>
-<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction_id</span>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="nt">safety_overrides</span><span class="p">:</span>
-<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">        </span><span class="nt">allow_window_functions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">    </span><span class="nt">safety_overrides</span><span class="p">:</span>
+<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">      </span><span class="nt">allow_window_functions</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">false</span>
+<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="w">    </span><span class="nt">batched</span><span class="p">:</span>
+<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="w">      </span><span class="nt">unique_key</span><span class="p">:</span>
+<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="w">        </span><span class="p p-Indicator">-</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">transaction_id</span>
 </code></pre></div>
 <h4 id="incremental-fields">Incremental Fields<a class="headerlink" href="#incremental-fields" title="Permanent link">&para;</a></h4>
 <table>
@@ -3587,15 +3596,9 @@ point <code>temp_directory</code> at a faster disk. <code>threads</code> is left
 <td><code>[]</code></td>
 <td>Output columns exempt from the determinism requirement (e.g. <code>inserted_at = NOW()</code>). See <a href="../../guide/incremental-models/#non-deterministic-columns">Non-deterministic columns</a>.</td>
 </tr>
-<tr>
-<td><code>safety_overrides</code></td>
-<td>object</td>
-<td>no</td>
-<td><em>(all false)</em></td>
-<td>Override safety checks for patterns that may produce different results on partial data (see <a href="#safety-overrides">Safety Overrides</a>)</td>
-</tr>
 </tbody>
 </table>
+<p><code>safety_overrides</code> is a top-level model key (see <a href="#model-fields">Model Fields</a> and <a href="#safety-overrides">Safety Overrides</a> below), not part of this <code>batched:</code> block.</p>
 <h4 id="safety-overrides">Safety Overrides<a class="headerlink" href="#safety-overrides" title="Permanent link">&para;</a></h4>
 <p>Smelt validates incremental models to ensure they produce the same results whether run on the full dataset or on individual partitions. Certain SQL patterns can violate this guarantee. Safety overrides let you acknowledge and allow these patterns when you know they are safe for your use case.</p>
 <table>
