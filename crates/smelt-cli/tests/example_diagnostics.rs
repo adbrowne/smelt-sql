@@ -4191,3 +4191,173 @@ fn timeseries_broken_key_per_partition_emits_unsupported_grain() {
         target[0].message
     );
 }
+
+/// `examples/web_analytics/models/silver/events_parsed.sql` was migrated from
+/// the retired `batched.safety_overrides` sub-block spelling to the top-level
+/// `safety_overrides:` key (`docs/specs/models.md` §"The Relation Contract").
+/// A pure spelling change must leave the derived maintenance plan byte-for-byte
+/// identical — reverting the model back to the sub-block spelling in a scratch
+/// copy of the workspace and comparing `smelt explain`'s maintenance-plan
+/// report is the real-fixture regression guard for that claim.
+mod safety_overrides_spelling_flip {
+    use std::path::Path;
+
+    use smelt_cli::argument_resolution::{compute_scope, resolve_argument};
+    use smelt_cli::{
+        build_maintenance_plan_report, discover_python_models, find_project_root, init_db, Config,
+        ModelDiscovery,
+    };
+    use smelt_core::graph::DependencyGraph;
+
+    /// Recursively copy `src` into `dst`, skipping build-artifact directories.
+    fn copy_dir(src: &Path, dst: &Path) {
+        std::fs::create_dir_all(dst).unwrap();
+        for entry in std::fs::read_dir(src).unwrap().flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if name == "target" || name == ".smelt" {
+                continue;
+            }
+            let target = dst.join(&name);
+            if path.is_dir() {
+                copy_dir(&path, &target);
+            } else {
+                std::fs::copy(&path, &target).unwrap();
+            }
+        }
+    }
+
+    /// Build the `smelt explain <model>` maintenance-plan report for
+    /// `model_name` in `project_dir`, mirroring
+    /// `explain_maintenance.rs::build_report_for`'s resolution sequence
+    /// (find_project_root → Config::load → ModelDiscovery → init_db →
+    /// Workspace/project → compute_scope + resolve_argument → source_file →
+    /// smelt_db::maintenance_plan_report → build_maintenance_plan_report).
+    fn build_report_for(project_dir: &Path, model_name: &str) -> Option<String> {
+        let project_dir = find_project_root(project_dir).expect("find project root");
+        let config = Config::load(&project_dir).expect("load smelt.yml");
+        let sources = smelt_cli::SourcesConfig::load(&project_dir).ok();
+
+        let discovery = ModelDiscovery::new(project_dir.clone(), config.paths.clone());
+        let mut models = discovery.discover_models().expect("discover models");
+
+        let function_files = discovery
+            .discover_function_files()
+            .expect("scan function files");
+        models.extend(function_files);
+
+        let python_files = discovery
+            .discover_python_files()
+            .expect("scan python files");
+        if !python_files.is_empty() {
+            let python_models = discover_python_models(
+                &python_files,
+                &models,
+                &config,
+                &project_dir,
+                config.python.as_deref(),
+            )
+            .expect("discover python models");
+            models.extend(python_models);
+        }
+
+        let db = init_db(&project_dir, &models);
+        let ws = smelt_db::Workspace::try_get(&db).expect("workspace not initialized");
+        let project = db
+            .project_input(&project_dir)
+            .expect("project not initialized");
+
+        let cwd = std::env::current_dir().unwrap_or_else(|_| project_dir.clone());
+        let active_scope = compute_scope(&project_dir, &cwd, &config.paths, None);
+        let canonical = resolve_argument(&db, ws, project, active_scope.as_ref(), model_name)
+            .unwrap_or_else(|e| panic!("resolve_argument({model_name}): {e}"));
+
+        let model = models
+            .iter()
+            .find(|m| m.canonical_path() == canonical)
+            .unwrap_or_else(|| panic!("model '{canonical}' not found among discovered models"));
+
+        let file = db
+            .source_file(&model.path)
+            .expect("model file not registered");
+
+        let result = smelt_db::maintenance_plan_report(&db, ws, file)?;
+
+        let graph = DependencyGraph::build(models.clone(), sources.as_ref()).expect("build graph");
+        let upstream = graph.get_upstream(&canonical);
+
+        let source_infos = smelt_core::discover_source_infos(&project_dir, &config.paths);
+        let (own_contract, edges) =
+            smelt_cli::explain::build_relation_contract(model, &models, &upstream, &source_infos);
+
+        let maintenance_cfg = model
+            .metadata
+            .as_deref()
+            .and_then(|m| m.maintenance.as_ref());
+        let cells_cfg: &[smelt_core::config::MaintenanceCellConfig] =
+            maintenance_cfg.map(|m| m.cells.as_slice()).unwrap_or(&[]);
+        let defaults_cfg = maintenance_cfg.and_then(|m| m.defaults.as_ref());
+
+        Some(
+            build_maintenance_plan_report(
+                &canonical,
+                &result,
+                &own_contract,
+                &edges,
+                cells_cfg,
+                defaults_cfg,
+            )
+            .expect("build_maintenance_plan_report"),
+        )
+    }
+
+    #[test]
+    fn events_parsed_top_level_spelling_matches_sub_block_maintenance_plan() {
+        let live_dir = Path::new(env!("CARGO_MANIFEST_DIR"))
+            .parent()
+            .unwrap()
+            .parent()
+            .unwrap()
+            .join("examples/web_analytics");
+
+        let top_level_report = build_report_for(&live_dir, "silver.events_parsed")
+            .expect("silver.events_parsed has a maintenance plan");
+
+        // Scratch copy of the workspace with events_parsed.sql's frontmatter
+        // reverted to the retired `batched.safety_overrides` sub-block form.
+        let tmp = tempfile::TempDir::new().expect("create tempdir");
+        for entry in ["smelt.yml", "models", "functions", "tests"] {
+            let src = live_dir.join(entry);
+            if src.exists() {
+                if src.is_dir() {
+                    copy_dir(&src, &tmp.path().join(entry));
+                } else {
+                    std::fs::copy(&src, tmp.path().join(entry)).unwrap();
+                }
+            }
+        }
+
+        let sql_path = tmp.path().join("models/silver/events_parsed.sql");
+        let content = std::fs::read_to_string(&sql_path).unwrap();
+        let reverted = content.replacen(
+            "safety_overrides:\n  allow_window_functions: true\n---",
+            "batched:\n  safety_overrides:\n    allow_window_functions: true\n---",
+            1,
+        );
+        assert_ne!(
+            content, reverted,
+            "sanity: the top-level safety_overrides: spelling must be present in the fixture \
+             for this test to exercise a real flip"
+        );
+        std::fs::write(&sql_path, reverted).unwrap();
+
+        let sub_block_report = build_report_for(tmp.path(), "silver.events_parsed")
+            .expect("silver.events_parsed has a maintenance plan under the sub-block spelling");
+
+        assert_eq!(
+            top_level_report, sub_block_report,
+            "top-level safety_overrides: must derive the exact same maintenance plan as the \
+             retired batched.safety_overrides sub-block spelling"
+        );
+    }
+}

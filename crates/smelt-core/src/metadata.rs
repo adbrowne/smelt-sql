@@ -24,7 +24,8 @@
 //!    ```
 
 use crate::config::{
-    BatchedConfig, DataLatency, Materialization, RefreshStrategy, StateConfig, TimeseriesConfig,
+    BatchedConfig, BatchedSafetyOverrides, DataLatency, Materialization, RefreshStrategy,
+    StateConfig, TimeseriesConfig,
 };
 use crate::frontmatter::{parse_frontmatter, DeclarationKind};
 use serde::de::Error as _;
@@ -298,6 +299,22 @@ pub struct ModelMetadata {
     )]
     pub unique_key: Option<Vec<String>>,
 
+    /// Top-level `safety_overrides:` (`docs/specs/models.md` §"The Relation
+    /// Contract") — named escape hatches for the partition-grain safety
+    /// checks, replacing the `batched.safety_overrides` sub-block spelling.
+    /// Same precedence as `unique_key:`: SQL frontmatter wins over the
+    /// `smelt.yml` model override when both set it. Consumed and cleared
+    /// during extraction (`fold_top_level_safety_overrides`) — a
+    /// successfully parsed [`ModelMetadata`] never carries both this field
+    /// and an equivalent `batched.safety_overrides`; downstream consumers
+    /// keep reading the merged value off [`ModelMetadata::batched`], exactly
+    /// as they do for the sub-block spelling today. Declaring both spellings
+    /// on the same model is a hard error
+    /// (`MetadataError::SafetyOverridesDoubleDeclared`), never silent
+    /// precedence between them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub safety_overrides: Option<BatchedSafetyOverrides>,
+
     /// Model-scoped functional-dependency declarations (`key → determines`).
     /// See `crate::config::FunctionalDependency` and `model_properties.md`
     /// §"Model-scoped declarations".
@@ -509,6 +526,15 @@ pub enum MetadataError {
     #[error("BatchedRequiresRefreshBatched: model declares a `batched:` block but is not `refresh: incremental` + `grain: partition` — add those keys or remove the `batched:` block")]
     BatchedRequiresRefreshBatched,
 
+    /// A model declares both the top-level `safety_overrides:` key and a
+    /// non-default `batched.safety_overrides` sub-block. The two spellings
+    /// are the same fact (`docs/specs/models.md` §"The Relation Contract");
+    /// declaring both is refused rather than silently picking one — mirrors
+    /// `SourceError::LatenessDoubleDeclared`'s conflict-error shape for a
+    /// declared-in-two-places fact.
+    #[error("SafetyOverridesDoubleDeclared: both top-level `safety_overrides:` and `batched.safety_overrides` are declared — declare it once (top-level `safety_overrides:` is the replacement spelling for `batched.safety_overrides`)")]
+    SafetyOverridesDoubleDeclared,
+
     /// A model declares `refresh: materialized_view` and a `timeseries:` block.
     /// Like `keyed`, the engine-maintained output is a keyed lookup with
     /// no partition column (`docs/specs/materialized_view.md` §"Constraints
@@ -615,6 +641,45 @@ pub enum MetadataError {
     /// contrast with the silent-drop rule for other `columns:` keys).
     #[error("ColumnTestOnUnknownColumn: model '{model}' declares tests on column '{column}' which is absent from the model's inferred output schema")]
     ColumnTestOnUnknownColumn { model: String, column: String },
+}
+
+/// Fold the top-level `safety_overrides:` frontmatter key
+/// ([`ModelMetadata::safety_overrides`]) into the internal `batched:`
+/// representation ([`ModelMetadata::batched`]) so every existing
+/// `batched:`-shaped safety check — `KeyedForbidsBatched`,
+/// `BatchedRequiresRefreshBatched`, `MaterializedViewForbidsBatched`, and the
+/// safety-override consumers in `smelt_logical::rules::incremental` — sees
+/// the top-level spelling identically to the sub-block form, with zero
+/// changes to those consumers (`docs/specs/models.md` §"The Relation
+/// Contract"). Called once, right after a `ModelMetadata` is deserialized
+/// from frontmatter, before it is handed to any caller.
+///
+/// A model that declares both the top-level key and a non-default
+/// `batched.safety_overrides` sub-block is refused
+/// (`MetadataError::SafetyOverridesDoubleDeclared`) — the two spellings name
+/// the same fact, so silently preferring one would hide the caller's intent.
+/// A `batched.safety_overrides` left at its all-`false` default is not
+/// treated as "declared" for this check, mirroring how an omitted sub-block
+/// is indistinguishable from an explicitly empty one.
+fn fold_top_level_safety_overrides(metadata: &mut ModelMetadata) -> Result<(), MetadataError> {
+    let Some(top_level) = metadata.safety_overrides.take() else {
+        return Ok(());
+    };
+    match &mut metadata.batched {
+        Some(existing) if existing.safety_overrides != BatchedSafetyOverrides::default() => {
+            return Err(MetadataError::SafetyOverridesDoubleDeclared);
+        }
+        Some(existing) => {
+            existing.safety_overrides = top_level;
+        }
+        None => {
+            metadata.batched = Some(BatchedConfig {
+                safety_overrides: top_level,
+                ..Default::default()
+            });
+        }
+    }
+    Ok(())
 }
 
 /// Check whether a `---\n`-prefixed source contains a `generates:` key in its
@@ -1430,6 +1495,8 @@ fn extract_single_model(source: &str) -> Result<FileMetadata, MetadataError> {
         }
     };
 
+    fold_top_level_safety_overrides(&mut metadata)?;
+
     // Populate the derived `check` config for check declarations.
     metadata.check = check_config;
 
@@ -1541,6 +1608,8 @@ fn extract_multi_model(source: &str) -> Result<FileMetadata, MetadataError> {
                 }
             }
         };
+
+        fold_top_level_safety_overrides(&mut metadata)?;
 
         // Set model name from delimiter
         metadata.name = Some(model_name);

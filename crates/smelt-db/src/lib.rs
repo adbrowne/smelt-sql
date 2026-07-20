@@ -105,6 +105,16 @@ fn map_metadata_error_to_diagnostic(err: &MetadataError) -> Option<Diagnostic> {
             code: Some(DiagnosticCode::YamlParseError),
             data: None,
         }),
+        // Raised at extraction time (`fold_top_level_safety_overrides`), like
+        // `YamlParseError` above — reuses its `DiagnosticCode` rather than
+        // adding a new catalogue entry for this structural conflict error.
+        MetadataError::SafetyOverridesDoubleDeclared => Some(Diagnostic {
+            severity: DiagnosticSeverity::Error,
+            message: err.to_string(),
+            range: rowan::TextRange::empty(rowan::TextSize::from(0)),
+            code: Some(DiagnosticCode::YamlParseError),
+            data: None,
+        }),
         // Handled by dedicated arms in check_file_diagnostics (with precise span
         // anchoring and early returns):
         MetadataError::GeneratesUnknownValue { .. } => None,

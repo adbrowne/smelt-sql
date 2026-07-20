@@ -2401,6 +2401,7 @@ JOIN smelt.model_b b ON a.id = b.id
                 refresh: None,
                 grain: None,
                 unique_key: None,
+                safety_overrides: None,
                 batched: None,
                 tags: Vec::new(),
                 target: None,

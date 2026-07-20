@@ -490,6 +490,20 @@ pub struct ModelConfig {
     /// partition-grain dedup aid, never key-addressing).
     #[serde(default, deserialize_with = "crate::sources::opt_string_or_vec")]
     pub unique_key: Option<Vec<String>>,
+    /// Top-level `safety_overrides:` (`docs/specs/models.md` §"The Relation
+    /// Contract") — named escape hatches for the partition-grain safety
+    /// checks, the smelt.yml-side replacement spelling for the
+    /// `batched.safety_overrides` sub-block. Frontmatter's own top-level
+    /// `safety_overrides:` (or its own `batched.safety_overrides` sub-block)
+    /// wins over this wholesale — see
+    /// [`Config::get_incremental_with_metadata`]. When smelt.yml is the only
+    /// side declaring incremental config, this value is folded into the
+    /// effective `batched:` block. Declaring both this key and a non-default
+    /// `batched.safety_overrides` sub-block on the same smelt.yml model
+    /// entry is a hard error, validated in
+    /// [`Config::validate_model_configs`].
+    #[serde(default)]
+    pub safety_overrides: Option<BatchedSafetyOverrides>,
     /// `batched:` block config (`unique_key`, `safety_overrides`). Selection
     /// itself is `refresh: incremental` + `grain: partition`, not the
     /// presence of this block.
@@ -1094,6 +1108,28 @@ fn interpolate_string(
     out
 }
 
+/// Fold a smelt.yml model entry's top-level `safety_overrides:`
+/// ([`ModelConfig::safety_overrides`]) into its `batched:` block
+/// ([`ModelConfig::batched`]), the smelt.yml-side mirror of
+/// `metadata::fold_top_level_safety_overrides` for SQL frontmatter. Called
+/// from [`Config::get_incremental`] / [`Config::get_incremental_with_metadata`]
+/// so every `batched:`-shaped safety-override consumer sees the top-level
+/// spelling identically to the sub-block form.
+///
+/// Declaring both the top-level key and a non-default
+/// `batched.safety_overrides` sub-block on the same smelt.yml model entry is
+/// a conflict, refused fail-loud by
+/// [`Config::validate_model_configs`] — this fold takes the top-level value
+/// when both are present so a caller who bypasses validation still gets a
+/// deterministic (not silently-precedence) result rather than a panic.
+fn fold_smelt_yml_safety_overrides(model_config: &ModelConfig) -> BatchedConfig {
+    let mut batched = model_config.batched.clone().unwrap_or_default();
+    if let Some(top_level) = &model_config.safety_overrides {
+        batched.safety_overrides = top_level.clone();
+    }
+    batched
+}
+
 impl Config {
     pub fn load(project_dir: &Path) -> Result<Self> {
         let config_path = project_dir.join("smelt.yml");
@@ -1310,7 +1346,7 @@ impl Config {
         Some(
             self.models
                 .get(model_name)
-                .and_then(|m| m.batched.clone())
+                .map(fold_smelt_yml_safety_overrides)
                 .unwrap_or_default(),
         )
     }
@@ -1454,7 +1490,7 @@ impl Config {
         Some(
             self.models
                 .get(model_name)
-                .and_then(|m| m.batched.clone())
+                .map(fold_smelt_yml_safety_overrides)
                 .unwrap_or_default(),
         )
     }
@@ -1468,6 +1504,27 @@ impl Config {
         model_metadata: &HashMap<String, ModelMetadata>,
     ) -> Vec<(String, String)> {
         let mut errors = Vec::new();
+
+        // A smelt.yml model entry declaring both the top-level
+        // `safety_overrides:` key and a non-default `batched.safety_overrides`
+        // sub-block names the same fact twice — refuse rather than silently
+        // preferring one, mirroring `MetadataError::SafetyOverridesDoubleDeclared`
+        // for the SQL frontmatter side.
+        for (name, model_config) in &self.models {
+            let sub_block_declared = model_config
+                .batched
+                .as_ref()
+                .is_some_and(|b| b.safety_overrides != BatchedSafetyOverrides::default());
+            if model_config.safety_overrides.is_some() && sub_block_declared {
+                errors.push((
+                    name.to_string(),
+                    "both top-level `safety_overrides:` and `batched.safety_overrides` are \
+                     declared — declare it once (top-level `safety_overrides:` is the \
+                     replacement spelling for `batched.safety_overrides`)"
+                        .to_string(),
+                ));
+            }
+        }
 
         // Collect all model names and their effective materialization + config
         let mut all_models: HashMap<&str, (Materialization, Option<&BatchedConfig>, Option<&str>)> =

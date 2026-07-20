@@ -166,6 +166,7 @@ Frontmatter in SQL files overrides project-level `smelt.yml` settings.
 | `timeseries.partition_column` | string | Column the engine prunes / deletes on |
 | `timeseries.granularity` | `hour` \| `day` \| `week` \| `month` \| `quarter` \| `year` | Time granularity for partitioning |
 | `batched.unique_key` | string[] | Columns for row-level merge (optional, `grain: partition` only) |
+| `safety_overrides` | object | Named escape hatches for the partition-grain safety checks (`grain: partition` only). See [smelt.yml reference — Safety Overrides](../reference/smelt-yml.md#safety-overrides). |
 | `schema_evolution` | object | Schema-change strategy for incremental models. Controls how smelt handles output schema changes (e.g., `alter_and_backfill` or `full_refresh`). See [Schema Evolution](schema-evolution.md). |
 | `columns` | object/map | Per-column metadata (defaults and backfill expressions) used during schema evolution. See [Schema Evolution](schema-evolution.md). |
 | `format` | `delta` \| `parquet` | Per-model table format override for Spark targets. Affects schema evolution capabilities. See [Schema Evolution — Table format configuration](schema-evolution.md#table-format-configuration). |

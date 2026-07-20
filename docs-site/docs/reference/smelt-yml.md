@@ -150,6 +150,8 @@ models:
     target: <target_name>
     refresh: incremental
     unique_key: [<column>, ...]
+    safety_overrides:
+      # safety-override fields...
     batched:
       # batched fields...
 ```
@@ -167,6 +169,7 @@ models:
 | `refresh` | string | no | `full` | Refresh axis: `full`, `incremental`, or `materialized_view` |
 | `unique_key` | string \| string[] | no | | The **identity** shape-defining fact — the output's row identity. A single string is sugar for a one-element list. Together with `timeseries:`, this is what admits `refresh: incremental`; frontmatter wins over this `smelt.yml` override when both set it. Distinct from the `batched:` sub-block's `unique_key` (a partition-grain dedup aid, never identity). |
 | `grain` | string | no | | Optional check-only assertion — `partition`, `key`, or `key_per_partition` — validated against the label `timeseries:`/`unique_key:` derive; never a driver |
+| `safety_overrides` | object | no | _(all false)_ | Named escape hatches for the partition-grain safety checks (see [Safety Overrides](#safety-overrides)). Admitted only on a partition-shaped output (a declared clock, no declared identity); same frontmatter-wins precedence as `unique_key:`. Declaring both this key and the `batched.safety_overrides` sub-block on the same model is an error — declare it once. |
 | `batched` | object | no | | Preference/config block layered on top of `refresh: incremental` (see [Batched Configuration](#incremental-configuration)) |
 
 **Target precedence:** SQL file frontmatter > `smelt.yml` model config > CLI `--target` flag.
@@ -233,11 +236,11 @@ models:
       event_time_column: transaction_timestamp
       partition_column: revenue_date
       granularity: day
+    safety_overrides:
+      allow_window_functions: false
     batched:
       unique_key:
         - transaction_id
-      safety_overrides:
-        allow_window_functions: false
 ```
 
 #### Incremental Fields
@@ -246,7 +249,8 @@ models:
 |-------|------|----------|---------|-------------|
 | `unique_key` | string[] | no | `[]` | Columns that uniquely identify a row. When present, the backend may choose a MERGE strategy instead of DELETE+INSERT. |
 | `nondeterministic_columns` | string[] | no | `[]` | Output columns exempt from the determinism requirement (e.g. `inserted_at = NOW()`). See [Non-deterministic columns](../guide/incremental-models.md#non-deterministic-columns). |
-| `safety_overrides` | object | no | _(all false)_ | Override safety checks for patterns that may produce different results on partial data (see [Safety Overrides](#safety-overrides)) |
+
+`safety_overrides` is a top-level model key (see [Model Fields](#model-fields) and [Safety Overrides](#safety-overrides) below), not part of this `batched:` block.
 
 #### Safety Overrides
 

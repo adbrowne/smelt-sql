@@ -442,6 +442,7 @@ models:
         refresh: None,
         grain: None,
         unique_key: Some(vec!["from_yaml".to_string()]),
+        safety_overrides: None,
         batched: None,
         tags: vec![],
         target: None,
@@ -458,6 +459,210 @@ models:
     assert_eq!(
         config.get_unique_key_with_metadata("orders", Some(&frontmatter_meta)),
         Some(["from_frontmatter".to_string()].as_slice())
+    );
+}
+
+/// Top-level `safety_overrides:` in frontmatter parses into `ModelMetadata`
+/// identically to the `batched.safety_overrides` sub-block form — both end up
+/// on `ModelMetadata::batched.safety_overrides`, the internal representation
+/// every existing safety check already reads (`docs/specs/models.md`
+/// §"The Relation Contract").
+#[test]
+fn top_level_safety_overrides_parses() {
+    let top_level_source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+safety_overrides:
+  allow_window_functions: true
+---
+SELECT event_ts, event_date FROM foo"#;
+    let result =
+        extract_file_metadata(top_level_source).expect("top-level safety_overrides: must parse");
+    let top_level_batched = match result {
+        FileMetadata::Single { metadata, .. } => {
+            assert!(
+                metadata.safety_overrides.is_none(),
+                "top-level safety_overrides is folded into `batched` during extraction"
+            );
+            metadata
+                .batched
+                .clone()
+                .expect("safety_overrides folds into an implicit `batched:` block")
+        }
+        _ => panic!("Expected Single variant"),
+    };
+    assert!(top_level_batched.safety_overrides.allow_window_functions);
+
+    let sub_block_source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+batched:
+  safety_overrides:
+    allow_window_functions: true
+---
+SELECT event_ts, event_date FROM foo"#;
+    let result = extract_file_metadata(sub_block_source)
+        .expect("batched.safety_overrides sub-block must still parse");
+    let sub_block_batched = match result {
+        FileMetadata::Single { metadata, .. } => {
+            metadata.batched.clone().expect("batched: block declared")
+        }
+        _ => panic!("Expected Single variant"),
+    };
+
+    assert_eq!(top_level_batched, sub_block_batched);
+}
+
+/// Declaring both the top-level `safety_overrides:` key and a non-default
+/// `batched.safety_overrides` sub-block on the same model is a conflict error
+/// — never silent precedence between the old and new spellings.
+#[test]
+fn top_level_safety_overrides_conflicts_with_batched_sub_block() {
+    let source = r#"---
+materialization: table
+refresh: incremental
+grain: partition
+timeseries:
+  event_time_column: event_ts
+  partition_column: event_date
+  granularity: day
+safety_overrides:
+  allow_window_functions: true
+batched:
+  safety_overrides:
+    allow_having: true
+---
+SELECT event_ts, event_date FROM foo"#;
+    let err =
+        extract_file_metadata(source).expect_err("declaring both spellings must be a hard error");
+    assert!(
+        matches!(
+            err,
+            smelt_core::metadata::MetadataError::SafetyOverridesDoubleDeclared
+        ),
+        "expected SafetyOverridesDoubleDeclared, got {err:?}"
+    );
+}
+
+/// Top-level `safety_overrides:` also parses as a `smelt.yml` model override
+/// (`ModelConfig::safety_overrides`), folded into the effective `batched:`
+/// block returned by `Config::get_incremental_with_metadata` exactly like the
+/// frontmatter spelling — and SQL frontmatter's own top-level (or sub-block)
+/// spelling wins wholesale over the smelt.yml one when both set it, mirroring
+/// `unique_key:`'s precedence rule.
+#[test]
+fn top_level_safety_overrides_parses_in_smelt_yml() {
+    use smelt_core::config::{BatchedSafetyOverrides, Config};
+
+    let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    timeseries:
+      event_time_column: event_ts
+      partition_column: event_date
+      granularity: day
+    safety_overrides:
+      allow_window_functions: true
+"#;
+    let config: Config =
+        serde_yaml::from_str(yaml).expect("smelt.yml top-level safety_overrides: must parse");
+
+    let batched = config
+        .get_incremental_with_metadata("daily_revenue", None)
+        .expect("selected model returns Some(batched)");
+    assert!(
+        batched.safety_overrides.allow_window_functions,
+        "smelt.yml top-level safety_overrides: must fold into the effective batched: block"
+    );
+
+    // SQL frontmatter wins wholesale over the smelt.yml top-level spelling.
+    let frontmatter_meta = ModelMetadata {
+        refresh: Some(smelt_core::config::RefreshStrategy::Incremental),
+        grain: Some(smelt_core::config::Grain::Partition),
+        timeseries: Some(smelt_core::config::TimeseriesConfig {
+            event_time_column: "event_ts".to_string(),
+            partition_column: "event_date".to_string(),
+            granularity: smelt_core::config::Granularity::Day,
+            week_start: None,
+            assert_monotonic: false,
+        }),
+        batched: Some(smelt_core::config::BatchedConfig {
+            safety_overrides: BatchedSafetyOverrides {
+                allow_having: true,
+                ..Default::default()
+            },
+            ..Default::default()
+        }),
+        ..Default::default()
+    };
+    let batched = config
+        .get_incremental_with_metadata("daily_revenue", Some(&frontmatter_meta))
+        .expect("selected model returns Some(batched)");
+    assert!(
+        !batched.safety_overrides.allow_window_functions,
+        "frontmatter's batched: block must win wholesale over the smelt.yml top-level spelling"
+    );
+    assert!(batched.safety_overrides.allow_having);
+}
+
+/// Declaring both the top-level `safety_overrides:` key and a non-default
+/// `batched.safety_overrides` sub-block on the same `smelt.yml` model entry
+/// is a conflict error, mirroring the SQL frontmatter refusal — never silent
+/// precedence between the two spellings.
+#[test]
+fn top_level_safety_overrides_conflicts_with_smelt_yml_batched_sub_block() {
+    use smelt_core::config::Config;
+
+    let yaml = r#"
+name: test_project
+version: 1
+targets:
+  dev:
+    type: duckdb
+    database: test.duckdb
+    schema: main
+models:
+  daily_revenue:
+    materialization: table
+    refresh: incremental
+    grain: partition
+    timeseries:
+      event_time_column: event_ts
+      partition_column: event_date
+      granularity: day
+    safety_overrides:
+      allow_window_functions: true
+    batched:
+      safety_overrides:
+        allow_having: true
+"#;
+    let config: Config = serde_yaml::from_str(yaml).expect("smelt.yml must parse structurally");
+    let errors = config.validate_model_configs(&std::collections::HashMap::new());
+    assert!(
+        errors
+            .iter()
+            .any(|(name, msg)| name == "daily_revenue" && msg.contains("safety_overrides")),
+        "expected a safety_overrides double-declaration error, got {errors:?}"
     );
 }
 
