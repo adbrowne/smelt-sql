@@ -42,6 +42,8 @@ use smelt_runtime::types::{ExecuteRequest, RunOutcome};
 use smelt_runtime::{execute_project, NoOpReporter};
 use tokio_util::sync::CancellationToken;
 
+use crate::recipe::ConformanceTarget;
+
 /// `BackendFactory` that always opens the same on-disk DuckDB file — the
 /// harness never needs multi-target dispatch.
 pub struct DuckDbBackendFactory {
@@ -185,10 +187,79 @@ impl LinkCProject {
         self.run(run_id, request, &NoOpReporter).await
     }
 
+    /// [`Self::run`] generalised over a [`ConformanceTarget`]
+    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2):
+    /// selects the backend factory arm by target. `DuckDb` reproduces
+    /// [`Self::run`]'s exact behaviour (the `DuckDbBackendFactory` above);
+    /// `SparkDelta` is `unimplemented!()` until a later phase of that plan
+    /// wires up a Spark backend factory — never reachable today since no
+    /// caller constructs a `SparkDelta`-targeted `LinkCProject`.
+    pub async fn run_with_target(
+        &self,
+        target: ConformanceTarget,
+        run_id: &str,
+        request: ExecuteRequest,
+        reporter: &dyn RunReporter,
+    ) -> Result<RunOutcome> {
+        match target {
+            ConformanceTarget::DuckDb => self.run(run_id, request, reporter).await,
+            ConformanceTarget::SparkDelta => unimplemented!(
+                "Spark backend factory arm lands in a later phase of \
+                 docs/plans/20260720-prod-w9-spark-conformance-twin.md"
+            ),
+        }
+    }
+
     /// Open a fresh connection to the harness's DuckDB file — for the cell's
     /// own read-back / oracle comparison after a run.
     pub fn connect(&self) -> Result<duckdb::Connection> {
         Ok(duckdb::Connection::open(&self.db_path)?)
+    }
+
+    /// Open a fresh [`DuckDbBackend`] against the harness's DuckDB file, as a
+    /// `dyn Backend` — for a cell that wants to route its own seeding/oracle
+    /// comparison through the `Backend` trait
+    /// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2)
+    /// rather than [`Self::connect`]'s raw `duckdb::Connection`. Schema is
+    /// always `main`, matching every staging helper in this crate
+    /// (`render.rs`'s `stage`/`stage_keyed`/`stage_composed`).
+    pub async fn backend(&self) -> Result<Box<dyn Backend>> {
+        let backend = DuckDbBackend::new(&self.db_path, "main")
+            .await
+            .map_err(|e| anyhow::anyhow!("DuckDB backend open failed: {}", e))?;
+        Ok(Box::new(backend))
+    }
+}
+
+/// Drive `fut` to completion from a **fresh OS thread carrying its own Tokio
+/// runtime**, regardless of whether the calling thread is itself already
+/// driving a runtime (`docs/plans/20260720-prod-w9-spark-conformance-twin.md`
+/// Phase 2 review finding: several staging helpers — `render.rs`'s
+/// `stage`/`stage_keyed`/`stage_composed` — are called from both plain
+/// `#[test]` functions and from inside `#[tokio::test] async fn` bodies via
+/// `CaseContext::stage_partition`/`stage_keyed`, so neither a bare
+/// `Runtime::new().block_on(..)` on the current thread (panics: "Cannot
+/// start a runtime from within a runtime" when already inside one) nor
+/// `tokio::task::block_in_place` (panics outside a multi-thread-flavor
+/// runtime, and these `#[tokio::test]`s use the default current-thread
+/// flavor) is safe here. A brand-new OS thread has no Tokio context at all,
+/// so opening a fresh single-use `Runtime` there and blocking on it is safe
+/// unconditionally. Kept here (rather than duplicated per call site) since
+/// every staging helper needs it and this module is `LinkCProject`'s home.
+pub(crate) fn block_on_isolated<F>(fut: F) -> F::Output
+where
+    F: std::future::Future + Send + 'static,
+    F::Output: Send + 'static,
+{
+    match std::thread::spawn(move || {
+        tokio::runtime::Runtime::new()
+            .unwrap_or_else(|e| panic!("tokio runtime for isolated blocking call: {e}"))
+            .block_on(fut)
+    })
+    .join()
+    {
+        Ok(output) => output,
+        Err(panic) => std::panic::resume_unwind(panic),
     }
 }
 

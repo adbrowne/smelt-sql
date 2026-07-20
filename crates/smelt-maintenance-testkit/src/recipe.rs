@@ -36,6 +36,19 @@ pub fn arb_payload_value() -> impl Strategy<Value = i64> {
     -PAYLOAD_BOUND..=PAYLOAD_BOUND
 }
 
+/// Which backend a staged Link-C project targets
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2). Selects
+/// both `render::render_smelt_yml_for`'s emitted target block and
+/// `LinkCProject::run_with_target`'s backend factory arm. `DuckDb` is the
+/// only variant ever constructed today — `SparkDelta` exists so the seam is
+/// in place ahead of the Spark arm a later phase of that plan wires up;
+/// selecting it from `run_with_target` is `unimplemented!()` until then.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ConformanceTarget {
+    DuckDb,
+    SparkDelta,
+}
+
 /// A source's mutation posture (`docs/plans/20260712-generative-maintenance-conformance.md`
 /// Phase 4; design §6 "mixed models"). Phase 1-3's pool is exclusively
 /// [`SourcePosture::AppendOnly`] (the fixed `events(d, id, val)` shape);

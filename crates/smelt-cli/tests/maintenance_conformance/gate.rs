@@ -13,7 +13,7 @@ use smelt_logical::maintenance::locality::LocalitySlice;
 use smelt_logical::maintenance::{Technique, Trigger};
 use smelt_maintenance_testkit::feed::{self, FeedSourcePosture};
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject};
-use smelt_maintenance_testkit::oracle::multiset_equal;
+use smelt_maintenance_testkit::oracle::multiset_equal_via_backend;
 use smelt_maintenance_testkit::oracle_modes::{
     keyed_end_state_with_retained_departed_keys, KeyedOracleRow, OracleMode,
 };
@@ -78,22 +78,29 @@ pub fn stage_recipe(recipe: &ModelRecipe, tmp: &tempfile::TempDir) -> anyhow::Re
     render::stage(recipe, &project_dir, &db_path)
 }
 
-fn insert_row(
+/// Routed through [`smelt_backend::Backend::execute_sql`] rather than a raw
+/// `duckdb::Connection`
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2) — same
+/// `INSERT` text, only the execution channel moved (this helper is private
+/// to this file, so the conversion has no blast radius on the sibling test
+/// files in this directory that also call into `gate.rs`'s *public*
+/// surface).
+async fn insert_row(
     project: &LinkCProject,
     recipe: &ModelRecipe,
     row: &smelt_maintenance_testkit::schedule_gen::GenRow,
 ) -> anyhow::Result<()> {
-    let conn = project.connect()?;
-    conn.execute(
-        &format!(
+    let backend = project.backend().await?;
+    backend
+        .execute_sql(&format!(
             "INSERT INTO main.sources_{} VALUES (DATE '{}', {}, {})",
             recipe.source.name,
             row.d.format("%Y-%m-%d"),
             row.id,
             row.val,
-        ),
-        [],
-    )?;
+        ))
+        .await
+        .map_err(|e| anyhow::anyhow!("insert row: {e}"))?;
     Ok(())
 }
 
@@ -120,7 +127,7 @@ pub async fn drive_and_assert(
         match step {
             ConformanceStep::RunWindow { start, end, rows } => {
                 for row in rows {
-                    insert_row(project, recipe, row)?;
+                    insert_row(project, recipe, row).await?;
                 }
 
                 let snapshot = {
@@ -136,10 +143,10 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::AppendLateRow(row) => {
-                insert_row(project, recipe, row)?;
+                insert_row(project, recipe, row).await?;
             }
             ConformanceStep::RerunWindow { start, end } => {
                 // Redelivery: same window as an earlier `RunWindow`, no new
@@ -158,7 +165,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::FullRefreshRun => {
                 // Unwindowed run: `execute_project` takes the full-refresh
@@ -178,7 +185,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_full_refresh(snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::BackfillRegion { start, end } => {
                 // An explicit backfill: same execution shape as `RunWindow`
@@ -196,7 +203,7 @@ pub async fn drive_and_assert(
                 let k = tracker.record_run(*start, *end, snapshot);
                 last_k = Some(k);
 
-                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit)?;
+                assert_equivalence_with_edit(project, recipe, &tracker, k, current_edit).await?;
             }
             ConformanceStep::RewriteModel { edit } => {
                 // Definition change (Phase 9): rewrite the model file on
@@ -224,13 +231,13 @@ pub async fn drive_and_assert(
 /// The S-restricted oracle assertion (design §6): materialize `S_k`, then
 /// `EXCEPT ALL`-compare it (both directions) against the maintained output
 /// table `main.<model_name>`.
-pub fn assert_equivalence(
+pub async fn assert_equivalence(
     project: &LinkCProject,
     recipe: &ModelRecipe,
     tracker: &STracker,
     k: usize,
 ) -> anyhow::Result<()> {
-    assert_equivalence_with_edit(project, recipe, tracker, k, None)
+    assert_equivalence_with_edit(project, recipe, tracker, k, None).await
 }
 
 /// [`assert_equivalence`] generalised over an optional post-`RewriteModel`
@@ -240,21 +247,21 @@ pub fn assert_equivalence(
 /// original recipe's own body — never comparing the old body against the
 /// new output (plan Phase 9 review checklist). `edit: None` reproduces
 /// [`assert_equivalence`]'s exact pre-Phase-9 behaviour.
-pub fn assert_equivalence_with_edit(
+pub async fn assert_equivalence_with_edit(
     project: &LinkCProject,
     recipe: &ModelRecipe,
     tracker: &STracker,
     k: usize,
     edit: Option<ModelEdit>,
 ) -> anyhow::Result<()> {
-    let conn = project.connect()?;
-    tracker.materialize_s(&conn, k)?;
+    let backend = project.backend().await?;
+    tracker.materialize_s(backend.as_ref(), k).await?;
     let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
     let oracle_sql = match edit {
         Some(edit) => tracker.s_restricted_oracle_sql_with_edit(recipe, edit),
         None => tracker.s_restricted_oracle_sql(recipe),
     };
-    let equal = multiset_equal(&conn, &maintained_sql, &oracle_sql);
+    let equal = multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;
     if !equal {
         anyhow::bail!(
             "S-restricted equivalence violated for model {:?} at run {k} (edit {edit:?}): \
@@ -519,21 +526,21 @@ fn fact_window_for_id(
 /// The settled-point oracle assertion (design §6 "Mixed models"): the fact
 /// side reads the S-restricted temp table (`tracker`'s `S_k`); the
 /// dimension side always reads its CURRENT physical state.
-fn assert_mixed_settled(
+async fn assert_mixed_settled(
     project: &LinkCProject,
     recipe: &MutableEnrichedRecipe,
     tracker: &STracker,
     k: usize,
 ) -> anyhow::Result<()> {
-    let conn = project.connect()?;
-    tracker.materialize_s(&conn, k)?;
+    let backend = project.backend().await?;
+    tracker.materialize_s(backend.as_ref(), k).await?;
     let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
     // `STracker::materialize_s` names its temp table `oracle_<source_name>`
     // (an internal convention of `s_tracker.rs`, mirrored here rather than
     // exposed as a public accessor since this is the only Phase 4 call site
     // needing it).
     let oracle_sql = recipe.oracle_body_over(&format!("oracle_{}", recipe.fact.name));
-    let equal = multiset_equal(&conn, &maintained_sql, &oracle_sql);
+    let equal = multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;
     if !equal {
         anyhow::bail!(
             "settled-point equivalence violated for {:?} at run {k}: maintained \
@@ -583,7 +590,7 @@ async fn drive_mixed_and_assert(
 
                 match tracker.oracle_mode() {
                     OracleMode::SRestricted => {
-                        assert_mixed_settled(project, recipe, &tracker, k)?;
+                        assert_mixed_settled(project, recipe, &tracker, k).await?;
                         settled_assertions += 1;
                     }
                     OracleMode::SettledPoint => {
@@ -788,18 +795,18 @@ pub fn classify_keyed(
 /// re-delivery occurs in a generated [`KeyedSchedule`]), then compare the
 /// maintained table's full contents against the recipe's own body evaluated
 /// over `S_k`.
-pub fn assert_keyed_equivalence(
+pub async fn assert_keyed_equivalence(
     project: &LinkCProject,
     recipe: &KeyedRecipe,
     tracker: &STracker,
     k: usize,
 ) -> anyhow::Result<()> {
-    let conn = project.connect()?;
-    tracker.materialize_s(&conn, k)?;
+    let backend = project.backend().await?;
+    tracker.materialize_s(backend.as_ref(), k).await?;
     let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
     let oracle_sql =
         render::render_keyed_oracle_body_over(recipe, &format!("oracle_{}", recipe.source.name));
-    let equal = multiset_equal(&conn, &maintained_sql, &oracle_sql);
+    let equal = multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await?;
     if !equal {
         anyhow::bail!(
             "keyed end-state equivalence violated for model {:?} at run {k}: maintained \
@@ -838,7 +845,7 @@ pub async fn drive_keyed_and_assert(
             .await?;
 
         let k = tracker.record_run(window.start, window.end, snapshot);
-        assert_keyed_equivalence(project, recipe, &tracker, k)?;
+        assert_keyed_equivalence(project, recipe, &tracker, k).await?;
     }
     Ok(())
 }
@@ -1137,10 +1144,12 @@ fn boundary_rows_within_reach_are_reflected() {
     let mut next_id = 1_i64;
     let boundary = boundary_rows_for(clamp, window, &mut next_id);
 
-    insert_row(&project, &recipe, &boundary.just_inside).expect("insert just-inside row");
-    insert_row(&project, &recipe, &boundary.just_outside).expect("insert just-outside row");
-
     let rt = tokio::runtime::Runtime::new().expect("tokio runtime");
+    rt.block_on(insert_row(&project, &recipe, &boundary.just_inside))
+        .expect("insert just-inside row");
+    rt.block_on(insert_row(&project, &recipe, &boundary.just_outside))
+        .expect("insert just-outside row");
+
     let mut request = base_request("dev");
     request.start = Some(window.0.format("%Y-%m-%d").to_string());
     request.end = Some(window.1.format("%Y-%m-%d").to_string());
@@ -1391,11 +1400,16 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 .unwrap_or_else(|e| panic!("case {i}: initial incremental day0 run failed: {e}"));
 
             {
-                let conn = project.connect().expect("connect for day0 freshness check");
+                let backend = project
+                    .backend()
+                    .await
+                    .expect("backend for day0 freshness check");
                 let maintained_day0 = restrict_to_day(&maintained_sql, day0, &day_col);
                 let oracle_day0 = restrict_to_day(&live_oracle_sql, day0, &day_col);
                 assert!(
-                    multiset_equal(&conn, &maintained_day0, &oracle_day0),
+                    multiset_equal_via_backend(backend.as_ref(), &maintained_day0, &oracle_day0)
+                        .await
+                        .expect("day0 freshness multiset comparison"),
                     "case {i}: freshly incremental-computed day0 must match a live recompute \
                      over the dimension's state at computation time: maintained \
                      ({maintained_day0:?}) != oracle ({oracle_day0:?})"
@@ -1461,7 +1475,7 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                     .await
                     .unwrap_or_else(|e| panic!("case {i} step {step_i}: run failed: {e}"));
 
-                let conn = project.connect().expect("connect for read-back");
+                let backend = project.backend().await.expect("backend for read-back");
 
                 // Freshness: the window just computed must match a live
                 // recompute over the CURRENT (post-mutation) dimension
@@ -1471,7 +1485,13 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 let maintained_new_day = restrict_to_day(&maintained_sql, new_day, &day_col);
                 let oracle_new_day = restrict_to_day(&live_oracle_sql, new_day, &day_col);
                 assert!(
-                    multiset_equal(&conn, &maintained_new_day, &oracle_new_day),
+                    multiset_equal_via_backend(
+                        backend.as_ref(),
+                        &maintained_new_day,
+                        &oracle_new_day
+                    )
+                    .await
+                    .expect("new-window multiset comparison"),
                     "case {i} step {step_i}: freshly incremental-computed window {new_day} must \
                      match a live recompute over the dimension's current state: maintained \
                      ({maintained_new_day:?}) != oracle ({oracle_new_day:?}), schedule={schedule:?}"
@@ -1485,10 +1505,19 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
             // schedule above has since mutated the dimension rows day0
             // joined against.
             {
-                let conn = project.connect().expect("connect for staleness check");
+                let backend = project
+                    .backend()
+                    .await
+                    .expect("backend for staleness check");
                 let maintained_day0_now = restrict_to_day(&maintained_sql, day0, &day_col);
                 assert!(
-                    multiset_equal(&conn, &maintained_day0_now, &day0_snapshot_sql),
+                    multiset_equal_via_backend(
+                        backend.as_ref(),
+                        &maintained_day0_now,
+                        &day0_snapshot_sql
+                    )
+                    .await
+                    .expect("frozen-day0 multiset comparison"),
                     "case {i}: day0 must remain frozen at its original computation-time state \
                      across purely incremental runs (no UpstreamMutation cell is ever built for \
                      a change_feed-declared dimension) — maintained day0 changed without a \
@@ -1503,7 +1532,13 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 // a documented path, or (b) broke fresh-window correctness
                 // and happened to still "settle" by accident).
                 assert!(
-                    !multiset_equal(&conn, &maintained_sql, &live_oracle_sql),
+                    !multiset_equal_via_backend(
+                        backend.as_ref(),
+                        &maintained_sql,
+                        &live_oracle_sql
+                    )
+                    .await
+                    .expect("whole-table staleness multiset comparison"),
                     "case {i}: expected the WHOLE table to be stale relative to a live recompute \
                      after purely incremental runs following dimension mutations — if this now \
                      holds, either the change_feed-scoping divergence has been fixed (update \
@@ -1522,9 +1557,14 @@ fn feed_declared_source_upholds_equivalence_via_recompute() {
                 .await
                 .unwrap_or_else(|e| panic!("case {i}: final full-refresh run failed: {e}"));
 
-            let conn = project.connect().expect("connect for final read-back");
+            let backend = project
+                .backend()
+                .await
+                .expect("backend for final read-back");
             assert!(
-                multiset_equal(&conn, &maintained_sql, &live_oracle_sql),
+                multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &live_oracle_sql)
+                    .await
+                    .expect("final full-refresh multiset comparison"),
                 "case {i}: feed-declared source equivalence via full-refresh recompute violated \
                  after an incremental history: maintained ({maintained_sql:?}) != oracle \
                  ({live_oracle_sql:?}), schedule={schedule:?}"
@@ -1672,7 +1712,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
 
     // Pre-rewrite run, under the original body — establishes a green
     // baseline before the skeleton-changing rewrite.
-    insert_row(
+    rt.block_on(insert_row(
         &project,
         &recipe,
         &GenRow {
@@ -1680,7 +1720,7 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
             id: 1,
             val: 10,
         },
-    )
+    ))
     .expect("seed row");
     let snapshot = {
         let conn = project.connect().expect("connect");
@@ -1692,7 +1732,8 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
     rt.block_on(project.run_quiet("run-0", request))
         .expect("initial run before rewrite");
     let k0 = tracker.record_run(w1_start, w1_end, snapshot);
-    assert_equivalence(&project, &recipe, &tracker, k0).expect("pre-rewrite equivalence");
+    rt.block_on(assert_equivalence(&project, &recipe, &tracker, k0))
+        .expect("pre-rewrite equivalence");
 
     // Rewrite: add the source's row-key column into the GROUP BY — a
     // grain/skeleton change, `incremental_models.md`'s `SkeletonAdd`
@@ -1729,13 +1770,13 @@ fn skeleton_position_add_is_refused_or_recomputed_never_corrupted() {
                 read_source_snapshot(&conn, &recipe.source)
             };
             let k1 = tracker.record_full_refresh(snapshot);
-            assert_equivalence_with_edit(
+            rt.block_on(assert_equivalence_with_edit(
                 &project,
                 &recipe,
                 &tracker,
                 k1,
                 Some(ModelEdit::AddGroupingColumn),
-            )
+            ))
             .expect(
                 "an admitted skeleton-position rewrite's recompute must equal the rewritten \
                  body's own oracle — never silently diverge",
@@ -1890,14 +1931,14 @@ fn insert_composed_row(
 /// model body evaluated over the full, currently-inserted source table —
 /// route 1's schedule never reprocesses a window, so no `STracker`
 /// S-restriction is needed.
-fn assert_composed_route1_equivalence(
+async fn assert_composed_route1_equivalence(
     project: &LinkCProject,
     recipe: &ComposedKeyedRecipe,
 ) -> anyhow::Result<()> {
-    let conn = project.connect()?;
+    let backend = project.backend().await?;
     let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
     let oracle_sql = render::render_composed_oracle_sql(recipe);
-    if !multiset_equal(&conn, &maintained_sql, &oracle_sql) {
+    if !multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await? {
         anyhow::bail!(
             "composed route-1 equivalence violated for {:?}: maintained ({maintained_sql:?}) != \
              oracle ({oracle_sql:?})",
@@ -1912,12 +1953,12 @@ fn assert_composed_route1_equivalence(
 /// equal the model SQL evaluated over the source rows within that slice's
 /// derived reach — zero margin here (`SIMPLE_SQL`-shaped, no lookback), so
 /// the reach is exactly the source rows sharing that same date.
-fn assert_composed_route1_per_slice(
+async fn assert_composed_route1_per_slice(
     project: &LinkCProject,
     recipe: &ComposedKeyedRecipe,
     slice_date: chrono::NaiveDate,
 ) -> anyhow::Result<()> {
-    let conn = project.connect()?;
+    let backend = project.backend().await?;
     let d = slice_date.format("%Y-%m-%d");
     let maintained_sql = format!(
         "SELECT * FROM main.{} WHERE d = DATE '{d}'",
@@ -1925,7 +1966,7 @@ fn assert_composed_route1_per_slice(
     );
     let oracle_body = render::render_composed_oracle_sql(recipe);
     let oracle_sql = format!("SELECT * FROM ({oracle_body}) t WHERE d = DATE '{d}'");
-    if !multiset_equal(&conn, &maintained_sql, &oracle_sql) {
+    if !multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql).await? {
         anyhow::bail!(
             "composed route-1 per-slice equivalence violated for {:?} at slice {d}: maintained \
              ({maintained_sql:?}) != model SQL over the slice's derived reach ({oracle_sql:?})",
@@ -1952,8 +1993,8 @@ async fn drive_composed_route1_and_assert(
             .run_quiet(&format!("composed-route1-run-{i}"), request)
             .await?;
 
-        assert_composed_route1_equivalence(project, recipe)?;
-        assert_composed_route1_per_slice(project, recipe, window.start)?;
+        assert_composed_route1_equivalence(project, recipe).await?;
+        assert_composed_route1_per_slice(project, recipe, window.start).await?;
     }
     Ok(())
 }

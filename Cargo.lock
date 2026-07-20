@@ -4307,12 +4307,14 @@ name = "smelt-maintenance-testkit"
 version = "0.3.2"
 dependencies = [
  "anyhow",
+ "arrow",
  "chrono",
  "duckdb",
  "proptest",
  "rowan",
  "smelt-backend",
  "smelt-backend-duckdb",
+ "smelt-backend-spark",
  "smelt-core",
  "smelt-db",
  "smelt-logical",

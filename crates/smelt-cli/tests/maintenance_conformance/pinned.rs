@@ -45,7 +45,7 @@ use proptest::strategy::{Strategy, ValueTree};
 use proptest::test_runner::TestRunner;
 
 use smelt_maintenance_testkit::link_c_harness::{base_request, LinkCProject, SqlCapturingReporter};
-use smelt_maintenance_testkit::oracle::multiset_equal;
+use smelt_maintenance_testkit::oracle::multiset_equal_via_backend;
 use smelt_maintenance_testkit::recipe::{
     arb_recipe, BodyConstruct, KeyedCombiner, KeyedRecipe, KeyedRunWindow, KeyedSchedule,
     ModelRecipe, MutableEnrichedRecipe, RecipePool,
@@ -297,11 +297,13 @@ mod hazard {
                 .await
                 .expect("catch-up run after dimension mutation");
 
-            let conn = project.connect().expect("connect");
+            let backend = project.backend().await.expect("backend");
             let maintained_sql = format!("SELECT * FROM main.{}", recipe.model_name);
             let oracle_sql = recipe.oracle_body_over(&format!("main.sources_{}", recipe.fact.name));
             assert!(
-                multiset_equal(&conn, &maintained_sql, &oracle_sql),
+                multiset_equal_via_backend(backend.as_ref(), &maintained_sql, &oracle_sql)
+                    .await
+                    .expect("catch-up multiset comparison"),
                 "catch-up run after in-place dimension mutation diverged from a full-refresh \
                  oracle over the CURRENT dimension contents"
             );
@@ -402,7 +404,7 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
                 .await
                 .expect("run must succeed");
 
-            let conn = project.connect().expect("connect after run");
+            let backend = project.backend().await.expect("backend after run");
             let maintained_sql =
                 "SELECT d, user_id, dt, val, payload FROM main.facts_enriched WHERE d = DATE '2024-01-01'";
             let oracle_sql = "SELECT f.d, f.user_id, f.dt, f.val, dm.payload \
@@ -410,7 +412,9 @@ JOIN smelt.sources.dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt
                  JOIN main.sources_dims dm ON f.user_id = dm.user_id AND f.dt = dm.dt \
                  WHERE f.d = DATE '2024-01-01'";
             assert!(
-                multiset_equal(&conn, maintained_sql, oracle_sql),
+                multiset_equal_via_backend(backend.as_ref(), maintained_sql, oracle_sql)
+                    .await
+                    .expect("composite-key multiset comparison"),
                 "composite-key (user_id, dt) join fan-out diverged from the full-refresh oracle"
             );
         });

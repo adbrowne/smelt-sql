@@ -18,8 +18,8 @@
 use std::path::Path;
 
 use crate::recipe::{
-    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, KeyedRecipe, ModelEdit, ModelRecipe,
-    SourcePosture,
+    BodyConstruct, ComposedKeyedRecipe, ComposedRoute, ConformanceTarget, KeyedRecipe, ModelEdit,
+    ModelRecipe, SourcePosture,
 };
 
 /// The model's `SELECT` body — no frontmatter, no `WHERE start/end` (`smelt`
@@ -224,11 +224,59 @@ pub fn render_source_yaml(recipe: &ModelRecipe) -> String {
 /// A minimal `smelt.yml`: one `dev` DuckDB target pointing at `db_path`, one
 /// `models` scan root, `table` materialization (matches the
 /// `link_c_harness`/`model_shapes` staging convention throughout this
-/// crate).
+/// crate). Equivalent to `render_smelt_yml_for(ConformanceTarget::DuckDb,
+/// db_path)` — kept as its own function since it is the only shape every
+/// existing caller in this crate and its dependents renders (DuckDB is the
+/// only target ever constructed before
+/// `docs/plans/20260720-prod-w9-spark-conformance-twin.md`'s later phases).
 pub fn render_smelt_yml(db_path: &Path) -> String {
+    render_smelt_yml_for(ConformanceTarget::DuckDb, db_path)
+}
+
+/// The `(target_name, target_name: ...)` pair keyed under `targets:` for
+/// `target`. The Spark block shape mirrors
+/// `crates/smelt-cli/tests/common/mod.rs::targets_yaml`'s own Spark arm
+/// (`connect_url`/`catalog`/`schema`/`warehouse`/`format: delta`); a
+/// `warehouse` directory sibling to `db_path` is used since no caller
+/// constructs the Spark arm yet (`ConformanceTarget::SparkDelta` is not
+/// reachable through `LinkCProject::run_with_target` until a later phase
+/// wires up the Spark backend factory).
+fn render_target_block(target: ConformanceTarget, db_path: &Path) -> (&'static str, String) {
+    match target {
+        ConformanceTarget::DuckDb => (
+            "dev",
+            format!(
+                "type: duckdb\n    database: {db}\n    schema: main",
+                db = db_path.display()
+            ),
+        ),
+        ConformanceTarget::SparkDelta => {
+            let warehouse = db_path
+                .parent()
+                .unwrap_or_else(|| Path::new("."))
+                .join("spark_warehouse");
+            (
+                "spark",
+                format!(
+                    "type: spark\n    connect_url: sc://localhost:15002\n    \
+                     catalog: spark_catalog\n    schema: smelt_conformance\n    \
+                     warehouse: {warehouse}\n    format: delta",
+                    warehouse = warehouse.display(),
+                ),
+            )
+        }
+    }
+}
+
+/// A minimal `smelt.yml` targeting `target`: one target block
+/// ([`render_target_block`]) under whichever name that target uses, one
+/// `models` scan root, `table` materialization
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2's
+/// `ConformanceTarget`-parametrized `render_smelt_yml`).
+pub fn render_smelt_yml_for(target: ConformanceTarget, db_path: &Path) -> String {
+    let (name, block) = render_target_block(target, db_path);
     format!(
-        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  dev:\n    type: duckdb\n    database: {db}\n    schema: main\ndefault_materialization: table\n",
-        db = db_path.display()
+        "name: generative_conformance\nversion: 1\npaths:\n  - models\ntargets:\n  {name}:\n    {block}\ndefault_materialization: table\n",
     )
 }
 
@@ -279,18 +327,48 @@ pub fn stage(
     )?;
     std::fs::write(project_dir.join("smelt.yml"), &staged.smelt_yml_contents)?;
 
-    let conn = duckdb::Connection::open(db_path)?;
-    conn.execute_batch(&format!(
-        "CREATE SCHEMA IF NOT EXISTS main; \
-         CREATE TABLE main.sources_{name} ({d} DATE, {id} INTEGER, {val} INTEGER);",
-        name = recipe.source.name,
-        d = recipe.source.clock_column,
-        id = recipe.source.key_column,
-        val = recipe.source.payload_column,
-    ))?;
-    drop(conn);
+    create_source_table_via_backend(
+        db_path,
+        &recipe.source.name,
+        &format!(
+            "{d} DATE, {id} INTEGER, {val} INTEGER",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    )?;
 
     crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
+}
+
+/// Create `main.sources_<name>` (columns `column_defs`) at `db_path` through
+/// [`smelt_backend::Backend::execute_sql`] rather than a raw
+/// `duckdb::Connection`
+/// (`docs/plans/20260720-prod-w9-spark-conformance-twin.md` Phase 2) — the
+/// single staging-DDL routine [`stage`]/[`stage_keyed`]/[`stage_composed`]
+/// all funnel through, so every real caller of those three (this crate's
+/// `schedule_gen.rs`/`probes.rs`/`verdict.rs`, and `gate.rs`) gets the
+/// Backend-routed execution channel for free with no signature change.
+/// `DuckDbBackend::new` already issues `CREATE SCHEMA IF NOT EXISTS main`
+/// itself, so this only needs the `CREATE TABLE`. Run on an isolated thread
+/// (`link_c_harness::block_on_isolated`) since callers include both plain
+/// `#[test]` functions and `#[tokio::test]` bodies already driving a runtime.
+fn create_source_table_via_backend(
+    db_path: &Path,
+    source_name: &str,
+    column_defs: &str,
+) -> anyhow::Result<()> {
+    let db_path = db_path.to_path_buf();
+    let ddl = format!("CREATE TABLE main.sources_{source_name} ({column_defs})");
+    crate::link_c_harness::block_on_isolated(async move {
+        let backend = smelt_backend_duckdb::DuckDbBackend::new(&db_path, "main")
+            .await
+            .map_err(|e| anyhow::anyhow!("open backend for staging DDL: {e}"))?;
+        smelt_backend::Backend::execute_sql(&backend, &ddl)
+            .await
+            .map_err(|e| anyhow::anyhow!("create source table {ddl:?}: {e}"))?;
+        Ok::<(), anyhow::Error>(())
+    })
 }
 
 /// Diagnostics self-check (design §4 "Valid-by-construction"): a throwaway
@@ -382,29 +460,20 @@ pub fn stage_keyed(
     )?;
     std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
 
-    let conn = duckdb::Connection::open(db_path)?;
-    match recipe.source.posture {
-        SourcePosture::AppendOnly => {
-            conn.execute_batch(&format!(
-                "CREATE SCHEMA IF NOT EXISTS main; \
-                 CREATE TABLE main.sources_{name} ({d} DATE, {id} INTEGER, {val} INTEGER);",
-                name = recipe.source.name,
-                d = recipe.source.clock_column,
-                id = recipe.source.key_column,
-                val = recipe.source.payload_column,
-            ))?;
-        }
-        SourcePosture::MutableSnapshot => {
-            conn.execute_batch(&format!(
-                "CREATE SCHEMA IF NOT EXISTS main; \
-                 CREATE TABLE main.sources_{name} ({id} INTEGER, {val} INTEGER);",
-                name = recipe.source.name,
-                id = recipe.source.key_column,
-                val = recipe.source.payload_column,
-            ))?;
-        }
-    }
-    drop(conn);
+    let column_defs = match recipe.source.posture {
+        SourcePosture::AppendOnly => format!(
+            "{d} DATE, {id} INTEGER, {val} INTEGER",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+        SourcePosture::MutableSnapshot => format!(
+            "{id} INTEGER, {val} INTEGER",
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    };
+    create_source_table_via_backend(db_path, &recipe.source.name, &column_defs)?;
 
     crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
@@ -518,16 +587,16 @@ pub fn stage_composed(
     )?;
     std::fs::write(project_dir.join("smelt.yml"), render_smelt_yml(db_path))?;
 
-    let conn = duckdb::Connection::open(db_path)?;
-    conn.execute_batch(&format!(
-        "CREATE SCHEMA IF NOT EXISTS main; \
-         CREATE TABLE main.sources_{name} ({d} DATE, {id} INTEGER, {val} INTEGER);",
-        name = recipe.source.name,
-        d = recipe.source.clock_column,
-        id = recipe.source.key_column,
-        val = recipe.source.payload_column,
-    ))?;
-    drop(conn);
+    create_source_table_via_backend(
+        db_path,
+        &recipe.source.name,
+        &format!(
+            "{d} DATE, {id} INTEGER, {val} INTEGER",
+            d = recipe.source.clock_column,
+            id = recipe.source.key_column,
+            val = recipe.source.payload_column,
+        ),
+    )?;
 
     crate::link_c_harness::LinkCProject::load(project_dir.to_path_buf(), db_path.to_path_buf())
 }
