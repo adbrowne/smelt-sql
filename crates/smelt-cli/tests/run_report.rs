@@ -115,6 +115,7 @@ fn base_request(target: &str) -> ExecuteRequest {
         retry_max: Some(0),
         retry_backoff_ms: Some(1),
         resume: false,
+        technique_overrides: vec![],
     }
 }
 

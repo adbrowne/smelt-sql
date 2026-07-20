@@ -1409,6 +1409,7 @@ mod column_scoped_merge_e2e {
             retry_max: None,
             retry_backoff_ms: None,
             resume: false,
+            technique_overrides: vec![],
         }
     }
 

@@ -235,6 +235,7 @@ async fn batched_write_clamp_does_not_widen_to_scan_margin() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(

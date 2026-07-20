@@ -153,10 +153,39 @@ pub struct ExecuteRequest {
     /// everything (`docs/specs/run_state.md` §"`--resume` semantics").
     #[serde(default)]
     pub resume: bool,
+
+    /// Request-scoped hard pins for `smelt bakeoff`'s offline forcing seam
+    /// (`docs/plans/20260719-prod-w7-bakeoff.md` Phase 3): each entry forces
+    /// one cell's technique for this run only. Entries enter the choice
+    /// ladder narrower than any frontmatter `maintenance.cells[]` pin for
+    /// the same cell — a request override for a cell also pinned in
+    /// frontmatter wins — but admission is still enforced exactly like a
+    /// frontmatter pin: an override naming a technique the derived plan did
+    /// not admit refuses loud, never silently substitutes. Empty (the
+    /// default) leaves resolution byte-identical to a request with no
+    /// overrides at all.
+    #[serde(default)]
+    pub technique_overrides: Vec<CellTechniqueOverride>,
 }
 
 fn default_true() -> bool {
     true
+}
+
+/// One request-scoped hard pin — see [`ExecuteRequest::technique_overrides`].
+/// Mirrors `smelt_core::config::MaintenanceCellConfig`'s `columns`/`on`
+/// matching shape but carries only a hard `technique` pin (no soft
+/// `prefer`, no `write` addressing pin — those stay frontmatter-only).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CellTechniqueOverride {
+    /// Names any member of the derived column group this override
+    /// addresses — same matching rule as `MaintenanceCellConfig::columns`.
+    pub columns: Vec<String>,
+    /// The trigger this override targets: a `<source-address>` or the
+    /// literal `backfill`.
+    pub on: String,
+    /// The hard-pinned technique. Bypasses the cost model, never admission.
+    pub technique: smelt_core::config::CellTechnique,
 }
 
 /// Outcome of a completed run. The runtime returns this from

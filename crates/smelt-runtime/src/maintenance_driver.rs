@@ -773,6 +773,7 @@ pub fn resolve_live_column_scoped_cell(
     sources: &[SourceFacts],
     explicitly_mutable: &HashSet<String>,
     backend_supports_column_scoped_merge: bool,
+    technique_overrides: &[crate::types::CellTechniqueOverride],
 ) -> Result<Option<(String, PlanCell, WriteSuppression)>> {
     let Some(result) = smelt_db::queries::maintenance::derive_model_maintenance_plan(
         sql,
@@ -802,6 +803,31 @@ pub fn resolve_live_column_scoped_cell(
         .as_ref()
         .map(|m| m.cells.as_slice())
         .unwrap_or(&[]);
+    // Request overrides enter the SAME `effective_override` ladder as
+    // frontmatter `cells[]` entries, converted to the matching shape
+    // (`prefer`/`write` left `None` — request scope only carries a hard
+    // technique pin). `matching_cell` (in `smelt-logical`, not touched by
+    // this phase) is first-match-wins, so request overrides are placed
+    // BEFORE the frontmatter cells in the combined slice: that is how
+    // "request scope is narrower than file scope" (`docs/plans/
+    // 20260719-prod-w7-bakeoff.md` Phase 3, decision B1) is realized —
+    // a request override for a cell also pinned in frontmatter is found
+    // first and wins.
+    let request_cells: Vec<smelt_core::config::MaintenanceCellConfig> = technique_overrides
+        .iter()
+        .map(|o| smelt_core::config::MaintenanceCellConfig {
+            columns: o.columns.clone(),
+            on: o.on.clone(),
+            prefer: None,
+            technique: Some(o.technique),
+            write: None,
+        })
+        .collect();
+    let combined_cells: Vec<smelt_core::config::MaintenanceCellConfig> = request_cells
+        .iter()
+        .cloned()
+        .chain(cells_cfg.iter().cloned())
+        .collect();
     for source in explicitly_mutable {
         let trigger = Trigger::UpstreamMutation {
             source: source.clone(),
@@ -842,7 +868,7 @@ pub fn resolve_live_column_scoped_cell(
                 .maintenance
                 .as_ref()
                 .and_then(|m| m.defaults.as_ref()),
-            cells_cfg,
+            &combined_cells,
             source,
             &group_columns,
         );

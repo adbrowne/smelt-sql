@@ -210,6 +210,7 @@ async fn incremental_run_pushes_source_filter() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(
@@ -334,6 +335,7 @@ async fn source_pushdown_preserves_correctness() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(
@@ -466,6 +468,7 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
     let incremental_outcome = execute_project(
         "cte-pushdown-test".to_string(),
@@ -520,6 +523,7 @@ async fn cte_body_pushes_filter_and_matches_full_refresh() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
     let full_outcome = execute_project(
         "cte-pushdown-full-refresh-test".to_string(),
@@ -680,6 +684,7 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
     let incremental_outcome = execute_project(
         "union-pushdown-test".to_string(),
@@ -740,6 +745,7 @@ async fn union_all_pushes_filter_and_matches_full_refresh() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
     let full_outcome = execute_project(
         "union-pushdown-full-refresh-test".to_string(),

@@ -229,6 +229,7 @@ async fn self_referential_backfill_converges_to_sequential_running_balance() {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
 
     let outcome = execute_project(

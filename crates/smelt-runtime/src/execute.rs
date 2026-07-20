@@ -1792,6 +1792,7 @@ pub async fn execute_project(
                         &maint_source_facts,
                         &explicitly_mutable,
                         backend.capabilities().supports_column_scoped_merge,
+                        &request.technique_overrides,
                     )?,
                     None => None,
                 };

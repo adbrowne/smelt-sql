@@ -431,6 +431,7 @@ fn make_request(target: &str, start: &str, end: &str) -> ExecuteRequest {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     }
 }
 
@@ -1426,6 +1427,7 @@ fn select_request(target: &str, model: &str, start: &str, end: &str) -> ExecuteR
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     }
 }
 

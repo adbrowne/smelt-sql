@@ -216,6 +216,7 @@ pub async fn run(args: RunArgs, scope: Option<&str>) -> Result<()> {
         retry_max: None,
         retry_backoff_ms: None,
         resume: args.resume,
+        technique_overrides: vec![],
     };
 
     let run_id = generate_run_id();
@@ -415,6 +416,7 @@ async fn run_since_upstream(
             retry_max: None,
             retry_backoff_ms: None,
             resume: false,
+            technique_overrides: vec![],
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

@@ -148,6 +148,7 @@ fn make_request(start: &str, end: &str) -> ExecuteRequest {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     }
 }
 

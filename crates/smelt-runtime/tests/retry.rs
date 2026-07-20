@@ -125,6 +125,7 @@ fn base_request(target: &str, retry_max: Option<u32>) -> ExecuteRequest {
         // wall-clock-derived, so this does not make the test flaky.
         retry_backoff_ms: Some(1),
         resume: false,
+        technique_overrides: vec![],
     }
 }
 

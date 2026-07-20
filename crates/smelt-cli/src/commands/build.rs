@@ -180,6 +180,7 @@ async fn run_build_with_checks(args: BuildArgs, scope: Option<&str>) -> Result<(
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     };
 
     let run_id = generate_run_id();
@@ -412,6 +413,7 @@ async fn build_include_upstreams(args: BuildArgs, scope: Option<&str>) -> Result
             retry_max: None,
             retry_backoff_ms: None,
             resume: false,
+            technique_overrides: vec![],
         };
         let run_id = generate_run_id();
         smelt_runtime::execute_project(

@@ -83,6 +83,7 @@ fn base_request(target: &str, jobs: Option<usize>) -> ExecuteRequest {
         retry_max: None,
         retry_backoff_ms: None,
         resume: false,
+        technique_overrides: vec![],
     }
 }
 
