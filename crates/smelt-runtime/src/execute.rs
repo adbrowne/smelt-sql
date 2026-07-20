@@ -1478,6 +1478,40 @@ pub async fn execute_project(
             let compiler = compilers.get(model_target);
             let resolver = &ephemeral_resolvers[model_target];
 
+            // W10 Phase 4 (`docs/plans/20260720-prod-w10-keyed-mutable-
+            // admission.md`): consult the SAME derived `MaintenancePlan`
+            // the non-keyed incremental branch already does (below, ~L1788)
+            // for a live `ColumnScopedMerge` cell on one of this model's
+            // `explicitly_mutable` sources — the keyed run loop's own
+            // analogue of `resolve_incremental_strategy`. The cumulative
+            // fold above/below still owns the `NewData` (creation/append)
+            // trigger; this owns the `UpstreamMutation` trigger, dispatched
+            // ALONGSIDE it once a live cell resolves and the target table
+            // already exists (never on the creation run — there is nothing
+            // to merge into yet). `table_exists_before_run` is captured
+            // BEFORE the fold below runs (which may itself create the
+            // table on a first run), mirroring the non-keyed branch's own
+            // "did the table exist before THIS run" capture.
+            let clean_sql_for_merge = smelt_parser::strip_frontmatter(&plan.sql).to_string();
+            let (maint_source_facts, explicitly_mutable) =
+                build_maint_source_facts(&plan.model_file, source_infos);
+            let table_exists_before_run = backend
+                .table_exists(schema, &db_table_name)
+                .await
+                .unwrap_or(false);
+            let column_scoped_cell = match plan.model_file.metadata.as_deref() {
+                Some(metadata) => crate::maintenance_driver::resolve_live_column_scoped_cell(
+                    &clean_sql_for_merge,
+                    &db_table_name,
+                    metadata,
+                    &maint_source_facts,
+                    &explicitly_mutable,
+                    backend.capabilities().supports_column_scoped_merge,
+                    &request.technique_overrides,
+                )?,
+                None => None,
+            };
+
             let exec_result = match (start_date, end_date) {
                 (Some(s), Some(e)) => {
                     let time_range = TimeRange {
@@ -1564,12 +1598,140 @@ pub async fn execute_project(
                 }
             };
 
-            total_rows = exec_result.row_count;
-            total_rows_overall += exec_result.row_count;
+            // W10 Phase 4: dispatch the live `UpstreamMutation` cell
+            // resolved above, alongside the cumulative fold that just ran —
+            // "the driver loop becomes the per-cell technique executor"
+            // (`docs/plans/20260707-maintenance-plan-impl.md` MP11), now
+            // extended to the keyed run loop. Never fires on the creation
+            // run (`table_exists_before_run` was captured before the fold
+            // above could have just created the table).
+            let mut used_column_scoped_merge = false;
+            if let Some((source, cell, suppression)) = column_scoped_cell.as_ref() {
+                if table_exists_before_run {
+                    // The mutated dimension's own declared `unique_key`
+                    // (`sources.md` §"Row identity") — same lookup the
+                    // non-keyed incremental branch performs, needed only for
+                    // the horizon-clamped corner's join-contribution proof.
+                    let dimension_unique_key: Vec<String> = source_infos
+                        .iter()
+                        .find(|info| {
+                            let segs = &info.address_segments;
+                            let bare = match segs.split_first() {
+                                Some((first, rest)) if first == "sources" => rest.join("."),
+                                _ => segs.join("."),
+                            };
+                            &bare == source
+                        })
+                        .and_then(|info| info.unique_key.clone())
+                        .unwrap_or_default();
+                    let contribution = if matches!(
+                        cell.partition_local,
+                        smelt_logical::maintenance::PartitionLocal::Yes
+                    ) {
+                        crate::maintenance_driver::dimension_join_contribution(
+                            &clean_sql_for_merge,
+                            source,
+                            &dimension_unique_key,
+                        )
+                    } else {
+                        smelt_logical::analysis::join_shape::ContributionVerdict::Monotone
+                    };
+                    let model_unique_key: Vec<String> = plan
+                        .model_file
+                        .metadata
+                        .as_deref()
+                        .and_then(|m| m.unique_key.clone())
+                        .unwrap_or_default();
+                    let dispatch = crate::maintenance_driver::decide_column_merge_dispatch(
+                        cell,
+                        source,
+                        table_exists_before_run,
+                        !model_unique_key.is_empty(),
+                        &contribution,
+                    );
+                    if let Some(dispatch) = dispatch {
+                        let compiled = compiler.compile_with_sql_and_ephemerals(
+                            &plan.model_file,
+                            schema,
+                            &clean_sql_for_merge,
+                            resolver,
+                        )?;
+                        let (window_start, window_end) = match (start_date, end_date) {
+                            (Some(s), Some(e)) => (
+                                s.format("%Y-%m-%d").to_string(),
+                                e.format("%Y-%m-%d").to_string(),
+                            ),
+                            _ => (String::new(), String::new()),
+                        };
+                        // A bare `grain: key` output has no partition
+                        // column of its own — `column: String::new()` is
+                        // the documented empty-string convention
+                        // `execute_column_scoped_write_with_observed_delta`
+                        // already reads as "no partition column" (T5's
+                        // observed-delta recording still keys on
+                        // `[start, end)` alone).
+                        let window = smelt_backend::PartitionRange {
+                            column: String::new(),
+                            start: window_start,
+                            end: window_end,
+                        };
+                        let retry_policy =
+                            RetryPolicy::from_request(request, run_id, &plan.name, reporter);
+                        let merge_result = match dispatch {
+                            crate::maintenance_driver::ColumnMergeDispatch::Full => {
+                                crate::maintenance_driver::execute_column_scoped_merge_full(
+                                    backend,
+                                    schema,
+                                    &db_table_name,
+                                    &model_unique_key,
+                                    &compiled.sql,
+                                    suppression,
+                                    &window,
+                                    &retry_policy,
+                                )
+                                .await
+                                .map_err(|e| anyhow::anyhow!("{}", e))?
+                            }
+                            crate::maintenance_driver::ColumnMergeDispatch::Clamped(_) => {
+                                // The horizon-clamped corner needs a
+                                // conv_ts on the output's own partition
+                                // axis — only a composed clock-and-identity
+                                // output that ALSO declares its own
+                                // `timeseries:` establishes one
+                                // (`incremental_models.md` §"Key temporal
+                                // locality"). No derivable keyed cell
+                                // reaches `PartitionLocal::Yes` today (the
+                                // non-keyed branch's own comment on this
+                                // corner: a clocked dimension's scan-bound
+                                // derivation is deferred) — refuse loudly
+                                // rather than silently mis-scoping the
+                                // write.
+                                return Err(anyhow::anyhow!(
+                                    "keyed run path: the horizon-clamped column-scoped MERGE \
+                                     corner is not yet reachable for a grain: key output \
+                                     ('{}') — its scan-bound derivation is deferred",
+                                    plan.name
+                                ));
+                            }
+                        };
+                        used_column_scoped_merge = true;
+                        total_rows = merge_result.row_count;
+                    }
+                }
+            }
+            if !used_column_scoped_merge {
+                total_rows = exec_result.row_count;
+            }
+            total_rows_overall += total_rows;
+            let keyed_strategy_label = if used_column_scoped_merge {
+                "column_scoped_merge".to_string()
+            } else {
+                "cumulative_aggregate".to_string()
+            };
             manifest_entries.insert(
                 plan.name.clone(),
                 ModelRunRecord {
-                    strategy: "cumulative_aggregate".to_string(),
+                    strategy: keyed_strategy_label,
                     time_range: match (start_date, end_date) {
                         (Some(s), Some(e)) => Some(TimeRangeRecord {
                             start: s.format("%Y-%m-%d").to_string(),
@@ -1578,7 +1740,7 @@ pub async fn execute_project(
                         _ => None,
                     },
                     partitions_updated: vec![],
-                    row_count: exec_result.row_count,
+                    row_count: total_rows,
                     duration_ms: model_start.elapsed().as_millis() as u64,
                     batch_safety: Some("cumulative".to_string()),
                     outcome: smelt_state::RunOutcomeKind::Success,

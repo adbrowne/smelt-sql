@@ -209,7 +209,7 @@ W8 Phase 5a/5b tried to make the **change-suppressed column-scoped `MERGE`** rea
 | 1     | done    | `docs(spec): key-grain append-only obligation binds fold-contributing sources, not every referenced source` | 2026-07-20 |
 | 2     | done    | `feat(maintenance): fold-contribution leaf classifier — does a source feed the cumulative fold` | 2026-07-20 |
 | 3     | done    | `feat(maintenance): key-grain NewData waives append-only for enrich-only covered mutable sources` | 2026-07-20 |
-| 4     | pending |        |      |
+| 4     | done    | `feat(runtime): dispatch change-suppressed column-scoped MERGE on the keyed run path` | 2026-07-20 |
 | 5     | pending |        |      |
 
 ---

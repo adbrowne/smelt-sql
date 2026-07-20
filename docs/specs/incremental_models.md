@@ -1772,9 +1772,14 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   loop's batch dispatch reads its verdict, exercised end-to-end on the partition-grain run loop
   in `crates/smelt-runtime/tests/technique_lowering.rs::column_scoped_merge_e2e` against the real
   `examples/timeseries/models/daily_events_enriched.sql` fact+dimension fixture, which drives the
-  accepted-full-scan corner below (the keyed run loop's own real-fixture proof is tracked
-  alongside the fold-contribution admission narrowing above, which is what makes a keyed model
-  carrying a covered mutable enrichment source reachable in the first place). Two distinct physical corners exist for a live
+  accepted-full-scan corner below. The keyed run loop is proven the same way, on the same corner:
+  a `grain: key` model folding an append-only, self-clocked fact per its declared `unique_key` and
+  inner-joined to an `explicitly_mutable`, `allow_full_scan` dimension purely for row admission
+  reaches `ColumnScopedMerge` end-to-end through `execute_project`
+  (`crates/smelt-runtime/tests/technique_lowering.rs::keyed_column_scoped_merge_e2e::keyed_run_loop_dispatches_column_scoped_merge_through_execute_project`),
+  with the fold-contribution admission narrowing above being what makes a keyed model carrying a
+  covered mutable enrichment source reachable in the first place; that coverage's own scope limit
+  is recorded below (§Known Divergences). Two distinct physical corners exist for a live
   cell, chosen by `maintenance_driver::decide_column_merge_dispatch` from the cell's
   `partition_local` verdict: the accepted-full-scan corner (`PartitionLocal::No`, an unclocked
   dimension the operator declared `allow_full_scan` for) is the one currently reachable from any
@@ -1806,6 +1811,22 @@ This section captures the partition-grain-**specific** rationale; the rationale 
   `Backfill`/`NewData` triggers are unaffected. Migration ordering:
   `docs/research/20260705-refresh-as-maintenance-plan/08-code-placement.md` §2.8 (M1–M6);
   `docs/plans/20260707-maintenance-plan-impl.md`.
+- **The keyed run loop's real-fixture coverage proves suppression and technique selection, not a
+  genuinely changed value landing.** `keyed_column_scoped_merge_e2e` (previous bullet) is the only
+  real-fixture proof of the keyed run loop's `ColumnScopedMerge` dispatch, and every merge it
+  drives is a `WriteSuppression::Suppressed` no-op by construction: the fixture's merged column
+  (`COUNT(t.transaction_id)`, folded from the append-only fact) never actually depends on the
+  joined dimension's own attribute, so a dimension mutation can never change the compared column's
+  value. This is forced by a pre-existing gap in
+  `smelt_logical::maintenance::grouping::collect_column_refs` — once 2+ `FROM` sources are joined,
+  an aggregate's own function-name token is misread as an ambiguous unqualified column reference,
+  and the fail-closed `degenerate_whole_model` collapse this triggers is what admits the cell at
+  all (it widens the fold column's mutation-sensitivity to every referenced source, including the
+  dimension it never reads). Until that provenance gap is fixed, no real fixture can drive the
+  keyed run loop's dispatch through a case where the merged value genuinely changes — the sibling
+  non-keyed test (`column_scoped_merge_e2e::column_scoped_merge_dispatches_through_execute_project`)
+  does assert a changed value lands, but the keyed path has no equivalent. Tracked by
+  `docs/plans/20260720-prod-w10-keyed-mutable-admission.md`.
 - **Statement emission is single-owner for the region-recompute, keyed-fold, and
   column-scoped-MERGE families, and both the conformance gate and `--show-sql` are wired to
   prove/print it.** The region `DELETE`+`INSERT` pair (`IncrementalStrategy::DeleteInsert`) is
