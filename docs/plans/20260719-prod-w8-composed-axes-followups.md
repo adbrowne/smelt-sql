@@ -71,8 +71,8 @@ Each remaining source-plan deferred item, with its tracked home — none is sile
 | 2     | done    | 42147964 | 2026-07-20 |
 | 3     | done    | (this commit) | 2026-07-20 |
 | 4     | done    | (this commit) | 2026-07-20 |
-| 5a    | blocked |        |      |
-| 5b    | blocked |        |      |
+| 5a    | superseded | → `20260720-prod-w10-keyed-mutable-admission.md` Phase 4 | 2026-07-20 |
+| 5b    | superseded | → `20260720-prod-w10-keyed-mutable-admission.md` Phase 5 | 2026-07-20 |
 | 6     | done    | 31e297e6 | 2026-07-20 |
 
 *(Phase 5 was reshaped 2026-07-20 into 5a + 5b after the original "no production code expected" scoping was proven unsatisfiable — see "## Blocked phases". 5a is the production dispatch change that makes `Suppressed` reachable for a generatable recipe; 5b is the original generative conformance leg, now satisfiable on top of 5a.)*
@@ -312,6 +312,8 @@ only (timeless — describe behaviour, not this phase).
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
 
 ## Blocked phases
+
+**SUPERSEDED 2026-07-20 — Phases 5a + 5b moved to `docs/plans/20260720-prod-w10-keyed-mutable-admission.md`.** The 5a block (below) traced to a real admission gap: `derive_new_data`'s `Grain::Key` branch refuses the whole plan for any non-append-only referenced source, independent of `allow_full_scan` and independent of whether the source feeds the fold — so the keyed suppressed-MERGE dispatch had no reachable test. Closing it needs a `derive.rs` admission narrowing (forbidden by 5a's charter) plus a fold-contribution safety predicate, because a mutable source can both feed the fold and be enrich-joined. That is W10's scope; W10 also carries the reintroduced 5a dispatch (its Phase 4) and the 5b generative leg (its Phase 5). W8's own remaining Phase 6 is `done`, so W8 is complete. The historical block notes below are retained for provenance.
 
 **2026-07-20 — Phase 5** ("Generative conformance leg for change-suppressed column-scoped MERGE"): no recipe can reach a live, suppression-capable `Technique::ColumnScopedMerge` cell with a proven/declared row key over a joined external source through the *current production pipeline*, so the phase's own "no production code expected" constraint is unsatisfiable as scoped. Two independent, exhaustive gaps, both requiring real production changes with their own admission-safety implications:
 - `Grain::Partition` recipes (e.g. `MutableEnrichedRecipe`) can never get `RowIdentity::Key` for an `UpstreamMutation` cell driven by a joined external source: `ModelInputs::declared_unique_key()` (`crates/smelt-logical/src/maintenance/derive.rs:464`) returns `&[]` for `Grain::Partition` (top-level `unique_key:` only threads into `Grain::Key`), and the proven-key fallback (`row_identity_with_context`) is always called with an empty `JoinContext` for external sources in the general derivation path (`derive_maintenance_plan_impl`, `derive.rs:573`) — verified empirically, `row_identity` returns `WholeRow` for enrichment-join bodies against a mutable dimension either way. `SourceFacts::unique_key` is hardcoded to `vec![]` at its one call site (`crates/smelt-db/src/queries/maintenance.rs::source_facts:82`).
