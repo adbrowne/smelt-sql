@@ -113,7 +113,7 @@ Progress key: `pending` / `in-progress` / `done` / `blocked`.
   once verification passes (it is scaffolding, not documentation).
 - Commit: `docs(plans): claim inventory for incremental-models spec redraft`
 
-### Phase 2 — Redraft: Overview + Surface — **pending**
+### Phase 2 — Redraft: Overview + Surface — **done** (2026-07-22)
 
 - Write the scope blockquote (≤6 lines), `## Overview`, and `## Surface` per the target
   architecture, introducing the running example.
@@ -158,7 +158,40 @@ Filled in during Phases 2–4. Every heading of the pre-redraft spec must appear
 
 | Old heading | Disposition (new heading / merged into / deleted) |
 |---|---|
-| *(filled during redraft)* | |
+| (header status paragraph, no heading) | content → §Known Divergences (already duplicated there; verified in Phase 5 via claim A8) |
+| The declared shape axis | → §Surface "The declared shape" |
+| Grain is a derived label (+ optional check-only assertion) | merged into "The declared shape" |
+| The two axes are orthogonal — "partitioned or keyed" is a category error | merged into "The declared shape" (one calm normative rule) |
+| The composition contract | → §Semantics (holding area; final home Phase 3: intro of the shape-profile sections) |
+| The plan (derived, reported) | → §Semantics (holding; Phase 3: plan machinery) |
+| Triggers | → §Semantics (holding; Phase 3: plan machinery) |
+| Upstream model edges | → §Semantics (holding; Phase 3: graph layer) |
+| Frontmatter | → §Surface "Maintenance overrides (`maintenance:`)" |
+| Partition-grain declaration (`grain: partition`) | kept (rules folded in) |
+| Partition-grain composition | → §Semantics partition profile (holding; Phase 3) |
+| Partition-grain frontmatter (in `.sql` files) | merged into "Partition-grain declaration" |
+| Partition-grain `smelt.yml` overrides | merged into "Partition-grain declaration" |
+| Granularity values | dropped as heading; pointer to `timeseries.md` retained in declaration rules (holding until Phase 3) |
+| Strategy enum (backend-internal) | → §Semantics partition profile (holding; Phase 3 — backend-internal, not surface) |
+| Key-grain declaration (`grain: key`) | kept (rules folded in) |
+| Key-grain composition | → §Semantics key profile (holding; Phase 3) |
+| Key-grain frontmatter (in `.sql` files) | merged into "Key-grain declaration" |
+| Key-grain `smelt.yml` overrides | merged into "Key-grain declaration" |
+| The column-family catalogue | kept |
+| Interval-versioned declaration (`versioning: interval`) | kept (rules folded in) |
+| Interval-versioning composition | → §Semantics interval profile (holding; Phase 3) |
+| Interval-versioning frontmatter (in `.sql` files) | merged into "Interval-versioned declaration" |
+| Interval-versioned output shape | merged into "Interval-versioned declaration" (validity-columns rule) |
+| CLI | kept; run-flag subsections merged in |
+| Partition-grain run flags | merged into "CLI" → "Run flags" |
+| Key-grain run flags | merged into "CLI" → "Run flags" |
+| Diagnostics | kept — one unified table (shared / partition / key groups) |
+| The `Maintenance*` family | merged into "Diagnostics" |
+| Key-grain diagnostic codes | merged into "Diagnostics" |
+| *(Semantics onward: filled in Phase 3/4)* | |
+
+Planned renames already referenced by the new text (final in Phase 3): "What the composed
+shape uniquely enables" → "What the composed shape enables".
 
 ## Appendix B — deleted Known-Divergences entries
 
