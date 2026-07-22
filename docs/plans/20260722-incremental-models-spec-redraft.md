@@ -120,7 +120,7 @@ Progress key: `pending` / `in-progress` / `done` / `blocked`.
 - Maintain the heading map (Appendix A) for every renamed/moved/merged section.
 - Commit: `docs(specs): incremental_models redraft — Overview + Surface`
 
-### Phase 3 — Redraft: Semantics — **pending**
+### Phase 3 — Redraft: Semantics — **done** (2026-07-22)
 
 - Shared machinery first, then the four shape profiles, per the target architecture.
 - Commit: `docs(specs): incremental_models redraft — Semantics`
@@ -188,10 +188,20 @@ Filled in during Phases 2–4. Every heading of the pre-redraft spec must appear
 | Diagnostics | kept — one unified table (shared / partition / key groups) |
 | The `Maintenance*` family | merged into "Diagnostics" |
 | Key-grain diagnostic codes | merged into "Diagnostics" |
-| *(Semantics onward: filled in Phase 3/4)* | |
-
-Planned renames already referenced by the new text (final in Phase 3): "What the composed
-shape uniquely enables" → "What the composed shape enables".
+| The plan (derived, reported) *(holding)* | merged into §Semantics "The plan matrix" |
+| Triggers *(holding)* | merged into "The plan matrix" |
+| Upstream model edges *(holding)* | merged into "The graph layer" |
+| The composition contract *(holding)* | merged into new §Semantics "Shape profiles" intro |
+| Partition-grain / Key-grain / Interval-versioning composition *(holding)* | composition tables now open their profile's §Semantics section |
+| Strategy enum (backend-internal) *(holding)* | → §Semantics partition grain "Strategy enum (backend-internal)" |
+| Granularity values *(holding)* | dropped as heading; inline pointer to `timeseries.md` |
+| Safety checks (per-cell admission for the partition grain's recompute corner) | → "Safety checks (per-cell admission for the recompute corner)" |
+| Event-time outer-visibility (partition-grain-local) | → "Event-time outer-visibility" |
+| Observing the per-source clamp (partition-grain-local surface) | → "Observing the per-source clamp" |
+| Functions inside partition-grain model bodies | → "Functions inside partition-grain bodies" |
+| What the composed shape uniquely enables | → "What the composed shape enables" |
+| *(all other §Semantics headings)* | kept verbatim; prose tightened, content preserved |
+| *(Design / Constraints / Divergences / Extensions / References: filled in Phase 4)* | |
 
 ## Appendix B — deleted Known-Divergences entries
 
