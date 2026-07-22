@@ -91,14 +91,16 @@ Each cell records the **technique** that repairs it (rewrite a partition range; 
 
 The **graph layer** lifts the plan to the DAG: given what landed upstream, which cells of which downstream models must run over which regions (**forward propagation**) — and given a requested output period, which upstream slices must exist first (**backward resolution**).
 
-### Why cells differ — the two costs
+### Why cells differ — the three costs
 
-The equivalence invariant fixes what the table must equal; it says nothing about how much work a run does to get there. The plan exists because many physically different repairs reach the same state, and they differ **only in cost**. That cost decomposes into two independent dimensions, each governed by its own machinery.
+The equivalence invariant fixes what the table must equal; it says nothing about how much work a run does to get there. The plan exists because many physically different repairs reach the same state, and they differ **only in cost**. That cost decomposes into three dimensions — read, compute, write. They correlate but do not track each other, and each has its own governing machinery.
 
 **Read cost — how much input the run must scan.** Two questions, each with a cheapest-to-dearest ladder:
 
 - *How is the delta discovered?* A source-provided **change feed** hands the delta over directly — the smallest possible read. A **clock** allows window-forward discovery: only the new window plus a derived lookback is scanned (the **scan clamps**, §"Windowed maintenance and the horizon"). **No clock** leaves only a snapshot diff — a full read, surfaced and guarded (`scan_bounds`), never silent.
 - *How much input does the repair itself need?* A **fold** consumes delta + stored state — the smallest read, paid for with combiner-algebra obligations (§"The algebraic maintenance ladder"). A **recompute** re-reads the region's full input — a larger read that needs no algebra at all. Neither dominates: a small delta into cheap state favours the fold; a delta touching most of a region can make the recompute cheaper. That is why proven-interchangeable techniques are cost-modelled and measurable (`smelt bakeoff`), not fixed by shape.
+
+**Compute cost — the engine work between read and write.** Scanned volume is only a proxy for what the repair costs to *evaluate*: the joins, aggregations, and sorts between scan and write can dominate, and on a distributed engine the **shuffle** they induce is often the dominant term. Compute correlates with read but does not track it — a bounded scan feeding a global aggregation or a wide join can shuffle far more than it reads. smelt's posture is two-fold. It does not hand-compute minimal deltas: the engine evaluates the model's SQL, joins included, over a widened scan, keeping join optimisation where the optimiser lives (§"Windowed maintenance and the horizon"). What smelt does control is the **unit of work**: a repair scoped region by region caps the working set and the shuffle of each statement, which is why a keyed model with proven temporal locality may still be maintained partition by partition even though one whole-table keyed `MERGE` would be equivalent — the locality proofs buy bounded compute, not just a smaller write (§"Key temporal locality"). Where the trade is real (one big statement vs. many bounded ones), it is a measurable cost question, not a correctness one.
 
 **Write cost — how the repair reaches stored rows.** Engines offer a handful of verbs — `INSERT`, `DELETE`, `UPDATE`, `MERGE` — but the cost structure behind them is three orthogonal properties, derived per cell (§"Per-cell write addressing"):
 
@@ -106,7 +108,7 @@ The equivalence invariant fixes what the table must equal; it says nothing about
 - **Replacement granularity.** A **wholesale** write (`DELETE`+`INSERT`, swap) replaces the whole region — simple and contract-agnostic, but it rewrites unchanged rows. A **surgical** write (`UPDATE`, `MERGE`, column-scoped merge) touches only changed rows or columns — less written, but it needs row identity, change-comparability proofs, and engine support.
 - **Locality.** Every verb is cheaper when the touched rows cluster in few partitions: the plan resolves the delta to touched partitions first and scopes the statement to them, whatever the addressing (§"Per-cell write addressing", "Addressing is how a row is found, not how far the statement ranges").
 
-The division of labour: the **declared facts** gate which write mechanisms exist at all; the **proofs** bound what must be read and where writes may land; and among the mechanisms that survive admission, equivalence makes the choice a pure cost question — the cost model, an operator `prefer`/`technique` pin, or an offline `smelt bakeoff` measurement decides, and freshness is the only thing at stake (§"Per-cell admission").
+The division of labour: the **declared facts** gate which write mechanisms exist at all; the **proofs** bound what must be read, where writes may land, and how small a unit of work a repair may be broken into; and among the mechanisms that survive admission, equivalence makes the choice a pure cost question — the cost model, an operator `prefer`/`technique` pin, or an offline `smelt bakeoff` measurement decides, and freshness is the only thing at stake (§"Per-cell admission").
 
 ### The running example
 
