@@ -91,6 +91,23 @@ Each cell records the **technique** that repairs it (rewrite a partition range; 
 
 The **graph layer** lifts the plan to the DAG: given what landed upstream, which cells of which downstream models must run over which regions (**forward propagation**) — and given a requested output period, which upstream slices must exist first (**backward resolution**).
 
+### Why cells differ — the two costs
+
+The equivalence invariant fixes what the table must equal; it says nothing about how much work a run does to get there. The plan exists because many physically different repairs reach the same state, and they differ **only in cost**. That cost decomposes into two independent dimensions, each governed by its own machinery.
+
+**Read cost — how much input the run must scan.** Two questions, each with a cheapest-to-dearest ladder:
+
+- *How is the delta discovered?* A source-provided **change feed** hands the delta over directly — the smallest possible read. A **clock** allows window-forward discovery: only the new window plus a derived lookback is scanned (the **scan clamps**, §"Windowed maintenance and the horizon"). **No clock** leaves only a snapshot diff — a full read, surfaced and guarded (`scan_bounds`), never silent.
+- *How much input does the repair itself need?* A **fold** consumes delta + stored state — the smallest read, paid for with combiner-algebra obligations (§"The algebraic maintenance ladder"). A **recompute** re-reads the region's full input — a larger read that needs no algebra at all. Neither dominates: a small delta into cheap state favours the fold; a delta touching most of a region can make the recompute cheaper. That is why proven-interchangeable techniques are cost-modelled and measurable (`smelt bakeoff`), not fixed by shape.
+
+**Write cost — how the repair reaches stored rows.** Engines offer a handful of verbs — `INSERT`, `DELETE`, `UPDATE`, `MERGE` — but the cost structure behind them is three orthogonal properties, derived per cell (§"Per-cell write addressing"):
+
+- **Row location.** A write finds its rows by **region predicate** (partition range — needs a clock: `DELETE`+`INSERT`, partition swap), by **identity** (needs a `unique_key`: keyed `MERGE`, in-place `UPDATE`), or by any other predicate a registered pattern can prove sound — the pattern set is open (§"The write-pattern set is open (and partly backend-provided)"). Pure append (`INSERT` of new rows) is the degenerate cheapest case: nothing to locate.
+- **Replacement granularity.** A **wholesale** write (`DELETE`+`INSERT`, swap) replaces the whole region — simple and contract-agnostic, but it rewrites unchanged rows. A **surgical** write (`UPDATE`, `MERGE`, column-scoped merge) touches only changed rows or columns — less written, but it needs row identity, change-comparability proofs, and engine support.
+- **Locality.** Every verb is cheaper when the touched rows cluster in few partitions: the plan resolves the delta to touched partitions first and scopes the statement to them, whatever the addressing (§"Per-cell write addressing", "Addressing is how a row is found, not how far the statement ranges").
+
+The division of labour: the **declared facts** gate which write mechanisms exist at all; the **proofs** bound what must be read and where writes may land; and among the mechanisms that survive admission, equivalence makes the choice a pure cost question — the cost model, an operator `prefer`/`technique` pin, or an offline `smelt bakeoff` measurement decides, and freshness is the only thing at stake (§"Per-cell admission").
+
 ### The running example
 
 The spec's examples draw from one small warehouse:
@@ -677,7 +694,8 @@ is declared, and pinning either (`cells[].write`) is validated, not trusted.
 
 The patterns named above are the ones understood *today*. The set grows — partition/atomic swap
 (Delta/Iceberg `REPLACE PARTITION`), copy-on-write vs merge-on-read variants, `MERGE … WHEN NOT
-MATCHED BY SOURCE` prune, staged-upsert, incremental MV refresh, engine-specific primitives —
+MATCHED BY SOURCE` prune, staged-upsert, a predicate-targeted `UPDATE` locating rows by
+something other than the row key, incremental MV refresh, engine-specific primitives —
 and the durable contract is deliberately **not** the enumeration; the enumeration is data.
 
 - **The invariant is the admission function, not the enum.** A new pattern is admitted by
@@ -685,6 +703,12 @@ and the durable contract is deliberately **not** the enumeration; the enumeratio
   discharging the equivalence proof obligation for the cells it serves. Nothing else moves:
   grain stays derived, the cost model ranks whatever the rule admits. A new mechanism can never
   be less correct than the ones it joins, because the equivalence gate is the price of entry.
+  Concretely: a dimension-mutation cell could one day be served by an `UPDATE` that locates
+  rows through the **join key** (`customer_id`) rather than the output's `unique_key`,
+  partition by partition — admitted exactly like any other pattern, by declaring the facts it
+  needs (a proven functional dependency from join key to the repaired columns) and discharging
+  the equivalence obligation for that cell. Today's registry serves that cell with a keyed
+  column `MERGE` (§"Per-cell write addressing", worked example).
 - **The pattern set is backend-relative.** Engines differ sharply on atomic partition swap, true
   `UPDATE`, and merge-on-read, so admission carries backend capability as its fourth factor: the
   write layer queries the backend's capability registry (`architecture.md`), and a pattern the
