@@ -1056,9 +1056,9 @@ recompute-a-region execution shape:
 
 `n` is rendered in the source's partition-column unit and is the same value the source-filter
 pushdown reads. A model with **any** `NotDerivable` source is **refused at planning time**, not
-assigned a class (`MaintenanceReachNotDerivable`): the diagnostic names the offending construct,
-the author rewrites into a derivable form, and there is no silent downgrade to full refresh
-(§"Validator, not chooser").
+assigned a class (`MaintenanceReachNotDerivable`): the diagnostic names the offending construct
+and its source-map points at the original SQL; the author rewrites into a derivable form, and
+there is no silent downgrade to full refresh (§"Validator, not chooser").
 
 **Wide single-batch builds.** When `FullyBatchSafe` yields a single batch spanning more than 30
 partition periods, smelt warns and recommends `--per-partition` or `--batch-size <n>`; either
@@ -1231,6 +1231,11 @@ dependency graph, never declared:
   order**, and its backfill may not be parallelised or reordered. A self-edge the planner cannot
   prove converges partition-by-partition (a self-reference reading forward or across all
   history) is refused at planning time.
+
+This is the same stateless/stateful spine that separates the partition grain from the key
+grain: a self-referential partition-grain model is *stateful-ordered* in execution yet keeps the
+partition-grain output shape — partitioned, and per-partition-equivalent within each window's
+own input.
 
 Ordered execution composes with the derived output window: a Form B skew relation — anchored on
 a *non-self* source — rebases an `Ordered` model's write window exactly as it would a
@@ -2157,6 +2162,8 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   footprint reflection, partition-locality projection, faithful-fold conditions, and
   definition-change column classification. Column-group-scoped dirt coarsens to whole-partition
   (safe, over-running); hour granularity is declared surface but propagation is day-ordinal.
+  The built grain-alignment check validates only the declaration (widen-never-narrow,
+  `MaintenanceGranularityMismatch`); graph edges still take the declaration directly.
   Refs: `model_properties.md` §Surface; `docs/plans/20260707-maintenance-plan-impl.md`.
 - **The ledger's warehouse substrate is DuckDB-only.** An additive-graded cell on another
   backend fails loudly (`UnsupportedFeature`); a Spark-dialect ledger builder is unbuilt.
@@ -2439,7 +2446,7 @@ its own spec diff and plan.
   no-op write-elimination category and the composed-shape composition points);
   `docs/research/20260716-relation-contract-and-per-cell-addressing.md` (the shared Relation
   Contract, grain-as-derived-label, per-cell write addressing, and the open write-pattern registry
-  this spec's §"Per-cell write addressing" and §"The declared shape axis" encode).
+  this spec's §"Per-cell write addressing" and §"The declared shape" encode).
 - **Related specs** (one list for the whole spec): `model_properties.md` (the derived proofs —
   monotonicity trace, bound/reach, partition alignment, determinism, discriminants, anchor
   resolution, once-write and join-contribution proofs, `bounded_domain:`); `model_transforms.md`
