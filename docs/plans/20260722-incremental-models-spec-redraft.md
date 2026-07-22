@@ -103,7 +103,7 @@ Progress key: `pending` / `in-progress` / `done` / `blocked`.
   to match.
 - Commit: `docs(plans): incremental-models spec redraft plan; SPEC_TEMPLATE optional Overview`
 
-### Phase 1 — Claim inventory — **pending**
+### Phase 1 — Claim inventory — **done** (2026-07-22; 547 entries: A117 surface, B120 shared semantics, C127 shape profiles, D114 design+constraints, E57 divergence classifications — 3 LANDED / 23 MIXED / 31 LIVE, F12 future+references)
 
 - Extract every normative claim (must / must-not / refuse / diagnostic / invariant /
   carve-out / default) from the current spec into
