@@ -254,3 +254,7 @@ categories in the table above, which together with `roundtrip_mismatch` account 
 - `ast.rs` `strip_ident_quotes` handles `"…"`/`'…'` but not `$$…$$` dollar-quoted STRING
   tokens (e.g. `CollateExpr::collation_name`) — delimiters silently kept if one ever reaches
   such a call site.
+
+## Incremental-models spec redraft (2026-07-22)
+
+- PR #166 (branch `spec-redraft-incremental-models`): phases 0–5 done. Remaining: Phase 6 follow-up PR — run `/smelt:validate incremental_models`, sweep §-name references in code comments + sibling specs per the plan Appendix A heading map (docs/plans/ and docs/research/ stay untouched), delete the claims scaffolding file. See `docs/plans/20260722-incremental-models-spec-redraft.md`.

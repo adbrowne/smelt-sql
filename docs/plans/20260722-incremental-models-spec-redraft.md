@@ -132,7 +132,17 @@ Progress key: `pending` / `in-progress` / `done` / `blocked`.
   reviewed; References updated.
 - Commit: `docs(specs): incremental_models redraft — Design through References`
 
-### Phase 5 — Verification — **pending**
+### Phase 5 — Verification — **done** (2026-07-22, except `/smelt:validate` — moved to Phase 6's opening step to stay inside the session usage budget)
+
+**Results:** 547 claims verified by six adversarial legs — 0 lost, 12 weakened (all fixed in
+the two verification-fix commits), 1 retired-per-plan (the "supersedes four earlier specs"
+history note), deletions/promotions all verified in place (E24/E40 repo evidence confirmed in
+`config.rs`/`metadata.rs`). Notable verifier catches beyond the weakenings: a missing
+Known-Divergences entry the graph layer pointed at (out-of-band-edit tripwire — added), a
+stale ledger-rationale cross-reference (fixed), and confirmation that the `refresh: batched`
+hard-error rule correctly lives in `models.md` as the `refresh:`-axis owner. Banned-vocabulary
+lint clean; all internal §-references resolve. Verdict files: scratchpad `verify-{A,B,C,D,EF}.md`
+(session-local; summaries recorded here).
 
 - Adversarial subagent pass: every inventoried claim checked against the new text
   (verdict per claim: preserved / weakened / lost / strengthened); anything not `preserved`
@@ -146,6 +156,8 @@ Progress key: `pending` / `in-progress` / `done` / `blocked`.
 
 ### Phase 6 — Reference sweep — **pending** (follow-up PR, after the spec settles)
 
+- Run `/smelt:validate incremental_models` first and triage the drift report (deferred from
+  Phase 5).
 - Update §-name references in **code comments and sibling specs** to the new headings using
   Appendix A. `docs/plans/` and `docs/research/` are historical records and stay untouched
   (standing convention).

@@ -323,7 +323,7 @@ Rules:
 - `smelt explain <model>` — prints the plan: cells, addressing, clamps, locality verdicts, the per-column guarantee ledger, and the model's inbound edges. With `--show-sql`, additionally prints each cell's emitted maintenance statements — the same emitters' output a run executes (§"Statement emission (single owner)"; flag surface in `cli.md`).
 - `smelt run --since-upstream --source <address> --landed <start>..<end>` (`--source`/`--landed` repeatable, one pair per source) — **forward propagation**: the caller declares what landed for each source since it last propagated; the graph reflects those per-source deltas through the edges and runs exactly the propagated per-edge regions with their trigger cells (§"The graph layer"). `--source` accepts a declared source or an upstream maintained model (a model's landed delta is the output window a completed run wrote). No per-invocation delta is computed automatically — a source named without a matching `--landed` propagates nothing. Opt-in; the intended default posture once trusted. Prints the dirty set before acting.
 - `smelt build <model> --period <start>..<end> --include-upstreams` — **backward resolution**: print the per-ancestor required slices and build order; optionally execute the bounded build (§"The graph layer").
-- `smelt bakeoff <model> [--cells <col>@<source>,...] [--runs N] [--target <name>] [--keep] [--pin]` — measures every admissible technique for a set of cells against a representative window of real data and reports cost. `--cells` defaults to every cell with two or more admissible techniques. `--runs N` (default 3) splits the driving source's event-time extent into `N` sequential windows and replays them in order per technique; each replay is a real `execute_project` run against the project's actual data. Each measured technique runs against a scratch clone of the chosen target under schema `smelt_bakeoff_<model>_<technique>`, dropped after measurement unless `--keep`. After each window the measured techniques' outputs are cross-checked against each other with `EXCEPT ALL` in both directions — the equivalence bakeoff exploits is verified, not assumed. `--target` selects which declared target to clone (default: the active target). `--pin` emits the winning `cells[]` entry (or a complete `maintenance:` block) as ready-to-paste YAML on stdout; it never rewrites the model's `.sql` file. An applied pin is an ordinary override, re-validated through admission on every compile.
+- `smelt bakeoff <model> [--cells <col>@<source>,...] [--runs N] [--target <name>] [--keep] [--pin]` — measures every admissible technique for a set of cells against a representative window of real data and reports cost. `--cells` defaults to every cell with two or more admissible techniques. `--runs N` (default 3) splits the driving source's event-time extent into `N` sequential windows and replays them in order per technique; each replay is a real `execute_project` run against the project's actual data. Each measured technique runs against a scratch target: the chosen target is cloned in-memory under a synthetic name with schema `smelt_bakeoff_<model>_<technique>` (no runtime schema seam — schema already flows from `config.targets[target].schema`), dropped after measurement unless `--keep`. After each window the measured techniques' outputs are cross-checked against each other with `EXCEPT ALL` in both directions — the equivalence bakeoff exploits is verified, not assumed. `--target` selects which declared target to clone (default: the active target). `--pin` emits the winning `cells[]` entry (or a complete `maintenance:` block) as ready-to-paste YAML on stdout; it never rewrites the model's `.sql` file. An applied pin is an ordinary override, re-validated through admission on every compile.
 
 `cells[].technique` pins and `prefer` preferences are honoured at execution: the same choice ladder that governs `smelt bakeoff`'s measurement targets resolves the technique a live run uses, and admission still binds.
 
@@ -372,7 +372,7 @@ All codes are catalogued in `diagnostics.md`; this spec owns their semantics. Ev
 | `KeyedRequiresGroupBy` | The model SELECT has no `GROUP BY` — there is no unique key to derive. |
 | `KeyedForbidsTimeseries` | The model declares `timeseries:` but key temporal locality cannot be established — no route applies; names the three routes and the nearest missing fact (§"Key temporal locality"). |
 | `KeyedUnknownCombiner` | A non-key projection is not a direct call to a catalogued aggregator; names the offending expression. For a bare column or `ANY_VALUE` under window-forward, names `MAX_BY` + an ordering column as the fix. |
-| `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes. |
+| `KeyedGroupByContainsPartitionColumn` | The `GROUP BY` contains the driving source's `partition_column` and the model declares no `timeseries:` block — ambiguous between the partition shape and the key-embedded time-partitioned shape; suggests both fixes: `grain: partition` + `timeseries:`, or declaring `timeseries:` on the model to stay `grain: key`. |
 | `KeyedForbidsWindowFunctions` | The outer SELECT uses `OVER (...)`. The keyed state *is* the window. |
 | `KeyedForbidsNondeterministic` | The SQL uses `NOW()`, `RANDOM()`, or other non-deterministic functions; cross-window merge requires deterministic per-window output. |
 | `KeyedSqlNotParseable` | The model body cannot be parsed into the shape the classifier reads. |
@@ -553,7 +553,7 @@ Recompute-a-region is contract-agnostic and unconditionally valid over replayabl
 fold corner is contract-specific (it needs a combiner algebra — §"The algebraic maintenance
 ladder"). Where the interchangeability conditions hold (§"Per-cell admission"), a recompute of a
 region **supersedes and resets** what folds had written there. "Unconditionally valid" is a
-correctness claim, not an admission claim: it holds even when no partition bound exists and the
+correctness claim, not an admission or cost claim: it holds even when no partition bound exists and the
 region is the whole table — whether that degenerate recompute is *admitted* is gated separately
 by the partition-locality guardrail (§"Partition-local maintenance").
 
@@ -689,7 +689,8 @@ and the durable contract is deliberately **not** the enumeration; the enumeratio
   `UPDATE`, and merge-on-read, so admission carries backend capability as its fourth factor: the
   write layer queries the backend's capability registry (`architecture.md`), and a pattern the
   target cannot execute is simply not a candidate. The registry is where backend-specific
-  optimisations are *contributed* rather than special-cased in the planner.
+  optimisations are *contributed* rather than special-cased in the planner, and it keeps a
+  portable project from silently depending on a primitive only one engine has.
 - **The `write:` pin is an open, fail-loud vocabulary.** Pins name patterns and patterns are
   extensible, so `write:` is an open name resolved against the registry, not a sealed enum. An
   unrecognised pin, or one naming a pattern the target backend cannot provide, is refused with a
@@ -1335,7 +1336,7 @@ Snapshot-reconcile models keep no ledger — each run is a self-contained reconc
 The ledger is backend-resident and transactional with the write it describes; it is a
 **correctness structure**, distinct from the opt-in run-state observability surface
 (`run_state.md`). Rationale for why this does not violate the state-ownership doctrine:
-§"Key-grain design".
+§"Partition-grain design" ("smelt does not own state").
 
 #### Admission matrix (column family × source shape)
 
@@ -1728,7 +1729,8 @@ corner is drawn from the open registry, so the mechanism set grows without the c
 distinction changing. Key temporal locality does not change how a keyed write is addressed — it
 adds a proof about *where* addressed rows can live, licensing target pruning, a time-partitioned
 keyed output, and per-slice equivalence. Promoting it to a third addressing pole was rejected:
-it would suggest a different write primitive and identity requirement where there is none.
+it would suggest a different write primitive and identity requirement where there is none, and
+it would misplace a per-model derived/declared fact as a shape property.
 (`docs/research/20260705-keyed-time-superset.md`.)
 
 **The axes compose; exclusivity is the recurring error.** Treating "partitioned" and "keyed" as
@@ -1795,8 +1797,9 @@ that silently corrupts the clamp — dropping rows still within the model's reac
 keeps clamps correct by construction; a declaration is admitted only as a *ceiling* that warns.
 The consequence — a late arrival beyond the derived reach is silently excluded rather than
 diagnosed — is accepted and documented (§"Windowed maintenance and the horizon"); surfacing
-lateness is a model-author + data-quality concern. Consistent with derive-else-declare
-(`models.md` §Design).
+lateness is a model-author + data-quality concern. This can be softened later if a legitimate
+need to widen beyond the derived reach appears; the safe default is derive-for-correctness,
+consistent with derive-else-declare (`models.md` §Design).
 
 **Validator, never chooser.** Auto-selecting or silently downgrading the declared shape was
 rejected: it reproduces dbt's `strategy:` footgun where the effective contract is invisible. The
@@ -1818,7 +1821,8 @@ clamp to a resolved inner alias (answers a question the output clamp must never 
 addressing pole for locality (changes no write primitive); per-edge grain declarations (two
 declarations can disagree — resolved by the derived label + check-only assertion); a closed
 write-pattern enum baked into the surface (bakes today's engines in). Deeper rationale:
-`docs/research/20260705-refresh-as-maintenance-plan/` parts 01–10.
+`docs/research/20260705-refresh-as-maintenance-plan/` parts 01–10, with the decision-acceptance
+records in `09-spec-readiness.md` §1 and `10-dependency-propagation.md` §11 of that directory.
 
 ### Partition-grain design
 
@@ -2179,6 +2183,10 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
 - **Straddle attribution without locality is scoped out of the ledger's v1** (a per-key
   footprint chaining across history;
   `docs/research/20260705-refresh-as-maintenance-plan/01-framework.md` §8).
+- **No out-of-band-edit tripwire (Open Question).** An observed output delta is trusted because
+  the recording state is smelt-owned and written only by smelt's own conditional-write path; an
+  external mutation to a target table between runs is not detected. Whether a tripwire (e.g. a
+  cheap table digest checked at run start) is worth its cost is open (§"The graph layer").
 - **A proposed `on_column_add: backfill | leave_null | recompute` policy knob** is noted but not
   surface.
 - **The derived model-wide horizon is under construction**, as is the data-quality check for the
