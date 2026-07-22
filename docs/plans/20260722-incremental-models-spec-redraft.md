@@ -125,7 +125,7 @@ Progress key: `pending` / `in-progress` / `done` / `blocked`.
 - Shared machinery first, then the four shape profiles, per the target architecture.
 - Commit: `docs(specs): incremental_models redraft — Semantics`
 
-### Phase 4 — Redraft: Design, Constraints, Divergences, Extensions, References — **pending**
+### Phase 4 — Redraft: Design, Constraints, Divergences, Extensions, References — **done** (2026-07-22)
 
 - Design distilled; Constraints deduplicated; Known Divergences pruned to live gaps
   (deletions logged in Appendix B with the verifying gate/test for each); Future Extensions
@@ -201,13 +201,24 @@ Filled in during Phases 2–4. Every heading of the pre-redraft spec must appear
 | Functions inside partition-grain model bodies | → "Functions inside partition-grain bodies" |
 | What the composed shape uniquely enables | → "What the composed shape enables" |
 | *(all other §Semantics headings)* | kept verbatim; prose tightened, content preserved |
-| *(Design / Constraints / Divergences / Extensions / References: filled in Phase 4)* | |
+| *(Design)* Partition-grain / Key-grain / Interval-versioning design | kept; shared-Design decision paragraphs kept with research cited by full path; "The two mechanisms stay binary per cell" folded into the locality paragraph; E57's standalone-classifier decision promoted into "Interval-versioning design" |
+| *(Constraints)* all three constraint sub-section headings | kept; bullets deduplicated, numbering preserved |
+| *(Known Divergences)* four sub-section headings | kept; entries rewritten gap-first from the claim inventory's E-records |
+| Future Extensions | kept; "Conditional maintenance without a change feed" graduated out (see Appendix B); observer/prefix-consistency contract entry added (was inline in the old invariant section) |
+| References | kept verbatim |
 
 ## Appendix B — deleted Known-Divergences entries
 
 Filled in during Phase 4. Each row: the deleted entry's first bold phrase, and the
 gate/test/code location that verifies the described work is landed.
 
-| Deleted entry | Verified landed by |
+| Deleted entry (claim id) | Disposition / verified by |
 |---|---|
-| *(filled during pruning)* | |
+| "The mode value is cut and the sub-block is retired." (E24) | LANDED — `refresh: batched` hard error + `batched:` sub-block `YamlParseError` fix-its (`crates/smelt-core/src/config.rs`, `crates/smelt-core/src/metadata.rs`). Phase 5 re-verifies. The deliberate no-`smelt migrate` decision is a fix-it design already implied by the diagnostics; not restated. |
+| "The pre-cut surface is removed." (E40) | LANDED — retired `refresh:` names hard-error with fix-its (`crates/smelt-core/src/config.rs`); the retired diagnostic's surviving case is covered by `PartitionGrainRequiresRefreshIncremental`. Phase 5 re-verifies. |
+| "The time-partitioned keyed output's admission … are all wired." (E44) | LANDED — locality gate, settle bound, downstream pushdown/driving-source selection all normative in §Semantics; residual gaps live on in the locality-gaps and conditional-maintenance entries (E16/E45 residues kept). Phase 5 re-verifies no residue lost. |
+| "Three execution paths in `crates/smelt-cli/src/main.rs`." (E33) | STALE — verified this session: `main.rs` has no legacy/optimizer/batched-only dispatch and no `PartitionGrainConfig` (CLI incremental path unified into `smelt-runtime` 2026-07-06). |
+| "Diagnostic code ownership." (E37) | PROMOTED — a standing rule, not a divergence; now the ownership sentence opening §Surface "Diagnostics". |
+| "Umbrella subsumption." (E57) | PROMOTED — a settled decision; now the "standalone classifier" paragraph in §Design "Interval-versioning design". |
+| Future Extension "Conditional maintenance without a change feed" (F4/M1–M3) | GRADUATED — the built mechanisms are normative in §Semantics (pruning category 2, observed deltas on model edges) / `model_transforms.md` / `sources.md`; residual unbuilt pieces are Known-Divergences entries (conditional-maintenance gaps, observed-delta consumption, override-ladder reach). |
+| Landed halves of the 23 MIXED entries (E1–E11, E14–E16, E18–E20, E25, E29, E36, E39, E41, E42) | Trimmed to their live residue; the full landed-evidence text is preserved in the claim inventory's E-records for Phase 5 verification. E42's residue merged into the ledger-substrate entry (was duplicated with E10). |
