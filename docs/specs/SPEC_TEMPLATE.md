@@ -85,6 +85,15 @@ What must always hold. What is explicitly not supported and why. These are the t
 - Properties that must hold across all inputs (proptest-style)
 - Things explicitly out of scope (and the reason — keeps future plans honest)
 
+## Limitations
+
+*(Optional.)* Deliberate scope boundaries: things the feature does not do **by design** at the
+spec's current cut. Distinct from both neighbours — §Known Divergences tracks implementation
+lagging decided intent (a gap a plan closes), and §Future Extensions holds undecided ideas;
+an entry here is decided *against* for now and changes only via its own spec diff. Each entry
+states the boundary, the reason, and the sanctioned alternative. Short pointers to boundaries
+stated normatively elsewhere in the spec are welcome for discoverability; don't restate the rule.
+
 ## Known Divergences / Open Questions
 
 Where current implementation differs from intent, or where intent itself is undecided. Update as part of any plan that touches this feature.

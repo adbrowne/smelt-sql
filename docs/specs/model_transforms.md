@@ -1,7 +1,7 @@
 ---
 feature: model_transforms
 status: experimental
-last_reviewed: 2026-07-11
+last_reviewed: 2026-07-23
 owners: [andrew]
 ---
 
@@ -87,8 +87,8 @@ pushdown → create-or-merge) is the *windowed-keyed-maintenance driver* — a m
 mechanism, so it is catalogued here in its own right. Its reference *implementation*
 lives today in the key-grain profile's built seed (`incremental_models.md`
 §"The key grain"; the direct-monoid classifier, the only
-keyed mode built so far) and generalises across `keyed`'s own column families as they
-land, with `versioned` a prospective future consumer of the same driver; the normative
+keyed mode built so far) and generalises across the key grain's own column families as they
+land; the normative
 *description* of the driver mechanism is this catalogue entry, not the mode spec.
 
 **Source-filter pushdown + the two clamps.** Three related mechanisms share one
@@ -275,8 +275,6 @@ here; the mode spec owns them in full:
 
 - **Backfill chunking** (one-shot / auto-sized / per-partition) and **auto-coarsen
   run window** — `incremental_models.md` §"First-run and backfill".
-- **Close-old / open-new interval maintenance** (SCD2) — `incremental_models.md`
-  §"Close-old / open-new interval maintenance (the combiner)".
 
 **Deferred, not catalogued as built or unbuilt: eviction / settled-key GC.** Retiring
 keyed state older than `current_window − H` is **not** licensed by any transform today —
@@ -531,9 +529,8 @@ by `docs/plans/20260704-model-updates.md` (design:
 - The **windowed-keyed-maintenance driver** is a standalone mechanism (mode-agnostic
   classify → step over driving partitions in temporal order → per-partition pushdown →
   create-or-merge loop, fail-closed on a non-monoid combiner) with the built `cumulative`
-  seed (now `incremental_models.md`'s key grain) as its first named consumer. `versioned` composes the
-  same driver as it lands; the mechanism's normative home is this spec, not the mode
-  that first implements it.
+  seed (now `incremental_models.md`'s key grain) as its first named consumer; the
+  mechanism's normative home is this spec, not the mode that first implements it.
 
 ## References
 

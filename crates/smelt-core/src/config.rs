@@ -82,12 +82,13 @@ impl<'de> Deserialize<'de> for RefreshStrategy {
                  (see docs/specs/incremental_models.md)",
                 REFRESH_INCREMENTAL_FIXIT
             ))),
-            "versioned" => Err(serde::de::Error::custom(format!(
-                "Invalid refresh strategy: 'versioned'. `refresh: versioned` is now \
-                 `refresh: incremental` with `grain: key` (+ `versioning: interval`) — {} \
-                 (see docs/specs/incremental_models.md)",
-                REFRESH_INCREMENTAL_FIXIT
-            ))),
+            "versioned" => Err(serde::de::Error::custom(
+                "Invalid refresh strategy: 'versioned'. There is no versioned mode: SCD2 \
+                 history is written as plain windowed SQL under `refresh: full` (or \
+                 `refresh: materialized_view` where the engine has native IVM) \
+                 (see docs/specs/incremental_models.md §Limitations)"
+                    .to_string(),
+            )),
             _ => Err(serde::de::Error::custom(format!(
                 "Invalid refresh strategy: {}. Must be 'full', 'incremental', or 'materialized_view'",
                 s
@@ -1902,11 +1903,13 @@ models:
         );
     }
 
-    /// `refresh: batched`/`keyed`/`versioned` are all hard errors pointing at
-    /// the `refresh: incremental` + `grain:` replacement.
+    /// `refresh: batched`/`keyed` are hard errors pointing at the
+    /// `refresh: incremental` + `grain:` replacement; `refresh: versioned` is a
+    /// hard error pointing at the plain-SQL SCD2 posture
+    /// (`docs/specs/incremental_models.md` §Limitations).
     #[test]
     fn test_refresh_strategy_removed_names_are_hard_errors() {
-        for value in ["batched", "keyed", "versioned"] {
+        for value in ["batched", "keyed"] {
             let result: Result<RefreshStrategy, _> = serde_yaml::from_str(value);
             let err = result
                 .expect_err("removed refresh name must be rejected")
@@ -1916,6 +1919,15 @@ models:
                 "error for '{value}' must name the refresh: incremental + grain: replacement; got: {err}"
             );
         }
+
+        let result: Result<RefreshStrategy, _> = serde_yaml::from_str("versioned");
+        let err = result
+            .expect_err("removed refresh name must be rejected")
+            .to_string();
+        assert!(
+            err.contains("refresh: full") && err.contains("Limitations"),
+            "error for 'versioned' must steer to the plain-SQL SCD2 posture; got: {err}"
+        );
     }
 
     /// `refresh: latest_value` and `refresh: accumulating_snapshot` remain

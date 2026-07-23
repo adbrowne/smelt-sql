@@ -1,13 +1,13 @@
 ---
 feature: incremental_models
 status: experimental
-last_reviewed: 2026-07-22
+last_reviewed: 2026-07-23
 owners: [andrew]
 ---
 
 # Incremental Models
 
-> **What this is.** The normative spec for **maintained models** — everything declared `refresh: incremental` — covering the shared maintenance contract, the derived per-model **maintenance plan**, the dependency-**graph layer** built on it, and the declared shapes (partition grain, key grain, interval versioning). Out of scope, with their own homes: the provable properties of a model's SQL (`model_properties.md`); the physical transform mechanisms (`model_transforms.md`); the `refresh:` axis and declaration law (`models.md`); source world-facts (`sources.md`); the `timeseries:` declaration grammar (`timeseries.md`); engine-maintained views (`materialized_view.md`); backend capability flags (`multi_backend.md`).
+> **What this is.** The normative spec for **maintained models** — everything declared `refresh: incremental` — covering the shared maintenance contract, the derived per-model **maintenance plan**, the dependency-**graph layer** built on it, and the declared shapes (partition grain, key grain). Out of scope, with their own homes: the provable properties of a model's SQL (`model_properties.md`); the physical transform mechanisms (`model_transforms.md`); the `refresh:` axis and declaration law (`models.md`); source world-facts (`sources.md`); the `timeseries:` declaration grammar (`timeseries.md`); engine-maintained views (`materialized_view.md`); backend capability flags (`multi_backend.md`).
 >
 > **Spec-first rule.** Edit this file before writing the implementation plan. The spec diff is the change description.
 >
@@ -40,8 +40,6 @@ A modeller declares `refresh: incremental` plus at most **two shape-defining fac
 
 - a **clock** (`timeseries:`) — the output has a time axis (`event_time_column`, `partition_column`, `granularity`) consumers can window over;
 - an **identity** (`unique_key:`) — the output is addressable by key, one row per key.
-
-An optional sub-declaration, `versioning: interval`, keeps *every* version of a key with a validity interval (SCD2) instead of only the current row.
 
 Everything beyond those facts — which maintenance technique runs where, how writes locate stored rows, what each run scans, what bookkeeping exists — is **derived** from the model's SQL and the declared facts, and printed by `smelt explain`. The machinery **validates** the declaration and refuses when the SQL cannot uphold it; it never chooses a different shape for you.
 
@@ -117,7 +115,8 @@ The spec's examples draw from one small warehouse:
 - `sources.orders` — clocked order fact feed (`order_ts`; up to 2 days late), append-only;
 - `sources.order_events` — clocked order-lifecycle event feed (`event_ts`), append-only;
 - `sources.raw_events` — clocked event feed with redeliveries; any duplicate of an event arrives within 7 days of the first copy (declared `key_recurrence: '7 days'`);
-- `sources.customers` — mutable dimension snapshot (`customer_id`, `tier`, `region`).
+- `sources.customers` — mutable dimension snapshot (`customer_id`, `tier`, `region`);
+- `sources.customer_changes` — clocked update-events feed of customer attribute changes (`effective_ts`), one row per change, append-only.
 
 and these models:
 
@@ -127,7 +126,8 @@ and these models:
 | `order_lifecycle` | identity | key grain (bare) |
 | `order_facts` | clock + identity (joins `customers`) | composed — the per-cell-addressing example |
 | `event_dedupe` | clock + identity | composed — the locality example |
-| `customer_history` | identity + `versioning: interval` | SCD2 |
+
+One further model, `customer_history` (SCD2 over `customer_changes`), appears in §Limitations: it is written as plain windowed SQL and is deliberately *not* a maintained shape.
 
 ### Reading guide
 
@@ -135,19 +135,19 @@ and these models:
 - *What exactly does a run do, and why was my model refused?* → §Semantics — shared machinery first (the invariant, the plan, windows and clamps, the graph layer), then one profile section per shape.
 - *Why is it designed this way; was X considered?* → §Design.
 - *What must never break?* → §Constraints & Invariants.
+- *What does smelt deliberately not do?* → §Limitations.
 - *Where does today's implementation fall short of this spec?* → §Known Divergences.
 
 ## Surface
 
 ### The declared shape
 
-The entire declared shape surface of an incremental model is the two shape-defining facts of the Relation Contract (`models.md` §"The Relation Contract") plus the optional interval-versioning sub-declaration:
+The entire declared shape surface of an incremental model is the two shape-defining facts of the Relation Contract (`models.md` §"The Relation Contract"):
 
 ```yaml
 refresh: incremental        # the one refresh mode this spec covers
 timeseries: { ... }         # the clock: event_time_column / partition_column / granularity (timeseries.md)
 unique_key: [ ... ]         # the identity: makes the output key-addressable
-versioning: interval        # optional; requires identity and no model clock (SCD2)
 grain: partition | key | key_per_partition   # optional CHECK-ONLY assertion; drives nothing
 ```
 
@@ -311,32 +311,6 @@ Any other aggregate, any non-aggregate non-key expression, and any composite exp
 
 The pattern functions `smelt.latest(value, ordering)` (→ `MAX_BY`), `smelt.once(value)` (→ the once-write canonical spelling), and `smelt.current(value)` (→ `ANY_VALUE`) are intent-naming sugar for the overwrite, once-write, and plain-overwrite families; they are ordinary transparent functions (`functions.md`) whose expansions are admitted on exactly the same terms as hand-written calls.
 
-### Interval-versioned declaration (`versioning: interval`)
-
-Opt-in: `refresh: incremental` + a declared identity + `versioning: interval`, with **no model clock**. The stored table is keyed state **plus history**: every version of a key is kept, each stamped with a non-overlapping validity interval (SCD2). Deliberately not a third grain — row addressing is still by key; the interval is structure within the key (§"Interval-versioning design"). `customer_history` from the running example:
-
-```sql
----
-refresh: incremental
-unique_key: [customer_id]
-versioning: interval
-grain: key                    # optional CHECK-ONLY assertion
----
-
-SELECT
-    customer_id,          -- the natural key
-    tier,
-    region
-FROM smelt.customers
-```
-
-Rules:
-
-- Admitted only where the output declares **identity** (`models.md` §"Constraint violations").
-- A `timeseries:` block on the model itself is a hard error together with `versioning: interval`: the SCD2 close-out escapes every time window (§"Per-cell write addressing"). This forbids output *partitioning*, not clocked *consumption* — over an update-events/CDC source the model still consumes window-forward (§"Input consumption is derived from the source").
-- The SELECT projects the **natural key** and the tracked attributes *as they are now*. smelt maintains the version history: each run compares incoming rows against the stored current version per key and, where a tracked attribute changed, closes the prior version and opens a new one (§"Close-old / open-new interval maintenance").
-- The stored table carries the projected columns plus smelt-managed validity columns — a `valid_from`/`valid_to` interval and an `is_current` flag; the user's SELECT never projects them (§"Validity columns"). A key with three successive states yields three rows: two closed intervals and one open.
-
 ### CLI
 
 - `smelt explain <model>` — prints the plan: cells, addressing, clamps, locality verdicts, the per-column guarantee ledger, and the model's inbound edges. With `--show-sql`, additionally prints each cell's emitted maintenance statements — the same emitters' output a run executes (§"Statement emission (single owner)"; flag surface in `cli.md`).
@@ -443,9 +417,7 @@ invariant is additionally checkable slice-by-slice:
 These are strengthenings of the one invariant, not peer contracts. What actually distinguishes
 the shapes is how their writes **address rows** — a per-cell fact (§"Per-cell write
 addressing"), not a second invariant. The key-addressed shapes discharge the *same* invariant on
-their end-state because their writes reach stored rows by key, wherever they live; the
-interval-versioned profile discharges it in its interval-keyed specialisation
-(§"End-state equivalence (interval-keyed)").
+their end-state because their writes reach stored rows by key, wherever they live.
 
 **The replayability split.** Full equivalence — an executable `full_refresh` oracle a test can
 run — holds only for **replayable inputs**: a set `S` the model can re-evaluate its own SQL over
@@ -639,10 +611,7 @@ The first three factors are structural; the fourth is the target engine's capabi
 - a **bare partition table** (clock, no identity) has no identity → only region rewrite or full
   rebuild. To gain keyed dimension-change addressing the output must declare a `unique_key`,
   which makes it the composed clock-and-identity shape (§"What the composed shape enables") —
-  declaring identity is **load-bearing** (it admits keyed writes), never a dedup footnote;
-- the SCD2 close-out cell (§"Interval versioning") has **only** keyed `MERGE` available, because
-  its write provably escapes any time window — derived per cell, fail-loud if the facts cannot
-  support it.
+  declaring identity is **load-bearing** (it admits keyed writes), never a dedup footnote.
 
 A cell with no admissible write mechanism is `MaintenanceNoAdmissibleTechnique`, naming the cell.
 
@@ -652,7 +621,7 @@ output also declares a `timeseries:` axis, the write stays **bounded to the affe
 partitions**: the changed-input delta is resolved to the touched partitions first, and the keyed
 `MERGE` is emitted per partition (or with a partition predicate) against just those. A genuinely
 window-free keyed write — one whole-table `MERGE` — is reached only when the cell **provably
-cannot** be bounded to a partition set (the SCD2 close-out); that unboundedness is itself a
+cannot** be bounded to a partition set; that unboundedness is itself a
 derived per-cell fact, fail-loud, never a default. Partition-scoping is orthogonal to the
 addressing corner: region and keyed writes alike ride the partition pruning the plan computes
 (§"Partition-local maintenance").
@@ -1587,123 +1556,6 @@ built-ins) in the projection list are rejected via `KeyedUnknownCombiner`.
   `--full-refresh`.
 - **Snapshot-reconcile:** the model is treated as always-stale; every `--auto` run reconciles.
 
-### Interval versioning (`versioning: interval`)
-
-The key grain's history-keeping sub-declaration (SCD2): keyed state plus a validity interval per
-version. Its declared surface is §Surface "Interval-versioned declaration".
-
-| Kind | What the profile composes | Home |
-|---|---|---|
-| **Output shape / grain** | declared identity + `versioning: interval`, no model clock (derived `grain: key`) — every version kept with a validity interval | `models.md` §"Refresh axis" |
-| **Properties (required)** | algebraic monotonicity/ordering discriminants (tracked-attribute change detection); event-time monotonicity trace (validity is stamped from source event-time, never the run clock); driving-fact / anchor resolution; window-independence / ordered-execution (the combiner reads versions in event order) | `model_properties.md` |
-| **World-facts (consumed)** | the timeseries clock of an update-events / CDC feed, *or* a mutable snapshot's mutation profile — one of the two, derived from the source's shape, never declared on the model | `timeseries.md`, `sources.md` |
-| **Default plan (fold corner)** | keyed `merge_into` sequenced by the windowed-keyed-maintenance driver, with source-filter pushdown on the driving source, folding through the close-old / open-new combiner (profile-local, below) | `model_transforms.md` |
-| **Admission** | every check is one instance of §"Per-cell admission" evaluated for the fold-a-delta corner over a key-grain-plus-interval output (§"Interval-versioning admission") | this spec |
-| **Invariant upheld** | end-state equivalence in its interval-keyed specialisation (below) | §"The equivalence invariant" |
-
-The machinery below is meaningful only inside `versioning: interval` and is owned here in full.
-
-#### End-state equivalence (interval-keyed)
-
-The user-visible set of `(key, version, validity interval)` rows equals what a full rebuild
-would compute from the same set of processed snapshots, independent of the order in which
-non-overlapping snapshots were merged. smelt owns freshness (pull) — the history is correct as
-of the last `smelt build`. Order-independence holds because validity is anchored to the source's
-event time, not the run clock (§"Validity stamped from source event-time"): the combiner reads
-versions in event order via the driving-fact/anchor and ordered-execution proofs, so replays and
-out-of-order windows converge to the same history rather than shifting interval boundaries.
-
-#### Input consumption is derived from the source
-
-How new input is discovered is never declared on the model; it is the input-consumption axis
-(`models.md`), derived from the source's shape:
-
-- **Window-forward** — a source carrying a `timeseries:` declaration (an update-events / CDC
-  feed) is consumed in `--event-time` run windows applied to the *source's* `partition_column`,
-  exactly as the plain key grain consumes its driving source. Only the new tail is read
-  (source-filter pushdown). Because the combiner consumes versions in event order, windows apply
-  in temporal order.
-- **Snapshot-diff** — a mutable snapshot source (no monotone clock) is re-scanned each run and
-  compared against the stored current versions; the end-state contract is identical, only the
-  scan cost differs.
-
-The choice between the two is the mutation-profile world-fact (`sources.md`) feeding the
-input-delta-discovery proof (`model_properties.md`); moving along this axis never changes the
-equivalence contract, only what is scanned.
-
-#### Interval-versioning admission
-
-Every admission check for this profile instantiates §"Per-cell admission" for the fold-a-delta
-corner over a key-grain-plus-interval output:
-
-- **Replayable input / faithful fold** (obligations 1–2) — the combiner consumes an
-  update-events / CDC feed (replayable, append-only) or a mutable snapshot (re-scanned whole
-  each run); either discharges the obligation for its own consumption route, never a hybrid of
-  the two on one model.
-- **Combiner algebra class** (obligation 3) — the combiner is the profile's own local machinery
-  (below), admitted once per model, not per column: every tracked attribute folds through the
-  same close-old / open-new step.
-- **Bounded reach / bounded footprint** (obligations 4–5) — window-forward: the reach is the
-  run's event-time window on the driving source; the footprint is the keys touched by that
-  window's rows. Snapshot-diff: reach and footprint are the whole snapshot and the whole key
-  space — an intentional escape hatch for a clockless source, not a derivation gap.
-- **Well-defined groups** (obligation 6) — all tracked attributes plus the validity columns form
-  one column group; a version change is a single indivisible event across every tracked column.
-
-#### Close-old / open-new interval maintenance (the combiner)
-
-For each incoming row, keyed by natural key:
-
-1. Look up the key's current (open) version in the stored table.
-2. If no current version exists, **open** one: insert the row with `valid_from` = the incoming
-   event time, `valid_to` = open, `is_current = true`.
-3. If a current version exists and a **tracked attribute** differs, **close** the old version
-   (set `valid_to` = the incoming event time, `is_current = false`) and **open** a new one at
-   that boundary.
-4. If a current version exists and no tracked attribute differs, do nothing — no spurious
-   version.
-
-The close and the open share the same boundary timestamp, so intervals abut without gaps or
-overlaps. The mechanism is emitted as a keyed `merge_into` (`model_transforms.md`) — matched
-keys close-and-reopen, unmatched keys open — so history is never re-read wholesale.
-
-#### Validity columns (smelt-managed)
-
-`valid_from`, `valid_to`, and `is_current` are managed by smelt, not projected by the user's
-SELECT: the user projects only the natural key and the tracked attributes; smelt appends and
-maintains the interval columns. The open interval's `valid_to` is either NULL or a far-future
-sentinel (undecided — §Known Divergences); `is_current` is a convenience flag equivalent to
-"`valid_to` is open" that indexes the current-version lookup the combiner performs every run.
-
-#### Tracked-attribute selection
-
-A new version opens for a key only when a **tracked attribute** changes between the stored
-current version and the incoming row. By default every projected non-key column is tracked.
-Whether a modeller can mark a column *untracked* (a slowly-drifting field that should not open
-versions), and whether that is derived from the SQL or declared, is an Open Question
-(§Known Divergences); the posture is to derive the key and tracked set from the SQL where
-unambiguous rather than restate them in a config block (§"Interval-versioning design").
-
-#### Validity stamped from source event-time (not run clock)
-
-`valid_from`/`valid_to` boundaries are stamped from the **source's event time** — the
-update-events feed's event-time column, or the snapshot's as-of timestamp — never the run
-clock. This is what makes the history replay-safe: re-running a window, or backfilling windows
-out of order, reproduces byte-identical interval boundaries. A run-clock stamp would make a
-version boundary depend on when `smelt build` happened to run, breaking order-independence.
-
-#### Deletion handling
-
-A key present in the store but absent from the incoming set is a **retraction**, handled as a
-**soft-close**: the key's current version is closed (`valid_to` set, `is_current = false`) with
-no new version opened — "no longer present as of this event time". The event time used is the
-run's window boundary for a window-forward feed, or the snapshot's as-of time for snapshot-diff.
-A hard delete (physically removing the key's rows) is not the default — the point of
-`versioning: interval` is retained history — and the opt-in surface for hard deletes, and for
-*late corrections* to an already-closed interval, are Open Questions (the retraction question
-the key grain shares — §"Reprocessing"). A CDC feed carrying explicit delete events resolves
-deletion directly: the delete event is the close signal.
-
 ### Interactions
 
 - The invariant, ladder, horizon, and validator-not-chooser are owned above; the plan's
@@ -1743,8 +1595,8 @@ miscast: order/set-determinacy falls out of the single invariant for every shape
 per-partition equivalence is a *strengthening*, not a peer. What actually drives the physical
 transform is how a write addresses rows — and addressing is a property of *a write*, not of *a
 model*: the declared facts fix which addressings are available, and each cell derives its own.
-SCD2 is the proof that addressing is intrinsic to the write: its close-out escapes the input
-time-window, so that cell is keyed regardless of the source's clock, while the same model's
+The composed shape is the proof that addressing is intrinsic to the write: a late dimension
+correction is keyed — it targets specific rows across many partitions — while the same model's
 creation cell is region-addressed. A *declared model-wide* addressing token was rejected — the
 per-cell plan already knows better.
 (`docs/research/20260716-relation-contract-and-per-cell-addressing.md`.)
@@ -1965,31 +1817,6 @@ windowed-keyed-maintenance driver (`model_transforms.md`), parameterised by
 drift risk; a consequence is that every consumer inherits the driver's granularity support
 (§Known Divergences).
 
-### Interval-versioning design
-
-**A sub-declaration of the key grain, not a third grain.** `versioning: interval` composes onto
-the key shape: row addressing is still by key, and the interval is structure *within* the key.
-What distinguishes it is only the local combiner and the extra validity columns — by the litmus
-rule, derived machinery, not grounds for a new enum value (`models.md` §"Refresh axis").
-
-**A smelt-owned pattern, distinct from engine-owned SCD.** This profile owns its combiner
-(close-old / open-new) and validates the declaration against derived properties. An
-engine-maintained SCD2 is not a variant of this profile — it is hand-written SCD2 SQL declared
-`refresh: materialized_view`, where the engine's IVM runtime does the maintenance. The two are
-different modes with different freshness owners, not one profile with a maintainer flag.
-(`materialized_view.md` §Design; `docs/research/20260703-model-updates.md` §17.8.)
-
-**A standalone classifier, composing shared capabilities by name.** The profile does not share
-execution machinery with the plain key grain: it has its own classifier and owns its combiner in
-full, while the mechanisms it is emitted through — keyed `merge_into`, the
-windowed-keyed-maintenance driver, source-filter pushdown — are general capabilities referenced
-by name. Consistent with the narrow-composable-rules posture
-(`docs/research/20260522-cumulative-as-its-own-rule.md`).
-
-**Derive from SQL where possible.** The natural key and tracked attributes should be derived
-from the SQL and the declared key rather than restated in a config block wherever unambiguous.
-The precise derive-vs-declare line for change-tracking columns is an Open Question.
-
 ## Constraints & Invariants
 
 ### The contract, plan, and graph layer
@@ -2001,8 +1828,7 @@ The precise derive-vs-declare line for change-tracking columns is an Open Questi
 - **Write addressing is per-cell, not per-model**, derived by the available-addressings rule
   (`available = declared contract facts × trigger/changed-input needs × equivalence invariant ×
   backend capability`) over the **open write-pattern registry**. The declared facts fix which
-  addressings are available; some writes are intrinsically keyed regardless of source clock
-  (SCD2's close-out). A keyed write on a clocked output stays partition-scoped unless it
+  addressings are available. A keyed write on a clocked output stays partition-scoped unless it
   provably cannot be. Key temporal locality refines keyed addressing with a derived slice bound
   without changing the addressing corner.
 - **The write-pattern set is an open registry, not a closed enum.** New patterns are admitted by
@@ -2123,19 +1949,80 @@ The precise derive-vs-declare line for change-tracking columns is an Open Questi
     (`KeyedRecurrenceBoundViolated`). A violated declaration fails the run; it never silently
     drops.
 
-### Interval-versioning constraints
+## Limitations
 
-1. **`versioning: interval` is admitted only where identity is declared**; the opt-in implies
-   `table` storage (inherited from the key shape).
-2. **No `timeseries:` block on the model itself.** Keyed-plus-interval output, not a partitioned
-   build; window-forward consumption of a clocked *source* is derived and in-bounds
-   (§"Input consumption is derived from the source").
-3. **Validity intervals are non-overlapping per key**: at most one open (`is_current`) version
-   per key at any time; closed intervals abut at shared boundaries with no gaps.
-4. **Validity is stamped from source event-time, never the run clock** — what makes the profile
-   order-independent and replay-safe.
-5. **End-state equivalent and order-independent**: merging non-overlapping snapshots in any
-   order converges to the same version history.
+Deliberate scope boundaries: things smelt does not do **by design** at this spec's current cut.
+Unlike §Known Divergences (implementation lagging decided intent), nothing here is a gap to be
+closed by a tracked plan — changing an entry requires its own spec diff. Each entry states the
+boundary, the reason, and the sanctioned alternative.
+
+### No smelt-maintained SCD2 — history-keeping is plain SQL
+
+smelt has no declared or derived history-keeping shape: no frontmatter opts a keyed model into
+retaining every version of a key. SCD2 is written as ordinary windowed SQL over a change
+stream. `customer_history` over the running example's `customer_changes` feed:
+
+```sql
+---
+refresh: full
+---
+
+SELECT
+    customer_id,
+    tier,
+    region,
+    effective_ts AS valid_from,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) AS valid_to,
+    LEAD(effective_ts) OVER (PARTITION BY customer_id ORDER BY effective_ts) IS NULL AS is_current
+FROM smelt.customer_changes
+```
+
+Every version of a key is a row; each version's validity interval closes at the next change's
+event time; the newest version per key is open. If the feed carries no-op change events (full
+row images where no tracked attribute changed), dedupe first — a `LAG`-comparison filter over
+the tracked columns before the `LEAD` — so spurious versions never open.
+
+The two sanctioned routes for keeping such a model current:
+
+- **`refresh: full`** — rebuild from the change stream each run. Always correct; cost is a full
+  rescan of the feed.
+- **`refresh: materialized_view`** — the same SQL, engine-maintained, where the backend has
+  native IVM (`materialized_view.md` §Design "No named pattern").
+
+There is deliberately no `refresh: incremental` route: `LEAD` is inadmissible in every corner —
+the key grain rejects window functions outright (`KeyedForbidsWindowFunctions`), and under the
+partition grain a new event must rewrite a row in an already-written earlier partition, outside
+every output clamp. Recognising the LEAD-over-clock-within-key pattern as an admissible
+incrementally-maintained shape is sketched in §Future Extensions.
+
+### No SCD2 over mutable snapshots
+
+smelt never manufactures a change stream by diffing successive scans of a mutable snapshot
+source. A version history needs an event time per version boundary, and a snapshot diff can
+stamp boundaries only with the scan time — the run clock — so the resulting history would
+depend on when `smelt build` happened to run, breaking the replay-safety the equivalence
+invariant demands (§"The equivalence invariant"). SCD2 therefore requires a source that already
+carries change events with their event times (an update-events / CDC feed). Maintaining the
+*current state* of keys from a snapshot (snapshot-reconcile, key grain) is in-bounds; retaining
+the *history* of snapshot states is not. If a snapshot-to-change-stream facility is ever wanted,
+it is a source-layer concern (`sources.md`), not a model shape.
+
+### Other deliberate boundaries
+
+Boundaries stated normatively elsewhere in this spec, collected here for discoverability:
+
+- **Late arrivals beyond the derived horizon are excluded**, silently; surfacing them is a
+  model-author + data-check concern (§"Windowed maintenance and the horizon").
+- **No continuous freshness.** smelt-owned maintenance is pull-based and per-run; the history is
+  correct as of the last `smelt build`. Engine-continuous freshness is a different refresh mode
+  (`materialized_view.md`).
+- **Non-replayable observation contracts are refused.** Min-ever-observed, first-observed-value,
+  and similar fold-the-observation-sequence columns have no executable full-refresh oracle and
+  are rejected rather than approximated (§"The equivalence invariant"; a possible opt-in weaker
+  contract is §Future Extensions).
+- **No delete signal under window-forward consumption.** An append-only feed without delete
+  events cannot express key deletion; departed keys persist (retention). Deletion semantics
+  beyond retention are an open question (§Known Divergences "The key grain").
 
 ## Known Divergences / Open Questions
 
@@ -2335,26 +2222,26 @@ undecided, as of `last_reviewed`. Completed work is not recorded here — histor
   state, group-rung retraction, and the bounded-domain multiset into keyed columns is future
   composition work.
 
-### Interval versioning
-
-- **Entirely unbuilt: `versioning:` does not parse** (cross-ref `models.md` §Known Divergences).
-  The classifier, the close-old/open-new maintenance via `merge_into`, and validity-column
-  management are the delivering plan's scope: `docs/plans/20260707-maintenance-plan-impl.md`.
-- **The validity-column surface is unsettled** — names/types, NULL vs far-future sentinel for
-  the open interval, configurability.
-- **Tracked-attribute selection is unsettled** — all projected non-key columns vs a declared
-  subset; how a column is marked untracked. Preference: derive from SQL (§"Interval-versioning
-  design").
-- **Late corrections to a closed interval need their own design**, as does any opt-in
-  hard-delete surface — the retraction question the key grain shares
-  (`docs/research/20260703-model-updates.md` §18.2).
-
 ## Future Extensions
 
 Ideas for widening the admission space that are **not decided**. Nothing here is surface; none
 of it may be relied on or implemented against until it graduates into §Surface/§Semantics via
 its own spec diff and plan.
 
+- **Smelt-maintained SCD2 via succession-pattern recognition.** The plain-SQL SCD2 shape
+  (§Limitations) could gain a `refresh: incremental` route by *recognising* the pattern rather
+  than declaring it: a walk-produced verdict that every window function in the projection is
+  `LEAD(t)` (or an expression over it) partitioned by an entity key and ordered by the driving
+  source's event-time column. The maintenance theorem: a new event touches only its own row and
+  its immediate predecessor within the key — bounded footprint, late events included (a
+  mid-history splice touches exactly the predecessor and reads its successor). The technique is
+  a keyed `MERGE` plus a targeted predecessor patch, and the standard equivalence invariant
+  applies directly (the SQL is its own oracle). The machinery generalises beyond SCD2 to any
+  `LEAD`/`LAG`-over-clock-within-key model (next-event features, sessionisation gaps), which is
+  what would justify building it. Open: the classifier grammar (expressions over `LEAD`,
+  post-window delete filtering), the fail-loud diagnostics for near-misses, and the
+  `model_properties.md` walk vocabulary for window functions. Full sketch:
+  `docs/research/20260723-scd2-succession-pattern.md`.
 - **Row-local derivation for a *changed* column.** When a column is **added** and its expression
   is a pure function of other columns already stored in the same row, the `PureBackfill` verdict
   already covers it (§"The definition-change trigger"): an in-place `UPDATE`, no upstream read.
@@ -2528,16 +2415,3 @@ its own spec diff and plan.
 - **User docs**: `docs-site/docs/guide/materializations.md` (to be replaced by a keyed-models guide with per-pattern recipes); `docs-site/docs/guide/incremental-models.md` §"The composed shape (key + time)" documents the composed (key-addressed *and* time-partitioned) form and its three locality routes; `docs-site/docs/examples/web-analytics/deduplication.md` is the worked tutorial — a redelivery-prone feed deduplicated by a keyed extremal fold under a declared recurrence bound, contrasted against the partition-grain `QUALIFY`-window workaround the preceding tutorial page builds.
 - **Plans (history)**: `docs/plans/20260523-cumulative-aggregate.md` (the built seed); `docs/plans/20260704-model-updates.md` (the mode-vertical master this spec re-cuts as a composition); `docs/plans/20260705-keyed-collapse.md` (the keyed-collapse sub-plan); `docs/plans/20260707-maintenance-plan-impl.md` (lands the target frontmatter surface and diagnostics).
 - **Research**: `docs/research/20260705-keyed-time-superset.md` (key temporal locality, the time-partitioned output, per-input scope maps); `docs/research/20260705-model-refresh-review.md`; `docs/research/20260705-unified-keyed-refresh.md`; `docs/research/20260705-keyed-collapse-application.md` (the decision record this spec encodes); `docs/research/20260704-monotone-join-maintenance.md` (the monotone-vs-retractable boundary); `docs/research/20260703-model-updates.md`; `docs/research/20260705-refresh-as-maintenance-plan/` (the shape-profile demotion and per-cell admission this spec composes).
-
-### Interval versioning
-
-- **Code**: `crates/smelt-core/src/config.rs` (`RefreshStrategy` — no `grain`/`versioning` surface yet); on build, the classifier under `crates/smelt-logical/src/rules/` and the maintenance path under `crates/smelt-runtime/`.
-- **Research**:
-  - [`docs/research/20260703-model-updates.md`](../research/20260703-model-updates.md) — Part 17 (the user surface; naming); Part 19 (the input-consumption axis)
-  - [`docs/research/20260704-maintenance-fundamentals.md`](../research/20260704-maintenance-fundamentals.md) — the maintenance framework this profile composes into
-  - [`docs/research/20260705-refresh-as-maintenance-plan/`](../research/20260705-refresh-as-maintenance-plan/) — the shape-profile demotion and per-cell admission this profile composes
-  - [`docs/research/20260522-cumulative-as-its-own-rule.md`](../research/20260522-cumulative-as-its-own-rule.md) — the sibling-rule sketches (`scd2`, `latest_value`, `accumulating_snapshot`)
-- **Plans (history)**:
-  - [`docs/plans/20260704-model-updates.md`](../plans/20260704-model-updates.md) — implements the model-updates research
-  - [`docs/plans/20260707-maintenance-plan-impl.md`](../plans/20260707-maintenance-plan-impl.md) — lands the target frontmatter surface (`grain`/`versioning`) and diagnostics
-
