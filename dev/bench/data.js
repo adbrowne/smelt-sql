@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784882255032,
+  "lastUpdate": 1784883535836,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -187,6 +187,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.917934,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "bc8a0b04a0fd0b72986797559d001c009ee0649a",
+          "message": "ci(vscode): bump CI Node.js from 20 to 24 (current LTS)\n\nactions/setup-node was pinned to Node 20 in test.yml/release.yml/\ndev-release.yml, which is now deprecated on GitHub-hosted runners.\nBump to 24 (current Active LTS) and update @types/node to match.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-24T18:55:43+10:00",
+          "tree_id": "83c5c85855786e5e76f2737633ecff44780b89af",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bc8a0b04a0fd0b72986797559d001c009ee0649a"
+        },
+        "date": 1784883533208,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 61.252291,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 59.031595,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 0.954271,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.61849,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.345979,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1012.673578,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.631694,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 3.0806,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.843014,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.700714,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 827.918842,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 7.82749,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 33.46228,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.890211,
             "unit": "ms"
           }
         ]
