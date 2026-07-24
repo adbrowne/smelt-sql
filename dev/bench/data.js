@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784578887844,
+  "lastUpdate": 1784882252274,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -93,6 +93,100 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Batch (1000)",
             "value": 13.835038,
+            "unit": "ms"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4c0ed72ca7129b7aa3661358dc04e888c7538d06",
+          "message": "ci(compat): fix scheduled-run failure in Detect Spark-relevant changes job\n\nOn schedule events github.event.before is unset, so the base-ref\nfallback resolved to the literal string 'HEAD~1', which paths-filter\ntried to fetch as a remote refspec and failed with exit 128. Skip\ncheckout/filter on schedule entirely — the downstream spark jobs\nalready run unconditionally when github.event_name == 'schedule'.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-24T18:33:56+10:00",
+          "tree_id": "bac9dc6a26d428967104f69caec21456c5e158ba",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4c0ed72ca7129b7aa3661358dc04e888c7538d06"
+        },
+        "date": 1784882250335,
+        "tool": "customSmallerIsBetter",
+        "benches": [
+          {
+            "name": "Build / Total",
+            "value": 62.300918,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Discovery",
+            "value": 59.899211,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Graph Build",
+            "value": 1.076356,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Topo Sort",
+            "value": 0.634202,
+            "unit": "ms"
+          },
+          {
+            "name": "Build / Validation",
+            "value": 0.371974,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Initial Load",
+            "value": 1010.797926,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Leaf Edit Diagnostics",
+            "value": 3.463423,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Mid Edit Diagnostics",
+            "value": 2.321415,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Root Edit Diagnostics",
+            "value": 2.195441,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Add File",
+            "value": 0.657225,
+            "unit": "ms"
+          },
+          {
+            "name": "Salsa / Full Diagnostics",
+            "value": 820.950169,
+            "unit": "ms"
+          },
+          {
+            "name": "Parser / Simple SQL",
+            "value": 5.93015,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Complex SQL",
+            "value": 34.06477,
+            "unit": "μs"
+          },
+          {
+            "name": "Parser / Batch (1000)",
+            "value": 13.917934,
             "unit": "ms"
           }
         ]
