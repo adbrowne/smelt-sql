@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784882252274,
+  "lastUpdate": 1784882255032,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -218,6 +218,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.916881326961303,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "4c0ed72ca7129b7aa3661358dc04e888c7538d06",
+          "message": "ci(compat): fix scheduled-run failure in Detect Spark-relevant changes job\n\nOn schedule events github.event.before is unset, so the base-ref\nfallback resolved to the literal string 'HEAD~1', which paths-filter\ntried to fetch as a remote refspec and failed with exit 128. Skip\ncheckout/filter on schedule entirely — the downstream spark jobs\nalready run unconditionally when github.event_name == 'schedule'.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-24T18:33:56+10:00",
+          "tree_id": "bac9dc6a26d428967104f69caec21456c5e158ba",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/4c0ed72ca7129b7aa3661358dc04e888c7538d06"
+        },
+        "date": 1784882254229,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.76847497624288,
             "unit": "MB/s"
           }
         ]
