@@ -1,5 +1,5 @@
 window.BENCHMARK_DATA = {
-  "lastUpdate": 1784883535836,
+  "lastUpdate": 1784883539079,
   "repoUrl": "https://github.com/adbrowne/smelt-sql",
   "entries": {
     "Smelt Latency Benchmarks": [
@@ -341,6 +341,35 @@ window.BENCHMARK_DATA = {
           {
             "name": "Parser / Throughput",
             "value": 24.76847497624288,
+            "unit": "MB/s"
+          }
+        ]
+      },
+      {
+        "commit": {
+          "author": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "committer": {
+            "email": "brownie@brownie.com.au",
+            "name": "Andrew Browne",
+            "username": "adbrowne"
+          },
+          "distinct": true,
+          "id": "bc8a0b04a0fd0b72986797559d001c009ee0649a",
+          "message": "ci(vscode): bump CI Node.js from 20 to 24 (current LTS)\n\nactions/setup-node was pinned to Node 20 in test.yml/release.yml/\ndev-release.yml, which is now deprecated on GitHub-hosted runners.\nBump to 24 (current Active LTS) and update @types/node to match.\n\nCo-Authored-By: Claude Sonnet 5 <noreply@anthropic.com>",
+          "timestamp": "2026-07-24T18:55:43+10:00",
+          "tree_id": "83c5c85855786e5e76f2737633ecff44780b89af",
+          "url": "https://github.com/adbrowne/smelt-sql/commit/bc8a0b04a0fd0b72986797559d001c009ee0649a"
+        },
+        "date": 1784883537928,
+        "tool": "customBiggerIsBetter",
+        "benches": [
+          {
+            "name": "Parser / Throughput",
+            "value": 24.81790953355568,
             "unit": "MB/s"
           }
         ]
