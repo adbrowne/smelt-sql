@@ -19,14 +19,21 @@ jobs:
     outputs:
       spark: ${{ steps.filter.outputs.spark }}
     steps:
+      # Skipped on schedule: github.event.before is unset for schedule events, so the
+      # base-ref fallback below resolves to the literal string 'HEAD~1', which
+      # paths-filter cannot fetch as a remote refspec. Downstream spark jobs already
+      # run unconditionally on schedule (github.event_name == 'schedule'), so this
+      # job's output isn't needed on that trigger.
       - name: Checkout code
+        if: github.event_name != 'schedule'
         uses: actions/checkout@v6
 
       - name: Filter paths
+        if: github.event_name != 'schedule'
         uses: dorny/paths-filter@v3
         id: filter
         with:
-          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || (github.event.before != '0000000000000000000000000000000000000000' && github.event.before || 'HEAD~1') }}
+          base: ${{ github.event_name == 'pull_request' && github.event.pull_request.base.sha || github.event.before }}
           filters: |
             spark:
               - 'crates/smelt-backend-spark/**'
