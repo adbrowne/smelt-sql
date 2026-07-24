@@ -1,18 +1,27 @@
 //! TDD coverage for the shared `smelt-runtime::diagnostics` builder
-//! (`docs/plans/20260725-ui-model-diagnostics.md` Phase 2a;
-//! `docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime builder").
+//! (`docs/plans/20260725-ui-model-diagnostics.md` Phases 2a/2b;
+//! `docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime builder";
+//! §Semantics "Technique preview set" / "Admissibility verdict").
 //!
-//! These tests exercise `build_model_diagnostics`/`build_relation_contract`
-//! against the real `examples/timeseries/` fixture project — no synthetic
-//! in-memory model — per the plan's "real-fixture tests" convention.
+//! These tests exercise `build_model_diagnostics`/`build_relation_contract`/
+//! `build_plan_cell_diagnostics` against the real `examples/timeseries/`
+//! fixture project — no synthetic in-memory model, except where a test
+//! needs a specific `RowIdentity`/`Technique` shape a constructed
+//! `PlanCell` demonstrates more directly than hunting a fixture for it —
+//! per the plan's "real-fixture tests" convention.
 
+use smelt_core::config::Config;
 use smelt_core::graph::DependencyGraph;
 use smelt_core::workspace::load_workspace;
 use smelt_core::{ModelFile, SourceInfo};
 use smelt_logical::analysis::source_bounds::BoundContext;
 use smelt_logical::analysis::walk::Comparability;
-use smelt_logical::maintenance::RowIdentity;
-use smelt_runtime::diagnostics::{build_model_diagnostics, build_relation_contract};
+use smelt_logical::maintenance::emit::MaintenanceDialect;
+use smelt_logical::maintenance::{PlanCell, RowIdentity, Technique};
+use smelt_runtime::diagnostics::{
+    build_model_diagnostics, build_plan_cell_diagnostics, build_relation_contract, Admissibility,
+};
+use smelt_runtime::{build_source_timeseries_map, CompilerRegistry, EphemeralResolver};
 use std::path::PathBuf;
 
 fn timeseries_root() -> PathBuf {
@@ -22,12 +31,12 @@ fn timeseries_root() -> PathBuf {
         .expect("examples/timeseries fixture must exist")
 }
 
-/// Load the real `examples/timeseries/` project's models and declared
-/// sources — the same two calls `smelt explain` makes
+/// Load the real `examples/timeseries/` project's models, declared
+/// sources, and `smelt.yml` config — the same calls `smelt explain` makes
 /// (`crates/smelt-cli/src/commands/explain.rs`), but without any Salsa
 /// database: `load_workspace` + `discover_source_infos` are both pure,
 /// disk-reading functions.
-fn load_fixture() -> (Vec<ModelFile>, Vec<SourceInfo>) {
+fn load_fixture() -> (Vec<ModelFile>, Vec<SourceInfo>, Config) {
     let root = timeseries_root();
     let loaded = load_workspace(&root);
     assert!(
@@ -36,7 +45,7 @@ fn load_fixture() -> (Vec<ModelFile>, Vec<SourceInfo>) {
         loaded.errors
     );
     let source_infos = smelt_core::discover_source_infos(&root, &loaded.config.paths);
-    (loaded.sql_files, source_infos)
+    (loaded.sql_files, source_infos, loaded.config)
 }
 
 fn find_model<'a>(models: &'a [ModelFile], name: &str) -> &'a ModelFile {
@@ -44,6 +53,70 @@ fn find_model<'a>(models: &'a [ModelFile], name: &str) -> &'a ModelFile {
         .iter()
         .find(|m| m.canonical_path() == name)
         .unwrap_or_else(|| panic!("model `{name}` not found in examples/timeseries"))
+}
+
+/// Derive `model`'s real `MaintenancePlan::cells` via the same plain
+/// (non-Salsa) entry point `smelt-db`'s own Salsa wrapper calls
+/// (`smelt_db::lib::maintenance_plan_report`'s doc comment: "gathers
+/// `file`'s referenced sources … then calls `derive_maintenance_plan`") —
+/// mirroring its input assembly without a Salsa database, matching this
+/// crate's existing Salsa-purity-respecting pattern of taking
+/// already-resolved facts. `allow_full_scan: true` for every referenced
+/// source keeps this a pure "what would the plan admit" helper: it is not
+/// re-testing the K8 partition-locality guardrail, only assembling cells
+/// for the technique-preview builder to render.
+fn derive_plan_cells(model: &ModelFile, source_infos: &[SourceInfo]) -> Vec<PlanCell> {
+    let metadata = model
+        .metadata
+        .as_deref()
+        .expect("fixture maintained model must declare frontmatter");
+    let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
+    let refs = smelt_logical::collect_path_refs(&stripped_sql);
+    let sources: Vec<smelt_logical::maintenance::SourceFacts> = refs
+        .iter()
+        .filter_map(|r| {
+            let stripped = r.strip_prefix("smelt.")?;
+            let bare = stripped.strip_prefix("sources.").unwrap_or(stripped);
+            let segs: Vec<String> = stripped.split('.').map(|s| s.to_string()).collect();
+            let info = source_infos.iter().find(|s| s.address_segments == segs);
+            Some(smelt_db::queries::maintenance::source_facts(
+                bare, info, true,
+            ))
+        })
+        .collect();
+    let table = model
+        .path
+        .file_stem()
+        .and_then(|s| s.to_str())
+        .unwrap_or("")
+        .to_string();
+    smelt_db::queries::maintenance::derive_model_maintenance_plan(
+        &stripped_sql,
+        &table,
+        metadata,
+        &sources,
+        &std::collections::HashSet::new(),
+        None,
+        &[],
+    )
+    .map(|r| r.plan.cells)
+    .unwrap_or_default()
+}
+
+/// The compilation machinery a technique preview's illustrative SQL is
+/// built through — `smelt-cli::explain`'s own `--show-sql` setup, minus
+/// anything `--period`-specific (the technique-preview builder always
+/// renders symbolic placeholders, `crates/smelt-runtime/src/diagnostics.rs`
+/// `build_technique_statements`'s own doc comment).
+struct CompileFixture {
+    registry: CompilerRegistry,
+    resolver: EphemeralResolver,
+}
+
+fn compile_fixture(config: &Config) -> CompileFixture {
+    let registry = CompilerRegistry::new(config, &config.targets);
+    let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+    CompileFixture { registry, resolver }
 }
 
 /// A `BoundContext` naming every `smelt.sources.*` ref `model` reads, keyed
@@ -87,14 +160,31 @@ fn bound_ctx_for(model: &ModelFile, source_infos: &[SourceInfo]) -> BoundContext
 /// §Known Divergences).
 #[test]
 fn properties_cover_derivable_catalogue_subset() {
-    let (models, source_infos) = load_fixture();
+    let (models, source_infos, config) = load_fixture();
     let model = find_model(&models, "daily_revenue");
     let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
     let upstream = graph.get_upstream(&model.canonical_path());
     let bound_ctx = bound_ctx_for(model, &source_infos);
+    let cf = compile_fixture(&config);
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
 
-    let diagnostics = build_model_diagnostics(model, &models, &upstream, &source_infos, &bound_ctx)
-        .expect("diagnostics build succeeds for a real fixture model");
+    // `daily_revenue` declares no frontmatter (no maintenance plan) — this
+    // test only exercises the property-set half of the builder.
+    let diagnostics = build_model_diagnostics(
+        model,
+        &models,
+        &upstream,
+        &source_infos,
+        &bound_ctx,
+        &[],
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &source_timeseries,
+    )
+    .expect("diagnostics build succeeds for a real fixture model");
 
     let props = &diagnostics.properties;
 
@@ -178,7 +268,7 @@ fn properties_cover_derivable_catalogue_subset() {
 /// declared source edge, guarding against a future accidental fork.
 #[test]
 fn relation_contract_matches_existing_explain_output() {
-    let (models, source_infos) = load_fixture();
+    let (models, source_infos, _config) = load_fixture();
     let model = find_model(&models, "daily_revenue");
     let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
     let upstream = graph.get_upstream(&model.canonical_path());
@@ -221,16 +311,395 @@ fn relation_contract_matches_existing_explain_output() {
 /// facts and asserting success.
 #[test]
 fn no_live_backend_required() {
-    let (models, source_infos) = load_fixture();
+    let (models, source_infos, config) = load_fixture();
     let model = find_model(&models, "daily_revenue");
     let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
     let upstream = graph.get_upstream(&model.canonical_path());
     let bound_ctx = bound_ctx_for(model, &source_infos);
+    let cf = compile_fixture(&config);
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
 
-    let result = build_model_diagnostics(model, &models, &upstream, &source_infos, &bound_ctx);
+    let result = build_model_diagnostics(
+        model,
+        &models,
+        &upstream,
+        &source_infos,
+        &bound_ctx,
+        &[],
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &source_timeseries,
+    );
     assert!(
         result.is_ok(),
         "diagnostics build must succeed without any live backend/target: {:?}",
         result.err()
     );
+}
+
+// ---------------------------------------------------------------------
+// Phase 2b: technique previews + admissibility
+// (`docs/plans/20260725-ui-model-diagnostics.md` §"Phase 2b";
+// `docs/specs/ui_model_diagnostics.md` §Semantics "Technique preview set" /
+// "Admissibility verdict")
+// ---------------------------------------------------------------------
+
+/// A synthetic `PlanCell` for tests that need a specific `RowIdentity`/
+/// `Technique` shape more directly than hunting a fixture for it — mirrors
+/// `smelt_logical::maintenance::choice`'s own test helpers
+/// (`admitted_plan` in `choice.rs`'s `#[cfg(test)] mod tests`).
+fn synthetic_cell(technique: Technique, row_identity: RowIdentity) -> PlanCell {
+    PlanCell {
+        group: "{status}".to_string(),
+        trigger: smelt_logical::maintenance::Trigger::UpstreamMutation {
+            source: "raw.user_status".to_string(),
+        },
+        corner: smelt_logical::maintenance::Corner::ColumnMerge,
+        technique,
+        partition_local: smelt_logical::maintenance::PartitionLocal::Yes,
+        scans: vec![],
+        ledger_catch_up: false,
+        row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+            identity: row_identity,
+            proven_mismatch: None,
+        },
+        skeleton_source_closure: None,
+        fingerprint_projections: Default::default(),
+    }
+}
+
+/// `docs/specs/ui_model_diagnostics.md` §Constraints: "the technique-preview
+/// builder must call the same pure emitters … that a live run uses for the
+/// admitted technique — a preview's statements for the `Admitted` entry
+/// must be identical to what `incremental_models.md`'s 'Statement emission
+/// (single owner)' rule already guarantees a run executes." `daily_cube_
+/// metrics`'s single creation cell (`Trigger::NewData`, `Technique::
+/// DeleteInsert`) always builds cleanly (a declared `timeseries.
+/// partition_column`, no `unique_key`/keyed-fold shape needed) — its
+/// `Admitted` preview must be byte-identical to `smelt-cli::explain::
+/// build_cell_statement_group`'s own (pre-`--period`, symbolic-placeholder)
+/// output for the same cell.
+#[test]
+fn admitted_preview_matches_live_run_statements() {
+    let (models, source_infos, config) = load_fixture();
+    let model = find_model(&models, "daily_cube_metrics");
+    let cf = compile_fixture(&config);
+    let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
+    let cells = derive_plan_cells(model, &source_infos);
+    let cell = cells
+        .iter()
+        .find(|c| c.technique == Technique::DeleteInsert)
+        .expect("daily_cube_metrics must admit a DeleteInsert creation cell");
+
+    let diagnostics = build_plan_cell_diagnostics(
+        cell,
+        model,
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &[],
+        &source_timeseries,
+    );
+
+    let admitted = diagnostics
+        .technique_previews
+        .iter()
+        .find(|p| p.admissibility == Admissibility::Admitted)
+        .expect("exactly one preview must be Admitted");
+    assert_eq!(admitted.technique, Technique::DeleteInsert);
+    assert!(
+        !admitted.statements.is_empty(),
+        "the Admitted DeleteInsert preview must render real statements"
+    );
+
+    let expected = smelt_cli::explain::build_cell_statement_group(
+        cell,
+        model,
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &[],
+        &smelt_planner::SourceTimeseriesMap::new(),
+        &smelt_cli::explain::RegionLiterals::Placeholders,
+        None,
+    )
+    .expect("smelt-cli's own build must succeed for this cell");
+
+    let admitted_sql: Vec<&str> = admitted.statements.iter().map(|s| s.sql.as_str()).collect();
+    let expected_sql: Vec<&str> = expected.statements.iter().map(|s| s.sql.as_str()).collect();
+    assert_eq!(
+        admitted_sql, expected_sql,
+        "the Admitted preview's statements must be byte-identical to smelt-cli::explain::\
+         build_cell_statement_group's own output for the same cell"
+    );
+    assert_eq!(admitted.transactional, expected.transactional);
+}
+
+/// `docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility verdict":
+/// "Region recompute is always `InterchangeableAlternative` when not itself
+/// the admitted technique". A cell whose admitted technique is
+/// `ColumnScopedMerge` still has a declared timeseries partition axis, so
+/// its `DeleteInsert` preview always builds — and must never be `Admitted`
+/// or `NotApplicable` here.
+#[test]
+fn recompute_is_always_interchangeable_when_not_admitted() {
+    let (models, source_infos, config) = load_fixture();
+    let model = find_model(&models, "daily_cube_metrics");
+    let cf = compile_fixture(&config);
+    let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
+
+    // A synthetic cell borrowing `daily_cube_metrics`'s own model (which
+    // declares a `timeseries.partition_column`, so `DeleteInsert` always
+    // builds) but a different admitted technique, so the `DeleteInsert`
+    // preview is never the `Admitted` entry.
+    let cell = synthetic_cell(
+        Technique::ColumnScopedMerge,
+        RowIdentity::Key(vec!["k".into()]),
+    );
+
+    let diagnostics = build_plan_cell_diagnostics(
+        &cell,
+        model,
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &["k".to_string()],
+        &source_timeseries,
+    );
+
+    let delete_insert_preview = diagnostics
+        .technique_previews
+        .iter()
+        .find(|p| p.technique == Technique::DeleteInsert)
+        .expect("every_known_technique_has_an_entry: DeleteInsert must have an entry");
+    assert_eq!(
+        delete_insert_preview.admissibility,
+        Admissibility::InterchangeableAlternative,
+        "region recompute must be InterchangeableAlternative when not the admitted technique, \
+         got {:?}",
+        delete_insert_preview.admissibility
+    );
+    assert!(
+        !delete_insert_preview.statements.is_empty(),
+        "an InterchangeableAlternative preview must still carry real illustrative SQL"
+    );
+}
+
+/// `docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility verdict":
+/// a `NotApplicable` preview must carry a non-empty `reason` and must still
+/// show illustrative SQL where the emitter can render it. A cell with
+/// `RowIdentity::WholeRow` cannot structurally support a keyed-fold's
+/// per-row addressing — `daily_events_status`'s real `{status}` cell is
+/// exactly this shape (its own doc comment: "this cell's own row identity
+/// resolves `WholeRow`").
+#[test]
+fn not_applicable_carries_reason() {
+    let (models, source_infos, config) = load_fixture();
+    let model = find_model(&models, "daily_events_status");
+    let cf = compile_fixture(&config);
+    let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
+    let cells = derive_plan_cells(model, &source_infos);
+    let cell = cells
+        .iter()
+        .find(|c| matches!(c.row_identity.identity, RowIdentity::WholeRow))
+        .expect("daily_events_status must have a WholeRow-identity cell");
+
+    let diagnostics = build_plan_cell_diagnostics(
+        cell,
+        model,
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &[],
+        &source_timeseries,
+    );
+
+    let keyed_fold_preview = diagnostics
+        .technique_previews
+        .iter()
+        .find(|p| p.technique == Technique::KeyedFold)
+        .expect("KeyedFold must have an entry");
+    match &keyed_fold_preview.admissibility {
+        Admissibility::NotApplicable { reason } => {
+            assert!(
+                !reason.is_empty(),
+                "a NotApplicable preview must always carry a non-empty reason"
+            );
+        }
+        other => panic!("expected NotApplicable for a WholeRow-identity cell, got {other:?}"),
+    }
+}
+
+/// `docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility verdict":
+/// "Exactly one preview entry per cell is `Admitted`." Checked across every
+/// cell of several real fixture models with distinct admitted-technique
+/// shapes.
+#[test]
+fn exactly_one_admitted_per_cell() {
+    let (models, source_infos, config) = load_fixture();
+    let cf = compile_fixture(&config);
+    let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
+
+    for model_name in [
+        "daily_cube_metrics",
+        "daily_events_enriched",
+        "daily_events_status",
+    ] {
+        let model = find_model(&models, model_name);
+        let cells = derive_plan_cells(model, &source_infos);
+        assert!(
+            !cells.is_empty(),
+            "{model_name} must derive at least one maintenance-plan cell"
+        );
+        for cell in &cells {
+            let diagnostics = build_plan_cell_diagnostics(
+                cell,
+                model,
+                "main",
+                "dev",
+                &cf.registry,
+                &cf.resolver,
+                MaintenanceDialect::DuckDb,
+                &[],
+                &source_timeseries,
+            );
+            let admitted_count = diagnostics
+                .technique_previews
+                .iter()
+                .filter(|p| p.admissibility == Admissibility::Admitted)
+                .count();
+            assert_eq!(
+                admitted_count, 1,
+                "{model_name} cell {:?} must have exactly one Admitted preview, got {}: {:?}",
+                diagnostics.group, admitted_count, diagnostics.technique_previews
+            );
+        }
+    }
+}
+
+/// `docs/specs/ui_model_diagnostics.md` §Semantics "Technique preview set":
+/// "never partial by omission" — every cell's preview set carries one entry
+/// per technique the emitters implement, regardless of the cell's own
+/// admitted technique.
+#[test]
+fn every_known_technique_has_an_entry() {
+    let (models, source_infos, config) = load_fixture();
+    let model = find_model(&models, "daily_events_enriched");
+    let cf = compile_fixture(&config);
+    let graph = DependencyGraph::build(models.clone(), None).expect("graph builds");
+    let source_timeseries = build_source_timeseries_map(&graph, &source_infos);
+    let cells = derive_plan_cells(model, &source_infos);
+    let cell = cells.first().expect("must have at least one cell");
+
+    let diagnostics = build_plan_cell_diagnostics(
+        cell,
+        model,
+        "main",
+        "dev",
+        &cf.registry,
+        &cf.resolver,
+        MaintenanceDialect::DuckDb,
+        &[],
+        &source_timeseries,
+    );
+
+    let techniques: std::collections::BTreeSet<String> = diagnostics
+        .technique_previews
+        .iter()
+        .map(|p| format!("{:?}", p.technique))
+        .collect();
+    assert_eq!(
+        techniques,
+        std::collections::BTreeSet::from([
+            "DeleteInsert".to_string(),
+            "KeyedFold".to_string(),
+            "ColumnScopedMerge".to_string(),
+            "InPlaceUpdate".to_string(),
+        ]),
+        "every known technique must have exactly one preview entry, got {:?}",
+        techniques
+    );
+}
+
+/// `docs/plans/20260725-ui-model-diagnostics.md` §"Phase 2b" required
+/// regression guard: `smelt_logical::maintenance::choice::resolve_cell_choice`
+/// is unaffected by this phase's additions (the new `technique_requires_
+/// row_identity` classifier is read-only and additive, consulted only by
+/// the `smelt-runtime` technique-preview builder, never by `resolve_cell_
+/// choice` itself). Mirrors `choice.rs`'s own `pin_bypasses_cost_model_but_
+/// not_admission` test scenario as a pinned-output guard.
+#[test]
+fn choice_rs_execution_semantics_unchanged() {
+    use smelt_core::config::CellTechnique;
+    use smelt_logical::maintenance::choice::{
+        resolve_cell_choice, ChosenTechnique, EffectiveOverride,
+    };
+    use smelt_logical::maintenance::{Corner, MaintenancePlan, PartitionLocal, Trigger};
+
+    let plan = MaintenancePlan {
+        cells: vec![PlanCell {
+            group: "{tier}".to_string(),
+            trigger: Trigger::UpstreamMutation {
+                source: "users".to_string(),
+            },
+            corner: Corner::ColumnMerge,
+            technique: Technique::ColumnScopedMerge,
+            partition_local: PartitionLocal::Yes,
+            scans: vec![],
+            ledger_catch_up: false,
+            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
+                identity: RowIdentity::WholeRow,
+                proven_mismatch: None,
+            },
+            skeleton_source_closure: None,
+            fingerprint_projections: Default::default(),
+        }],
+        refusals: vec![],
+        key_locality: None,
+    };
+    let trigger = Trigger::UpstreamMutation {
+        source: "users".to_string(),
+    };
+
+    // No override: an admitted+live technique is preferred over recompute.
+    let resolved = resolve_cell_choice(&plan, &trigger, &EffectiveOverride::default(), None, true)
+        .expect("no pin — never refuses");
+    assert_eq!(
+        resolved,
+        ChosenTechnique::Admitted(Technique::ColumnScopedMerge)
+    );
+
+    // A pin naming a technique this cell did not admit still refuses —
+    // unaffected by the technique-preview builder's wider display-only set.
+    let bad_overrides = EffectiveOverride {
+        prefer: None,
+        technique: Some(CellTechnique::Fold),
+    };
+    let err = resolve_cell_choice(&plan, &trigger, &bad_overrides, None, true)
+        .expect_err("pinning an unadmitted technique must still refuse");
+    assert!(err.to_string().contains("MaintenanceUnboundedFootprint"));
+
+    // `recompute` remains always resolvable.
+    let recompute_overrides = EffectiveOverride {
+        prefer: None,
+        technique: Some(CellTechnique::Recompute),
+    };
+    let resolved = resolve_cell_choice(&plan, &trigger, &recompute_overrides, None, true)
+        .expect("recompute is always resolvable");
+    assert_eq!(resolved, ChosenTechnique::RegionRecompute);
 }

@@ -139,7 +139,13 @@ pub enum Corner {
 }
 
 /// The physical op a cell emits (the technique realizing its corner).
-#[derive(Debug, Clone, PartialEq, Eq)]
+///
+/// `Serialize`: consumed directly as [`crate::maintenance::choice::
+/// ChosenTechnique`]'s payload and, via the `smelt-runtime` diagnostics
+/// builder, as a technique preview's own label
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "smelt-runtime builder") —
+/// a plain additive derive, no variant or admission logic changes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Technique {
     /// Region overwrite: `DELETE` the write window, `INSERT` its recompute.
     DeleteInsert,

@@ -245,14 +245,12 @@ pub fn resolve_cell_choice(
         ) {
             match selection {
                 super::WriteSelection::RegionRecompute => Ok(ChosenTechnique::RegionRecompute),
-                super::WriteSelection::Technique(_) => Ok(ChosenTechnique::Admitted(
-                    admitted_technique
-                        .expect(
-                            "admits_write_selection already proved `admitted_technique` is \
-                             Some for this pin",
-                        )
-                        .clone(),
-                )),
+                super::WriteSelection::Technique(_) => {
+                    Ok(ChosenTechnique::Admitted(*admitted_technique.expect(
+                        "admits_write_selection already proved `admitted_technique` is \
+                         Some for this pin",
+                    )))
+                }
             }
         } else {
             Err(ChoiceRefusal {
@@ -283,13 +281,9 @@ pub fn resolve_cell_choice(
             match pin {
                 CellTechnique::Recompute => Ok(ChosenTechnique::RegionRecompute),
                 CellTechnique::Fold | CellTechnique::RederiveColumns => {
-                    Ok(ChosenTechnique::Admitted(
-                        admitted_technique
-                            .expect(
-                                "admits() already proved `admitted_technique` is Some for this pin",
-                            )
-                            .clone(),
-                    ))
+                    Ok(ChosenTechnique::Admitted(*admitted_technique.expect(
+                        "admits() already proved `admitted_technique` is Some for this pin",
+                    )))
                 }
                 // The outer `if let` guard already narrowed `pin` to one of
                 // the three arms above — `Suppress`/`Unconditional` never
@@ -316,9 +310,34 @@ pub fn resolve_cell_choice(
     match overrides.prefer {
         Some(TechniquePreference::Recompute) => Ok(ChosenTechnique::RegionRecompute),
         _ => match live_technique {
-            Some(t) => Ok(ChosenTechnique::Admitted(t.clone())),
+            Some(t) => Ok(ChosenTechnique::Admitted(*t)),
             None => Ok(ChosenTechnique::RegionRecompute),
         },
+    }
+}
+
+/// Whether `technique`'s emitted write addresses stored rows individually —
+/// and therefore structurally needs a proven per-row [`RowIdentity::Key`],
+/// never a [`RowIdentity::WholeRow`] fallback — to be a real option for a
+/// cell. **Read-only classification, additive only**: consulted by the
+/// `smelt-runtime` technique-preview builder
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Technique preview set")
+/// to decide a *display-only* `NotApplicable` verdict for a technique this
+/// cell did not admit; it is never consulted by [`resolve_cell_choice`] or
+/// any other real-execution admission path, and adding it changes no
+/// existing function's resolved output (`docs/specs/ui_model_diagnostics.md`
+/// §Design "Why preview *every* technique…": "the wider preview set is
+/// display-only … `resolve_cell_choice`'s real-execution semantics are
+/// unchanged").
+///
+/// `Technique::DeleteInsert` (region recompute) addresses a whole partition
+/// region, never an individual row, so it needs no row identity at all —
+/// `false`. Every targeted-write technique (`KeyedFold`, `ColumnScopedMerge`,
+/// `InPlaceUpdate`) addresses rows individually by key — `true`.
+pub fn technique_requires_row_identity(technique: Technique) -> bool {
+    match technique {
+        Technique::DeleteInsert => false,
+        Technique::KeyedFold | Technique::ColumnScopedMerge | Technique::InPlaceUpdate => true,
     }
 }
 
@@ -798,6 +817,30 @@ pub fn enrichment_restrict_column(dimension_unique_key: &[String]) -> Option<&st
     match dimension_unique_key {
         [only] => Some(only.as_str()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod technique_requires_row_identity_tests {
+    use super::*;
+
+    #[test]
+    fn delete_insert_needs_no_row_identity() {
+        assert!(!technique_requires_row_identity(Technique::DeleteInsert));
+    }
+
+    #[test]
+    fn every_targeted_write_technique_needs_row_identity() {
+        for t in [
+            Technique::KeyedFold,
+            Technique::ColumnScopedMerge,
+            Technique::InPlaceUpdate,
+        ] {
+            assert!(
+                technique_requires_row_identity(t),
+                "{t:?} addresses rows individually and must require a proven row identity"
+            );
+        }
     }
 }
 

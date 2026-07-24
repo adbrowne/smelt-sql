@@ -65,7 +65,7 @@ Today `smelt explain <model> --show-sql` is the only place any of this data — 
 |-------|----------|--------|------|
 | 1     | done     | cb878c9a | 2026-07-25 |
 | 2a    | done     | 5def9647 | 2026-07-25 |
-| 2b    | pending  |        |      |
+| 2b    | done     | TBD    | 2026-07-25 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |

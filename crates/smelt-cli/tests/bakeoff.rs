@@ -576,7 +576,7 @@ async fn pin_emits_parseable_cells_entry() {
 
     let expected = match winning_technique {
         CellTechnique::Recompute => ChosenTechnique::RegionRecompute,
-        _ => ChosenTechnique::Admitted(cell.technique.clone()),
+        _ => ChosenTechnique::Admitted(cell.technique),
     };
     assert_eq!(
         chosen, expected,
