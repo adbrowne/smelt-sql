@@ -21,6 +21,7 @@ pub mod check_runner;
 pub mod combined_loop;
 pub mod compile;
 pub mod cumulative;
+pub mod diagnostics;
 pub mod dimension_horizon_merge;
 pub mod execute;
 pub mod fn_bodies;

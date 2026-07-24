@@ -24,6 +24,7 @@
 
 use std::collections::BTreeMap;
 
+use serde::Serialize;
 use smelt_parser::{ColumnRef, SelectStmt};
 
 use super::{item_alias, item_expr, resolve_scope_group_by, select_stmt_items, SelectItemKind};
@@ -1509,7 +1510,7 @@ pub type KeySet = Vec<String>;
 /// query structure (a `GROUP BY` factory key, a `DISTINCT` whole-row key, a
 /// discriminated-union key). Empty ⇒ no key proven ⇒ `OneToMany` (fail-closed;
 /// grain is never optimistically assumed, `model_properties.md` §Constraints).
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct Grain {
     /// Column sets each of which uniquely identifies an output row.
     pub keys: Vec<KeySet>,
@@ -1534,7 +1535,7 @@ impl Grain {
 /// A functional dependency derived by the walk from query structure:
 /// `key → determines` (output-column names in the node's own scope). An empty
 /// `key` is the constant-column FD (`∅ → c` for a literal column).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct DerivedFd {
     pub key: KeySet,
     pub determines: String,
@@ -1544,7 +1545,7 @@ pub struct DerivedFd {
 /// (`model_properties.md` §"Determinism (run vs row) and the nondeterminism
 /// predicate"). A columnar union takes the per-position lub (`clean ∪ clean =
 /// clean`).
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Determinism {
     /// Deterministic every run (a plain column, a deterministic expression).
     Clean,
@@ -1555,7 +1556,7 @@ pub enum Determinism {
 }
 
 /// Per-column determinism fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ColumnDeterminism {
     pub output: String,
     pub level: Determinism,
@@ -1569,7 +1570,7 @@ pub struct ColumnDeterminism {
 /// columnar union takes the per-position lub, same shape as
 /// [`Determinism`]'s. `Incomparable` is the fail-closed default — an
 /// unrecognised construct never defaults to `Comparable`.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Serialize)]
 pub enum Comparability {
     /// A pure function of processed inputs — safe to diff against a prior
     /// run's stored value.
@@ -1588,7 +1589,7 @@ impl Default for Comparability {
 }
 
 /// Per-column change-comparability fact.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ColumnComparability {
     pub output: String,
     pub comparability: Comparability,
@@ -1596,7 +1597,7 @@ pub struct ColumnComparability {
 
 /// Per-column algebraic discriminants of an aggregate output column (the
 /// combiner classifier applied at the aggregate's defining scope).
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct ColumnDiscriminant {
     pub output: String,
     pub discriminants: Discriminants,
@@ -1607,7 +1608,7 @@ pub struct ColumnDiscriminant {
 /// functional dependencies, per-column discriminants, and the determinism
 /// predicate are folded bottom-up by [`PropertyTransfer`]; the fields are the
 /// four fact families, all fail-closed by default.
-#[derive(Debug, Clone, Default, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
 pub struct PropertyVector {
     /// Output columns of this node, in projection order.
     pub columns: Vec<String>,

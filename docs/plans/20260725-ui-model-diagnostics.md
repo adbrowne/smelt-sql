@@ -64,7 +64,7 @@ Today `smelt explain <model> --show-sql` is the only place any of this data — 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | cb878c9a | 2026-07-25 |
-| 2a    | pending  |        |      |
+| 2a    | done     | TBD    | 2026-07-25 |
 | 2b    | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |

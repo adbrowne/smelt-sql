@@ -4385,6 +4385,7 @@ dependencies = [
  "smelt-backend",
  "smelt-backend-duckdb",
  "smelt-backends",
+ "smelt-cli",
  "smelt-core",
  "smelt-db",
  "smelt-dialect",

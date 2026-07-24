@@ -33,6 +33,14 @@ pyo3 = { workspace = true, optional = true }
 
 [dev-dependencies]
 tempfile = "3"
+# Test-only, back-edge dependency: `diagnostics.rs`'s tests prove
+# `smelt-cli::explain`'s re-exported `build_relation_contract` is the exact
+# same function this crate derives (`docs/specs/ui_model_diagnostics.md`
+# §Design "Why a shared smelt-runtime builder"), not a second
+# implementation. `smelt-cli` already depends on `smelt-runtime` as a normal
+# dependency; a dev-dependency here only links test binaries, which Cargo
+# permits even though it forms a cycle with the normal dependency graph.
+smelt-cli = { path = "../smelt-cli" }
 smelt-backend-duckdb = { path = "../smelt-backend-duckdb" }
 smelt-backends = { path = "../smelt-backends" }
 tokio = { version = "1", features = ["rt", "macros", "rt-multi-thread"] }

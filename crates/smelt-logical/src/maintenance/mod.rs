@@ -36,6 +36,8 @@ pub mod skeleton;
 
 use std::collections::{BTreeMap, BTreeSet};
 
+use serde::Serialize;
+
 pub use crate::analysis::fingerprint::Projection as FingerprintProjection;
 pub use crate::analysis::skeleton_closure::SkeletonSourceClosure;
 use crate::analysis::walk::{ColumnComparability, Comparability};
@@ -198,7 +200,7 @@ impl ScanClamp {
 /// consumer re-derives it (`CLAUDE.md` §"Maintenance-plan purity").
 /// Fail-closed: a proven key that does not cover the output (a fan-out join)
 /// is never trusted, even as a partial key — `WholeRow` instead.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub enum RowIdentity {
     /// Rows are addressed individually by this key.
     Key(Vec<String>),
@@ -213,7 +215,7 @@ pub enum RowIdentity {
 /// precedence, but the disagreement is surfaced here rather than silently
 /// dropped, so a caller (`smelt explain`, a future admission audit) can see
 /// that the two facts disagree instead of only ever seeing the winner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct RowIdentityVerdict {
     pub identity: RowIdentity,
     /// `Some(proven)` exactly when a declared key was used *and* the walk

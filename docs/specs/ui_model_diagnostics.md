@@ -24,7 +24,7 @@ The central new idea is the **preview/admission split**. `incremental_models.md`
 ## Surface
 
 - **`smelt-runtime` builder** (Rust API, consumed by `smelt-cli` and `smelt-ui`): a pure function taking a resolved model and its Salsa-derived query results (maintenance plan, property walk output) and returning a `ModelDiagnostics` value containing:
-  - the model's full derived-property set, per `model_properties.md`'s catalogue, both model-scoped and column-scoped where a proof is column-scoped;
+  - the model's derived-property set, growing toward full coverage of `model_properties.md`'s catalogue (see §Known Divergences for the current boundary), both model-scoped and column-scoped where a proof is column-scoped;
   - the model's relation contract and the relation contract of every inbound edge (source or upstream model), per `incremental_models.md`'s contract shape;
   - the maintenance plan's cells, each carrying a **technique preview set**: one entry per known technique (region delete+insert, keyed fold, column-scoped merge, in-place update, region recompute), each entry holding the SQL statements that technique would emit for this cell and an **admissibility verdict** (see §Semantics);
   - the plan's refusals, unchanged from `incremental_models.md`.
@@ -68,7 +68,8 @@ The central new idea is the **preview/admission split**. `incremental_models.md`
 
 ## Known Divergences / Open Questions
 
-- **Entire surface is unimplemented at time of writing.** This spec was drafted ahead of any code; every item in §Surface is a target, not current behavior. Tracked by the implementation plan for this spec (path to be added once `docs/plans/` has it — see §References).
+- **Most of the surface is unimplemented at time of writing.** The `smelt-runtime` builder's property-set and relation-contract derivation have landed (see the following entry for the property-set boundary); the technique-preview set and its admissibility verdicts, the CLI `--technique` flag, the UI REST endpoint, and the UI page itself remain targets, not current behavior. Tracked by `docs/plans/20260725-ui-model-diagnostics.md`.
+- **The property set covers only a subset of `model_properties.md`'s catalogue.** The `smelt-runtime` builder's property set currently carries columns, grain, functional dependencies, per-column determinism, per-column comparability, per-column algebraic discriminants, region row identity, and per-source bound/reach — i.e. everything reachable from the three already-derived per-model calls other code in the tree already uses (the property-walk vector, region row identity, and unified source bound/reach). It does **not** yet include: the event-time monotonicity trace, maintained-window/horizon, injection-point/pushdown-depth, partition alignment, driving-fact/anchor resolution, join-contribution monotonicity, skeleton-role, footprint reflection, partition-locality projection, faithful-fold conditions, grain-alignment, standalone fingerprint/cardinality projection, skeleton-source closure, or model-scoped declarations. Closing this gap needs new derivation plumbing — locating the relevant AST nodes and deriving these as standalone per-model results, not just adapting an existing single call — and is tracked by `docs/plans/20260725-ui-model-diagnostics.md`.
 - **Open question**: whether `smelt bakeoff`'s cost-measurement machinery should eventually read technique previews from this builder (rather than independently invoking `admitted_family()`/live execution) is undecided; today `bakeoff` measures real cost via live runs and is unaffected by this spec.
 
 ## Future Extensions

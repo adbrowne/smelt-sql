@@ -8,10 +8,11 @@
 //! ladder and the maintainable/delegated cutoff live in `incremental_models.md`
 //! and are **not** decided here.
 
+use serde::Serialize;
 use smelt_types::SqlFunction;
 
 /// Whether a combiner's presented value moves monotonically, and how.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub enum Monotone {
     /// The presented value itself only ever moves one way (`MIN`/`MAX`).
     Value,
@@ -25,7 +26,7 @@ pub enum Monotone {
 /// The raw algebraic facts of a combiner. Not the maintenance ladder — see
 /// `incremental_models.md` §"The algebraic maintenance ladder" for how these
 /// facts order into maintainable/delegated tiers.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
 pub struct Discriminants {
     /// The combiner is a commutative monoid (closed, associative, has an
     /// identity) — a fold of contributions is well-defined without replay.
