@@ -140,6 +140,10 @@ pub async fn start_server(
         .route("/api/project", get(api::get_project))
         .route("/api/graph", get(api::get_graph))
         .route("/api/models/{name}", get(api::get_model))
+        .route(
+            "/api/models/{name}/diagnostics",
+            get(api::get_model_diagnostics),
+        )
         .route("/api/resolve", post(api::post_resolve))
         .route("/api/run/plan", post(api::post_run_plan))
         .route("/api/run/execute", post(api::post_run_execute))

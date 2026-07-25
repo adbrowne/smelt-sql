@@ -7,6 +7,8 @@ use smelt_core::graph::DependencyGraph;
 use smelt_core::parse_selector;
 use smelt_core::SourcesConfig;
 use smelt_db::{ColumnSource, DiagnosticSeverity};
+use smelt_planner::BoundContext;
+use smelt_runtime::diagnostics::ModelDiagnostics;
 
 use crate::types::*;
 
@@ -261,6 +263,160 @@ pub fn build_model_details(
     }
 
     model_details
+}
+
+/// Build the [`BoundContext`] a model's property-set derivation needs: one
+/// `add_source` per upstream dependency that declares its own `timeseries:`
+/// clock. Mirrors `smelt_cli::explain::build_bound_context` field-for-field
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+/// boundary" — this is input assembly, not a derivation the shared builder
+/// itself owns, so a small duplicate here does not violate the boundary;
+/// `smelt-ui` has no dependency on `smelt-cli` to reuse its copy).
+fn build_bound_context(model_name: &str, graph: &DependencyGraph, config: &Config) -> BoundContext {
+    let mut ctx = BoundContext::new();
+    for dep_name in graph.get_upstream(model_name) {
+        if let Ok(dep_model) = graph.get_model(&dep_name) {
+            let dep_meta = dep_model.metadata.as_deref();
+            let ts = config
+                .get_timeseries_with_metadata(&dep_name, dep_meta)
+                .cloned()
+                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
+            if let Some(ts) = ts {
+                ctx.add_source(&dep_name, &ts.partition_column);
+            }
+        }
+    }
+    ctx
+}
+
+/// `BackendType` has only two variants today (`DuckDB`, `Spark`) —
+/// `smelt_backend::maintenance_dialect` takes the richer `SqlDialect`
+/// (which also has `PostgreSQL`); this is the narrow bridge from a target's
+/// declared backend to the maintenance-statement dialect tag. Mirrors
+/// `smelt_cli::commands::explain::backend_type_to_maintenance_dialect`
+/// (private to that crate, so duplicated here rather than reused).
+fn backend_type_to_maintenance_dialect(
+    backend_type: smelt_core::config::BackendType,
+) -> smelt_logical::maintenance::emit::MaintenanceDialect {
+    let dialect = match backend_type {
+        smelt_core::config::BackendType::DuckDB => smelt_backend::SqlDialect::DuckDB,
+        smelt_core::config::BackendType::Spark => smelt_backend::SqlDialect::SparkSQL,
+    };
+    smelt_backend::maintenance_dialect(dialect)
+}
+
+/// Build one model's [`ModelDiagnostics`] for `GET /api/models/:name/diagnostics`
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "UI REST API"). A thin
+/// adapter over `smelt_runtime::diagnostics::build_model_diagnostics`: every
+/// argument below is already-resolved data assembled from the caller's own
+/// Salsa/discovery state (mirroring `smelt-cli::commands::explain`'s
+/// assembly for the same shared builder call) — this function derives no
+/// property, contract, or technique-preview data itself
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+/// boundary").
+///
+/// Returns `Ok(None)` when `name` doesn't resolve to a model in `graph`
+/// (the caller maps this to `404`, matching the existing `/api/models/:name`
+/// convention); `Err` only for a genuine derivation failure (the caller maps
+/// this to `500`).
+pub fn build_model_diagnostics_response(
+    graph: &DependencyGraph,
+    config: &Config,
+    db: &smelt_db::Database,
+    project_dir: &std::path::Path,
+    name: &str,
+) -> anyhow::Result<Option<ModelDiagnostics>> {
+    let Ok(model) = graph.get_model(name) else {
+        return Ok(None);
+    };
+
+    let models: Vec<smelt_core::ModelFile> = graph.models().values().cloned().collect();
+    let upstream = graph.get_upstream(name);
+    let source_infos = smelt_core::discover_source_infos(project_dir, &config.paths);
+    let bound_ctx = build_bound_context(name, graph, config);
+
+    let ws = smelt_db::Workspace::try_get(db);
+    let plan_cells: Vec<smelt_logical::maintenance::PlanCell> =
+        match (ws, db.source_file(&model.path)) {
+            (Some(ws), Some(file)) => smelt_db::maintenance_plan_report(db, ws, file)
+                .map(|result| result.plan.cells)
+                .unwrap_or_default(),
+            _ => Vec::new(),
+        };
+
+    let default_target = config.targets.keys().next().cloned().unwrap_or_default();
+    let target = config.get_target(name, model.metadata.as_deref(), &default_target);
+    let schema = config
+        .targets
+        .get(&target)
+        .map(|t| t.schema.clone())
+        .unwrap_or_else(|| "main".to_string());
+    let dialect = config
+        .targets
+        .get(&target)
+        .and_then(|t| t.backend_type().ok())
+        .map(backend_type_to_maintenance_dialect)
+        .unwrap_or(smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb);
+
+    let mut registry = smelt_runtime::CompilerRegistry::new(config, &config.targets);
+    if let Some(ws) = ws {
+        let fn_bodies = smelt_runtime::build_fn_body_map(db, ws);
+        registry.set_function_bodies_all(fn_bodies);
+    }
+
+    // Wire real upstream-column typing, mirroring `smelt explain --show-sql`
+    // (`smelt_cli::commands::explain::explain_maintenance_plan`) — best
+    // effort, never fatal: a failure here only means printed casts fall
+    // back to their default, not that the endpoint fails.
+    match smelt_runtime::UpstreamSchemas::from_database(db, project_dir, &models) {
+        Ok(upstream_schemas) => {
+            registry.set_upstream_schemas_all(std::sync::Arc::new(upstream_schemas));
+        }
+        Err(e) => {
+            tracing::warn!(
+                "diagnostics endpoint: upstream schema derivation failed for `{name}` ({e}); \
+                 printed casts may fall back to defaults"
+            );
+        }
+    }
+
+    let ephemeral_models: Vec<(String, String)> = models
+        .iter()
+        .filter(|m| {
+            config.get_materialization_with_metadata(&m.canonical_path(), m.metadata.as_deref())
+                == smelt_core::config::Materialization::Ephemeral
+        })
+        .map(|m| (m.db_name_owned(), m.content.clone()))
+        .collect();
+    let resolver = registry
+        .get(&target)
+        .build_ephemeral_resolver(&ephemeral_models, &schema);
+
+    let unique_key: Vec<String> = config
+        .get_incremental_with_metadata(name, model.metadata.as_deref())
+        .map(|b| b.unique_key)
+        .unwrap_or_default();
+
+    let source_timeseries = smelt_runtime::build_source_timeseries_map(graph, &source_infos);
+
+    let diagnostics = smelt_runtime::diagnostics::build_model_diagnostics(
+        model,
+        &models,
+        &upstream,
+        &source_infos,
+        &bound_ctx,
+        &plan_cells,
+        &schema,
+        &target,
+        &registry,
+        &resolver,
+        dialect,
+        &source_timeseries,
+        &unique_key,
+    )
+    .map_err(|e| anyhow::anyhow!("{e}"))?;
+
+    Ok(Some(diagnostics))
 }
 
 /// Resolve select/exclude selectors to model names without computing a full plan.

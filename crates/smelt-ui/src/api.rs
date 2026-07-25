@@ -78,6 +78,34 @@ pub async fn get_model(
         .ok_or(StatusCode::NOT_FOUND)
 }
 
+/// `GET /api/models/:name/diagnostics` — `docs/specs/ui_model_diagnostics.md`
+/// §Surface "UI REST API". Read-only, no request body; 404 if the model
+/// doesn't resolve, matching `get_model`'s convention exactly. A thin
+/// adapter over `build::build_model_diagnostics_response`, which itself is a
+/// thin adapter over `smelt_runtime::diagnostics::build_model_diagnostics` —
+/// this handler shapes no data of its own.
+pub async fn get_model_diagnostics(
+    State(state): State<Arc<AppState>>,
+    Path(name): Path<String>,
+) -> Result<Json<ModelDiagnosticsResponse>, StatusCode> {
+    let graph = state.graph.lock().await;
+    let db = state.db.lock().await;
+    match build::build_model_diagnostics_response(
+        &graph,
+        &state.config,
+        &db,
+        &state.project_dir,
+        &name,
+    ) {
+        Ok(Some(diagnostics)) => Ok(Json(diagnostics)),
+        Ok(None) => Err(StatusCode::NOT_FOUND),
+        Err(e) => {
+            tracing::error!("failed to build model diagnostics for `{name}`: {e:?}");
+            Err(StatusCode::INTERNAL_SERVER_ERROR)
+        }
+    }
+}
+
 pub async fn post_resolve(
     State(state): State<Arc<AppState>>,
     Json(request): Json<ResolveRequest>,

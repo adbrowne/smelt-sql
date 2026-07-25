@@ -4450,6 +4450,7 @@ dependencies = [
  "smelt-core",
  "smelt-db",
  "smelt-dialect",
+ "smelt-logical",
  "smelt-parser",
  "smelt-planner",
  "smelt-runtime",

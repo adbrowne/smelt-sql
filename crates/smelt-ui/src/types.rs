@@ -1,6 +1,14 @@
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 
+/// `GET /api/models/:name/diagnostics`'s response type
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "UI REST API"). A plain
+/// alias, not a hand-mirrored struct: reusing `ModelDiagnostics`'s own
+/// `Serialize` impl directly avoids a second, drift-prone copy of its shape
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+/// boundary").
+pub type ModelDiagnosticsResponse = smelt_runtime::diagnostics::ModelDiagnostics;
+
 #[derive(Clone, Serialize)]
 pub struct GraphResponse {
     pub nodes: Vec<GraphNode>,
