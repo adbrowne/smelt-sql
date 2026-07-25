@@ -10,13 +10,13 @@
       
       
       
-        <link rel="canonical" href="https://smeltsql.com/guide/materializations/">
+        <link rel="canonical" href="https://smeltsql.com/guide/model-diagnostics/">
       
       
-        <link rel="prev" href="../sources/">
+        <link rel="prev" href="../web-ui/">
       
       
-        <link rel="next" href="../incremental-models/">
+        <link rel="next" href="../editor-setup/">
       
       
         
@@ -27,7 +27,7 @@
     
     
       
-        <title>Materializations - smelt</title>
+        <title>Model Diagnostics - smelt</title>
       
     
     
@@ -80,7 +80,7 @@
     <div data-md-component="skip">
       
         
-        <a href="#materializations" class="md-skip">
+        <a href="#model-diagnostics" class="md-skip">
           Skip to content
         </a>
       
@@ -113,7 +113,7 @@
         <div class="md-header__topic" data-md-component="header-topic">
           <span class="md-ellipsis">
             
-              Materializations
+              Model Diagnostics
             
           </span>
         </div>
@@ -1299,37 +1299,10 @@
                 
   
   
-    
   
   
-  
-    <li class="md-nav__item md-nav__item--active">
-      
-      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
-      
-      
-        
-      
-      
-        <label class="md-nav__link md-nav__link--active" for="__toc">
-          
-  
-  
-  <span class="md-ellipsis">
-    
-  
-    Materializations
-  
-
-    
-  </span>
-  
-  
-
-          <span class="md-nav__icon md-icon"></span>
-        </label>
-      
-      <a href="./" class="md-nav__link md-nav__link--active">
+    <li class="md-nav__item">
+      <a href="../materializations/" class="md-nav__link">
         
   
   
@@ -1345,231 +1318,6 @@
   
 
       </a>
-      
-        
-
-<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
-  
-  
-  
-    
-  
-  
-    <label class="md-nav__title" for="__toc">
-      <span class="md-nav__icon md-icon"></span>
-      Table of contents
-    </label>
-    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
-      
-        <li class="md-nav__item">
-  <a href="#materialization-types" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Materialization types
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Materialization types">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#view-default" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        view (default)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#table" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        table
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#ephemeral" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        ephemeral
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#setting-materialization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Setting materialization
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Setting materialization">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#1-yaml-frontmatter-in-the-sql-file" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        1. YAML frontmatter in the SQL file
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#2-models-section-in-smeltyml" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        2. models section in smelt.yml
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#3-default_materialization-in-smeltyml" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        3. default_materialization in smelt.yml
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#refresh-axis" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Refresh axis
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Refresh axis">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#refresh-full-default" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: full (default)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#refresh-incremental-grain-partition" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: incremental + grain: partition
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#refresh-incremental-grain-key" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: incremental + grain: key
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#refresh-materialized_view" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: materialized_view
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#decision-guide" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Decision guide
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#grain-partition-vs-grain-key" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        grain: partition vs grain: key
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#changing-materialization-type" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Changing materialization type
-      
-    </span>
-  </a>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#further-reading" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Further reading
-      
-    </span>
-  </a>
-  
-</li>
-      
-    </ul>
-  
-</nav>
-      
     </li>
   
 
@@ -1915,10 +1663,37 @@
                 
   
   
+    
   
   
-    <li class="md-nav__item">
-      <a href="../model-diagnostics/" class="md-nav__link">
+  
+    <li class="md-nav__item md-nav__item--active">
+      
+      <input class="md-nav__toggle md-toggle" type="checkbox" id="__toc">
+      
+      
+        
+      
+      
+        <label class="md-nav__link md-nav__link--active" for="__toc">
+          
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+          <span class="md-nav__icon md-icon"></span>
+        </label>
+      
+      <a href="./" class="md-nav__link md-nav__link--active">
         
   
   
@@ -1934,6 +1709,103 @@
   
 
       </a>
+      
+        
+
+<nav class="md-nav md-nav--secondary" aria-label="Table of contents">
+  
+  
+  
+    
+  
+  
+    <label class="md-nav__title" for="__toc">
+      <span class="md-nav__icon md-icon"></span>
+      Table of contents
+    </label>
+    <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
+      
+        <li class="md-nav__item">
+  <a href="#opening-the-diagnostics-page" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Opening the diagnostics page
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#overview" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Overview
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#properties" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Properties
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relation-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relation contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maintenance-plan-and-technique-previews" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maintenance plan and technique previews
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#remove-comments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remove comments
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#further-reading" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Further reading
+      
+    </span>
+  </a>
+  
+</li>
+      
+    </ul>
+  
+</nav>
+      
     </li>
   
 
@@ -2834,171 +2706,10 @@
     <ul class="md-nav__list" data-md-component="toc" data-md-scrollfix>
       
         <li class="md-nav__item">
-  <a href="#materialization-types" class="md-nav__link">
+  <a href="#opening-the-diagnostics-page" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Materialization types
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Materialization types">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#view-default" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        view (default)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#table" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        table
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#ephemeral" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        ephemeral
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#setting-materialization" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Setting materialization
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Setting materialization">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#1-yaml-frontmatter-in-the-sql-file" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        1. YAML frontmatter in the SQL file
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#2-models-section-in-smeltyml" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        2. models section in smelt.yml
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#3-default_materialization-in-smeltyml" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        3. default_materialization in smelt.yml
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#refresh-axis" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Refresh axis
-      
-    </span>
-  </a>
-  
-    <nav class="md-nav" aria-label="Refresh axis">
-      <ul class="md-nav__list">
-        
-          <li class="md-nav__item">
-  <a href="#refresh-full-default" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: full (default)
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#refresh-incremental-grain-partition" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: incremental + grain: partition
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#refresh-incremental-grain-key" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: incremental + grain: key
-      
-    </span>
-  </a>
-  
-</li>
-        
-          <li class="md-nav__item">
-  <a href="#refresh-materialized_view" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        refresh: materialized_view
-      
-    </span>
-  </a>
-  
-</li>
-        
-      </ul>
-    </nav>
-  
-</li>
-      
-        <li class="md-nav__item">
-  <a href="#decision-guide" class="md-nav__link">
-    <span class="md-ellipsis">
-      
-        Decision guide
+        Opening the diagnostics page
       
     </span>
   </a>
@@ -3006,10 +2717,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#grain-partition-vs-grain-key" class="md-nav__link">
+  <a href="#overview" class="md-nav__link">
     <span class="md-ellipsis">
       
-        grain: partition vs grain: key
+        Overview
       
     </span>
   </a>
@@ -3017,10 +2728,43 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#changing-materialization-type" class="md-nav__link">
+  <a href="#properties" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Changing materialization type
+        Properties
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#relation-contract" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Relation contract
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#maintenance-plan-and-technique-previews" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Maintenance plan and technique previews
+      
+    </span>
+  </a>
+  
+</li>
+      
+        <li class="md-nav__item">
+  <a href="#remove-comments" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remove comments
       
     </span>
   </a>
@@ -3055,7 +2799,7 @@
 
 
   
-    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/materializations.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
+    <a href="https://github.com/adbrowne/smelt-sql/edit/main/docs-site/docs/guide/model-diagnostics.md" title="Edit this page" class="md-content__button md-icon" rel="edit">
       
       <svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24"><path d="M10 20H6V4h7v5h5v3.1l2-2V8l-6-6H6c-1.1 0-2 .9-2 2v16c0 1.1.9 2 2 2h4zm10.2-7c.1 0 .3.1.4.2l1.3 1.3c.2.2.2.6 0 .8l-1 1-2.1-2.1 1-1c.1-.1.2-.2.4-.2m0 3.9L14.1 23H12v-2.1l6.1-6.1z"/></svg>
     </a>
@@ -3063,362 +2807,82 @@
   
 
 
-<h1 id="materializations">Materializations<a class="headerlink" href="#materializations" title="Permanent link">&para;</a></h1>
-<p>A model is described by three independent axes: <strong>kind</strong> (model, test, function, …), <strong>materialization</strong> (how storage works: <code>view</code> / <code>table</code> / <code>ephemeral</code>), and <strong>refresh</strong> (how a stored <code>table</code> is kept current across runs: <code>full</code> / <code>incremental</code> / <code>materialized_view</code>). This page covers materialization first, then the refresh axis.</p>
-<h2 id="materialization-types">Materialization types<a class="headerlink" href="#materialization-types" title="Permanent link">&para;</a></h2>
-<h3 id="view-default">view (default)<a class="headerlink" href="#view-default" title="Permanent link">&para;</a></h3>
-<p>Creates a SQL view. No data is stored -- the query is re-evaluated each time the view is read.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">VIEW</span><span class="w"> </span><span class="n">user_events</span><span class="w"> </span><span class="k">AS</span>
-<a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="w">  </span><span class="k">SELECT</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">event_count</span>
-<a id="__codelineno-0-3" name="__codelineno-0-3" href="#__codelineno-0-3"></a><span class="w">  </span><span class="k">FROM</span><span class="w"> </span><span class="n">events</span><span class="w"> </span><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
-</code></pre></div>
-<p>Best for:</p>
+<h1 id="model-diagnostics">Model Diagnostics<a class="headerlink" href="#model-diagnostics" title="Permanent link">&para;</a></h1>
+<p>The diagnostics page is a full-screen view of everything smelt knows and derives about a
+single model: its columns and configuration, the full set of properties smelt has proven
+about it, its relation contract, and — for incremental models — the maintenance plan smelt
+would use to keep it up to date, including the SQL every candidate technique would emit.</p>
+<p>It answers questions the graph view's <a href="../web-ui/#model-detail-panel">model detail panel</a>
+doesn't have room for, in particular "why did smelt pick this technique and not that one?"
+and "what would the SQL look like if it had picked something else?"</p>
+<h2 id="opening-the-diagnostics-page">Opening the diagnostics page<a class="headerlink" href="#opening-the-diagnostics-page" title="Permanent link">&para;</a></h2>
+<p>From the <a href="../web-ui/#dependency-graph">dependency graph</a>, click a model to open its detail
+panel, then click <strong>Open Diagnostics</strong>. The diagnostics page replaces the graph view; use
+<strong>Close</strong> to return.</p>
+<h2 id="overview">Overview<a class="headerlink" href="#overview" title="Permanent link">&para;</a></h2>
+<p>The top of the page repeats the model's identity, materialization, tags, owner, incremental
+configuration, and column list — the same information as the detail panel, plus the model's
+full SQL text in a read-only, syntax-highlighted viewer.</p>
+<h2 id="properties">Properties<a class="headerlink" href="#properties" title="Permanent link">&para;</a></h2>
+<p>The properties section lists everything smelt has derived about the model's rows and columns:</p>
 <ul>
-<li>Lightweight transforms and staging layers</li>
-<li>Models that are queried infrequently</li>
-<li>Keeping the database small during development</li>
+<li><strong>Grain</strong> — the column set(s) that uniquely identify a row, when smelt can prove one.</li>
+<li><strong>Row identity</strong> — whether rows are identified by a key or only comparable as a whole row,
+  plus any columns where a claimed key has been proven to mismatch actual row identity.</li>
+<li><strong>Functional dependencies</strong> — key → column relationships smelt has derived from the model's
+  SQL.</li>
+<li><strong>Per-column determinism, comparability, and algebraic discriminants</strong> — a table listing,
+  for every output column, whether it's deterministic, how it compares across runs, and its
+  algebraic shape (monoid, invertible, decomposable, monotone) where relevant to incremental
+  maintenance.</li>
+<li><strong>Set-op and fan-out indicators</strong> — badges flagging a <code>UNION</code>/<code>INTERSECT</code>/<code>EXCEPT</code> barrier
+  or a fan-out join, both of which constrain which maintenance techniques apply.</li>
+<li><strong>Literal columns</strong> — columns smelt has proven hold a constant value.</li>
+<li><strong>Source bounds</strong> — for each upstream source, whether smelt has derived a bounded scan
+  range, an unbounded scan, or neither.</li>
 </ul>
-<h3 id="table">table<a class="headerlink" href="#table" title="Permanent link">&para;</a></h3>
-<p>Creates a physical table. Data is persisted and only recomputed when you run the model again.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="k">CREATE</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">daily_revenue</span><span class="w"> </span><span class="k">AS</span>
-<a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="w">  </span><span class="k">SELECT</span><span class="w"> </span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">revenue</span>
-<a id="__codelineno-1-3" name="__codelineno-1-3" href="#__codelineno-1-3"></a><span class="w">  </span><span class="k">FROM</span><span class="w"> </span><span class="n">transactions</span><span class="w"> </span><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span><span class="p">;</span>
-</code></pre></div>
-<p>Best for:</p>
+<h2 id="relation-contract">Relation contract<a class="headerlink" href="#relation-contract" title="Permanent link">&para;</a></h2>
+<p>Below the properties, the page shows the model's own relation contract (its event-time clock,
+identity columns, and derived grain) alongside the same contract for every inbound edge — each
+source or upstream model the plan depends on. This is the same contract shape maintenance
+planning uses to decide which techniques a cell can admit; see
+<a href="../incremental-models/">Incremental Models</a> for what each field means.</p>
+<h2 id="maintenance-plan-and-technique-previews">Maintenance plan and technique previews<a class="headerlink" href="#maintenance-plan-and-technique-previews" title="Permanent link">&para;</a></h2>
+<p>For an incremental model, the page renders one block per maintenance cell (mirroring
+<code>smelt explain</code>'s report): the cell's trigger, corner, and row identity, followed by a
+<strong>technique picker</strong> — one button per technique smelt knows how to render for this cell,
+including techniques the plan didn't pick.</p>
+<p>Selecting a technique shows the SQL statements it would emit for this cell, plus a badge
+explaining whether that technique is actually usable here:</p>
 <ul>
-<li>Frequently queried models</li>
-<li>Heavy aggregations you don't want to recompute on every read</li>
-<li>Models with many downstream dependents</li>
-<li><code>refresh: incremental</code> models (every <code>grain:</code> requires <code>table</code> materialization)</li>
+<li><strong>Admitted</strong> — the technique the maintenance plan actually resolved for this cell; its SQL
+  is exactly what a real run executes.</li>
+<li><strong>Interchangeable Alternative</strong> — proven sound for this cell (it would produce the same
+  resulting state as the admitted technique) but not the one the plan picked. Region recompute
+  always carries this badge when it isn't itself the admitted technique, since it's always a
+  safe fallback.</li>
+<li><strong>Not Applicable</strong>, with a reason — the technique's structural preconditions aren't met for
+  this cell (for example, previewing a keyed-fold technique on a cell with no row key). The SQL
+  is still shown for illustration, but it is not a real option for this cell and must not be
+  treated as one.</li>
 </ul>
-<h3 id="ephemeral">ephemeral<a class="headerlink" href="#ephemeral" title="Permanent link">&para;</a></h3>
-<p>Not materialized at all. The model's SQL is inlined as a CTE (Common Table Expression) into every downstream model that references it.</p>
-<p>Best for:</p>
-<ul>
-<li>Intermediate transformation steps that don't need to be queried directly</li>
-<li>Reducing the number of objects in your database</li>
-<li>Simple column renames or type casts</li>
-</ul>
-<div class="admonition warning">
-<p class="admonition-title">Warning</p>
-<p>Ephemeral models cannot declare <code>refresh: incremental</code> / <code>grain:</code>, or target overrides. smelt will raise an error if you try to combine these.</p>
-</div>
-<p>Key-grain running state (one row per <code>GROUP BY</code> key, folded across partitions) is not a fourth materialization type — it is <code>materialization: table</code> + <code>refresh: incremental</code> + <code>grain: key</code>. See <a href="#refresh-axis">Refresh axis</a> below.</p>
-<div class="admonition note">
-<p class="admonition-title">Tests are not a materialization</p>
-<p>A unit test is a <code>smelt.test</code> declaration, not a <code>materialization</code> value — it lives on the kind axis alongside models and functions, produces no database object, and is run by <code>smelt test</code> (never by <code>smelt run</code>). See the <a href="../testing/">Testing guide</a> for the <code>smelt.test</code> grammar (<code>PASSING</code>/<code>EXPECT</code>, the <code>#cte</code> operator, <code>check_order</code>/<code>cases</code>).</p>
-</div>
-<h2 id="setting-materialization">Setting materialization<a class="headerlink" href="#setting-materialization" title="Permanent link">&para;</a></h2>
-<p>There are three ways to set a model's materialization. They are listed here in order of precedence (highest to lowest):</p>
-<h3 id="1-yaml-frontmatter-in-the-sql-file">1. YAML frontmatter in the SQL file<a class="headerlink" href="#1-yaml-frontmatter-in-the-sql-file" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="c1">---</span>
-<a id="__codelineno-2-2" name="__codelineno-2-2" href="#__codelineno-2-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-2-3" name="__codelineno-2-3" href="#__codelineno-2-3"></a><span class="c1">---</span>
-<a id="__codelineno-2-4" name="__codelineno-2-4" href="#__codelineno-2-4"></a>
-<a id="__codelineno-2-5" name="__codelineno-2-5" href="#__codelineno-2-5"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="k">as</span><span class="w"> </span><span class="n">lifetime_value</span>
-<a id="__codelineno-2-6" name="__codelineno-2-6" href="#__codelineno-2-6"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">transactions</span>
-<a id="__codelineno-2-7" name="__codelineno-2-7" href="#__codelineno-2-7"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span>
-</code></pre></div>
-<h3 id="2-models-section-in-smeltyml">2. models section in smelt.yml<a class="headerlink" href="#2-models-section-in-smeltyml" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="nt">models</span><span class="p">:</span>
-<a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="w">  </span><span class="nt">daily_revenue</span><span class="p">:</span>
-<a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-3-4" name="__codelineno-3-4" href="#__codelineno-3-4"></a><span class="w">  </span><span class="nt">user_activity</span><span class="p">:</span>
-<a id="__codelineno-3-5" name="__codelineno-3-5" href="#__codelineno-3-5"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">table</span>
-<a id="__codelineno-3-6" name="__codelineno-3-6" href="#__codelineno-3-6"></a><span class="w">  </span><span class="nt">staging_users</span><span class="p">:</span>
-<a id="__codelineno-3-7" name="__codelineno-3-7" href="#__codelineno-3-7"></a><span class="w">    </span><span class="nt">materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">ephemeral</span>
-</code></pre></div>
-<h3 id="3-default_materialization-in-smeltyml">3. default_materialization in smelt.yml<a class="headerlink" href="#3-default_materialization-in-smeltyml" title="Permanent link">&para;</a></h3>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="nt">default_materialization</span><span class="p">:</span><span class="w"> </span><span class="l l-Scalar l-Scalar-Plain">view</span>
-</code></pre></div>
-<p>When <code>materialization</code> is omitted in the SQL frontmatter, in <code>models.&lt;name&gt;</code> of <code>smelt.yml</code>, <strong>and</strong> at the project-level <code>default_materialization</code> key, a model is materialized as a <code>view</code> — that is the built-in fallback. See <a href="../../reference/smelt-yml/#materialization-types"><code>smelt.yml</code> reference</a> for the precedence chain.</p>
-<div class="admonition tip">
-<p class="admonition-title">Tip</p>
-<p>A common pattern is to set <code>default_materialization: view</code> in <code>smelt.yml</code>, then override specific models to <code>table</code> where performance matters. This keeps development fast while ensuring production-critical models are materialized.</p>
-</div>
-<h2 id="refresh-axis">Refresh axis<a class="headerlink" href="#refresh-axis" title="Permanent link">&para;</a></h2>
-<p>The <code>refresh:</code> frontmatter key controls how a stored model's output is recomputed on each run. It applies only to <code>materialization: table</code>; setting it on other materialization types has no effect for <code>view</code> (a warning is emitted) and is a hard error for <code>ephemeral</code>. There is no <code>materialization: materialized_view</code> storage type — a backend-managed materialized view is selected on the refresh axis instead, via <code>refresh: materialized_view</code> over an implied <code>table</code>.</p>
-<table>
-<thead>
-<tr>
-<th>Value</th>
-<th>Who keeps it current</th>
-<th>Contract</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>full</code> (default)</td>
-<td>smelt, by recomputing everything each run</td>
-<td>trivial (recompute)</td>
-</tr>
-<tr>
-<td><code>incremental</code></td>
-<td>smelt, by running the derived maintenance plan each run</td>
-<td>processed-input equivalence, discharged per cell — see <a href="../incremental-models/">Incremental Models</a></td>
-</tr>
-<tr>
-<td><code>materialized_view</code></td>
-<td>the engine, continuously, via native incremental-view maintenance</td>
-<td>end-state; engine-owned — requires a backend with native IVM, see below</td>
-</tr>
-</tbody>
-</table>
-<p>When <code>refresh:</code> is omitted, <code>full</code> is assumed — the model always rebuilds completely. <code>refresh: incremental</code> additionally requires a sibling <code>grain:</code> declaration — what a stored row <em>is</em> and how it is addressed:</p>
-<table>
-<thead>
-<tr>
-<th><code>grain:</code></th>
-<th>A stored row is…</th>
-<th>Identity</th>
-<th><code>timeseries:</code></th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>partition</code></td>
-<td>one row of a complete, partition-addressed table</td>
-<td><code>unique_key</code> optional (within-partition dedup aid only)</td>
-<td><strong>required</strong></td>
-</tr>
-<tr>
-<td><code>key</code></td>
-<td>the end-state per key</td>
-<td><code>unique_key</code> <strong>required</strong>, composite-valued</td>
-<td><strong>forbidden</strong> — the output has no partition column; partition shape is read from the source</td>
-</tr>
-<tr>
-<td><code>key_per_partition</code></td>
-<td>the trajectory: one row per <code>(key, partition)</code></td>
-<td><code>unique_key</code> <strong>required</strong></td>
-<td><strong>required</strong> — the partition axis is half the grain</td>
-</tr>
-</tbody>
-</table>
-<p>There is no per-model <code>strategy:</code> knob that says "delete+insert", "merge", or "fold" — how each part of the output is maintained under each kind of change is <em>derived</em> per <code>(column-group × trigger)</code> cell (the maintenance plan) and reported by <code>smelt explain</code>. One model is routinely append-driven, merge-driven, and recompute-driven at different cells.</p>
-<h3 id="refresh-full-default">refresh: full (default)<a class="headerlink" href="#refresh-full-default" title="Permanent link">&para;</a></h3>
-<p>No frontmatter key needed. The model always rebuilds from scratch:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">---</span>
-<a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="c1">---</span>
-<a id="__codelineno-5-4" name="__codelineno-5-4" href="#__codelineno-5-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="nb">date</span><span class="p">,</span><span class="w"> </span><span class="k">SUM</span><span class="p">(</span><span class="n">amount</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">revenue</span>
-<a id="__codelineno-5-5" name="__codelineno-5-5" href="#__codelineno-5-5"></a><span class="k">FROM</span><span class="w"> </span><span class="n">transactions</span>
-<a id="__codelineno-5-6" name="__codelineno-5-6" href="#__codelineno-5-6"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="mi">1</span>
-</code></pre></div>
-<h3 id="refresh-incremental-grain-partition">refresh: incremental + grain: partition<a class="headerlink" href="#refresh-incremental-grain-partition" title="Permanent link">&para;</a></h3>
-<p>Processes only new or changed data instead of rebuilding the entire table, keeping one row per partition. See <a href="../incremental-models/">Incremental Models</a> for the full DELETE+INSERT mechanics, safety analysis, and configuration.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="c1">---</span>
-<a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-6-3" name="__codelineno-6-3" href="#__codelineno-6-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
-<a id="__codelineno-6-4" name="__codelineno-6-4" href="#__codelineno-6-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="n">partition</span>
-<a id="__codelineno-6-5" name="__codelineno-6-5" href="#__codelineno-6-5"></a><span class="n">timeseries</span><span class="p">:</span>
-<a id="__codelineno-6-6" name="__codelineno-6-6" href="#__codelineno-6-6"></a><span class="w">  </span><span class="n">event_time_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_ts</span>
-<a id="__codelineno-6-7" name="__codelineno-6-7" href="#__codelineno-6-7"></a><span class="w">  </span><span class="n">partition_column</span><span class="p">:</span><span class="w"> </span><span class="n">event_date</span>
-<a id="__codelineno-6-8" name="__codelineno-6-8" href="#__codelineno-6-8"></a><span class="w">  </span><span class="n">granularity</span><span class="p">:</span><span class="w"> </span><span class="k">day</span>
-<a id="__codelineno-6-9" name="__codelineno-6-9" href="#__codelineno-6-9"></a><span class="c1">---</span>
-<a id="__codelineno-6-10" name="__codelineno-6-10" href="#__codelineno-6-10"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_count</span>
-<a id="__codelineno-6-11" name="__codelineno-6-11" href="#__codelineno-6-11"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
-<a id="__codelineno-6-12" name="__codelineno-6-12" href="#__codelineno-6-12"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
-<a id="__codelineno-6-13" name="__codelineno-6-13" href="#__codelineno-6-13"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">event_date</span><span class="p">,</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span>
-</code></pre></div>
-<h3 id="refresh-incremental-grain-key">refresh: incremental + grain: key<a class="headerlink" href="#refresh-incremental-grain-key" title="Permanent link">&para;</a></h3>
-<p>Stateful merge into one row per <code>GROUP BY</code> key. Each run only aggregates the new partition's events and merges them into the running keyed state via <code>merge_into</code>. The unique key, the per-column aggregator, and the cross-window combiner are all derived from the SELECT.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">---</span>
-<a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">incremental</span>
-<a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="n">grain</span><span class="p">:</span><span class="w"> </span><span class="k">key</span>
-<a id="__codelineno-7-5" name="__codelineno-7-5" href="#__codelineno-7-5"></a><span class="c1">---</span>
-<a id="__codelineno-7-6" name="__codelineno-7-6" href="#__codelineno-7-6"></a><span class="k">SELECT</span>
-<a id="__codelineno-7-7" name="__codelineno-7-7" href="#__codelineno-7-7"></a><span class="w">    </span><span class="n">device_id</span><span class="p">,</span>
-<a id="__codelineno-7-8" name="__codelineno-7-8" href="#__codelineno-7-8"></a><span class="w">    </span><span class="n">user_id</span><span class="p">,</span>
-<a id="__codelineno-7-9" name="__codelineno-7-9" href="#__codelineno-7-9"></a><span class="w">    </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w">      </span><span class="k">AS</span><span class="w"> </span><span class="n">event_count</span><span class="p">,</span>
-<a id="__codelineno-7-10" name="__codelineno-7-10" href="#__codelineno-7-10"></a><span class="w">    </span><span class="k">MIN</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">first_seen</span><span class="p">,</span>
-<a id="__codelineno-7-11" name="__codelineno-7-11" href="#__codelineno-7-11"></a><span class="w">    </span><span class="k">MAX</span><span class="p">(</span><span class="n">event_ts</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">last_seen</span>
-<a id="__codelineno-7-12" name="__codelineno-7-12" href="#__codelineno-7-12"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
-<a id="__codelineno-7-13" name="__codelineno-7-13" href="#__codelineno-7-13"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
-<a id="__codelineno-7-14" name="__codelineno-7-14" href="#__codelineno-7-14"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span>
-</code></pre></div>
-<p>The output has one row per <code>(device_id, user_id)</code>. There is no <code>event_date</code> column — partitions collapse into a per-key row. The driving partition shape is read from the source's <code>timeseries:</code> declaration; running with <code>--event-time-start D --event-time-end D+N</code> merges the N partitions in temporal order. Without a run window, the model falls back to a single-shot full refresh.</p>
-<p>Each non-key projection must be a direct call to one of the <strong>allowlisted aggregators</strong>, which are paired with a fixed cross-window combiner:</p>
-<table>
-<thead>
-<tr>
-<th>Per-partition aggregator</th>
-<th>Cross-window combiner</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td><code>COUNT(...)</code></td>
-<td><code>SUM</code></td>
-</tr>
-<tr>
-<td><code>SUM(...)</code></td>
-<td><code>SUM</code></td>
-</tr>
-<tr>
-<td><code>MIN(...)</code></td>
-<td><code>MIN</code></td>
-</tr>
-<tr>
-<td><code>MAX(...)</code></td>
-<td><code>MAX</code></td>
-</tr>
-<tr>
-<td><code>BOOL_AND(...)</code></td>
-<td><code>BOOL_AND</code></td>
-</tr>
-<tr>
-<td><code>BOOL_OR(...)</code></td>
-<td><code>BOOL_OR</code></td>
-</tr>
-<tr>
-<td><code>BIT_AND(...)</code></td>
-<td><code>BIT_AND</code></td>
-</tr>
-<tr>
-<td><code>BIT_OR(...)</code></td>
-<td><code>BIT_OR</code></td>
-</tr>
-<tr>
-<td><code>BIT_XOR(...)</code></td>
-<td><code>xor()</code></td>
-</tr>
-</tbody>
-</table>
-<p>Anything outside the allowlist — <code>STRING_AGG</code>, <code>LIST_AGG</code>, <code>FIRST</code>, <code>LAST</code>, <code>AVG</code>, composite expressions like <code>SUM(x) + 1</code> — is rejected at planning time. Each allowed aggregator is commutative and associative, which is the property that lets the rule merge windows in any order and still produce the same final state.</p>
-<p>Best for:</p>
-<ul>
-<li>Running counts and identity edge sets (e.g. <code>(device, user)</code> co-occurrence)</li>
-<li>Per-key rollups where each run should be cheap — proportional to the new window's source rows, not the full source history</li>
-<li>Tables consumed downstream as a lookup (no <code>partition_column</code> on the output — the output has no partition column at all)</li>
-</ul>
-<div class="admonition warning">
-<p class="admonition-title">Forbidden combinations</p>
-<p>The retired <code>batched:</code> sub-block is a hard error for every model, regardless of grain — see <a href="../incremental-models/">Incremental models</a>. Top-level <code>safety_overrides:</code> is admitted only on a partition-shaped output (no declared identity); declaring it on a <code>grain: key</code> model is refused. <code>refresh: incremental</code> on an <code>ephemeral</code> model is also a hard error.</p>
-</div>
-<p><code>grain: key</code> and <code>timeseries:</code> are <strong>not</strong> a forbidden combination — the key axis (identity) and the time axis (clock) are independent, and declaring both is a first-class shape of its own: the <a href="../incremental-models/#the-composed-shape-key-time">composed shape</a>, a keyed output that is also time-partitioned. It requires one more fact beyond a bare <code>grain: key</code> declaration: proof, or a checked declaration, that key temporal locality holds (every duplicate delivery of one key stays within a bounded window of itself on the event axis). A <code>timeseries:</code> block on a <code>grain: key</code> model that satisfies none of the three locality routes is refused (<code>KeyedForbidsTimeseries</code>, naming the missing route) — the composed shape is opt-in on the declared facts, not automatic.</p>
-<div class="admonition note">
-<p class="admonition-title">Reprocessing</p>
-<p>Reprocessing an already-merged window is refused when detected. If a past window's data changes, run with <code>--full-refresh</code> to truncate and rebuild from scratch.</p>
-</div>
-<p>For the deeper rationale, see the <a href="../../reference/cumulative-aggregate/">key-grain patterns reference</a>.</p>
-<h3 id="refresh-materialized_view">refresh: materialized_view<a class="headerlink" href="#refresh-materialized_view" title="Permanent link">&para;</a></h3>
-<p>Delegates freshness to the backend's own native incremental-view maintenance instead of a smelt-driven refresh loop. The output is a keyed lookup, like <code>grain: key</code>; it must not declare a <code>timeseries:</code> or <code>grain:</code> key.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="c1">---</span>
-<a id="__codelineno-8-2" name="__codelineno-8-2" href="#__codelineno-8-2"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-8-3" name="__codelineno-8-3" href="#__codelineno-8-3"></a><span class="n">refresh</span><span class="p">:</span><span class="w"> </span><span class="n">materialized_view</span>
-<a id="__codelineno-8-4" name="__codelineno-8-4" href="#__codelineno-8-4"></a><span class="c1">---</span>
-<a id="__codelineno-8-5" name="__codelineno-8-5" href="#__codelineno-8-5"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span><span class="p">,</span><span class="w"> </span><span class="k">COUNT</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">event_count</span>
-<a id="__codelineno-8-6" name="__codelineno-8-6" href="#__codelineno-8-6"></a><span class="k">FROM</span><span class="w"> </span><span class="n">smelt</span><span class="p">.</span><span class="n">silver</span><span class="p">.</span><span class="n">events_parsed</span>
-<a id="__codelineno-8-7" name="__codelineno-8-7" href="#__codelineno-8-7"></a><span class="k">WHERE</span><span class="w"> </span><span class="n">user_id</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">NULL</span>
-<a id="__codelineno-8-8" name="__codelineno-8-8" href="#__codelineno-8-8"></a><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">device_id</span><span class="p">,</span><span class="w"> </span><span class="n">user_id</span>
-</code></pre></div>
-<p>smelt never silently substitutes another refresh mode for this one: on a backend without native incremental-view maintenance (every backend today — DuckDB and both Spark profiles), <code>refresh: materialized_view</code> is a <strong>hard error</strong> rather than a silent fallback to <code>grain: key</code> or a full-refresh table. Use <code>refresh: incremental</code> + <code>grain: key</code> for smelt-driven maintenance on those backends.</p>
-<h2 id="decision-guide">Decision guide<a class="headerlink" href="#decision-guide" title="Permanent link">&para;</a></h2>
-<table>
-<thead>
-<tr>
-<th>Scenario</th>
-<th>Recommended</th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Staging layer / light transforms</td>
-<td><code>view</code></td>
-</tr>
-<tr>
-<td>Aggregations queried by BI tools</td>
-<td><code>table</code></td>
-</tr>
-<tr>
-<td>Intermediate step used by one downstream</td>
-<td><code>ephemeral</code></td>
-</tr>
-<tr>
-<td>Model with many downstream dependents</td>
-<td><code>table</code></td>
-</tr>
-<tr>
-<td>Incremental processing (per-partition output)</td>
-<td><code>table</code> + <code>refresh: incremental</code> + <code>grain: partition</code></td>
-</tr>
-<tr>
-<td>Keyed state (one row per key across history)</td>
-<td><code>table</code> + <code>refresh: incremental</code> + <code>grain: key</code></td>
-</tr>
-<tr>
-<td>Database-managed refresh</td>
-<td><code>table</code> + <code>refresh: materialized_view</code></td>
-</tr>
-<tr>
-<td>Development / iteration</td>
-<td><code>view</code></td>
-</tr>
-</tbody>
-</table>
-<h2 id="grain-partition-vs-grain-key">grain: partition vs grain: key<a class="headerlink" href="#grain-partition-vs-grain-key" title="Permanent link">&para;</a></h2>
-<p>Both shapes are time-aware, but they uphold different contracts:</p>
-<table>
-<thead>
-<tr>
-<th>Property</th>
-<th><code>grain: partition</code></th>
-<th><code>grain: key</code></th>
-</tr>
-</thead>
-<tbody>
-<tr>
-<td>Frontmatter</td>
-<td><code>materialization: table</code> + <code>refresh: incremental</code> + <code>grain: partition</code> + <code>timeseries:</code></td>
-<td><code>materialization: table</code> + <code>refresh: incremental</code> + <code>grain: key</code></td>
-</tr>
-<tr>
-<td>Output shape</td>
-<td>One row per <code>(partition_column, …)</code> — partitioned</td>
-<td>One row per <code>GROUP BY</code> key — collapsed (by default)</td>
-</tr>
-<tr>
-<td>Declares <code>timeseries:</code>?</td>
-<td>Yes (the model's output is a timeseries)</td>
-<td>By default, no (reads partition shape from the source) — <strong>may</strong> also declare <code>timeseries:</code> to become the <a href="../incremental-models/#the-composed-shape-key-time">composed shape</a> once key temporal locality is established; refused (<code>KeyedForbidsTimeseries</code>) otherwise</td>
-</tr>
-<tr>
-<td>Equivalence contract</td>
-<td>Per-partition equivalence with full refresh</td>
-<td>End-state equivalence under any admitted window ordering</td>
-</tr>
-<tr>
-<td>Re-running a past window</td>
-<td>Idempotent (DELETE+INSERT)</td>
-<td>Refused when detected; use <code>--full-refresh</code></td>
-</tr>
-<tr>
-<td>Backend primitive</td>
-<td><code>DELETE</code> + <code>INSERT</code> per partition</td>
-<td><code>MERGE INTO</code> with per-column combiners</td>
-</tr>
-</tbody>
-</table>
-<p>If the question is "what's the day's contribution?", use <code>grain: partition</code>. If the question is "what's the running total per key?", use <code>grain: key</code>.</p>
-<h2 id="changing-materialization-type">Changing materialization type<a class="headerlink" href="#changing-materialization-type" title="Permanent link">&para;</a></h2>
-<p>When you change a model from <code>view</code> to <code>table</code> (or vice versa), smelt automatically drops the existing object — regardless of its current type — before creating the new one. You do not need to manually drop the old view before running a model as a table.</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1">-- Before: view (no frontmatter)</span>
-<a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="c1">-- After: add frontmatter to change to table</span>
-<a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a>
-<a id="__codelineno-9-4" name="__codelineno-9-4" href="#__codelineno-9-4"></a><span class="c1">---</span>
-<a id="__codelineno-9-5" name="__codelineno-9-5" href="#__codelineno-9-5"></a><span class="n">materialization</span><span class="p">:</span><span class="w"> </span><span class="k">table</span>
-<a id="__codelineno-9-6" name="__codelineno-9-6" href="#__codelineno-9-6"></a><span class="c1">---</span>
-<a id="__codelineno-9-7" name="__codelineno-9-7" href="#__codelineno-9-7"></a>
-<a id="__codelineno-9-8" name="__codelineno-9-8" href="#__codelineno-9-8"></a><span class="k">SELECT</span><span class="w"> </span><span class="p">...</span>
-</code></pre></div>
-<p>Run <code>smelt run --select my_model</code> and smelt will drop the view and create the table automatically.</p>
+<p>Only one technique per cell is ever marked Admitted. A technique preview — of any verdict — is
+display-only: selecting it does not run anything, and it has no effect on which technique a
+real run will actually use. To change what a real run does, use the model's
+<code>maintenance:</code> frontmatter, as described in
+<a href="../incremental-models/#steering-prefer--technique">Incremental Models</a>.</p>
+<h2 id="remove-comments">Remove comments<a class="headerlink" href="#remove-comments" title="Permanent link">&para;</a></h2>
+<p>A single "Remove comments" toggle at the top of the page applies to every SQL viewer on the
+page at once — the model's own SQL and every technique preview's statements — stripping <code>--</code>
+and <code>/* */</code> comments while leaving the surrounding formatting untouched. This is purely a
+display filter; it doesn't change what SQL a run would execute.</p>
 <h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
 <ul>
-<li><a href="../incremental-models/">Incremental Models</a> for time-partitioned incremental processing (<code>grain: partition</code>, requires <code>table</code>)</li>
-<li><a href="../../reference/cumulative-aggregate/">Key-grain patterns reference</a> for the normative behaviour, classifier rules, and complete diagnostic list of <code>grain: key</code></li>
-<li><a href="../sql-models/">SQL Models</a> for YAML frontmatter syntax</li>
+<li><a href="../web-ui/">Web UI</a> for the graph view and the rest of the UI's features.</li>
+<li><a href="../incremental-models/">Incremental Models</a> for the maintenance plan, technique
+  interchangeability, and how to steer which technique a real run picks.</li>
+<li><a href="../../reference/smelt-explain/"><code>smelt explain</code></a> for the command-line equivalent, including
+  the <code>--technique</code> flag this page's technique picker mirrors.</li>
 </ul>
 
 

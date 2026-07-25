@@ -1663,6 +1663,34 @@
   
   
     <li class="md-nav__item">
+      <a href="../../guide/model-diagnostics/" class="md-nav__link">
+        
+  
+  
+  <span class="md-ellipsis">
+    
+  
+    Model Diagnostics
+  
+
+    
+  </span>
+  
+  
+
+      </a>
+    </li>
+  
+
+              
+            
+              
+                
+  
+  
+  
+  
+    <li class="md-nav__item">
       <a href="../../guide/editor-setup/" class="md-nav__link">
         
   
@@ -2907,7 +2935,7 @@
 <p>Add <code>--show-sql</code> to also print, after each cell's block, the maintenance statements that cell executes — the output of the same pure emitters a run executes. Each cell's SELECT body is compiled through the real discovered project's ephemeral resolver and upstream column types, the same way a run compiles it, so the printed SQL matches what a run would compile (referenced ephemeral models are CTE-inlined, and ref-column aggregates cast to their real type). A transactional group (e.g. a paired region <code>DELETE</code>+<code>INSERT</code>) is bracketed by <code>BEGIN</code>/<code>COMMIT</code> lines. <code>--show-sql</code> never connects to a backend. Combine with <code>--period &lt;start&gt;..&lt;end&gt;</code> for the real literal window bounds, or omit it to see the symbolic <code>{{window_start}}</code>/<code>{{window_end}}</code> placeholders instead. Combined with <code>--json</code>, the report is emitted as JSON with a <code>statements</code> array per cell.</p>
 <p>Add <code>--technique &lt;name&gt;</code> alongside <code>--show-sql</code> to preview a <em>different</em> technique than the one the plan admitted — every technique smelt has an emitter for, rendered against each cell's own contract/identity/column data and labelled with its admissibility: <code>Admitted</code> (the plan's own choice), <code>InterchangeableAlternative</code> (proven sound here, but not the one picked — region recompute always qualifies when it isn't itself admitted), or <code>NotApplicable</code> with a reason (the technique's preconditions aren't met for this cell — reported, never omitted). Accepts <code>delete_insert</code>, <code>keyed_fold</code>, <code>column_scoped_merge</code>, <code>in_place_update</code>, <code>recompute</code> (<code>recompute</code> and <code>delete_insert</code> are the same technique). The preview always uses the symbolic <code>{{window_start}}</code>/<code>{{window_end}}</code> placeholders regardless of <code>--period</code> — it's a display-only illustration, not a windowed dry run. <code>--json</code> output always carries every technique's preview per cell (a <code>technique_previews</code> array) plus the model's full derived property set, whether or not <code>--technique</code> is given.</p>
 <p>One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the <code>BIGINT</code> default — a compile-order limitation shared identically by a real run, not an <code>explain</code>-specific divergence. See <code>docs/specs/cli.md</code> Known Divergences.</p>
-<p>See <a href="../cli/#smelt-explain"><code>smelt explain</code> in the CLI reference</a> for the full flag list and a sample maintenance-plan report.</p>
+<p>See <a href="../cli/#smelt-explain"><code>smelt explain</code> in the CLI reference</a> for the full flag list and a sample maintenance-plan report. The web UI's <a href="../../guide/model-diagnostics/">model diagnostics page</a> renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.</p>
 <h2 id="json-output-schema">JSON output schema<a class="headerlink" href="#json-output-schema" title="Permanent link">&para;</a></h2>
 <p>With <code>--json</code>, smelt prints a single JSON object with the following top-level fields:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="p">{</span>
