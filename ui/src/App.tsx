@@ -6,6 +6,7 @@ import { Graph } from './components/Graph'
 import { ModelDetail } from './components/ModelDetail'
 import { RunPlanner } from './pages/RunPlanner'
 import { RunHistory } from './pages/RunHistory'
+import { ModelDiagnostics } from './pages/ModelDiagnostics'
 import { useWebSocket } from './hooks/useWebSocket'
 
 type Page = 'graph' | 'planner' | 'history'
@@ -13,6 +14,10 @@ type Page = 'graph' | 'planner' | 'history'
 function App() {
   const [page, setPage] = useState<Page>('graph')
   const [selectedModel, setSelectedModel] = useState<string | null>(null)
+  // Per-model diagnostics is not a standalone nav tab (`Page` union) — it's
+  // opened over the graph+panel row for one model at a time, per
+  // `docs/plans/20260725-ui-model-diagnostics.md` Phase 5.
+  const [diagnosticsModel, setDiagnosticsModel] = useState<string | null>(null)
   const wsStatus = useWebSocket()
 
   const { data: project } = useQuery({
@@ -99,29 +104,39 @@ function App() {
         </header>
 
         <div className="flex-1 flex min-h-0">
-          {page === 'graph' && (
+          {diagnosticsModel ? (
+            <ModelDiagnostics
+              model={diagnosticsModel}
+              onClose={() => setDiagnosticsModel(null)}
+            />
+          ) : (
             <>
-              <div className="flex-1">
-                {graphData && (
-                  <Graph
-                    data={graphData}
-                    selectedModel={selectedModel}
-                    onSelectModel={setSelectedModel}
-                  />
-                )}
-              </div>
+              {page === 'graph' && (
+                <>
+                  <div className="flex-1">
+                    {graphData && (
+                      <Graph
+                        data={graphData}
+                        selectedModel={selectedModel}
+                        onSelectModel={setSelectedModel}
+                      />
+                    )}
+                  </div>
 
-              {selectedModel && modelDetail && (
-                <ModelDetail
-                  model={modelDetail}
-                  onClose={() => setSelectedModel(null)}
-                />
+                  {selectedModel && modelDetail && (
+                    <ModelDetail
+                      model={modelDetail}
+                      onClose={() => setSelectedModel(null)}
+                      onOpenDiagnostics={setDiagnosticsModel}
+                    />
+                  )}
+                </>
               )}
+
+              {page === 'planner' && <RunPlanner />}
+              {page === 'history' && <RunHistory />}
             </>
           )}
-
-          {page === 'planner' && <RunPlanner />}
-          {page === 'history' && <RunHistory />}
         </div>
       </div>
     </ErrorBoundary>
