@@ -103,6 +103,7 @@ nav:
     - Production Deployment: guide/deployment.md
     - Orchestration: guide/orchestration.md
     - Web UI: guide/web-ui.md
+    - Model Diagnostics: guide/model-diagnostics.md
     - Editor Setup: guide/editor-setup.md
     - Editor Features: guide/editor-features.md
   - Examples:

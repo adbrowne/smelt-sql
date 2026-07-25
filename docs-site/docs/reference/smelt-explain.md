@@ -32,7 +32,7 @@ Add `--technique <name>` alongside `--show-sql` to preview a *different* techniq
 
 One narrow gap: a column aggregated directly off an ephemeral ref (rather than a materialized upstream model) still casts to the `BIGINT` default — a compile-order limitation shared identically by a real run, not an `explain`-specific divergence. See `docs/specs/cli.md` Known Divergences.
 
-See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report.
+See [`smelt explain` in the CLI reference](cli.md#smelt-explain) for the full flag list and a sample maintenance-plan report. The web UI's [model diagnostics page](../guide/model-diagnostics.md) renders the same technique previews and admissibility verdicts interactively, alongside the model's full derived property set.
 
 ## JSON output schema
 
