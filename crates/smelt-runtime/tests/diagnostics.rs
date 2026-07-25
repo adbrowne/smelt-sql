@@ -183,6 +183,7 @@ fn properties_cover_derivable_catalogue_subset() {
         &cf.resolver,
         MaintenanceDialect::DuckDb,
         &source_timeseries,
+        &[],
     )
     .expect("diagnostics build succeeds for a real fixture model");
 
@@ -332,6 +333,7 @@ fn no_live_backend_required() {
         &cf.resolver,
         MaintenanceDialect::DuckDb,
         &source_timeseries,
+        &[],
     );
     assert!(
         result.is_ok(),
@@ -379,9 +381,13 @@ fn synthetic_cell(technique: Technique, row_identity: RowIdentity) -> PlanCell {
 /// metrics`'s single creation cell (`Trigger::NewData`, `Technique::
 /// DeleteInsert`) always builds cleanly (a declared `timeseries.
 /// partition_column`, no `unique_key`/keyed-fold shape needed) — its
-/// `Admitted` preview must be byte-identical to `smelt-cli::explain::
-/// build_cell_statement_group`'s own (pre-`--period`, symbolic-placeholder)
-/// output for the same cell.
+/// `Admitted` preview must render real, non-empty statements, and
+/// `smelt-cli::explain::build_admitted_statement_group` — the CLI's own
+/// thin reader over this same entry — must reproduce it byte-identically,
+/// substituting real `--period` literals for the builder's symbolic
+/// `{{window_start}}`/`{{window_end}}` placeholders when a concrete period
+/// is given (`smelt-cli` no longer keeps a second, independent derivation
+/// for this cell — `docs/plans/20260725-ui-model-diagnostics.md`).
 #[test]
 fn admitted_preview_matches_live_run_statements() {
     let (models, source_infos, config) = load_fixture();
@@ -418,29 +424,52 @@ fn admitted_preview_matches_live_run_statements() {
         "the Admitted DeleteInsert preview must render real statements"
     );
 
-    let expected = smelt_cli::explain::build_cell_statement_group(
-        cell,
-        model,
-        "main",
-        "dev",
-        &cf.registry,
-        &cf.resolver,
-        MaintenanceDialect::DuckDb,
-        &[],
-        &smelt_planner::SourceTimeseriesMap::new(),
+    // No `--period`: the CLI's reader must reproduce the preview's own
+    // symbolic-placeholder statements verbatim, byte-identical.
+    let placeholders = smelt_cli::explain::build_admitted_statement_group(
+        &diagnostics,
         &smelt_cli::explain::RegionLiterals::Placeholders,
-        None,
     )
-    .expect("smelt-cli's own build must succeed for this cell");
-
+    .expect("smelt-cli's reader must succeed for an Admitted preview with real statements");
     let admitted_sql: Vec<&str> = admitted.statements.iter().map(|s| s.sql.as_str()).collect();
-    let expected_sql: Vec<&str> = expected.statements.iter().map(|s| s.sql.as_str()).collect();
+    let placeholder_sql: Vec<&str> = placeholders
+        .statements
+        .iter()
+        .map(|s| s.sql.as_str())
+        .collect();
     assert_eq!(
-        admitted_sql, expected_sql,
-        "the Admitted preview's statements must be byte-identical to smelt-cli::explain::\
-         build_cell_statement_group's own output for the same cell"
+        admitted_sql, placeholder_sql,
+        "smelt-cli::explain::build_admitted_statement_group must reproduce the shared \
+         builder's own Admitted preview statements byte-identically when no --period is given"
     );
-    assert_eq!(admitted.transactional, expected.transactional);
+    assert_eq!(admitted.transactional, placeholders.transactional);
+
+    // A concrete `--period`: every `{{window_start}}`/`{{window_end}}`
+    // token in the preview's own statements must be replaced by the real
+    // literal, nothing else touched.
+    let with_period = smelt_cli::explain::build_admitted_statement_group(
+        &diagnostics,
+        &smelt_cli::explain::RegionLiterals::Period {
+            start: "2024-01-01".to_string(),
+            end: "2024-01-03".to_string(),
+        },
+    )
+    .expect("smelt-cli's reader must succeed under a concrete --period");
+    for stmt in &with_period.statements {
+        assert!(
+            !stmt.sql.contains("{{window_start}}") && !stmt.sql.contains("{{window_end}}"),
+            "expected the real --period literals substituted in, no placeholders left: {}",
+            stmt.sql
+        );
+    }
+    assert!(
+        with_period
+            .statements
+            .iter()
+            .any(|s| s.sql.contains("2024-01-01") && s.sql.contains("2024-01-03")),
+        "expected the real --period literals present in the substituted statements: {:?}",
+        with_period.statements
+    );
 }
 
 /// `docs/specs/ui_model_diagnostics.md` §Semantics "Admissibility verdict":

@@ -1,0 +1,85 @@
+Maintenance plan: daily_events
+
+Cells (2):
+  - group {*} on trigger NewData { source: "raw.events" }
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      ledger_catch_up: false
+      region key: Key(["event_date", "user_id"])
+      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+      scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      write pin: (none)
+  - group {*} on trigger Backfill
+      corner:    RecomputeRegion
+      technique: DeleteInsert
+      ledger_catch_up: false
+      region key: Key(["event_date", "user_id"])
+      locality:  NOT partition_local (source: raw.events, why: unclocked source is read in full on every recompute)
+      scan clamps: (none)
+      admissible write patterns: region, keyed, column, update, full_rebuild, keyed_conditional, staged_candidate
+      write pin: (none)
+
+Refusals: (none)
+
+Relation contract:
+  clock:    event_time_column=event_timestamp partition_column=event_date granularity=Day
+  identity: (none)
+  derived grain: partition
+
+Inbound edges: sources.raw.events
+  - sources.raw.events (source)
+      clock:    (none)
+      identity: event_id
+      derived grain: key
+
+  cell[0] statements:
+    BEGIN
+      DELETE FROM main.daily_events WHERE event_date >= '{{window_start}}' AND event_date < '{{window_end}}'
+      INSERT INTO main.daily_events SELECT * FROM (
+-- 
+--                    
+--                  
+--              
+--         
+--                            
+--                                  
+--                
+-- 
+-- Incremental materialization: only process new partitions
+-- Run with: smelt run --select daily_events --event-time-start 2024-01-01 --event-time-end 2024-01-06
+SELECT
+    date_trunc('day', event_timestamp) as event_date,
+    user_id,
+    COUNT(*) as event_count
+FROM main.sources_raw_events
+GROUP BY 1, 2
+
+
+) AS _smelt_output_clamp WHERE event_date >= '{{window_start}}' AND event_date < '{{window_end}}'
+    COMMIT
+  cell[1] statements:
+    BEGIN
+      DELETE FROM main.daily_events WHERE event_date >= '{{window_start}}' AND event_date < '{{window_end}}'
+      INSERT INTO main.daily_events SELECT * FROM (
+-- 
+--                    
+--                  
+--              
+--         
+--                            
+--                                  
+--                
+-- 
+-- Incremental materialization: only process new partitions
+-- Run with: smelt run --select daily_events --event-time-start 2024-01-01 --event-time-end 2024-01-06
+SELECT
+    date_trunc('day', event_timestamp) as event_date,
+    user_id,
+    COUNT(*) as event_count
+FROM main.sources_raw_events
+GROUP BY 1, 2
+
+
+) AS _smelt_output_clamp WHERE event_date >= '{{window_start}}' AND event_date < '{{window_end}}'
+    COMMIT

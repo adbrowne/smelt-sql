@@ -420,15 +420,21 @@ pub struct PlanCellDiagnostics {
 /// (`docs/specs/ui_model_diagnostics.md` §Design "Why preview *every*
 /// technique").
 ///
-/// Ported from (and, once `smelt-cli`'s own copy is retired in a later
-/// phase, the sole owner of) `smelt-cli::explain::build_cell_statement_group`
-/// — this version always renders the symbolic `{{window_start}}`/
-/// `{{window_end}}` output-window placeholders (the CLI's own
-/// `RegionLiterals::Placeholders` branch, byte-identical to its default
-/// `--show-sql` output with no `--period` given): a technique-preview build
-/// is a display-only illustration of a cell's shape, not a `--period`-bound
-/// dry run, so the `DerivedWindow`/`--period` machinery that branch alone
-/// needs stays a `smelt-cli`-only concern.
+/// This is the sole owner of the symbolic (no real `--period` window)
+/// statement derivation — `smelt-cli::explain` no longer keeps a second copy
+/// (`smelt_cli::explain::build_admitted_statement_group` reads this
+/// function's output, verbatim, out of the `Admitted` technique-preview
+/// entry rather than re-deriving it). This version always renders the
+/// symbolic `{{window_start}}`/`{{window_end}}` output-window placeholders:
+/// a technique-preview build is a display-only illustration of a cell's
+/// shape, not a `--period`-bound dry run. `smelt-cli`'s own
+/// `build_delete_insert_period_statement_group` is the one surviving
+/// CLI-side re-derivation, scoped to exactly the one case a real `--period`
+/// changes in a way plain token substitution over this function's
+/// placeholder output cannot reproduce (`Technique::DeleteInsert`'s skew
+/// inversion and widened source-scan pushdown) — every other technique's
+/// real-`--period` rendering is plain substitution over this function's own
+/// output, not a second derivation.
 ///
 /// Returns `Err(reason)` when this technique's structural preconditions
 /// (a declared `timeseries.partition_column` for `DeleteInsert`, a
@@ -728,6 +734,23 @@ pub struct ModelDiagnostics {
 /// `registry`/`resolver`/`dialect`/`source_timeseries` are the same
 /// already-resolved compilation facts `smelt-cli::explain`'s `--show-sql`
 /// path assembles before calling the (moving) statement-group builder.
+///
+/// `write_unique_key` is a second, deliberately distinct unique-key input:
+/// the effective *write*/MERGE-dedup key `Technique::ColumnScopedMerge`'s
+/// preview must key on — `Config::get_incremental_with_metadata`'s
+/// config-merged `batched.unique_key` (frontmatter wins wholesale over a
+/// `smelt.yml` model override; the *only* surviving spelling for a
+/// row-shaped, non-clocked join whose own `.sql` frontmatter cannot carry a
+/// top-level `unique_key:` — `docs/specs/models.md` §"The Relation
+/// Contract"). This is never the same fact as the model's own top-level
+/// `unique_key:` (`model.metadata.unique_key`, read below as
+/// `declared_unique_key`): that one is the *identity*/grain fact `row_identity`
+/// derives P2 region-row-identity from, and is empty for exactly the
+/// row-shaped models whose write key only exists via the `batched:` override
+/// (`examples/timeseries/models/daily_events_enriched.sql`'s own doc
+/// comment). Passing `declared_unique_key` to both purposes — the shape this
+/// function used before this parameter existed — silently starved every such
+/// model's `ColumnScopedMerge` preview of its real key.
 #[allow(clippy::too_many_arguments)]
 pub fn build_model_diagnostics(
     model: &ModelFile,
@@ -742,6 +765,7 @@ pub fn build_model_diagnostics(
     resolver: &EphemeralResolver,
     dialect: MaintenanceDialect,
     source_timeseries: &SourceTimeseriesMap,
+    write_unique_key: &[String],
 ) -> Result<ModelDiagnostics, DiagnosticsError> {
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let declared_unique_key: Vec<String> = model
@@ -771,7 +795,7 @@ pub fn build_model_diagnostics(
                 registry,
                 resolver,
                 dialect,
-                &declared_unique_key,
+                write_unique_key,
                 source_timeseries,
             )
         })
@@ -784,4 +808,131 @@ pub fn build_model_diagnostics(
         inbound_edges,
         cells,
     })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use smelt_core::config::{Config, Materialization, Target};
+    use smelt_core::metadata::ModelMetadata;
+    use smelt_core::{Granularity, RefInfo, SmeltRef};
+    use std::collections::HashMap;
+
+    fn duckdb_target() -> Target {
+        Target {
+            target_type: "duckdb".to_string(),
+            database: Some("test.duckdb".to_string()),
+            schema: "main".to_string(),
+            connect_url: None,
+            catalog: None,
+            warehouse: None,
+            format: None,
+            settings: None,
+        }
+    }
+
+    fn test_config() -> Config {
+        let mut targets = HashMap::new();
+        targets.insert("dev".to_string(), duckdb_target());
+        Config {
+            name: "test".to_string(),
+            version: 1,
+            paths: vec!["models".to_string()],
+            targets,
+            default_materialization: Materialization::View,
+            models: HashMap::new(),
+            python: None,
+            target: None,
+            state: Default::default(),
+            maintenance: None,
+        }
+    }
+
+    /// `build_technique_statements`'s `Technique::DeleteInsert` branch must
+    /// succeed for a model whose outermost FROM is a `TableExpr`-returning
+    /// function call (`smelt.functions.windowed(...)`) — the shape
+    /// `silver.sessions` uses in `examples/web_analytics`
+    /// (`crates/smelt-cli/tests/explain_model.rs::sessions_show_sql_emits_statements`
+    /// is the real-`--period` counterpart of this unit test). Clamping the
+    /// raw, unexpanded model body *before* compiling — never the compiled
+    /// output, which the compiler's own printer has already expanded — is
+    /// what makes this succeed: `inject_time_filter`'s reparse only ever
+    /// sees a plain FROM clause referencing a CTE, never the
+    /// function-expansion's reparse-hostile output.
+    ///
+    /// Ported from `smelt-cli::explain`'s own regression test of the same
+    /// name when the CLI's duplicate no-`--period` derivation was retired in
+    /// favor of this shared builder
+    /// (`docs/plans/20260725-ui-model-diagnostics.md`).
+    #[test]
+    fn delete_insert_clamp_succeeds_on_table_expr_function_from() {
+        use smelt_core::config::TimeseriesConfig;
+
+        let content = "SELECT device_id, d FROM smelt.functions.windowed(src => raw_events)";
+        let path: std::path::PathBuf = "sessions.sql".into();
+        let model = ModelFile {
+            name: "sessions".to_string(),
+            model_id: smelt_core::ModelId::from_path(path.clone()),
+            path,
+            content: content.to_string(),
+            refs: vec![RefInfo {
+                has_named_params: false,
+                range: Default::default(),
+                smelt_ref: SmeltRef::Path(vec!["raw_events".to_string()]),
+            }],
+            parse_errors: Vec::new(),
+            metadata: Some(Box::new(ModelMetadata {
+                materialization: Some(Materialization::Table),
+                timeseries: Some(TimeseriesConfig {
+                    event_time_column: "d".to_string(),
+                    partition_column: "d".to_string(),
+                    granularity: Granularity::Day,
+                    week_start: None,
+                    assert_monotonic: false,
+                }),
+                ..Default::default()
+            })),
+            kind: smelt_core::ModelKind::Sql,
+            address_segments: vec!["sessions".to_string()],
+        };
+
+        let config = test_config();
+        let mut registry = CompilerRegistry::new(&config, &config.targets);
+        let mut fn_bodies: crate::fn_bodies::FnBodyMap = HashMap::new();
+        fn_bodies.insert(
+            "windowed".to_string(),
+            (
+                vec![("src".to_string(), None)],
+                "(SELECT * FROM src)".to_string(),
+            ),
+        );
+        registry.set_function_bodies_all(fn_bodies);
+        let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
+
+        let source_timeseries = SourceTimeseriesMap::new();
+
+        let group = build_technique_statements(
+            Technique::DeleteInsert,
+            &model,
+            "main",
+            "dev",
+            &registry,
+            &resolver,
+            MaintenanceDialect::DuckDb,
+            &[],
+            &source_timeseries,
+        )
+        .unwrap_or_else(|e| {
+            panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")
+        });
+
+        assert!(
+            group
+                .statements
+                .iter()
+                .any(|s| s.sql.contains("_smelt_output_clamp")),
+            "expected the output clamp wrapper in the emitted statements: {:?}",
+            group.statements
+        );
+    }
 }

@@ -6,7 +6,9 @@ use smelt_cli::{
     SourcesConfig,
 };
 use smelt_core::graph::DependencyGraph;
+use smelt_logical::maintenance::Technique;
 use smelt_planner::{Frontmatter, ModelGraph, ModelInfo, Planner};
+use smelt_runtime::diagnostics::build_model_diagnostics;
 use std::collections::HashMap;
 
 use crate::ExplainArgs;
@@ -568,16 +570,63 @@ async fn explain_maintenance_plan(
         None => None,
     };
 
+    // `--technique <name>` (`docs/specs/ui_model_diagnostics.md` §Surface
+    // "CLI"): parsed once, up front, so a malformed name fails loud before
+    // any of the (expensive — one emitter call per technique per cell)
+    // shared-diagnostics work below runs.
+    let technique_requested = args
+        .technique
+        .as_deref()
+        .map(parse_technique_arg)
+        .transpose()?;
+
+    // The shared `smelt-runtime::diagnostics` builder is the single owner
+    // of the technique-preview set and the property set
+    // (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+    // boundary") — and, since this fix, the sole deriver of the *symbolic*
+    // statement shape the default `--show-sql` text report renders too
+    // (`build_admitted_statement_group` in `smelt_cli::explain` reads its
+    // `Admitted` preview entry rather than re-deriving); `smelt-cli` no
+    // longer keeps its own second copy of the no-`--period` derivation, so
+    // `diagnostics` is now always built (never gated behind `--json`/
+    // `--technique`).
+    let diagnostics = {
+        let bound_ctx = smelt_cli::explain::build_bound_context(&canonical, &graph, &config);
+        build_model_diagnostics(
+            model,
+            &models,
+            &upstream,
+            &source_infos,
+            &bound_ctx,
+            &result.plan.cells,
+            &schema,
+            &target,
+            &registry,
+            &resolver,
+            dialect,
+            &source_timeseries,
+            &unique_key,
+        )
+        .map_err(|e| anyhow::anyhow!("{e}"))
+        .with_context(|| format!("Failed to build model diagnostics for `{}`", canonical))?
+    };
+
+    // `statements` is this cell's *admitted*-technique rendering — read
+    // straight from `diagnostics.cells`' own `Admitted` preview entry for
+    // every cell except a `Technique::DeleteInsert` cell under a concrete
+    // `--period`, which still needs the real skew-aware/scan-widened
+    // derivation `build_technique_statements`'s symbolic preview
+    // deliberately does not attempt (`smelt_cli::explain::
+    // build_all_cell_statements`'s own doc comment).
     let statements = smelt_cli::explain::build_all_cell_statements(
         &result.plan.cells,
+        &diagnostics.cells,
         model,
         &schema,
         &target,
         &registry,
         &resolver,
         dialect,
-        &unique_key,
-        &source_timeseries,
         &region,
         derived_window.as_ref(),
     );
@@ -589,16 +638,28 @@ async fn explain_maintenance_plan(
             &statements,
             own_contract.clone(),
             edges.clone(),
+            &diagnostics.cells,
+            diagnostics.properties.clone(),
         );
         println!("{}", serde_json::to_string_pretty(&json)?);
         return Ok(());
     }
 
     println!("{}", report);
-    print!(
-        "{}",
-        smelt_cli::explain::render_cell_statements_text(&statements)
-    );
+    match technique_requested {
+        Some(technique) => {
+            print!(
+                "{}",
+                smelt_cli::explain::render_technique_previews_text(&diagnostics.cells, technique)
+            );
+        }
+        None => {
+            print!(
+                "{}",
+                smelt_cli::explain::render_cell_statements_text(&statements)
+            );
+        }
+    }
 
     Ok(())
 }
@@ -740,6 +801,28 @@ fn parse_period(value: &str) -> Result<(String, String)> {
         anyhow::bail!("malformed --period range '{value}': end is before start");
     }
     Ok((start_date.to_string(), end_date.to_string()))
+}
+
+/// Parse `--technique <name>` into a [`Technique`]
+/// (`docs/specs/ui_model_diagnostics.md` §Surface "CLI"): a named CLI error
+/// (never a panic) on an unrecognized name, listing the accepted set
+/// (fail-loud discipline, `CLAUDE.md` §"Fail-loud discipline"). `recompute`
+/// and `delete_insert` both resolve to `Technique::DeleteInsert` — `--show-
+/// sql`'s own maintenance-plan report already documents `DeleteInsert` as
+/// doubling for region recompute (`docs/specs/incremental_models.md`), and
+/// `smelt_runtime::diagnostics`'s technique registry has no separate
+/// recompute emitter or `Technique` variant.
+fn parse_technique_arg(value: &str) -> Result<Technique> {
+    match value {
+        "delete_insert" | "recompute" => Ok(Technique::DeleteInsert),
+        "keyed_fold" => Ok(Technique::KeyedFold),
+        "column_scoped_merge" => Ok(Technique::ColumnScopedMerge),
+        "in_place_update" => Ok(Technique::InPlaceUpdate),
+        other => anyhow::bail!(
+            "unknown --technique '{other}': expected one of delete_insert, keyed_fold, \
+             column_scoped_merge, in_place_update, recompute"
+        ),
+    }
 }
 
 #[cfg(test)]

@@ -486,6 +486,19 @@ struct ExplainArgs {
     /// `{{window_end}}` instead of real literals.
     #[arg(long = "period", requires = "show_sql")]
     period: Option<String>,
+
+    /// Render a named technique's own preview statements instead of the
+    /// admitted one's, for every cell — including a cell where this
+    /// technique is structurally `NotApplicable`, whose reason is reported
+    /// rather than silently omitted (`docs/specs/ui_model_diagnostics.md`
+    /// §Surface "CLI"). Requires `--show-sql`. Accepts: `delete_insert`,
+    /// `keyed_fold`, `column_scoped_merge`, `in_place_update`, `recompute`
+    /// (`recompute` and `delete_insert` both resolve to the same
+    /// DELETE+INSERT / region-recompute technique — there is no separate
+    /// recompute emitter). Never affects `--json`, which always carries
+    /// every technique's preview regardless of this flag.
+    #[arg(long = "technique", requires = "show_sql")]
+    technique: Option<String>,
 }
 
 #[derive(Parser)]

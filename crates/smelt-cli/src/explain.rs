@@ -7,10 +7,7 @@ use smelt_core::{Granularity, Materialization, ModelOriginKind, PartitionGrainCo
 use smelt_logical::maintenance::emit::{MaintenanceDialect, StatementGroup};
 use smelt_logical::maintenance::{PlanCell, Technique};
 use smelt_planner::{analyze_batch_safety, BatchSafety, BoundContext, BoundResult, ModelInfo};
-use smelt_runtime::{
-    classify_cumulative_sql, inject_source_filters, inject_time_filter, CompilerRegistry,
-    EphemeralResolver, SourceBound, TimeRange,
-};
+use smelt_runtime::{CompilerRegistry, EphemeralResolver, SourceBound, TimeRange};
 use std::collections::BTreeMap;
 
 /// Top-level JSON output for `smelt explain --json`.
@@ -109,9 +106,39 @@ fn is_self_origin(origins: &[String]) -> bool {
 // imports (`use crate::explain::RelationContractView`, etc.) continue to work
 // unchanged — `smelt-cli` no longer owns a second copy of this derivation.
 pub use smelt_runtime::diagnostics::{
-    build_relation_contract, InboundEdgeContract, RelationContractClock, RelationContractProvider,
-    RelationContractView,
+    build_relation_contract, Admissibility, InboundEdgeContract, ModelDiagnostics,
+    PlanCellDiagnostics, PropertySet, RelationContractClock, RelationContractProvider,
+    RelationContractView, TechniquePreview,
 };
+
+/// Build the [`smelt_planner::BoundContext`] a model's `--json` source-bounds
+/// section (`compute_source_bounds`) and the shared `smelt-runtime::
+/// diagnostics` property-set derivation both need: one `add_source` per
+/// upstream dependency that declares its own `timeseries:` clock. Shared
+/// so both call sites build the bound context from the same rule rather
+/// than two independent copies of this loop
+/// (`docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+/// boundary").
+pub fn build_bound_context(
+    model_name: &str,
+    graph: &DependencyGraph,
+    config: &Config,
+) -> BoundContext {
+    let mut ctx = BoundContext::new();
+    for dep_name in graph.get_upstream(model_name) {
+        if let Ok(dep_model) = graph.get_model(&dep_name) {
+            let dep_meta = dep_model.metadata.as_deref();
+            let ts = config
+                .get_timeseries_with_metadata(&dep_name, dep_meta)
+                .cloned()
+                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
+            if let Some(ts) = ts {
+                ctx.add_source(&dep_name, &ts.partition_column);
+            }
+        }
+    }
+    ctx
+}
 
 /// Render one [`RelationContractView`] as indented text lines shared by
 /// the model's own contract and every inbound edge's contract — the same
@@ -577,29 +604,6 @@ pub enum RegionLiterals {
     Placeholders,
 }
 
-impl RegionLiterals {
-    /// The raw (unquoted) start/end bounds. Callers quote them as needed
-    /// per the destination emitter's own literal convention (a `Region`'s
-    /// `start`/`end` are pre-quoted SQL literals; `TimeRange`'s are quoted
-    /// by `inject_time_filter` itself).
-    fn raw(&self) -> (String, String) {
-        match self {
-            RegionLiterals::Period { start, end } => (start.clone(), end.clone()),
-            RegionLiterals::Placeholders => {
-                ("{{window_start}}".to_string(), "{{window_end}}".to_string())
-            }
-        }
-    }
-
-    fn quoted_region(&self) -> smelt_logical::maintenance::emit::Region {
-        let (start, end) = self.raw();
-        smelt_logical::maintenance::emit::Region {
-            start: format!("'{}'", start.replace('\'', "''")),
-            end: format!("'{}'", end.replace('\'', "''")),
-        }
-    }
-}
-
 /// The `--period`-derived output window and per-source scan margin a
 /// `Technique::DeleteInsert` cell's statements are built from — computed once
 /// per `--show-sql` invocation (in `commands/explain.rs`, the only caller)
@@ -644,267 +648,201 @@ pub struct CellStatements {
     pub outcome: Result<StatementGroup, String>,
 }
 
-/// Build the [`StatementGroup`] a plan cell would execute, using the same
-/// pure emitters a run executes
-/// (`docs/specs/incremental_models.md` §"Statement emission (single owner)"):
-/// this is the CLI-side "same inputs, same emitter" observation path —
-/// `--show-sql` never connects to a backend or executes anything, so every
-/// SELECT body here is compiled through the sanctioned
-/// `CompilerRegistry::get(...).compile_with_sql_and_ephemerals(...)` entry
-/// point (Run-pipeline-parity rule, `architecture.md`) and every clamp is
-/// injected via `smelt-runtime`'s existing transformer functions, never a
-/// new compile helper in `smelt-cli`.
+/// Render `diag_cell`'s own `Admitted` technique-preview entry — the single
+/// shared deriver of a cell's statement shape
+/// (`smelt_runtime::diagnostics::build_model_diagnostics`,
+/// `docs/specs/ui_model_diagnostics.md` §Semantics "Thin-consumer
+/// boundary") — as a [`StatementGroup`], substituting the real `--period`
+/// literals for the builder's own symbolic `{{window_start}}`/
+/// `{{window_end}}` placeholders when a concrete period was given.
 ///
-/// Returns `Err(reason)` rather than fabricating SQL when this cell's
-/// technique-specific inputs (unique key, keyed-fold driving-source
-/// classification) cannot be assembled from the discovered project, or when
-/// the technique has no production consumer yet (`Technique::InPlaceUpdate`,
-/// `incremental_models.md` — no live plan cell lowers to it).
+/// This plain token substitution is exact (not an approximation) for every
+/// technique except `Technique::DeleteInsert` under a concrete `--period`:
+/// the shared builder's placeholder statements carry the two tokens
+/// verbatim wherever a literal bound would otherwise appear —
+/// `inject_time_filter`/`inject_source_filters` both pass a zero-margin
+/// bound through unchanged (`subtract_seconds_from_date`/
+/// `add_seconds_to_date`'s `secs == 0` fast path returns the input
+/// untouched), never reformatting or recomputing it — so swapping the token
+/// text for the real literal reproduces byte-for-byte what re-deriving the
+/// statement with the real literal in hand would have produced.
+/// `Technique::DeleteInsert` under a real `--period` is the one case this
+/// cannot cover: see [`build_delete_insert_period_statement_group`]'s own
+/// doc comment for why.
+pub fn build_admitted_statement_group(
+    diag_cell: &PlanCellDiagnostics,
+    region: &RegionLiterals,
+) -> Result<StatementGroup, String> {
+    let preview = diag_cell
+        .technique_previews
+        .iter()
+        .find(|p| matches!(p.admissibility, Admissibility::Admitted))
+        .ok_or_else(|| {
+            "no Admitted technique preview entry for this cell — the shared diagnostics \
+             builder always populates exactly one (docs/specs/ui_model_diagnostics.md \
+             §Semantics \"Admissibility verdict\")"
+                .to_string()
+        })?;
+
+    if preview.statements.is_empty() {
+        // NotApplicable/empty preview: the builder could not render this
+        // technique at all for this cell — surface the same reason, never a
+        // silently empty success.
+        return match &preview.admissibility {
+            Admissibility::NotApplicable { reason } => Err(reason.clone()),
+            _ => Err("the admitted technique preview has no statements".to_string()),
+        };
+    }
+
+    let statements = preview
+        .statements
+        .iter()
+        .map(|s| smelt_logical::maintenance::emit::MaintenanceStatement {
+            sql: match region {
+                RegionLiterals::Period { start, end } => s
+                    .sql
+                    .replace("{{window_start}}", start)
+                    .replace("{{window_end}}", end),
+                RegionLiterals::Placeholders => s.sql.clone(),
+            },
+        })
+        .collect();
+
+    Ok(StatementGroup {
+        statements,
+        transactional: preview.transactional,
+    })
+}
+
+/// Build `cell`'s `Technique::DeleteInsert` statement group for a concrete
+/// `--period`, deriving the real output window and per-source scan margin
+/// the same way a live run's `build_model_plans` would
+/// (`smelt_runtime::derive_batch_filtered_sql`,
+/// `docs/specs/model_transforms.md` §Semantics "The output window is
+/// derived, never assumed").
+///
+/// This is the one `--show-sql` statement shape
+/// [`build_admitted_statement_group`]'s token substitution cannot
+/// reproduce: the real output window can differ from the literal `--period`
+/// text (skew inversion, e.g. `silver.sessions` in `examples/web_analytics`)
+/// and the real read additionally widens per-source scan pushdown that the
+/// shared builder's symbolic preview never renders at all — it is
+/// deliberately display-only (`smelt_runtime::diagnostics::
+/// build_technique_statements`'s own doc comment: "a technique-preview
+/// build is a display-only illustration of a cell's shape, not a
+/// `--period`-bound dry run"). `smelt-runtime` remains the sole deriver of
+/// the *symbolic* preview shape every technique-preview entry carries; this
+/// function is `smelt-cli`'s own real-window dry-run rendering for the one
+/// technique whose real statements a concrete `--period` changes — a
+/// distinct concern from a technique preview, not a second copy of the same
+/// derivation (`docs/specs/ui_model_diagnostics.md` §Semantics
+/// "Thin-consumer boundary").
 ///
 /// `resolver` must be built from the *actual* discovered project (the same
-/// way `smelt-runtime`'s dry-run compile path in `execute.rs` builds it —
-/// `SqlCompiler::build_ephemeral_resolver` over the target's ephemeral
-/// models), not `EphemeralResolver::empty()`: an empty resolver leaves any
-/// `smelt.<ephemeral>` ref in this model's SELECT body resolved as a
-/// physical table reference instead of CTE-inlined, which is what a real
-/// run would do (`docs/specs/cli.md` §"`smelt explain <model>`
-/// maintenance-plan report").
+/// way `smelt-runtime`'s dry-run compile path in `execute.rs` builds it),
+/// not `EphemeralResolver::empty()` — see `build_admitted_statement_group`'s
+/// sibling doc note in `commands/explain.rs` for the same requirement.
 #[allow(clippy::too_many_arguments)]
-pub fn build_cell_statement_group(
-    cell: &PlanCell,
+fn build_delete_insert_period_statement_group(
     model: &ModelFile,
     schema: &str,
     target: &str,
     registry: &CompilerRegistry,
     resolver: &EphemeralResolver,
     dialect: MaintenanceDialect,
-    unique_key: &[String],
-    source_timeseries: &smelt_planner::SourceTimeseriesMap,
-    region: &RegionLiterals,
-    derived: Option<&DerivedWindow>,
+    dw: &DerivedWindow,
 ) -> Result<StatementGroup, String> {
     let stripped_sql = smelt_parser::strip_frontmatter(&model.content).to_string();
     let table_name = format!("{schema}.{}", model.db_name_owned());
 
-    match cell.technique {
-        Technique::DeleteInsert => {
-            let partition_col = model
-                .metadata
-                .as_deref()
-                .and_then(|m| m.timeseries.as_ref())
-                .map(|t| t.partition_column.clone())
-                .ok_or_else(|| {
-                    "no timeseries.partition_column declared — cannot build the region \
-                     DELETE+INSERT pair"
-                        .to_string()
-                })?;
+    let partition_col = model
+        .metadata
+        .as_deref()
+        .and_then(|m| m.timeseries.as_ref())
+        .map(|t| t.partition_column.clone())
+        .ok_or_else(|| {
+            "no timeseries.partition_column declared — cannot build the region \
+             DELETE+INSERT pair"
+                .to_string()
+        })?;
 
-            // Inject the output clamp on the model's own (uncompiled) SQL
-            // *before* compiling — the same order the live run uses
-            // (`derive_batch_filtered_sql` clamps `clean_sql` — the raw model
-            // body — then compiles the clamped text;
-            // `docs/specs/model_transforms.md` §Semantics "Source-filter
-            // pushdown + the two clamps"). `inject_time_filter` only needs
-            // the model's own outermost FROM clause, which is a plain
-            // CTE/table reference regardless of what a nested CTE's FROM
-            // contains, so clamping the raw body is always safe. Clamping
-            // the *compiled* SQL instead (the previous order here) fed
-            // `inject_time_filter`'s reparse a FROM position that the
-            // compiler's printer had already expanded — for a model whose
-            // FROM is a `TableExpr`-returning function call
-            // (`smelt.functions.f(...)`), that expansion emits a
-            // parenthesized form that smelt-parser's grammar cannot
-            // re-parse (it round-trips fine as DuckDB-executable text, which
-            // is all the live run ever does with it — it never feeds
-            // compiled SQL back through the parser), so the reparse-based
-            // `inject_time_filter` call spuriously failed with "No FROM
-            // clause found". Wrapping before compiling never asks the parser
-            // to re-parse the compiler's own function-expansion output, so
-            // this is a call-ordering fix, not a new clamp mechanism.
-            let (compiled, region_used) = if let Some(dw) = derived {
-                // A concrete `--period` was given: derive the statements
-                // exactly as a live run's `derive_batch_filtered_sql` would
-                // for this window — output clamp *and* the per-source
-                // widened-scan pushdown, composed in one single-owner call
-                // rather than re-implemented here.
-                let run_range = TimeRange {
-                    start: dw.output_start.clone(),
-                    end: dw.output_end.clone(),
-                };
-                let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
-                    &stripped_sql,
-                    &partition_col,
-                    &dw.scan_bounds,
-                    &run_range,
-                    dw.run_start,
-                    dw.skew,
-                )
-                .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
+    // Derive the statements exactly as a live run's `derive_batch_filtered_sql`
+    // would for this window — output clamp *and* the per-source widened-scan
+    // pushdown, composed in one single-owner call rather than re-implemented
+    // here. This clamps the model's own (uncompiled) SQL *before* compiling —
+    // the same order the live run uses — so a model whose outermost FROM is a
+    // `TableExpr`-returning function call (`smelt.functions.f(...)`) never
+    // asks the parser to re-parse the compiler's own function-expansion
+    // output (which is reparse-hostile even though it is DuckDB-executable).
+    let run_range = TimeRange {
+        start: dw.output_start.clone(),
+        end: dw.output_end.clone(),
+    };
+    let filtered_sql = smelt_runtime::derive_batch_filtered_sql(
+        &stripped_sql,
+        &partition_col,
+        &dw.scan_bounds,
+        &run_range,
+        dw.run_start,
+        dw.skew,
+    )
+    .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
 
-                let compiled = registry
-                    .get(target)
-                    .compile_with_sql_and_ephemerals(model, schema, &filtered_sql, resolver)
-                    .map_err(|e| format!("failed to compile model body: {e}"))?;
+    let compiled = registry
+        .get(target)
+        .compile_with_sql_and_ephemerals(model, schema, &filtered_sql, resolver)
+        .map_err(|e| format!("failed to compile model body: {e}"))?;
 
-                let region_used = smelt_logical::maintenance::emit::Region {
-                    start: format!("'{}'", dw.output_start.replace('\'', "''")),
-                    end: format!("'{}'", dw.output_end.replace('\'', "''")),
-                };
-                (compiled, region_used)
-            } else {
-                // No `--period`: symbolic placeholders, no window to derive
-                // a skew inversion or scan margin from — output-clamp the
-                // raw body with the placeholder literals only.
-                let (raw_start, raw_end) = region.raw();
-                let wrapped_raw = inject_time_filter(
-                    &stripped_sql,
-                    &partition_col,
-                    &TimeRange {
-                        start: raw_start,
-                        end: raw_end,
-                    },
-                )
-                .map_err(|e| format!("failed to inject the output clamp: {e}"))?;
+    let region_used = smelt_logical::maintenance::emit::Region {
+        start: format!("'{}'", dw.output_start.replace('\'', "''")),
+        end: format!("'{}'", dw.output_end.replace('\'', "''")),
+    };
 
-                let compiled = registry
-                    .get(target)
-                    .compile_with_sql_and_ephemerals(model, schema, &wrapped_raw, resolver)
-                    .map_err(|e| format!("failed to compile model body: {e}"))?;
-
-                (compiled, region.quoted_region())
-            };
-
-            Ok(smelt_logical::maintenance::emit::emit_delete_insert(
-                &table_name,
-                &partition_col,
-                &region_used,
-                &compiled.sql,
-                dialect,
-            ))
-        }
-        Technique::KeyedFold => {
-            let model_has_timeseries = model
-                .metadata
-                .as_ref()
-                .is_some_and(|m| m.timeseries.is_some());
-            let classification = classify_cumulative_sql(
-                &model.name,
-                &stripped_sql,
-                source_timeseries,
-                model_has_timeseries,
-            )
-            .map_err(|e| format!("{e}"))?;
-
-            let (raw_start, raw_end) = region.raw();
-            let time_range = TimeRange {
-                start: raw_start,
-                end: raw_end,
-            };
-            let mut bound_map = std::collections::HashMap::new();
-            bound_map.insert(
-                classification.driving_source.name.clone(),
-                SourceBound {
-                    partition_col: classification
-                        .driving_source
-                        .timeseries
-                        .partition_column
-                        .clone(),
-                    before_secs: 0,
-                    after_secs: 0,
-                },
-            );
-            let pushed = inject_source_filters(&stripped_sql, &bound_map, &time_range);
-
-            let compiled = registry
-                .get(target)
-                .compile_with_sql_and_ephemerals(model, schema, &pushed, resolver)
-                .map_err(|e| format!("failed to compile model body: {e}"))?;
-
-            let folds: Vec<(String, String)> = classification
-                .aggregator_columns
-                .iter()
-                .map(|col| {
-                    let target_col = format!("target.{}", col.output_name);
-                    let delta_col = format!("delta.{}", col.output_name);
-                    (
-                        col.output_name.clone(),
-                        col.cross_partition_combiner.render(&target_col, &delta_col),
-                    )
-                })
-                .collect();
-
-            Ok(smelt_logical::maintenance::emit::emit_keyed_fold(
-                &table_name,
-                &classification.unique_key,
-                &folds,
-                &compiled.sql,
-                // `smelt explain` does not yet render the locality-derived
-                // target-scan slice predicate — that surface lands in
-                // `docs/plans/20260715-composed-axes-conditional-
-                // maintenance.md` phase A5.
-                None,
-                dialect,
-            ))
-        }
-        Technique::ColumnScopedMerge => {
-            if unique_key.is_empty() {
-                return Err(
-                    "no unique_key declared — cannot build the column-scoped MERGE".to_string(),
-                );
-            }
-            let compiled = registry
-                .get(target)
-                .compile_with_sql_and_ephemerals(model, schema, &stripped_sql, resolver)
-                .map_err(|e| format!("failed to compile model body: {e}"))?;
-
-            Ok(smelt_logical::maintenance::emit::emit_column_scoped_merge(
-                &table_name,
-                unique_key,
-                &compiled.sql,
-                dialect,
-            ))
-        }
-        Technique::InPlaceUpdate => Err("Technique::InPlaceUpdate has no production consumer yet \
-             (docs/specs/incremental_models.md § Known Divergences)"
-            .to_string()),
-    }
+    Ok(smelt_logical::maintenance::emit::emit_delete_insert(
+        &table_name,
+        &partition_col,
+        &region_used,
+        &compiled.sql,
+        dialect,
+    ))
 }
 
 /// Build a [`CellStatements`] entry for every cell in `plan`, in the same
 /// order they appear in the report (`docs/specs/cli.md`: "Statements print
-/// in execution order").
+/// in execution order"). `diag_cells` is `ModelDiagnostics::cells`, in the
+/// same cell order as `plan_cells` — every cell but a `Technique::
+/// DeleteInsert` cell under a concrete `--period` reads its statements
+/// straight from `diag_cells[i]`'s own `Admitted` preview
+/// ([`build_admitted_statement_group`]); only that one combination re-derives
+/// with the real window ([`build_delete_insert_period_statement_group`]).
 #[allow(clippy::too_many_arguments)]
 pub fn build_all_cell_statements(
     plan_cells: &[PlanCell],
+    diag_cells: &[PlanCellDiagnostics],
     model: &ModelFile,
     schema: &str,
     target: &str,
     registry: &CompilerRegistry,
     resolver: &EphemeralResolver,
     dialect: MaintenanceDialect,
-    unique_key: &[String],
-    source_timeseries: &smelt_planner::SourceTimeseriesMap,
     region: &RegionLiterals,
     derived: Option<&DerivedWindow>,
 ) -> Vec<CellStatements> {
     plan_cells
         .iter()
+        .zip(diag_cells.iter())
         .enumerate()
-        .map(|(cell_index, cell)| CellStatements {
-            cell_index,
-            outcome: build_cell_statement_group(
-                cell,
-                model,
-                schema,
-                target,
-                registry,
-                resolver,
-                dialect,
-                unique_key,
-                source_timeseries,
-                region,
-                derived,
-            ),
+        .map(|(cell_index, (cell, diag_cell))| {
+            let outcome = match (cell.technique, derived) {
+                (Technique::DeleteInsert, Some(dw)) => build_delete_insert_period_statement_group(
+                    model, schema, target, registry, resolver, dialect, dw,
+                ),
+                _ => build_admitted_statement_group(diag_cell, region),
+            };
+            CellStatements {
+                cell_index,
+                outcome,
+            }
         })
         .collect()
 }
@@ -955,6 +893,89 @@ pub fn render_statement_group_text(group: &StatementGroup, indent: &str) -> Stri
     out
 }
 
+/// Render `--show-sql --technique <name>` output: for every cell, the
+/// requested technique's own preview entry from the shared `smelt-runtime::
+/// diagnostics` builder (`docs/specs/ui_model_diagnostics.md` §Surface
+/// "CLI") — its SQL statements and admissibility verdict, printed in place
+/// of the admitted technique's statements [`render_cell_statements_text`]
+/// prints by default. A cell where the requested technique's own verdict is
+/// `NotApplicable` still prints its reason and any illustrative SQL the
+/// builder could still render — never silently omitted (fail-loud
+/// discipline, `CLAUDE.md` §"Fail-loud discipline").
+///
+/// `cells` is `ModelDiagnostics::cells`, in the same cell order `--show-sql`
+/// itself reports (`build_model_diagnostics` maps 1:1 over the same
+/// `MaintenancePlanResult::plan.cells` this report's own statements are
+/// built from) — every requested technique is a member of the closed
+/// registry `ModelDiagnostics` always populates
+/// (`smelt_runtime::diagnostics::ALL_TECHNIQUES`), so every cell is
+/// guaranteed to carry a matching preview entry.
+pub fn render_technique_previews_text(
+    cells: &[PlanCellDiagnostics],
+    requested: Technique,
+) -> String {
+    use std::fmt::Write as _;
+    let mut out = String::new();
+    for (cell_index, cell) in cells.iter().enumerate() {
+        let _ = writeln!(out, "  cell[{cell_index}] technique preview: {requested:?}");
+        match cell
+            .technique_previews
+            .iter()
+            .find(|p| p.technique == requested)
+        {
+            Some(preview) => {
+                let _ = writeln!(
+                    out,
+                    "    verdict: {}",
+                    format_admissibility(&preview.admissibility)
+                );
+                if preview.statements.is_empty() {
+                    let _ = writeln!(out, "    (no statements)");
+                } else if preview.transactional {
+                    let _ = writeln!(out, "    BEGIN");
+                    for stmt in &preview.statements {
+                        let _ = writeln!(out, "      {}", stmt.sql);
+                    }
+                    let _ = writeln!(out, "    COMMIT");
+                } else {
+                    for stmt in &preview.statements {
+                        let _ = writeln!(out, "    {}", stmt.sql);
+                    }
+                }
+            }
+            None => {
+                // `ALL_TECHNIQUES` always yields one preview entry per known
+                // technique for every cell (`docs/specs/ui_model_diagnostics.md`
+                // §Semantics "Technique preview set" — "never partial by
+                // omission") — reaching here would mean the registry and
+                // this CLI's accepted `--technique` names have drifted
+                // apart, so this is reported rather than silently skipped.
+                let _ = writeln!(
+                    out,
+                    "    (no preview entry: {requested:?} is not in the technique registry)"
+                );
+            }
+        }
+    }
+    out
+}
+
+/// Render one [`Admissibility`] verdict as the text `--technique` prints
+/// after each cell's preview header.
+fn format_admissibility(a: &Admissibility) -> String {
+    match a {
+        Admissibility::Admitted => {
+            "Admitted (the technique the plan actually resolved for this cell)".to_string()
+        }
+        Admissibility::InterchangeableAlternative => {
+            "InterchangeableAlternative (proven sound for this cell, but not the one the plan \
+             resolved)"
+                .to_string()
+        }
+        Admissibility::NotApplicable { reason } => format!("NotApplicable — {reason}"),
+    }
+}
+
 /// JSON shape for one statement in `--json --show-sql`'s per-cell
 /// `statements` array (`docs/specs/cli.md`:
 /// `{"sql": "<statement>", "transactional_group": <int>}`).
@@ -982,15 +1003,27 @@ pub struct ExplainCellJson {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub no_statements_reason: Option<String>,
     pub statements: Vec<ExplainStatementJson>,
+    /// The full technique-preview array for this cell — one entry per
+    /// technique in the closed registry, never just the admitted one
+    /// (`docs/specs/ui_model_diagnostics.md` §Surface "CLI": "`--json`
+    /// gains the full technique-preview array per cell (all techniques,
+    /// not just the admitted one)"). Read verbatim from the shared
+    /// `smelt-runtime::diagnostics` builder — never re-derived here
+    /// (§Semantics "Thin-consumer boundary").
+    pub technique_previews: Vec<TechniquePreview>,
 }
 
 /// The `--json --show-sql` per-model report:
 /// `{"model": "<name>", "contract": {...}, "inbound_edges": [...], "cells":
-/// [...]}`, carrying the Relation Contract slots
+/// [...], "properties": {...}}`, carrying the Relation Contract slots
 /// (`docs/specs/models.md` §"The Relation Contract") for both this model
-/// and every inbound edge alongside each cell's own `statements` array
+/// and every inbound edge, each cell's own `statements` and
+/// `technique_previews` arrays, and the model's full derived property set
 /// (`docs/specs/cli.md` §"`smelt explain <model>` maintenance-plan
-/// report").
+/// report"; `docs/specs/ui_model_diagnostics.md` §Surface "CLI"). Both
+/// `properties` and every cell's `technique_previews` are read verbatim
+/// from `smelt_runtime::diagnostics::ModelDiagnostics` — this JSON shape
+/// never derives them itself.
 #[derive(Debug, Serialize)]
 pub struct ExplainMaintenanceJson {
     pub model: String,
@@ -998,22 +1031,32 @@ pub struct ExplainMaintenanceJson {
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub inbound_edges: Vec<InboundEdgeContract>,
     pub cells: Vec<ExplainCellJson>,
+    pub properties: PropertySet,
 }
 
 /// Build the `--json --show-sql` report from the derived plan cells and
 /// their built statement groups, plus the model's own Relation Contract
-/// fill and its inbound edges' contracts.
+/// fill, its inbound edges' contracts, and the shared diagnostics builder's
+/// per-cell technique-preview set and property set.
+///
+/// `diagnostics_cells` must be in the same cell order as `plan_cells`/
+/// `statements` — `smelt_runtime::diagnostics::build_model_diagnostics`
+/// maps 1:1 over the same `plan_cells` slice this report's own `statements`
+/// are built from, so a positional `zip` is exact, not an approximation.
 pub fn build_maintenance_plan_json(
     model_name: &str,
     plan_cells: &[PlanCell],
     statements: &[CellStatements],
     own_contract: RelationContractView,
     inbound_edges: Vec<InboundEdgeContract>,
+    diagnostics_cells: &[PlanCellDiagnostics],
+    properties: PropertySet,
 ) -> ExplainMaintenanceJson {
     let cells = plan_cells
         .iter()
         .zip(statements.iter())
-        .map(|(cell, cs)| {
+        .zip(diagnostics_cells.iter())
+        .map(|((cell, cs), diag_cell)| {
             let (no_statements_reason, statements) = match &cs.outcome {
                 Ok(group) => {
                     let stmts = group
@@ -1042,6 +1085,7 @@ pub fn build_maintenance_plan_json(
                 row_identity_proven_mismatch: cell.row_identity.proven_mismatch.clone(),
                 no_statements_reason,
                 statements,
+                technique_previews: diag_cell.technique_previews.clone(),
             }
         })
         .collect();
@@ -1050,6 +1094,7 @@ pub fn build_maintenance_plan_json(
         contract: own_contract,
         inbound_edges,
         cells,
+        properties,
     }
 }
 
@@ -1232,19 +1277,7 @@ fn compute_source_bounds(
     use smelt_planner::analysis::source_bounds::derive_model_bounds;
     use smelt_planner::Frontmatter;
 
-    let mut ctx = BoundContext::new();
-    for dep_name in graph.get_upstream(model_name) {
-        if let Ok(dep_model) = graph.get_model(&dep_name) {
-            let dep_meta = dep_model.metadata.as_deref();
-            let ts = config
-                .get_timeseries_with_metadata(&dep_name, dep_meta)
-                .cloned()
-                .or_else(|| dep_meta.and_then(|m| m.timeseries.clone()));
-            if let Some(ts) = ts {
-                ctx.add_source(&dep_name, &ts.partition_column);
-            }
-        }
-    }
+    let ctx = build_bound_context(model_name, graph, config);
 
     let stripped = Frontmatter::strip(sql);
     let raw_bounds = derive_model_bounds(stripped, &ctx);
@@ -1658,92 +1691,14 @@ mod tests {
         );
     }
 
-    /// `build_cell_statement_group`'s `Technique::DeleteInsert` branch must
-    /// succeed for a model whose outermost FROM is a `TableExpr`-returning
-    /// function call (`smelt.functions.windowed(...)`), the shape
-    /// `silver.sessions` uses in `examples/web_analytics`
-    /// (`crates/smelt-cli/tests/explain_model.rs::sessions_show_sql_emits_statements`
-    /// is the real-fixture counterpart of this unit test). Clamping the raw,
-    /// unexpanded model body *before* compiling — never the compiled output,
-    /// which the compiler's own printer has already expanded — is what makes
-    /// this succeed: `inject_time_filter`'s reparse only ever sees a plain
-    /// FROM clause referencing a CTE, never the function-expansion's
-    /// reparse-hostile output.
-    #[test]
-    fn delete_insert_clamp_succeeds_on_table_expr_function_from_after_expansion() {
-        use smelt_core::config::TimeseriesConfig;
-        use smelt_logical::maintenance::{Corner, PartitionLocal, Trigger};
-
-        let content = "SELECT device_id, d FROM smelt.functions.windowed(src => raw_events)";
-        let mut model = make_model("sessions", vec!["raw_events"], content);
-        model.metadata = Some(Box::new(crate::metadata::ModelMetadata {
-            materialization: Some(Materialization::Table),
-            timeseries: Some(TimeseriesConfig {
-                event_time_column: "d".to_string(),
-                partition_column: "d".to_string(),
-                granularity: Granularity::Day,
-                week_start: None,
-                assert_monotonic: false,
-            }),
-            ..Default::default()
-        }));
-
-        let config = make_config(vec![]);
-        let mut registry = CompilerRegistry::new(&config, &config.targets);
-        let mut fn_bodies: smelt_runtime::FnBodyMap = HashMap::new();
-        fn_bodies.insert(
-            "windowed".to_string(),
-            (
-                vec![("src".to_string(), None)],
-                "(SELECT * FROM src)".to_string(),
-            ),
-        );
-        registry.set_function_bodies_all(fn_bodies);
-        let resolver = registry.get("dev").build_ephemeral_resolver(&[], "main");
-
-        let cell = PlanCell {
-            group: "{*}".to_string(),
-            trigger: Trigger::Backfill,
-            corner: Corner::RecomputeRegion,
-            technique: Technique::DeleteInsert,
-            partition_local: PartitionLocal::Yes,
-            scans: vec![],
-            ledger_catch_up: false,
-            row_identity: smelt_logical::maintenance::RowIdentityVerdict {
-                identity: smelt_logical::maintenance::RowIdentity::WholeRow,
-                proven_mismatch: None,
-            },
-            skeleton_source_closure: None,
-            fingerprint_projections: std::collections::BTreeMap::new(),
-        };
-
-        let source_timeseries = smelt_planner::SourceTimeseriesMap::new();
-        let region = RegionLiterals::Placeholders;
-
-        let outcome = build_cell_statement_group(
-            &cell,
-            &model,
-            "main",
-            "dev",
-            &registry,
-            &resolver,
-            smelt_logical::maintenance::emit::MaintenanceDialect::DuckDb,
-            &[],
-            &source_timeseries,
-            &region,
-            None,
-        );
-
-        let group = outcome.unwrap_or_else(|e| {
-            panic!("expected Ok (clamp injection over the expanded FROM), got Err: {e}")
-        });
-        assert!(
-            group
-                .statements
-                .iter()
-                .any(|s| s.sql.contains("_smelt_output_clamp")),
-            "expected the output clamp wrapper in the emitted statements: {:?}",
-            group.statements
-        );
-    }
+    // The `Technique::DeleteInsert`-over-a-`TableExpr`-FROM clamp-ordering
+    // regression this module used to cover directly (via its own
+    // `build_cell_statement_group`) now lives with the logic that owns it:
+    // `smelt_runtime::diagnostics::build_technique_statements` for the
+    // symbolic no-`--period` case
+    // (`crates/smelt-runtime/src/diagnostics.rs::tests::
+    // delete_insert_clamp_succeeds_on_table_expr_function_from`), and
+    // `crates/smelt-cli/tests/explain_model.rs::sessions_show_sql_emits_statements`
+    // for the real-`--period` case this file's own
+    // `build_delete_insert_period_statement_group` still derives.
 }

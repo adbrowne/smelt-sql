@@ -1126,6 +1126,7 @@ smelt explain [MODEL_NAME] [OPTIONS]
 | `--select` | `-s` | string[] | | Select models to include (repeatable). Same selector syntax as `smelt run`. Ignored when `MODEL_NAME` is given. |
 | `--show-sql` | | bool | `false` | With `MODEL_NAME`, additionally print the maintenance statements each cell executes. Never connects to a backend. |
 | `--period` | | `<start>..<end>` | | With `--show-sql`, use these real literal date bounds (`YYYY-MM-DD..YYYY-MM-DD`, end exclusive) for the printed statements' region. Without it, the symbolic placeholders `{{window_start}}`/`{{window_end}}` stand in. |
+| `--technique` | | string | | Requires `--show-sql`. Render a named technique's own preview statements instead of the admitted one's, for every cell — including a cell where the technique is not applicable, whose reason is printed rather than silently skipped. Accepts `delete_insert`, `keyed_fold`, `column_scoped_merge`, `in_place_update`, `recompute` (`recompute` and `delete_insert` both resolve to the same DELETE+INSERT / region-recompute technique). Doesn't affect `--json`, whose `technique_previews` array always carries every technique regardless of this flag. |
 
 Without a `MODEL_NAME`, the output includes both the **logical graph** (models as written) and the **physical graph** (execution plan with ephemeral models inlined, strategies resolved). See [Two-Graph Architecture](../developing/architecture.md#two-graph-architecture) for details.
 
@@ -1200,6 +1201,20 @@ wired to the same suppression check yet. The cell's `region key:` row (`WholeRow
 still a reliable signal for one half of the admission rule: a `WholeRow` region key means that cell
 never suppresses, regardless of what `--show-sql` prints.
 
+Add `--technique <name>` (alongside `--show-sql`) to inspect a technique smelt *didn't* pick — every
+technique smelt knows an emitter for, previewed against each cell's own contract/identity/column data,
+labelled with whether that technique is actually sound here. This renders the requested technique's
+own statements in place of the admitted one's, per cell, together with the cell's admissibility verdict
+for it: `Admitted` (this is the technique the plan actually resolved), `InterchangeableAlternative`
+(proven sound for this cell, but not the one the plan resolved — region recompute is always this when
+it isn't itself admitted), or `NotApplicable` with a reason (the technique's structural preconditions
+aren't met for this cell — printed, never silently skipped). `--technique` always uses the symbolic
+`{{window_start}}`/`{{window_end}}` placeholders — it's a display-only illustration of a cell's shape,
+not a `--period`-bound dry run. `--json` (with or without `--technique`) always carries the full
+`technique_previews` array per cell — one entry per known technique, not just the admitted one — plus
+a top-level `properties` object with the model's derived property set (columns, grain, functional
+dependencies, per-column determinism/comparability/discriminants, row identity, source bounds).
+
 **Examples:**
 
 ```bash
@@ -1226,6 +1241,10 @@ smelt explain daily_events --show-sql --period 2024-01-01..2024-01-08
 
 # Machine-readable statements array per cell
 smelt explain daily_events --show-sql --json
+
+# See what the keyed-fold technique would look like on a model that doesn't admit it,
+# and why it's not applicable there
+smelt explain daily_events --show-sql --technique keyed_fold
 ```
 
 ```text
