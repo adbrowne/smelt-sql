@@ -54,6 +54,47 @@ loudly when they don't, and tells you what each relaxation bought. On this frami
 catalogue's entries (A1 per-group recompute, C1 diff-then-patch, …) are *table stakes* —
 mechanism parity worth having — while the sections below are the reason smelt exists.
 
+### 1.1 The declarativity gradient — the principle under everything
+
+The general principle beneath every section of this note: data systems should be **as
+declarative as their authors can afford**, because everything smelt offers — optimised
+maintenance, change propagation, cost choice, verification — is purchased with what the
+tool can *know*. The perfect antithesis is the undocumented imperative pipeline: pandas
+scripts with no framework, where the tool can know nothing and therefore do nothing beyond
+run-it-all-again.
+
+Declarativity is a **gradient per node**, not a yes/no property of the system:
+
+1. **Opaque imperative** — a code body. smelt knows at best its inputs and outputs. What
+   that already buys is the declarative *graph*: ordering, scheduling, rerun,
+   total-delta propagation around the node. Real value, and the floor.
+2. **Imperative with declared contracts** — the same body plus declared facts about its
+   behaviour: output schema, identity, clock, determinism, "output is append-only", even
+   "maintains its own state; restatement requires rebuild". smelt cannot analyse the body,
+   but the declare → probe → fail-loud triple (§4.1) applies to node claims exactly as it
+   does to source claims — rungs are climbed by *annotation*, without changing languages.
+3. **Declarative body: SQL** — the body is analysable; properties are recovered by proof
+   (the raising direction).
+4. **Declarative intent** — the body *is* a declaration; properties hold by construction
+   and the implementation lowers (§2.4).
+
+Each rung up purchases narrower repairs, finer propagation, more verbs, and more
+verification; and the price of staying low should be *visible* — `explain` can print what
+a node's opacity costs ("total-delta: downstream over-runs; not verifiable; no
+cell-scoped verbs") so the trade is priced, not hidden.
+
+**Mixing rungs is the point.** This is structurally the gradual-typing bet (TypeScript):
+adoption is incremental, tooling leverage scales with annotations, and teams choose per
+node where imperative capability beats tool assistance. A system demanding full
+declarativity everywhere loses every team with one irreducibly weird node; a system
+offering none — imperative orchestration of scripts — forfeits all the leverage. smelt's
+position is to make every increment of declarativity purchase the maximum leverage, and to
+grade rather than forbid the low rungs.
+
+Read this way, the note's two big structures are the two axes of one design: the contract
+lattice (§5) is what a user can *decline*; the declarativity gradient is what a user can
+*tell*. Both are declared, validated, and graded — never assumed.
+
 The organising end-state of the whole argument comes first (§2): a **kernel** of proofs,
 state, emission, and testing, with today's incremental-models feature as the **default
 kind** built on it. Everything after §2 can be read as filling in what the kernel knows
@@ -173,8 +214,9 @@ Graph citizenship is unchanged and is the kernel's real requirement: however a n
 authored, it speaks the contract vocabulary — clock, identity, delta shapes in and out,
 the edge protocol. The graph layer never asks how a node was written; it asks what it
 dirties and what it needs. (Contrast today's genuinely opaque nodes — a Python model or an
-imported dbt model — which degrade to total-delta. Intent nodes are the opposite extreme:
-*maximally* transparent, because nothing about them needs recovering.)
+imported dbt model — which degrade to total-delta: the gradient's low rungs, §1.1. Intent
+nodes are the top rung: *maximally* transparent, because nothing about them needs
+recovering.)
 
 Recognition and intent are complements, not rivals: classifiers (succession, top-N) serve
 the install base — existing SQL, dbt imports — while intent surfaces serve greenfield; both
@@ -712,6 +754,10 @@ aftermath is graded.
     stability, but the pilot doubles as the succession classifier's greenfield twin
     (same registry cells, opposite direction) and would settle the escape-slot design
     early.
+18. **Contract-annotated imperative nodes (§1.1 rung 2)** — Python/opaque models that
+    declare probed facts (schema, identity, clock, determinism, delta posture) and so
+    escape total-delta propagation without changing languages; wants the Python-model
+    surface and the node-claim audit probes, plus `explain` pricing opacity honestly.
 
 **Standing lens, not a build item:** the kernel/kind factoring (§2) is the long-game
 architecture — it should influence boundary decisions *now* (every invariant kept pure is
