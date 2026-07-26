@@ -554,6 +554,110 @@ property cut. **(15) cell-selector surface for run/backfill** — the manipulati
 first tranche; wants the ledger grading fully landed first. **(16) queryable property/
 contract facts for consumers** — after the vocabulary stabilises.
 
+## 12. Kernel and kinds — incremental models as the *default* implementation
+
+The strongest version of §10+§11, proposed for examination: factor smelt into a **kernel**
+(the property/proof layer, the state/ledger substrate, the transformation/emission layer,
+the graph protocol, the conformance harness) and treat today's incremental-models feature —
+partition grain, key grain, the composed corner — as the **default model kind** implemented
+against that kernel. Other kinds, making *different trade-offs*, could then be implemented
+by users (or shipped as non-default extras) without the core contract having to bless them.
+
+### 12.1 The division of ownership
+
+**The kernel owns** (and no kind may reimplement):
+
+- **Properties and proofs**: the walk verdicts (grain, combiner algebra, bounded reach,
+  alignment, determinism, FDs), source world-facts, and the obligation vocabulary —
+  "admission as a service": *does this SQL + these declarations discharge obligation O?*
+- **State substrate**: the processed-set `S` bookkeeping, covered intervals, and grading —
+  one authority for "what contract does this region meet right now".
+- **Emission discipline**: statements are pure emitter outputs; backends execute, never
+  author (the statement-parity rule, unchanged).
+- **The graph protocol**: a typed edge interface — given upstream dirt, what does this node
+  dirty downstream; given a requested region, what does it need upstream. Kinds implement
+  it; the kernel composes it.
+- **The harness**: oracle testing as a service — a kind states its invariant; the harness
+  drives generated runs against it wherever the claim is testable.
+
+**A kind owns**: its declared surface (frontmatter grammar), its contract (which
+lattice point it claims — see 12.3), its plan derivation (properties → cells → techniques,
+using kernel proofs), and its grading semantics. The default kind's contract is exact
+equivalence-at-`S`; that never weakens.
+
+### 12.2 What could then stay out of core
+
+The gap catalogue's §E — patterns surveyed and *deliberately rejected* — reads differently
+under this factoring: it is a **kind wishlist**. Snapshot-diff SCD2 with execution-time
+stamping (SQLMesh's `SCD_TYPE_2_BY_COLUMN`), declared non-idempotent keyed upsert
+(`INCREMENTAL_BY_UNIQUE_KEY`), wall-clock rolling windows (catalogue D4), ignore-retract
+postures, approximate/sketch-backed kinds — all are things real users demonstrably want
+(SQLMesh ships them), all are things smelt's core rightly refuses to *bless as exact*, and
+all are implementable against the kernel by someone who accepts the trade-off — provided
+they declare it (12.3). Core stops being the arbiter of every posture and becomes the
+arbiter of *honesty about postures*. The breadth of SQLMesh's kind set is itself the market
+evidence that one default kind, however good, will not cover everyone; the difference is
+that smelt's kinds would be typed by contract rather than by folklore.
+
+### 12.3 The honesty typing — kinds are points in the contract lattice
+
+The dbt-macro failure mode (an ecosystem of untyped, unverifiable extensions) is the risk.
+The defence is to reuse §4's lattice as the **type of a kind**: every kind must declare
+which contract it claims — exact-at-`S` / exact-at-reconciliation-points /
+exact-modulo-relation / non-idempotent (restatement requires rebuild) / best-effort — and
+the kernel enforces the consequences:
+
+- **Testable claims are tested.** An exact kind gets the full generative oracle. A
+  reconcile-point kind gets oracle checks at reconciliation points. A non-idempotent kind
+  gets its *limitations* verified (restatement genuinely refused, the non-idempotence
+  printed in `explain`).
+- **Grades propagate.** A downstream exact model consuming a non-exact upstream is tainted
+  in the ledger; the graph layer makes weak links visible instead of laundering them.
+- **Unknown is safe.** A kind that cannot (or does not) implement the graph edge interface
+  degrades to the total-delta posture — over-running, never wrong — exactly as a full
+  refresh upstream does today.
+
+This is the load-bearing move: §4 described relaxations as *parameters of the default
+kind*; this section generalises them to *the typing discipline for all kinds*. The lattice
+is the kernel's contract language, not a feature list.
+
+### 12.4 smelt is already building this kernel — by accident of discipline
+
+The architectural invariants the repo already enforces by CI gate *are* the kernel/kind
+boundary: maintenance-plan purity (plans are pure data derived by pure functions —
+kind-derivable), statement-emission single ownership (emitters are pure — kernel-owned),
+the property-composition walk rule (verdicts come from one shared walk — kernel-owned),
+and the generative conformance gate (the harness — kernel-owned). These exist today for
+testability; they are the same cuts a kind API needs. The research claim worth recording:
+**the kernel should be extracted from the working default implementation, not designed a
+priori.** The spec's own design notes already take this posture for the crate boundary
+("extraction-mechanical", the rejected `smelt-maintenance` crate) — the kind API is the
+same judgment at the next level up.
+
+### 12.5 Precedents and their lessons
+
+- **dbt custom materializations / incremental-strategy macros** — proof of demand for
+  exactly this extension point, and proof that shipping it without a correctness story
+  yields an ecosystem nobody can trust or upgrade. The kernel's typing (12.3) is the fix.
+- **SQLMesh model kinds** — a closed, vendor-curated kind set; demand evidence and a
+  catalogue of trade-offs users accept, but not extensible and not proof-carrying.
+- **MLIR dialects over a shared IR + verifier** — the structural analogue: kinds are
+  dialects, the property layer is the verifier, and the lesson is that the verifier and the
+  shared IR must stabilise *before* the dialect ecosystem opens.
+
+### 12.6 Risks and sequencing
+
+The risks are §10.4's, amplified: premature API design could distort the default
+implementation, and the kernel surface is much larger than Tier-0 preference hooks. The
+sequencing that manages both: (1) keep hardening the internal boundary the CI gates already
+enforce; (2) implement the next internal features *as if they were kinds* —
+`materialized_view` delegation is already a de-facto second kind, and the SCD2-succession
+classifier is the natural shakedown for a third — extracting the kernel interface each one
+actually needed; (3) only then externalise, contract-typing first (12.3), Rust-internal
+kinds before Python kinds. The §8 amendment: **(17) kernel/kind factoring as the long-game
+architecture** — not a near-term build, but a lens that should already influence boundary
+decisions, because every invariant kept pure today is kernel surface bought for free.
+
 ## References
 
 - `docs/specs/incremental_models.md` — the invariant, plan, admission, ledger, graph layer.
