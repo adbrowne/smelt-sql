@@ -120,7 +120,10 @@ Enumerated so §5's relaxations have something concrete to relax:
    append-only or bounded-late — the readiness is usually purchased and never used.
 2. **Point-in-time cross-input consistency.** The view reflects one snapshot across all base
    tables. Requires multiversioning/coordination. Analytics consumers almost never need it —
-   they live with "orders through Tuesday, customers through Monday" every day.
+   they live with "orders through Tuesday, customers through Monday" every day. The clause
+   has a stronger form that is even less often needed and even more expensive: *within a
+   row*, every column reflects the same snapshot, so the fact columns cannot land before
+   the enrichment columns are joined (§5.8).
 3. **Coupled maintenance.** Ingestion triggers (or target-lag schedules) maintenance; the
    user cannot say "land the data now, repair the expensive join column this weekend".
 4. **Query-class cliffs.** An unsupported operator anywhere in the view usually means the
@@ -133,7 +136,8 @@ Enumerated so §5's relaxations have something concrete to relax:
    engine. State is opaque operator state; disaster recovery, migration, and "run the
    backfill somewhere cheaper" are not expressible.
 7. **Uniform freshness.** One view, one lag. No "these columns hourly, that enrichment
-   column daily".
+   column daily", and no way to say the enrichment column may be as-of a *different input
+   state* than the fact columns beside it.
 
 Each clause maps to at least one smelt differentiation below.
 
@@ -200,7 +204,10 @@ The engine sees one refresh at a time. smelt sees the schedule and the run plan:
 - **Cadence-fit techniques**: IVM engines optimise for per-transaction or minutes-lag
   updates; smelt knows the model runs daily and can pick techniques whose fixed costs
   amortise at batch cadence (bigger regions, recompute-over-fold pivots at much higher
-  delta fractions).
+  delta fractions). The limiting case is the **sweep**: knowing the model runs daily makes
+  "re-derive every enrichment column against the current lookup table, once per run" a
+  legitimate technique competing with per-mutation repair (§5.8) — a choice only a
+  scheduler-aware planner can even consider.
 - **Business-calendar horizons**: "books close on the 5th; prior months are immutable after
   close" is orchestration-level truth. Declared as a freeze horizon (§5.3) it deletes
   retraction-readiness for almost all of the table.
@@ -282,7 +289,9 @@ The composed corner already gives different cells different techniques; the natu
 step is different cells having different *declared freshness*: transactional columns tight,
 enrichment columns loose. One table, several visible freshness contracts, each cell
 scheduled to its own budget. `explain` prints it; consumers can query it (a per-column-group
-"fresh through" fact — the per-column settle bound generalised to an SLA).
+"fresh through" fact — the per-column settle bound generalised to an SLA). This entry is
+the *budget* half of the story; §5.8 is the *contract* half — what consistency relation
+survives once groups are allowed to diverge.
 
 ### 5.7 Declared retraction policy per column group (relaxes clause 1, scoped)
 
@@ -291,6 +300,106 @@ retractions exactly (invertible fold), some should refuse them (frozen), some sh
 them by declared policy (a "lifetime max" that deliberately never un-sees). Today smelt has
 exact-or-refuse; a declared per-group policy with the risk stated in `explain` covers the
 middle honestly.
+
+### 5.8 Enrichment decoupling — decline the row-level snapshot across column groups (relaxes clause 2, per column)
+
+The most common real posture the fixed contract has no word for: *land the facts now,
+enrich later, and accept that the enrichment columns are as-of a different input state
+than the columns beside them.* Two concrete shapes, both familiar:
+
+- **Ingest without the join.** The raw event lands immediately; the joined-in dimension
+  attributes (`customer_tier`, `product_category`, geo rollups) fill in on a later pass.
+  The fact columns are current; the enrichment column group is as-of whatever dimension
+  state the last enrichment pass saw — possibly *nothing* on the first landing.
+- **Sweep the lookup table.** Rather than repairing per dimension mutation (the expensive
+  fanout cell), periodically re-derive the whole enrichment column group against the
+  current lookup table. Cheap and bounded; but different lookup tables get swept on
+  different cadences, so `customer_tier` and `product_category` in one row can reflect
+  *different* dimension states.
+
+Today's spec can already *schedule* this (§5.2 deferral, §5.6 per-group budgets) and the
+per-cell plan already means different column groups consume different inputs at different
+times. What is missing is naming the **contract consequence**, which is genuinely a
+distinct lattice point:
+
+> The processed set becomes a **vector** `S⃗` indexed by (column group × input), and
+> equivalence holds *cell-wise*: each column group equals a full refresh at its own `S`.
+> What is given up is the existence of a single-`S` witness for the whole row — the row is
+> not, and need not be, a state the table ever had under any full refresh.
+
+That is the precise loss, and it is worth stating precisely because it is not free:
+cross-column invariants can break. If `country` is a fact column and `region` is an
+enrichment column derived from a `countries` lookup, a skewed row can carry a
+`(country, region)` pair that no snapshot of the lookup ever contained. Any downstream
+model that *combines* column groups with skewed as-of vectors inherits the weakness, and
+the graph layer should taint it exactly as §10.3 propagates grades — visible, not
+laundered.
+
+**Why this is a low-risk lattice point** (unlike §5.4): staleness is not approximation.
+The values are exact — merely as-of an older input state — so the claim is *fully
+oracle-testable* in the machinery that already exists: `enrichment_group ==
+full_refresh(group, customers ∈ S_dim)` for the recorded `S_dim`. §5.4 asks the user to
+accept a value no full refresh would produce; §5.8 asks them to accept a value some full
+refresh *would* produce, just not the one at the newest inputs. That difference is what
+makes it safe to ship early and hard for a black box to offer at all: an engine's view has
+one lag and one snapshot, so it must either do the join at ingest or drop the row.
+
+**How the honesty is kept.** Same four properties as every other lattice entry:
+
+- *Declared*, per column group: "this group may lag its inputs; sweep cadence C" or
+  "repair deferred to window W" — never inferred from the fact that a repair happened to
+  be skipped.
+- *Validated*: the group must be **factorable** — its sensitivity to the lagging input has
+  to be provable (the column-group factoring proof §11.3 already requires) — otherwise the
+  lag would silently contaminate columns the user believed were current. Refuse rather
+  than approximate.
+- *Graded*: the ledger records the as-of vector, and `explain` prints it per group
+  ("`tier_*`: customers ∈ S through 2026-07-19; orders through 2026-07-26"). A per-column
+  "as-of" fact is the natural consumer-facing surface — the §5.6 freshness SLA answers
+  *when will it be current*; the as-of vector answers *what is it current with respect to*.
+  The pair is the honest description; either alone misleads.
+- *Composable*: freeze the far past (§5.3), sweep the enrichment groups (§5.8), keep the
+  transactional groups exact — one table, three contracts, all printed.
+
+**Representation of a not-yet-enriched value.** Two situations that look alike and are
+not:
+
+- **First landing** (row ingested hourly, joined daily): there is no prior value, so the
+  column is **NULL**, graded pending. This is the only coherent answer — and it is exactly
+  what equivalence-at-`S⃗` already says, since a full refresh against `customers ∈ ∅`
+  produces NULL for an outer-joined enrichment. Nothing new is being blessed; the value is
+  honest, and the grade explains it. (Excluding the row from a consumer view until the
+  group lands is *not* a general option: the view spans all time, so hiding every
+  hour-old row until the nightly join would defeat the purpose of decoupling in the first
+  place. It only degenerates into a special case of the per-consumer freshness choice
+  §4.4 already covers, where a consumer explicitly wants enriched rows only.)
+- **Re-enrichment** (row was enriched; the dimension has since changed; the repair hasn't
+  run): the column simply keeps the value the last pass computed. That is not a policy
+  choice at all — it is what staleness *means*, and it is the oracle-testable case above:
+  the value equals a full refresh at the older `S_dim`.
+
+So there is no third "carry-forward" policy to design here; the earlier framing conflated
+the two rows above. The genuinely policy-shaped variant lives in §5.7 — deliberately
+*retaining* a value the current inputs would no longer produce (a "last known good" that
+survives the dimension row being deleted, not merely un-repaired). That is a declared
+refusal to un-see, which is why it belongs with the retraction policies rather than with
+staleness.
+
+The remaining open question is narrower and worth settling early: whether NULL-because-
+pending must be **distinguishable** from NULL-because-the-join-genuinely-missed. Both are
+NULL in the data; only the ledger knows which. If consumers need to tell them apart, that
+argues for the per-group as-of fact being queryable alongside the data rather than only
+printable in `explain`.
+
+**Prior art worth studying.** Paimon's partial-update merge engine with per-field sequence
+groups is the closest production analogue — different writers populate different columns
+of the same key at different times, with per-field ordering — but it is a storage-layer
+mechanism with no contract statement, no factoring proof, and no way to ask what a column
+is current with respect to. Feature stores (Feast/Tecton) go the other way, making
+point-in-time correctness the headline guarantee and paying for it. Neither offers the
+choice; smelt's contribution is making it a declared, validated, graded point rather than
+an accident of pipeline design — which is what it is today in essentially every warehouse
+that does late enrichment by hand.
 
 ### What makes this a lattice rather than a grab-bag
 
@@ -905,40 +1014,45 @@ aftermath is graded.
 6. **Deferral windows / per-column-group freshness (§5.2, §5.6)** — the scheduling policy
    axis; needs a declaration grammar and graph-layer scheduling, but the grading machinery
    is the hard part and exists.
-7. **Tier-0 Python planner rules (§9.3)** — choose-among-admitted policies; the
+7. **Enrichment decoupling / per-group as-of (§5.8)** — declared column-group lag plus the
+   sweep technique; shares item 6's declaration grammar, and the per-cell plan, factoring
+   proof, and ledger already carry the hard machinery. Ranked high despite being a
+   *contract* relaxation because staleness is exactly oracle-testable (unlike §5.4), and
+   it names a posture nearly every real warehouse already runs unverifiably by hand.
+8. **Tier-0 Python planner rules (§9.3)** — choose-among-admitted policies; the
    admitted-set + cost hooks exist, and the story ("your niche requirement is a policy
    file, not a vendor ticket") is immediately marketable.
-8. **Cell-selector surface for run/backfill (§11.2)** — the manipulation layer's first
+9. **Cell-selector surface for run/backfill (§11.2)** — the manipulation layer's first
    tranche; wants the ledger grading fully landed first.
-9. **Per-trigger engine placement (§6)** — backfill-on-cheap-engine; needs multi-backend
-   maturity but no new theory.
-10. **Equivalence modulo declared indifference (§5.5)** — starts as comparison machinery in
+10. **Per-trigger engine placement (§6)** — backfill-on-cheap-engine; needs multi-backend
+    maturity but no new theory.
+11. **Equivalence modulo declared indifference (§5.5)** — starts as comparison machinery in
     the conformance harness (ties, float ε), graduates to admission widening.
-11. **Algebraic-aggregate basis decomposition (§10.7)** — `AVG`/`VAR`/`STDDEV` persisted as
+12. **Algebraic-aggregate basis decomposition (§10.7)** — `AVG`/`VAR`/`STDDEV` persisted as
     foldable components + finalizer view; recognition is a registry lookup and the walk
     machinery is unchanged, but it needs the basis-≠-output plan slot (a table + view pair
     under one logical name) and, for float columns, §5.5's ε-comparison first.
 
 **Tier 3 — valuable but contract-risky, demand-gated, or stability-gated:**
 
-12. **Reconciliation-point equivalence (§5.4)** — biggest expressiveness win, biggest risk
+13. **Reconciliation-point equivalence (§5.4)** — biggest expressiveness win, biggest risk
     of blessing silent approximation; only with grading fully user-visible.
-13. **External Tier-2 declaration surface (§9.3)** — gated on the `sources.md`
+14. **External Tier-2 declaration surface (§9.3)** — gated on the `sources.md`
     declared-relationship family (§4.2) landing first.
-14. **Demand-driven maintenance (§4.4)** — wants consumption metadata smelt doesn't
+15. **Demand-driven maintenance (§4.4)** — wants consumption metadata smelt doesn't
     collect yet.
-15. **Cross-source alignment declarations (§4.2, third bullet)** — real horizon wins;
+16. **Cross-source alignment declarations (§4.2, third bullet)** — real horizon wins;
     subtle audit story.
-16. **Queryable property/contract facts for consumers (§11.1)** — after the property
+17. **Queryable property/contract facts for consumers (§11.1)** — after the property
     vocabulary stabilises.
-17. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
+18. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
     obligation vocabulary survives internal shakedown (succession, C1, B3).
-18. **Intent-node authoring surfaces (§10.5)** — an SCD2 or windowed-aggregation
+19. **Intent-node authoring surfaces (§10.5)** — an SCD2 or windowed-aggregation
     declaration as the pilot, generated-denotation rule from day one; gated on kernel
     stability, but the pilot doubles as the succession classifier's greenfield twin
     (same registry cells, opposite direction) and would settle the escape-slot design
     early.
-19. **Contract-annotated imperative nodes (§2 rung 2)** — Python/opaque models that
+20. **Contract-annotated imperative nodes (§2 rung 2)** — Python/opaque models that
     declare probed facts (schema, identity, clock, determinism, delta posture) and so
     escape total-delta propagation without changing languages; wants the Python-model
     surface and the node-claim audit probes, plus `explain` pricing opacity honestly.
@@ -962,7 +1076,13 @@ Not spec edits yet; where they would land:
 - **`sources.md`** grows the declared-relationship family (§4.2) alongside the existing
   world-facts, with the declaration → derived clamp → audit probe triple as its template.
 - A future **`maintenance_scheduling.md`** (or graph-layer section growth) owns deferral,
-  subsumption, freshness budgets, and engine placement — none of which are per-model facts.
+  subsumption, freshness budgets, sweep cadences, and engine placement — none of which are
+  per-model facts.
+- The **invariant statement itself** would need the per-cell form if §5.8 lands: `S` as a
+  vector indexed by (column group × input), equivalence cell-wise, and an explicit
+  statement that a single-`S` witness for the whole row is *not* promised when any group
+  declares lag. That is a genuine edit to the spec's headline guarantee, so it wants
+  deciding before the surface is designed rather than after.
 - The **conformance harness** grows toward user-facing `smelt verify` and
   comparison-modulo-indifference.
 - **Intent nodes (§10.5)** would eventually touch `models.md`'s declaration law with one
@@ -986,3 +1106,6 @@ Not spec edits yet; where they would land:
 - DBSP (VLDB J. '25) — why delta derivation is commodity theory.
 - Oracle dimension declarations / query-rewrite constraints — closest prior art for
   user-declared semantic facts feeding a rewrite/maintenance decision (§4.2).
+- Paimon partial-update merge engine + per-field sequence groups; feature-store
+  point-in-time correctness (Feast/Tecton) — the two poles of the enrichment-decoupling
+  trade-off (§5.8): a storage mechanism with no contract, and a contract with no opt-out.
