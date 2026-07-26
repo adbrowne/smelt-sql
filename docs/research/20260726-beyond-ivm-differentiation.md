@@ -81,10 +81,20 @@ Declarativity is a **gradient per node**, not a yes/no property of the system:
    "maintains its own state; restatement requires rebuild". smelt cannot analyse the body,
    but the declare → probe → fail-loud triple (§4.1) applies to node claims exactly as it
    does to source claims — rungs are climbed by *annotation*, without changing languages.
-3. **Declarative body: SQL** — the body is analysable; properties are recovered by proof
-   (the raising direction).
-4. **Declarative intent** — the body *is* a declaration; properties hold by construction
-   and the implementation lowers (§10.5).
+3. **Declarative body: SQL** — the body is analysable, so nothing need be taken on trust:
+   smelt *recovers* the properties by proving them over the query (grain, combiner
+   algebra, bounded reach). SQL is declarative about **what data** the node contains, but
+   the maintenance-relevant intent is implicit in it and has to be reconstructed — this is
+   **raising**, recovering intent from its lowered form. The classic case: an SCD2
+   dimension written as `lag()`/window SQL is *recognisable* as a succession pattern, but
+   only by a classifier that survives the author refactoring the query.
+4. **Declarative intent** — the node is authored *as* the declaration it means
+   (`scd2: {key, change_ts, attributes}`), not as a query implementing it. The same
+   properties now hold **by construction** — there is nothing to recognise, because the
+   pattern is the node's identity rather than an artifact of how someone wrote the SQL —
+   and the executable form is generated *from* the declaration (**lowering**, the reliable
+   direction). §10.5 develops this, including the rule that keeps it honest: such a node
+   must still generate a SQL denotation, so the equivalence oracle applies to it unchanged.
 
 Each rung up purchases narrower repairs, finer propagation, more verbs, and more
 verification; and the price of staying low should be *visible* — `explain` can print what
