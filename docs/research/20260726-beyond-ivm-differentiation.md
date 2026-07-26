@@ -122,34 +122,152 @@ same layers enable follow (§11), then a ranked candidate list (§12) and spec i
 
 ## 3. What the fixed IVM contract costs (the clauses users pay for)
 
-Enumerated so §5's relaxations have something concrete to relax:
+Enumerated so §5's relaxations have something concrete to relax. Each clause below is
+stated, then graded against production engines — Databricks Enzyme, Snowflake dynamic
+tables, Materialize, Feldera/DBSP, Oracle, BigQuery, ClickHouse. The grading matters: a
+clause no engine actually enforces is not a cost smelt can claim to remove, and a clause
+some engine already lets the user relax is a feature to be *beaten*, not invented. Two
+clauses survive intact, three hold only in a narrowed form, and one is largely false as a
+universal claim.
 
 1. **Retraction-readiness.** The engine must be able to un-see any row forever. This is why
    non-invertible aggregates need per-group recompute or domain multisets, why DISTINCT
    needs derivation counts, why state can't be frozen or dropped. Most warehouse sources are
    append-only or bounded-late — the readiness is usually purchased and never used.
+
+   *Holds in the general case, with two instructive exceptions.* Oracle's fast refresh
+   recomputes affected groups for MIN/MAX under DELETE rather than folding, and keeps
+   before/after images in the MV log (`INCLUDING NEW VALUES`) precisely to afford it;
+   BigQuery forces a full refresh on any BigLake base-table deletion. But **Feldera** does
+   let a declaration retire the liability: `LATENESS` on a monotone column plus an
+   `append_only` table property compute a waterline and generate GC that provably shrinks
+   internal indexes, with late data filtered-and-logged rather than trusted blindly. And
+   **ClickHouse**'s insert-trigger MVs sidestep the clause rather than pay it — they never
+   observe base-table updates or deletes at all, so correctness under mutation is the
+   target engine's problem (`ReplacingMergeTree` with explicit `is_deleted`,
+   `AggregatingMergeTree` `-State`/`-Merge` folds) rather than something the MV layer
+   purchased and left idle. The clause is therefore about *state retention cost under a
+   changefeed the engine claims to see*, not a universal tax.
 2. **Point-in-time cross-input consistency.** The view reflects one snapshot across all base
    tables. Requires multiversioning/coordination. Analytics consumers almost never need it —
    they live with "orders through Tuesday, customers through Monday" every day. The clause
    has a stronger form that is even less often needed and even more expensive: *within a
    row*, every column reflects the same snapshot, so the fact columns cannot land before
    the enrichment columns are joined (§5.8).
+
+   *Holds where claimed, but it is not claimed uniformly, and the base form is already
+   relaxable in one engine.* Materialize defaults to strict serializability with one global
+   virtual timestamp; Oracle's `atomic_refresh=TRUE` refreshes a set to a single point in
+   time; BigQuery guarantees reads consistent with base tables by compensating at query
+   time. Snowflake coordinates all inputs at one data timestamp *within a pipeline* — and
+   then hands the user `DYNAMIC_TABLE_REFRESH_BOUNDARY()` to declare an upstream
+   out-of-pipeline, which is a deliberate opt-out at whole-upstream-table granularity, with
+   the honest cost that staleness past the boundary is not surfaced downstream. ClickHouse's
+   incremental MVs give no cross-table consistency at all: only the inserted-into table
+   triggers the view, the joined side is read in full at that instant, and a fact arriving
+   before its dimension row silently loses the match. The **stronger form is unrebutted** —
+   across all seven engines, no mechanism was found that lets sibling columns of one output
+   row be as-of different input states. Snowflake's boundary function is the closest, and it
+   operates on whole upstream tables, not column groups.
 3. **Coupled maintenance.** Ingestion triggers (or target-lag schedules) maintenance; the
    user cannot say "land the data now, repair the expensive join column this weekend".
+
+   *Overstated at table granularity; survives only at sub-object granularity.* Decoupling
+   *when a whole object refreshes* from ingestion cadence is table stakes: Snowflake's
+   `TARGET_LAG = DOWNSTREAM` plus `SUSPEND`/manual `REFRESH`, Databricks' per-MV
+   `SCHEDULE EVERY`/`SCHEDULE CRON` with triggered-by-default refresh and refresh-selection,
+   Oracle's `REFRESH ON DEMAND` and `START WITH … NEXT`, BigQuery's `enable_refresh=false`
+   plus `BQ.REFRESH_MATERIALIZED_VIEW`, ClickHouse's refreshable MVs, Feldera's per-connector
+   pause/`start_after` orchestration. Oracle goes furthest and reaches genuine *partial*
+   repair: Partition Change Tracking with `DBMS_MVIEW.REFRESH(method => 'P')` refreshes only
+   stale partitions. What no engine offers is repair scoped to a *column group* — every
+   refresh surveyed is atomic over the object's rows, so "land the facts now, repair the
+   expensive join column this weekend" remains inexpressible. State the clause that way or
+   it is simply wrong.
 4. **Query-class cliffs.** An unsupported operator anywhere in the view usually means the
    *whole view* falls off the incremental path (or is rejected). The contract is
    all-or-nothing per view.
+
+   *Holds everywhere — the most robust clause of the seven.* What varies is only whether the
+   cliff is loud or silent. Materialize rejects unmaterializable functions at
+   `CREATE MATERIALIZED VIEW` time; BigQuery rejects unsupported SQL at definition time;
+   Snowflake and Databricks default to silent degradation to full recompute, each with an
+   opt-in strict mode that converts the fallback into a creation-time failure. Snowflake
+   enumerates its disqualifiers (`EXCEPT`/`INTERSECT`, `LIMIT`, `ROLLUP`/`CUBE`,
+   `WITH RECURSIVE`, non-deterministic functions, external functions); Databricks exposes the
+   rejection reason as a `cost_model_rejection_subtype`. The unit of fallback is the whole
+   view in every case — no engine incrementalizes the tractable part of a view and recomputes
+   only the disqualifying subexpression. BigQuery's `allow_non_incremental_definition` (paired
+   with `max_staleness`) is the clearest prior art for the escape smelt should generalise: a
+   *second class* of view that trades incrementality for expressiveness, chosen at creation
+   and not migratable afterwards.
 5. **Mechanism opacity.** The engine decides fold-vs-recompute; you cannot pin, measure,
-   compare, or even reliably see the choice. (Enzyme's cost model chooses per refresh;
-   Snowflake documents thresholds; neither is user-steerable.)
+   compare, or even reliably see the choice.
+
+   *Largely false as written — this clause should not be leaned on.* The observability half
+   is dead on every engine surveyed. Databricks' pipeline event log exposes
+   `planning_information.technique_information.maintenance_type` (`ROW_BASED`,
+   `PARTITION_OVERWRITE`, `APPEND_ONLY`, `GROUP_AGGREGATE`, `GENERIC_AGGREGATE`,
+   `FULL_RECOMPUTE`) alongside the rejection reason. Snowflake exposes `refresh_mode` and
+   `refresh_mode_reason` on `SHOW DYNAMIC TABLES`, and `REFRESH_ACTION` per historical
+   refresh in `DYNAMIC_TABLE_REFRESH_HISTORY`. Materialize gives per-operator plans and
+   memory via `EXPLAIN ANALYZE` and `mz_introspection`. Oracle's `DBMS_MVIEW.EXPLAIN_MVIEW`
+   reports fast-refresh eligibility into `MV_CAPABILITIES_TABLE`. ClickHouse inverts the
+   premise outright: the user authors the trigger query and target engine, so there is no
+   engine choice to hide.
+
+   The steering half is weaker than claimed too. Snowflake's `REFRESH_MODE` (`AUTO`, `FULL`,
+   `INCREMENTAL`, `ADAPTIVE`) is a first-class `CREATE`/`ALTER` parameter that pins the
+   mechanism and fails loudly when the query cannot support the pinned choice; Oracle's
+   `DBMS_MVIEW.REFRESH(method => 'F'|'C'|'P')` pins fast/complete/partition; Databricks has an
+   equivalent incremental-vs-full policy lever. What genuinely remains is narrower and should
+   be stated as such: **the choice among incremental sub-techniques is not pinnable, the cost
+   model behind it is not a published or inspectable formula, and where a mode is resolved
+   automatically it is frozen at creation rather than re-evaluated as data drifts.** smelt's
+   claim here is not "we make the mechanism visible" — several engines already do — it is
+   that the mechanism is *derived by pure functions from declared properties, reproducible
+   offline, diffable across versions, and assertable in tests* (§7).
 6. **Engine lock-in.** The view, its state, and its maintenance live and die inside one
    engine. State is opaque operator state; disaster recovery, migration, and "run the
    backfill somewhere cheaper" are not expressible.
+
+   *Holds for maintenance state; does not hold for results, and fails outright on one
+   engine.* The distinction matters because engines increasingly sell the first as if it
+   answered the second. Snowflake's Iceberg-backed dynamic tables put output in an open
+   external format; Materialize supports bulk export to object storage and can be
+   self-hosted; Feldera checkpoints let a running pipeline be suspended and resumed
+   elsewhere — but all three keep the *incremental maintenance state* in an engine-owned
+   format with no documented cross-engine export, and Databricks streaming-table checkpoints
+   are explicitly system-managed (a full refresh discards and recreates them). ClickHouse is
+   the real exception: an MV's target is an ordinary queryable, exportable MergeTree table,
+   with no opaque internal state format at all. So the clause is about maintenance state
+   portability, not data portability, and it is a property of most engines rather than all.
 7. **Uniform freshness.** One view, one lag. No "these columns hourly, that enrichment
    column daily", and no way to say the enrichment column may be as-of a *different input
    state* than the fact columns beside it.
 
-Each clause maps to at least one smelt differentiation below.
+   *Holds everywhere, without exception — the strongest clause alongside 4.* Freshness is
+   scheduled per object on every engine surveyed (`TARGET_LAG`, `SCHEDULE CRON`,
+   `max_staleness`, `REFRESH EVERY`), and a refresh is atomic over the object's rows.
+   BigQuery documents `max_staleness` as applying to the entire view rather than individual
+   partitions. Oracle's PCT is the near miss a knowledgeable reader will reach for first, and
+   it fails in the relevant direction: it refines staleness *in space* (which partition) but
+   not *in composition* (which column group), and nested MVs compose freshness conjunctively
+   — real-time rewrite requires every base MV fresh. Splitting fact and enrichment columns
+   into separately-scheduled views approximates the effect on any of these engines, at the
+   cost of doing the join at read time and losing the single-row contract entirely.
+
+**What this leaves.** Clauses 4 and 7 are intact and universal; they are the strongest
+ground for §5.6–§5.8. Clause 2's stronger form is unrebutted across all seven engines, which
+makes enrichment decoupling (§5.8) the most defensible claim in the note — though the trade
+itself is not novel, since Snowflake's `DYNAMIC_TABLE_REFRESH_BOUNDARY()` already offers it
+at table granularity, unvalidated and ungraded (§5.8 argues the difference).
+Clauses 1, 3, and 6 hold in narrowed forms and should be stated narrowly.
+Clause 5 should be retired as a cost and re-pitched as a claim about *derivation and
+testability* rather than visibility. Acting on user-declared world-facts is likewise not
+smelt's alone — Feldera's `LATENESS`/`append_only` and Oracle's `RELY`/`QUERY_REWRITE_INTEGRITY`
+both do it — so §4.1 argues the narrower and still-substantial claim: cheap policing,
+project-wide composition, and the rest of the lattice.
 
 ## 4. Knowledge asymmetry — things smelt can know that the engine can't assume
 
@@ -164,14 +282,31 @@ must *defend against*.
 entire branch of the engine's defensive machinery: append-only deletes retraction handling;
 bounded lateness turns "retain everything forever" into a derived finite lookback; key
 recurrence bounds dedup state. The spec has all of this — what's worth saying out loud is
-that this is not a convenience feature, it is the *primary cost lever*, and no in-engine IVM
-can offer it because the engine cannot afford to trust a user claim it can't police.
+that this is not a convenience feature, it is the *primary cost lever*.
 
-smelt can, because it can **police cheaply**: emit low-cost audit probes (watermark
-monotonicity, spot-check append-only via count/max-rowid deltas, sampled recurrence-window
-checks) and fail loudly on violation. Trust-but-verify at a sliver of the cost of
-readiness-for-anything. This "declared fact + cheap validator + fail-loud" triple is a
-reusable pattern every entry below can follow.
+It is **not**, however, a lever only smelt can pull, and the note is weaker if it pretends
+otherwise. Feldera is the counterexample: `LATENESS` on a monotone column plus an
+`append_only` table property let the engine compute a waterline and generate garbage
+collection that provably shrinks its internal indexes — a declared world-fact retiring an
+engine liability, in an engine. Oracle reached the same shape decades earlier from the
+rewrite side, with `CREATE DIMENSION`, `RELY` constraints, and
+`QUERY_REWRITE_INTEGRITY = TRUSTED | STALE_TOLERATED` letting a user assert facts the
+database will act on without policing. Materialize's temporal filters bound working state by
+the same logic. The honest claim is narrower and still substantial: engines that accept such
+declarations accept them **one fact at a time, at ingestion or view granularity, and either
+trust them outright or reject violators at the door**.
+
+Three things follow that no surveyed engine offers together. First, **cheap policing**:
+smelt can emit low-cost audit probes (watermark monotonicity, spot-check append-only via
+count/max-rowid deltas, sampled recurrence-window checks) and fail loudly on violation —
+trust-but-verify at a sliver of the cost of readiness-for-anything, rather than Feldera's
+filter-and-log or Oracle's unpoliced `TRUSTED`. Second, **composition**: a declared fact on
+a source propagates through the whole project's derivation graph (§8), so one annotation
+retires machinery in every model downstream of it, rather than being restated per view.
+Third, **the rest of the lattice**: a lateness bound is one rung: deferred repair (§5.2),
+thawable frozen horizons (§5.3), reconciliation-point equivalence (§5.4), and per-column
+freshness (§5.6–§5.8) are relaxations no engine exposes at all. This "declared fact + cheap
+validator + fail-loud" triple is a reusable pattern every entry below can follow.
 
 ### 4.2 Declared intra-source relationships (the user's date/timestamp example)
 
@@ -351,8 +486,10 @@ oracle-testable* in the machinery that already exists: `enrichment_group ==
 full_refresh(group, customers ∈ S_dim)` for the recorded `S_dim`. §5.4 asks the user to
 accept a value no full refresh would produce; §5.8 asks them to accept a value some full
 refresh *would* produce, just not the one at the newest inputs. That difference is what
-makes it safe to ship early and hard for a black box to offer at all: an engine's view has
-one lag and one snapshot, so it must either do the join at ingest or drop the row.
+makes it safe to ship early, and hard for a black box to offer at the granularity that
+matters: an engine's view has one lag, so absent an explicit opt-out it must either do the
+join at ingest or drop the row — and the one production opt-out that exists (below) works on
+whole upstream tables rather than column groups.
 
 **How the honesty is kept.** Same four properties as every other lattice entry:
 
@@ -401,15 +538,31 @@ NULL in the data; only the ledger knows which. If consumers need to tell them ap
 argues for the per-group as-of fact being queryable alongside the data rather than only
 printable in `explain`.
 
-**Prior art worth studying.** Paimon's partial-update merge engine with per-field sequence
-groups is the closest production analogue — different writers populate different columns
-of the same key at different times, with per-field ordering — but it is a storage-layer
-mechanism with no contract statement, no factoring proof, and no way to ask what a column
-is current with respect to. Feature stores (Feast/Tecton) go the other way, making
-point-in-time correctness the headline guarantee and paying for it. Neither offers the
-choice; smelt's contribution is making it a declared, validated, graded point rather than
-an accident of pipeline design — which is what it is today in essentially every warehouse
-that does late enrichment by hand.
+**Prior art worth studying — three poles, none of them this point.** Paimon's partial-update
+merge engine with per-field sequence groups is the closest production analogue at the
+*mechanism* level — different writers populate different columns of the same key at
+different times, with per-field ordering — but it is a storage-layer mechanism with no
+contract statement, no factoring proof, and no way to ask what a column is current with
+respect to. Feature stores (Feast/Tecton) are the opposite pole: point-in-time correctness
+as the headline guarantee, paid for unconditionally, with no opt-out.
+
+The third pole is the nearest miss and the one to argue against explicitly. Snowflake's
+`DYNAMIC_TABLE_REFRESH_BOUNDARY()` is a real, documented *contract with an opt-out*: wrapping
+an upstream reference declares it out-of-pipeline, so it is read at refresh time with no
+snapshot-isolation guarantee relative to the rest of the inputs — deliberately trading
+cross-input consistency for decoupled freshness. That is the same trade §5.8 proposes, which
+means the idea is validated rather than novel, and the contribution has to be located
+precisely. Three differences, in increasing order of importance. It is scoped to a **whole
+upstream table**, not a column group, so it cannot express "`tier_*` may lag, the rest of the
+row may not" within one output. It requires **no factoring proof** — nothing checks that the
+exempted input's staleness actually confines itself to the columns the user believes depend
+on it. And it is **ungraded**: Snowflake's own documentation notes that staleness past the
+boundary is not surfaced in the downstream refresh status, so the user must monitor it out of
+band — precisely the "silently weakened, invisibly" failure the lattice exists to prevent.
+smelt's contribution is therefore not the trade itself but its granularity, its validation,
+and its grading — making it a declared, proven, printed point rather than an accident of
+pipeline design or an unmonitored escape hatch, which is what it is today in essentially
+every warehouse that does late enrichment by hand.
 
 ### What makes this a lattice rather than a grab-bag
 
@@ -1114,8 +1267,19 @@ Not spec edits yet; where they would land:
 - `docs/research/20260703-model-updates.md` — rejection catalogue (Part 12).
 - `docs/research/20260601-virtual-environments.md` — environments/state layering.
 - DBSP (VLDB J. '25) — why delta derivation is commodity theory.
+- §3's per-clause grading was checked against primary vendor documentation for Databricks
+  Enzyme, Snowflake dynamic tables, Materialize, Feldera/DBSP, Oracle, BigQuery, and
+  ClickHouse. The specific mechanisms named there (`REFRESH_MODE`,
+  `DYNAMIC_TABLE_REFRESH_BOUNDARY()`, `planning_information.technique_information`,
+  `LATENESS`/`append_only`, `DBMS_MVIEW.EXPLAIN_MVIEW`, PCT,
+  `allow_non_incremental_definition`) are each documented surface, not inference.
 - Oracle dimension declarations / query-rewrite constraints — closest prior art for
   user-declared semantic facts feeding a rewrite/maintenance decision (§4.2).
 - Paimon partial-update merge engine + per-field sequence groups; feature-store
-  point-in-time correctness (Feast/Tecton) — the two poles of the enrichment-decoupling
-  trade-off (§5.8): a storage mechanism with no contract, and a contract with no opt-out.
+  point-in-time correctness (Feast/Tecton); Snowflake `DYNAMIC_TABLE_REFRESH_BOUNDARY()` —
+  the three poles of the enrichment-decoupling trade-off (§5.8): a storage mechanism with no
+  contract, a contract with no opt-out, and a contract whose opt-out is table-scoped,
+  unvalidated, and ungraded.
+- Feldera `LATENESS`/`append_only`; Oracle `QUERY_REWRITE_INTEGRITY` and `RELY` constraints —
+  engines that already act on user-declared world-facts (§4.1), one policing by
+  filter-and-log, the other by explicit trust.
