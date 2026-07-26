@@ -54,13 +54,21 @@ loudly when they don't, and tells you what each relaxation bought. On this frami
 catalogue's entries (A1 per-group recompute, C1 diff-then-patch, …) are *table stakes* —
 mechanism parity worth having — while the sections below are the reason smelt exists.
 
-### 1.1 The declarativity gradient — the principle under everything
+## 2. The two axes — what you can decline, and what you can tell
 
-The general principle beneath every section of this note: data systems should be **as
-declarative as their authors can afford**, because everything smelt offers — optimised
-maintenance, change propagation, cost choice, verification — is purchased with what the
-tool can *know*. The perfect antithesis is the undocumented imperative pipeline: pandas
-scripts with no framework, where the tool can know nothing and therefore do nothing beyond
+Two structures organise everything in this note, and they are the two axes of one design.
+The **contract lattice** — introduced above, made systematic in §5, and generalised into a
+typing discipline in §10.3 — is what a user can *decline*: which clauses of the maximal
+guarantee they pay for. The **declarativity gradient** is what a user can *tell*: how much
+the tool can know about each node, and therefore how much it can do for that node. Both are
+declared, validated, and graded — never assumed.
+
+The gradient deserves the fuller introduction here, because it is the general principle
+beneath every section that follows: data systems should be **as declarative as their
+authors can afford**, because everything smelt offers — optimised maintenance, change
+propagation, cost choice, verification — is purchased with what the tool can *know*. The
+perfect antithesis is the undocumented imperative pipeline: pandas scripts with no
+framework, where the tool can know nothing and therefore do nothing beyond
 run-it-all-again.
 
 Declarativity is a **gradient per node**, not a yes/no property of the system:
@@ -76,7 +84,7 @@ Declarativity is a **gradient per node**, not a yes/no property of the system:
 3. **Declarative body: SQL** — the body is analysable; properties are recovered by proof
    (the raising direction).
 4. **Declarative intent** — the body *is* a declaration; properties hold by construction
-   and the implementation lowers (§2.4).
+   and the implementation lowers (§10.5).
 
 Each rung up purchases narrower repairs, finer propagation, more verbs, and more
 verification; and the price of staying low should be *visible* — `explain` can print what
@@ -91,351 +99,16 @@ offering none — imperative orchestration of scripts — forfeits all the lever
 position is to make every increment of declarativity purchase the maximum leverage, and to
 grade rather than forbid the low rungs.
 
-Read this way, the note's two big structures are the two axes of one design: the contract
-lattice (§5) is what a user can *decline*; the declarativity gradient is what a user can
-*tell*. Both are declared, validated, and graded — never assumed.
-
-The organising end-state of the whole argument comes first (§2): a **kernel** of proofs,
-state, emission, and testing, with today's incremental-models feature as the **default
-kind** built on it. Everything after §2 can be read as filling in what the kernel knows
-(§4), what contracts it can validate (§5), what control and visibility it grants (§6–§8),
-and who can extend it (§9–§10).
-
-## 2. Kernel and kinds — incremental models as the *default* implementation
-
-The strongest version of the extensibility and layer-surface arguments (developed in §9 and
-§10), proposed for examination: factor smelt into a **kernel** (the property/proof layer,
-the state/ledger substrate, the transformation/emission layer, the graph protocol, the
-conformance harness) and treat today's incremental-models feature — partition grain, key
-grain, the composed corner — as the **default model kind** implemented against that kernel.
-Other kinds, making *different trade-offs*, could then be implemented by users (or shipped
-as non-default extras) without the core contract having to bless them.
-
-### 2.1 The division of ownership
-
-**The kernel owns** (and no kind may reimplement):
-
-- **Properties and proofs**: the walk verdicts (grain, combiner algebra, bounded reach,
-  alignment, determinism, FDs), source world-facts, and the obligation vocabulary —
-  "admission as a service": *does this SQL + these declarations discharge obligation O?*
-- **State substrate**: the processed-set `S` bookkeeping, covered intervals, and grading —
-  one authority for "what contract does this region meet right now".
-- **Emission discipline**: statements are pure emitter outputs; backends execute, never
-  author (the statement-parity rule, unchanged).
-- **The graph protocol**: a typed edge interface — given upstream dirt, what does this node
-  dirty downstream; given a requested region, what does it need upstream. Kinds implement
-  it; the kernel composes it.
-- **The harness**: oracle testing as a service — a kind states its invariant; the harness
-  drives generated runs against it wherever the claim is testable.
-
-**A kind owns**: its declared surface (frontmatter grammar — or an entire authoring
-surface, §2.4), its contract (which lattice point it claims — see §2.3), its plan
-derivation (properties → cells → techniques, using kernel proofs), and its grading
-semantics. The default kind's contract is exact equivalence-at-`S`; that never weakens.
-
-### 2.2 What could then stay out of core
-
-The gap catalogue's §E — patterns surveyed and *deliberately rejected* — reads differently
-under this factoring: it is a **kind wishlist**. Snapshot-diff SCD2 with execution-time
-stamping (SQLMesh's `SCD_TYPE_2_BY_COLUMN`), declared non-idempotent keyed upsert
-(`INCREMENTAL_BY_UNIQUE_KEY`), wall-clock rolling windows (catalogue D4), ignore-retract
-postures, approximate/sketch-backed kinds — all are things real users demonstrably want
-(SQLMesh ships them), all are things smelt's core rightly refuses to *bless as exact*, and
-all are implementable against the kernel by someone who accepts the trade-off — provided
-they declare it (§2.3). Core stops being the arbiter of every posture and becomes the
-arbiter of *honesty about postures*. The breadth of SQLMesh's kind set is itself the market
-evidence that one default kind, however good, will not cover everyone; the difference is
-that smelt's kinds would be typed by contract rather than by folklore.
-
-### 2.3 The honesty typing — kinds are points in the contract lattice
-
-The dbt-macro failure mode (an ecosystem of untyped, unverifiable extensions) is the risk.
-The defence is to reuse the relaxation lattice (§5) as the **type of a kind**: every kind
-must declare which contract it claims — exact-at-`S` / exact-at-reconciliation-points /
-exact-modulo-relation / non-idempotent (restatement requires rebuild) / best-effort — and
-the kernel enforces the consequences:
-
-- **Testable claims are tested.** An exact kind gets the full generative oracle. A
-  reconcile-point kind gets oracle checks at reconciliation points. A non-idempotent kind
-  gets its *limitations* verified (restatement genuinely refused, the non-idempotence
-  printed in `explain`).
-- **Grades propagate.** A downstream exact model consuming a non-exact upstream is tainted
-  in the ledger; the graph layer makes weak links visible instead of laundering them.
-- **Unknown is safe.** A kind that cannot (or does not) implement the graph edge interface
-  degrades to the total-delta posture — over-running, never wrong — exactly as a full
-  refresh upstream does today.
-
-This is the load-bearing move: §5 describes relaxations as *parameters of the default
-kind*; this section generalises them to *the typing discipline for all kinds*. The lattice
-is the kernel's contract language, not a feature list.
-
-### 2.4 Kinds may own the authoring surface — intent nodes, not only SQL nodes
-
-The sections above still carry a hidden assumption: that every node *starts* as SQL, from
-which the kernel proves properties. That pipeline direction — SQL → AST/types → property
-proofs → plan — is **raising**: recovering intent from its lowered form. Raising is the
-compiler's fragile direction; the SCD2-succession work
-(`docs/research/20260723-scd2-succession-pattern.md`) is a case study in how much machinery
-it takes to *recognise* one pattern in lag-function SQL, and how easily a refactor breaks
-the recognition. When the pattern is the whole point of the node, the user should be able
-to say so: an **intent node** is a graph node authored in a kind-owned surface — a
-declaration, not a query — from which the properties hold **by construction** and the
-maintenance plan **lowers** directly.
-
-Concrete candidates, each with live market demand:
-
-- **SCD2 as a declaration** (`scd2: {key, change_ts, attributes, …}`) — dbt *snapshots*
-  are exactly this and are heavily used; nobody misses writing the lag-function SQL.
-- **Data vault from metadata** — hubs/links/satellites generated from entity/relationship
-  config; AutomateDV builds a business on this atop dbt string macros. The user's instinct
-  is right: a vault author never wants an "initial SQL stage we then prove something
-  about" — the config *is* the model.
-- **Declared windowed aggregations** (feature-store style, Feast/Tecton feature views) —
-  "sum of spend per customer over trailing 30d, daily grain" is a declaration whose
-  combiner algebra, clock, and grain are all axiomatic; it is precisely a maintainable
-  fold, stated without SQL.
-- **Sessionization / dedup specs** — gap-parameterised sessions, keyed dedup with a
-  recurrence window: shapes smelt currently proves out of SQL could instead be declared.
-
-**The one rule that keeps intent nodes honest: every node must have a denotation, and the
-denotation is *generated*, never hand-authored.** The equivalence invariant needs a
-full-refresh oracle — `full_refresh(inputs ∈ S)` must mean something for every node. For
-an intent node the kind *generates* the denotation (typically as SQL) from the intent.
-Generating rather than hand-writing kills the drift risk (no second source of truth), and
-it lets the generated denotation flow through the **existing pipeline**: type inference
-gives the output schema downstream models consume, diagnostics and LSP hover work
-unchanged, and the conformance harness runs the generated denotation as the oracle against
-the kind's maintenance statements. Better still, running the property *walk* over the
-generated denotation becomes a **cross-check**: the kind asserts its properties
-axiomatically, the walk re-derives them from the generated SQL, and disagreement is a bug
-in the kind's generator — the kind tests itself with kernel machinery.
-
-Graph citizenship is unchanged and is the kernel's real requirement: however a node is
-authored, it speaks the contract vocabulary — clock, identity, delta shapes in and out,
-the edge protocol. The graph layer never asks how a node was written; it asks what it
-dirties and what it needs. (Contrast today's genuinely opaque nodes — a Python model or an
-imported dbt model — which degrade to total-delta: the gradient's low rungs, §1.1. Intent
-nodes are the top rung: *maximally* transparent, because nothing about them needs
-recovering.)
-
-Recognition and intent are complements, not rivals: classifiers (succession, top-N) serve
-the install base — existing SQL, dbt imports — while intent surfaces serve greenfield; both
-lower into the same registry cells and the same ledger. The
-recognition-over-declaration philosophy inverts exactly when the pattern stops being an
-implementation detail of a query and becomes the node's identity.
-
-Risks, named: **expressiveness cliffs** — every config surface eventually meets a need it
-can't express (dbt snapshots' fixed strategies), so intent grammars need typed SQL escape
-slots (an expression *inside* a declaration, typed against the generated query) rather
-than an all-or-nothing fall-off to raw SQL; **surface proliferation** — kinds must stay
-few, and the mandatory generated denotation is the tax that keeps a surface from being
-cheap folklore; **per-surface tooling** — schema-validated YAML is easy, but a surface
-worth shipping needs its own diagnostics, and the LSP investment is SQL-shaped today.
-
-### 2.5 smelt is already building this kernel — by accident of discipline
-
-The architectural invariants the repo already enforces by CI gate *are* the kernel/kind
-boundary: maintenance-plan purity (plans are pure data derived by pure functions —
-kind-derivable), statement-emission single ownership (emitters are pure — kernel-owned),
-the property-composition walk rule (verdicts come from one shared walk — kernel-owned),
-and the generative conformance gate (the harness — kernel-owned). These exist today for
-testability; they are the same cuts a kind API needs. The research claim worth recording:
-**the kernel should be extracted from the working default implementation, not designed a
-priori.** The spec's own design notes already take this posture for the crate boundary
-("extraction-mechanical", the rejected `smelt-maintenance` crate) — the kind API is the
-same judgment at the next level up.
-
-### 2.6 Precedents and their lessons
-
-- **dbt custom materializations / incremental-strategy macros** — proof of demand for
-  exactly this extension point, and proof that shipping it without a correctness story
-  yields an ecosystem nobody can trust or upgrade. The kernel's typing (§2.3) is the fix.
-- **SQLMesh model kinds** — a closed, vendor-curated kind set; demand evidence and a
-  catalogue of trade-offs users accept, but not extensible and not proof-carrying.
-- **MLIR dialects over a shared IR + verifier** — the structural analogue: kinds are
-  dialects, the property layer is the verifier, and the lesson is that the verifier and the
-  shared IR must stabilise *before* the dialect ecosystem opens. Its second lesson backs
-  §2.4: high-level dialects exist precisely because *raising* from lowered form is hard —
-  semantics carried structurally beat semantics recovered by analysis.
-
-### 2.7 Risks and sequencing
-
-The risks are §9.4's, amplified: premature API design could distort the default
-implementation, and the kernel surface is much larger than Tier-0 preference hooks. The
-sequencing that manages both: (1) keep hardening the internal boundary the CI gates already
-enforce; (2) implement the next internal features *as if they were kinds* —
-`materialized_view` delegation is already a de-facto second kind, and the SCD2-succession
-classifier is the natural shakedown for a third — extracting the kernel interface each one
-actually needed; (3) only then externalise, contract-typing first (§2.3), Rust-internal
-kinds before Python kinds. Not a near-term build, but a standing lens (§11): every
-invariant kept pure today is kernel surface bought for free.
-
-### 2.8 The canonical-form question — what is the core representation?
-
-If kinds may own authoring surfaces (§2.4), what do they all map *to*? The instinct is "a
-canonical IR that SQL and every other surface lower into". Before reaching for one, unbundle
-what the smelt CST is currently doing, because "the core representation" is three different
-jobs that happen to live in one artifact today:
-
-1. **The semantic anchor (denotation)** — what defines correctness. Today: the model's SQL,
-   because `full_refresh(inputs ∈ S)` means "run this SQL on a real engine". This is what
-   the conformance oracle executes.
-2. **The analysis substrate** — what the property walk, type inference, and admission run
-   over. Today: the Rowan CST + typed AST.
-3. **The extension/interchange protocol** — what a node must "speak" to be a graph citizen.
-   Today: implicit — the contract vocabulary (clock, identity, delta shapes, edge protocol,
-   obligations) that §2.1 names as kernel-owned.
-
-Four candidate architectures, and what each gives up:
-
-**Candidate 1 — SQL CST stays canonical; everything lowers to it** (the status quo,
-extended per §2.4). Intent surfaces generate SQL denotations; imperative nodes declare
-contracts; the walk runs over SQL. Costs: (a) SQL cannot *denote* everything — recursive
-graph algorithms, ML scoring, genuinely stateful logic have no clean SQL denotation, so
-gradient rung-2 nodes are permanently second-class; (b) cross-model optimisation (fusion,
-shared delta scans) happens as SQL-to-SQL rewriting — workable but clumsy; (c) dialect
-coupling — "SQL" is really "the dialect the parser and oracle speak", with multi-backend
-fidelity carried by the differential gates, not the representation. The raising-fragility
-cost is real but §2.4's cross-check (kind asserts axiomatically, walk re-derives from
-generated SQL) turns it into a test harness.
-
-**Candidate 2 — a neutral logical algebra as the canonical core** (Substrait / Calcite
-RelNode / DBSP-circuit shaped). SQL parses *into* the algebra; intent nodes lower *into*
-it; backends print *from* it; properties are theorems about algebra nodes. The "obviously
-right" compiler answer, and the one to resist, because of what it forfeits:
-
-- **The free oracle.** The correctness economics (§9.1: correctness purchased by tests
-  against DuckDB, not runtime engineering) depend on the canonical form being *directly
-  executable by an engine smelt doesn't maintain*. A neutral algebra has no oracle unless
-  you build a reference interpreter (DBSP did — that is a runtime, a named anti-goal) or
-  round-trip through SQL anyway — at which point SQL is still the semantic anchor and the
-  algebra is just an internal data structure.
-- **Lossless source mapping.** Rowan's whole point. Diagnostics, LSP hover, goto-def, and
-  the refusal-names-the-line experience all depend on the analysis substrate being the
-  user's text. Algebra nodes have provenance annotations at best; every IR-based system
-  fights this forever.
-- **Semantic fidelity.** Substrait's long lesson: NULL semantics, collation, three-valued
-  logic, and dialect function behaviour are brutally hard to pin in a neutral IR — you
-  re-litigate exactly the corner cases the differential gates currently settle empirically.
-- **Transparency.** Today `explain` shows SQL the user can read and run. Printed-from-IR
-  SQL moves trust into the printer.
-
-**Candidate 3 — the contract vocabulary is the canonical form; bodies are pluggable.**
-Don't canonicalise bodies at all. The stable core is the kernel vocabulary of §2.1:
-property verdicts, obligations, world-facts, the edge protocol, cell addressing, ledger
-grades. A node kind must provide two things: **a denotation** (generated SQL, per the §2.4
-rule) and **property claims** in the shared vocabulary — proved by the walk for SQL bodies,
-asserted-and-cross-checked for intent bodies, declared-and-probed for opaque bodies. The
-graph layer, planner, and ledger only ever see the vocabulary. This is the deepest line of
-§2.4 promoted to the design decision: *the graph layer never asks how a node was written;
-it asks what it dirties and what it needs* — the canonical form is the answer to those
-questions, not the body. Costs: body-level cross-surface optimisation needs a shared body
-form first (the generated denotation supplies SQL for exactly that whenever wanted); each
-surface carries its own lowering machinery; and the vocabulary must be versioned and
-stable — the MLIR lesson of §2.6, with the vocabulary playing the verifier's role.
-
-**Candidate 4 — a multi-level tower (MLIR-proper).** Intent dialects → logical algebra →
-per-dialect SQL, progressive lowering, properties attached at the level where they are
-axiomatic. Theoretically complete and wrong near-term: Candidate 2's costs plus Candidate
-3's, and MLIR only worked because LLVM IR beneath it was already twenty years stable.
-smelt does not yet have the stable bottom.
-
-**The position this note takes:** separate the anchor from the API, and stabilise them in
-the right order.
-
-1. **SQL stays the denotation anchor** — not because SQL is the ideal semantic form, but
-   because it is the only representation with a *free, external, adversarially-maintained
-   oracle* (real engines) and a free install base. Every alternative anchor makes smelt the
-   arbiter of its own correctness. The §2.4 rule generalises from an intent-node rule to
-   *the* architectural rule: **SQL is the denotation language of the system; nothing else
-   is ever the correctness reference.**
-2. **The contract vocabulary is the canonical form and the stable extension API**
-   (Candidate 3). Investment goes into naming, typing, and versioning the vocabulary. This
-   is what a dataframe frontend, a YAML SCD2 surface, a dbt import, or a Python node all
-   map to — and it is far smaller and more stabilisable than any body IR. It also subsumes
-   the tier story (§9.3): registering a pattern and registering a kind are both "speak the
-   vocabulary, carry obligations".
-3. **A logical algebra, if it ever comes, is a private planner IR** — introduced only when
-   a concrete need forces it (cross-model fusion at scale, a non-SQL backend, delta-rule
-   derivation smelt wants to own), never exposed as the extension API, never the
-   correctness anchor. Internal IRs are cheap to change; canonical IRs are forever.
-
-A two-question test for any proposed representation: **what is its oracle, and what is its
-diff?** SQL has an engine oracle and (via the walk) a property diff. A vocabulary claim has
-a probe oracle and a trivially diffable form (§10.1's refactor-safety product). A neutral
-algebra has neither without building them. This test explains why the CST has felt right so
-far and where its actual boundary is: bodies that can't be SQL — and the vocabulary layer,
-not a replacement IR, is how those get in.
-
-Named risks of the vocabulary-canonical position: **vocabulary versioning** (a kind built
-against vocabulary v1 meeting a kernel at v2 — MLIR handles this with dialect version
-negotiation, painfully) and **denotation gaps** (a node whose semantics genuinely cannot be
-generated as SQL — e.g. ML scoring — caps at gradient rung 2, declared-and-probed, with
-`explain` pricing the opacity per §1.1).
-
-### 2.9 Basis choice — properties attach to the persisted state, not the query
-
-A test case that sharpens §2.8 and exposes a fourth thing hiding inside the CST's roles:
-**the choice of persisted basis.**
-
-`AVG(x)` is *algebraic* in the aggregation-literature sense: not foldable itself, but a
-finalizer over foldable components (`SUM(x)`, `COUNT(x)`). If a model persists `avg_price`,
-the walk correctly finds no combiner algebra — two averages cannot be merged without the
-weights. If it persists `sum_price, count_price` and a view computes the division at read
-time, every persisted column folds and the model becomes maintainable.
-
-The load-bearing observation: **the denotation didn't change — the persisted state did.**
-The maintenance properties smelt proves were never really properties of "the model's SQL";
-they are properties of *the state chosen for persistence*, with the authored query fixing
-only what the output must denote. Today the two coincide because smelt persists exactly
-what the query selects. The average example shows a degree of freedom in between: pick a
-*basis* whose properties are good, plus a finalizer view bridging back to the declared
-schema.
-
-This is achievable as a SQL-only transform — which is itself evidence for §2.8's
-SQL-anchor position. The rewrite is source-to-source: `AVG(x)` → persist
-`SUM(x), COUNT(x)`, expose `sum_x / count_x AS avg_x` through a finalizer view. Basis and
-finalizer are both SQL; the walk proves foldability of the basis; the conformance oracle
-still runs. Recognising the opportunity is not fragile raising — the function registry
-already knows `AVG` is algebraic; it is a table lookup, not pattern archaeology. The same
-shape covers `VAR`/`STDDEV` (sum, sum-of-squares, count) and generalises:
-
-- **Finer-grain basis**: persist daily grain, finalize to monthly in the view — the finer
-  grain folds where the coarser one had lost alignment.
-- **Pre-join basis**: persist the two sides' partial aggregates, finalize with the join —
-  F-IVM's whole trick; §8's "helper state as visible models" is exactly this.
-- **Where it runs out**: holistic aggregates (`MEDIAN`, exact percentiles) have *no*
-  finite foldable basis — a theorem, not a representation failure, and where §2.3's
-  approximate kinds (sketch basis, declared-approximate contract) pick up.
-
-Two architectural consequences:
-
-1. **The plan needs a slot for basis ≠ declared output.** Today one logical model maps to
-   one persisted relation with the model's own schema. This transform makes the physical
-   realisation a *pair* (base table + finalizer view) under one logical name, the public
-   schema served by the view — the logical/physical separation earning its keep, and
-   arguably the first rewrite where the physical form has a genuinely different *shape*,
-   not just different statements.
-2. **Admission runs over the basis, not the authored text.** The equivalence invariant
-   refines to: incremental basis == full-refresh basis, with output equality following by
-   construction through the (deterministic) finalizer. The walk machinery is unchanged;
-   what changes is *which SQL* it walks — the planner-derived basis query, which by the
-   §2.4 generated-denotation rule is generated, never hand-authored, and so inherits the
-   same cross-check discipline as intent nodes.
-
-Two caveats the harness would surface immediately: **float semantics** (`SUM/COUNT`
-division is not bit-identical to the engine's `AVG` under floating point — §5.5's
-equivalence-modulo-ε stops being a luxury and becomes a prerequisite for this rewrite on
-float columns) and **decimal typing** (the finalizer's division type must match `AVG`'s
-inferred type exactly; the type oracle polices this for free).
-
-For the representation debate, basis choice *strengthens* Candidate 3 rather than
-reopening Candidate 2: no neutral algebra is needed — what is needed is the plan/property
-layer **quantifying over a space of SQL-expressible bases** instead of assuming basis =
-authored query. And it converges with intent nodes: a declared windowed aggregation (§2.4)
-would generate its basis directly — the recognition path (this rewrite) and the
-declaration path (intent surfaces) target the same physical shape, a coherence check on
-the whole design.
+The rest of the note walks the two axes. First the fixed contract's cost, so the
+relaxations have something concrete to relax (§3); then what a user can *tell* — the
+gradient's declaration rungs in practice (§4); then what a user can *decline* — the
+relaxation lattice (§5); then the control, transparency, and whole-project leverage that
+follow (§6–§8); then who can extend the system, and at what risk (§9). The organising
+end-state comes after that (§10): a **kernel** of proofs, state, emission, and testing —
+with today's incremental-models feature as the **default kind** built on it — including the
+representation story that lets kinds own authoring surfaces. Two further product cuts the
+same layers enable follow (§11), then a ranked candidate list (§12) and spec implications
+(§13).
 
 ## 3. What the fixed IVM contract costs (the clauses users pay for)
 
@@ -466,9 +139,10 @@ Each clause maps to at least one smelt differentiation below.
 
 ## 4. Knowledge asymmetry — things smelt can know that the engine can't assume
 
-An engine must be sound for arbitrary DML from an adversarial workload. smelt sits where
-declarations, orchestration, and the whole project are visible — it can *trust and verify*
-what an engine must *defend against*.
+The gradient's first axis-in-practice: what a user can *tell* the tool. An engine must be
+sound for arbitrary DML from an adversarial workload. smelt sits where declarations,
+orchestration, and the whole project are visible — it can *trust and verify* what an engine
+must *defend against*.
 
 ### 4.1 Declared source world-facts (already core; underweighted as differentiation)
 
@@ -545,11 +219,11 @@ external ones):
 
 ## 5. The relaxation lattice — guarantees the user can decline (the likely centre of value)
 
-The user's hunch, made systematic. Each relaxation names: the clause relaxed, what it buys,
-and how smelt keeps the *remaining* contract honest. The recurring design shape: **the
-invariant is never silently weakened — the user declares the weaker contract, smelt
-validates the declaration, and the ledger/explain surface shows exactly which contract each
-region currently satisfies.**
+The second axis-in-practice, and the user's hunch made systematic: what a user can
+*decline*. Each relaxation names: the clause relaxed, what it buys, and how smelt keeps the
+*remaining* contract honest. The recurring design shape: **the invariant is never silently
+weakened — the user declares the weaker contract, smelt validates the declaration, and the
+ledger/explain surface shows exactly which contract each region currently satisfies.**
 
 ### 5.1 Input-order freedom (relaxes clause 2/3 — already smelt's foundation)
 
@@ -642,7 +316,7 @@ Mostly already designed; listed to complete the picture and mark the genuinely n
   fixes the *sound* set; per-run cost picks within it.
 - **Operational verbs**: backfill a region without ingesting new data; replay a region;
   rebuild one column group; dry-run a plan. IVM offers "refresh". These fall out of per-cell
-  addressing + the ledger; the differentiation is having *verbs* at all (deepened in §10.2).
+  addressing + the ledger; the differentiation is having *verbs* at all (deepened in §11.2).
 - **Heterogeneous engine placement** (the user's Athena-vs-Photon example): a backfill
   tolerates latency → cheapest scan pricing; the daily run wants latency → premium engine.
   Because state is ordinary tables and exchange is Parquet, the *same cell* can run on
@@ -768,7 +442,7 @@ what a rule can break determines what discipline it needs:
   and fails loudly — the §4.1 triple, with the declaration itself extensible.
 - **Tier 3 — new lattice points.** Extensions to what "correct" *means* (new relaxations,
   new equivalence relations). See §9.4 — probably not an open API; the disciplined form of
-  Tier 3 is a whole *kind* (§2).
+  Tier 3 is a whole *kind* (§10).
 
 A rule at any tier never gets to say "trust me" invisibly: whatever it chose or declared
 prints in `explain`, and anything above Tier 0 carries obligations core checks or probes.
@@ -806,12 +480,351 @@ surface: choose-among-admitted), Tier 2 second (declarations are already YAML-sh
 Tier 1 only once the registry's obligation vocabulary has survived a few internal pattern
 additions (succession, C1, B3 as the shakedown cruise).
 
-## 10. Two more product cuts: the property layer and the manipulation layer
+## 10. Kernel and kinds — incremental models as the *default* implementation
+
+The strongest version of the extensibility argument (§9), and the architecture that carries
+everything above, proposed for examination: factor smelt into a **kernel** (the
+property/proof layer, the state/ledger substrate, the transformation/emission layer, the
+graph protocol, the conformance harness) and treat today's incremental-models feature —
+partition grain, key grain, the composed corner — as the **default model kind** implemented
+against that kernel. Other kinds, making *different trade-offs*, could then be implemented
+by users (or shipped as non-default extras) without the core contract having to bless them.
+
+### 10.1 The division of ownership
+
+**The kernel owns** (and no kind may reimplement):
+
+- **Properties and proofs**: the walk verdicts (grain, combiner algebra, bounded reach,
+  alignment, determinism, FDs), source world-facts, and the obligation vocabulary —
+  "admission as a service": *does this SQL + these declarations discharge obligation O?*
+- **State substrate**: the processed-set `S` bookkeeping, covered intervals, and grading —
+  one authority for "what contract does this region meet right now".
+- **Emission discipline**: statements are pure emitter outputs; backends execute, never
+  author (the statement-parity rule, unchanged).
+- **The graph protocol**: a typed edge interface — given upstream dirt, what does this node
+  dirty downstream; given a requested region, what does it need upstream. Kinds implement
+  it; the kernel composes it.
+- **The harness**: oracle testing as a service — a kind states its invariant; the harness
+  drives generated runs against it wherever the claim is testable.
+
+**A kind owns**: its declared surface (frontmatter grammar — or an entire authoring
+surface, §10.5), its contract (which lattice point it claims — see §10.3), its plan
+derivation (properties → cells → techniques, using kernel proofs), and its grading
+semantics. The default kind's contract is exact equivalence-at-`S`; that never weakens.
+
+### 10.2 What could then stay out of core
+
+The gap catalogue's §E — patterns surveyed and *deliberately rejected* — reads differently
+under this factoring: it is a **kind wishlist**. Snapshot-diff SCD2 with execution-time
+stamping (SQLMesh's `SCD_TYPE_2_BY_COLUMN`), declared non-idempotent keyed upsert
+(`INCREMENTAL_BY_UNIQUE_KEY`), wall-clock rolling windows (catalogue D4), ignore-retract
+postures, approximate/sketch-backed kinds — all are things real users demonstrably want
+(SQLMesh ships them), all are things smelt's core rightly refuses to *bless as exact*, and
+all are implementable against the kernel by someone who accepts the trade-off — provided
+they declare it (§10.3). Core stops being the arbiter of every posture and becomes the
+arbiter of *honesty about postures*. The breadth of SQLMesh's kind set is itself the market
+evidence that one default kind, however good, will not cover everyone; the difference is
+that smelt's kinds would be typed by contract rather than by folklore.
+
+### 10.3 The honesty typing — kinds are points in the contract lattice
+
+The dbt-macro failure mode (an ecosystem of untyped, unverifiable extensions) is the risk.
+The defence is to reuse the relaxation lattice (§5) as the **type of a kind**: every kind
+must declare which contract it claims — exact-at-`S` / exact-at-reconciliation-points /
+exact-modulo-relation / non-idempotent (restatement requires rebuild) / best-effort — and
+the kernel enforces the consequences:
+
+- **Testable claims are tested.** An exact kind gets the full generative oracle. A
+  reconcile-point kind gets oracle checks at reconciliation points. A non-idempotent kind
+  gets its *limitations* verified (restatement genuinely refused, the non-idempotence
+  printed in `explain`).
+- **Grades propagate.** A downstream exact model consuming a non-exact upstream is tainted
+  in the ledger; the graph layer makes weak links visible instead of laundering them.
+- **Unknown is safe.** A kind that cannot (or does not) implement the graph edge interface
+  degrades to the total-delta posture — over-running, never wrong — exactly as a full
+  refresh upstream does today.
+
+This is the load-bearing move that joins the note's two axes: §5 describes relaxations as
+*parameters of the default kind*; this section generalises them to *the typing discipline
+for all kinds*. The lattice is the kernel's contract language, not a feature list.
+
+### 10.4 Precedents and their lessons
+
+- **dbt custom materializations / incremental-strategy macros** — proof of demand for
+  exactly this extension point, and proof that shipping it without a correctness story
+  yields an ecosystem nobody can trust or upgrade. The kernel's typing (§10.3) is the fix.
+- **SQLMesh model kinds** — a closed, vendor-curated kind set; demand evidence and a
+  catalogue of trade-offs users accept, but not extensible and not proof-carrying.
+- **MLIR dialects over a shared IR + verifier** — the structural analogue: kinds are
+  dialects, the property layer is the verifier, and the lesson is that the verifier and the
+  shared IR must stabilise *before* the dialect ecosystem opens. Its second lesson backs
+  the next section (§10.5): high-level dialects exist precisely because *raising* from
+  lowered form is hard — semantics carried structurally beat semantics recovered by
+  analysis.
+
+### 10.5 Kinds may own the authoring surface — intent nodes, not only SQL nodes
+
+The sections above still carry a hidden assumption: that every node *starts* as SQL, from
+which the kernel proves properties. That pipeline direction — SQL → AST/types → property
+proofs → plan — is **raising**: recovering intent from its lowered form. Raising is the
+compiler's fragile direction; the SCD2-succession work
+(`docs/research/20260723-scd2-succession-pattern.md`) is a case study in how much machinery
+it takes to *recognise* one pattern in lag-function SQL, and how easily a refactor breaks
+the recognition. When the pattern is the whole point of the node, the user should be able
+to say so: an **intent node** is a graph node authored in a kind-owned surface — a
+declaration, not a query — from which the properties hold **by construction** and the
+maintenance plan **lowers** directly. On the declarativity gradient (§2), intent nodes are
+the top rung.
+
+Concrete candidates, each with live market demand:
+
+- **SCD2 as a declaration** (`scd2: {key, change_ts, attributes, …}`) — dbt *snapshots*
+  are exactly this and are heavily used; nobody misses writing the lag-function SQL.
+- **Data vault from metadata** — hubs/links/satellites generated from entity/relationship
+  config; AutomateDV builds a business on this atop dbt string macros. The user's instinct
+  is right: a vault author never wants an "initial SQL stage we then prove something
+  about" — the config *is* the model.
+- **Declared windowed aggregations** (feature-store style, Feast/Tecton feature views) —
+  "sum of spend per customer over trailing 30d, daily grain" is a declaration whose
+  combiner algebra, clock, and grain are all axiomatic; it is precisely a maintainable
+  fold, stated without SQL.
+- **Sessionization / dedup specs** — gap-parameterised sessions, keyed dedup with a
+  recurrence window: shapes smelt currently proves out of SQL could instead be declared.
+
+**The one rule that keeps intent nodes honest: every node must have a denotation, and the
+denotation is *generated*, never hand-authored.** The equivalence invariant needs a
+full-refresh oracle — `full_refresh(inputs ∈ S)` must mean something for every node. For
+an intent node the kind *generates* the denotation (typically as SQL) from the intent.
+Generating rather than hand-writing kills the drift risk (no second source of truth), and
+it lets the generated denotation flow through the **existing pipeline**: type inference
+gives the output schema downstream models consume, diagnostics and LSP hover work
+unchanged, and the conformance harness runs the generated denotation as the oracle against
+the kind's maintenance statements. Better still, running the property *walk* over the
+generated denotation becomes a **cross-check**: the kind asserts its properties
+axiomatically, the walk re-derives them from the generated SQL, and disagreement is a bug
+in the kind's generator — the kind tests itself with kernel machinery.
+
+Graph citizenship is unchanged and is the kernel's real requirement: however a node is
+authored, it speaks the contract vocabulary — clock, identity, delta shapes in and out,
+the edge protocol. The graph layer never asks how a node was written; it asks what it
+dirties and what it needs. (Contrast today's genuinely opaque nodes — a Python model or an
+imported dbt model — which degrade to total-delta: the gradient's low rungs, §2. Intent
+nodes are the top rung: *maximally* transparent, because nothing about them needs
+recovering.)
+
+Recognition and intent are complements, not rivals: classifiers (succession, top-N) serve
+the install base — existing SQL, dbt imports — while intent surfaces serve greenfield; both
+lower into the same registry cells and the same ledger. The
+recognition-over-declaration philosophy inverts exactly when the pattern stops being an
+implementation detail of a query and becomes the node's identity.
+
+Risks, named: **expressiveness cliffs** — every config surface eventually meets a need it
+can't express (dbt snapshots' fixed strategies), so intent grammars need typed SQL escape
+slots (an expression *inside* a declaration, typed against the generated query) rather
+than an all-or-nothing fall-off to raw SQL; **surface proliferation** — kinds must stay
+few, and the mandatory generated denotation is the tax that keeps a surface from being
+cheap folklore; **per-surface tooling** — schema-validated YAML is easy, but a surface
+worth shipping needs its own diagnostics, and the LSP investment is SQL-shaped today.
+
+### 10.6 The canonical-form question — what is the core representation?
+
+If kinds may own authoring surfaces (§10.5), what do they all map *to*? The instinct is "a
+canonical IR that SQL and every other surface lower into". Before reaching for one, unbundle
+what the smelt CST is currently doing, because "the core representation" is three different
+jobs that happen to live in one artifact today:
+
+1. **The semantic anchor (denotation)** — what defines correctness. Today: the model's SQL,
+   because `full_refresh(inputs ∈ S)` means "run this SQL on a real engine". This is what
+   the conformance oracle executes.
+2. **The analysis substrate** — what the property walk, type inference, and admission run
+   over. Today: the Rowan CST + typed AST.
+3. **The extension/interchange protocol** — what a node must "speak" to be a graph citizen.
+   Today: implicit — the contract vocabulary (clock, identity, delta shapes, edge protocol,
+   obligations) that §10.1 names as kernel-owned.
+
+Four candidate architectures, and what each gives up:
+
+**Candidate 1 — SQL CST stays canonical; everything lowers to it** (the status quo,
+extended per §10.5). Intent surfaces generate SQL denotations; imperative nodes declare
+contracts; the walk runs over SQL. Costs: (a) SQL cannot *denote* everything — recursive
+graph algorithms, ML scoring, genuinely stateful logic have no clean SQL denotation, so
+gradient rung-2 nodes are permanently second-class; (b) cross-model optimisation (fusion,
+shared delta scans) happens as SQL-to-SQL rewriting — workable but clumsy; (c) dialect
+coupling — "SQL" is really "the dialect the parser and oracle speak", with multi-backend
+fidelity carried by the differential gates, not the representation. The raising-fragility
+cost is real but §10.5's cross-check (kind asserts axiomatically, walk re-derives from
+generated SQL) turns it into a test harness.
+
+**Candidate 2 — a neutral logical algebra as the canonical core** (Substrait / Calcite
+RelNode / DBSP-circuit shaped). SQL parses *into* the algebra; intent nodes lower *into*
+it; backends print *from* it; properties are theorems about algebra nodes. The "obviously
+right" compiler answer, and the one to resist, because of what it forfeits:
+
+- **The free oracle.** The correctness economics (§9.1: correctness purchased by tests
+  against DuckDB, not runtime engineering) depend on the canonical form being *directly
+  executable by an engine smelt doesn't maintain*. A neutral algebra has no oracle unless
+  you build a reference interpreter (DBSP did — that is a runtime, a named anti-goal) or
+  round-trip through SQL anyway — at which point SQL is still the semantic anchor and the
+  algebra is just an internal data structure.
+- **Lossless source mapping.** Rowan's whole point. Diagnostics, LSP hover, goto-def, and
+  the refusal-names-the-line experience all depend on the analysis substrate being the
+  user's text. Algebra nodes have provenance annotations at best; every IR-based system
+  fights this forever.
+- **Semantic fidelity.** Substrait's long lesson: NULL semantics, collation, three-valued
+  logic, and dialect function behaviour are brutally hard to pin in a neutral IR — you
+  re-litigate exactly the corner cases the differential gates currently settle empirically.
+- **Transparency.** Today `explain` shows SQL the user can read and run. Printed-from-IR
+  SQL moves trust into the printer.
+
+**Candidate 3 — the contract vocabulary is the canonical form; bodies are pluggable.**
+Don't canonicalise bodies at all. The stable core is the kernel vocabulary of §10.1:
+property verdicts, obligations, world-facts, the edge protocol, cell addressing, ledger
+grades. A node kind must provide two things: **a denotation** (generated SQL, per the
+§10.5 rule) and **property claims** in the shared vocabulary — proved by the walk for SQL
+bodies, asserted-and-cross-checked for intent bodies, declared-and-probed for opaque
+bodies. The graph layer, planner, and ledger only ever see the vocabulary. This is the
+deepest line of §10.5 promoted to the design decision: *the graph layer never asks how a
+node was written; it asks what it dirties and what it needs* — the canonical form is the
+answer to those questions, not the body. Costs: body-level cross-surface optimisation needs
+a shared body form first (the generated denotation supplies SQL for exactly that whenever
+wanted); each surface carries its own lowering machinery; and the vocabulary must be
+versioned and stable — the MLIR lesson of §10.4, with the vocabulary playing the verifier's
+role.
+
+**Candidate 4 — a multi-level tower (MLIR-proper).** Intent dialects → logical algebra →
+per-dialect SQL, progressive lowering, properties attached at the level where they are
+axiomatic. Theoretically complete and wrong near-term: Candidate 2's costs plus Candidate
+3's, and MLIR only worked because LLVM IR beneath it was already twenty years stable.
+smelt does not yet have the stable bottom.
+
+**The position this note takes:** separate the anchor from the API, and stabilise them in
+the right order.
+
+1. **SQL stays the denotation anchor** — not because SQL is the ideal semantic form, but
+   because it is the only representation with a *free, external, adversarially-maintained
+   oracle* (real engines) and a free install base. Every alternative anchor makes smelt the
+   arbiter of its own correctness. The §10.5 rule generalises from an intent-node rule to
+   *the* architectural rule: **SQL is the denotation language of the system; nothing else
+   is ever the correctness reference.**
+2. **The contract vocabulary is the canonical form and the stable extension API**
+   (Candidate 3). Investment goes into naming, typing, and versioning the vocabulary. This
+   is what a dataframe frontend, a YAML SCD2 surface, a dbt import, or a Python node all
+   map to — and it is far smaller and more stabilisable than any body IR. It also subsumes
+   the tier story (§9.3): registering a pattern and registering a kind are both "speak the
+   vocabulary, carry obligations".
+3. **A logical algebra, if it ever comes, is a private planner IR** — introduced only when
+   a concrete need forces it (cross-model fusion at scale, a non-SQL backend, delta-rule
+   derivation smelt wants to own), never exposed as the extension API, never the
+   correctness anchor. Internal IRs are cheap to change; canonical IRs are forever.
+
+A two-question test for any proposed representation: **what is its oracle, and what is its
+diff?** SQL has an engine oracle and (via the walk) a property diff. A vocabulary claim has
+a probe oracle and a trivially diffable form (§11.1's refactor-safety product). A neutral
+algebra has neither without building them. This test explains why the CST has felt right so
+far and where its actual boundary is: bodies that can't be SQL — and the vocabulary layer,
+not a replacement IR, is how those get in.
+
+Named risks of the vocabulary-canonical position: **vocabulary versioning** (a kind built
+against vocabulary v1 meeting a kernel at v2 — MLIR handles this with dialect version
+negotiation, painfully) and **denotation gaps** (a node whose semantics genuinely cannot be
+generated as SQL — e.g. ML scoring — caps at gradient rung 2, declared-and-probed, with
+`explain` pricing the opacity per §2).
+
+### 10.7 Basis choice — properties attach to the persisted state, not the query
+
+A test case that sharpens §10.6 and exposes a fourth thing hiding inside the CST's roles:
+**the choice of persisted basis.**
+
+`AVG(x)` is *algebraic* in the aggregation-literature sense: not foldable itself, but a
+finalizer over foldable components (`SUM(x)`, `COUNT(x)`). If a model persists `avg_price`,
+the walk correctly finds no combiner algebra — two averages cannot be merged without the
+weights. If it persists `sum_price, count_price` and a view computes the division at read
+time, every persisted column folds and the model becomes maintainable.
+
+The load-bearing observation: **the denotation didn't change — the persisted state did.**
+The maintenance properties smelt proves were never really properties of "the model's SQL";
+they are properties of *the state chosen for persistence*, with the authored query fixing
+only what the output must denote. Today the two coincide because smelt persists exactly
+what the query selects. The average example shows a degree of freedom in between: pick a
+*basis* whose properties are good, plus a finalizer view bridging back to the declared
+schema.
+
+This is achievable as a SQL-only transform — which is itself evidence for §10.6's
+SQL-anchor position. The rewrite is source-to-source: `AVG(x)` → persist
+`SUM(x), COUNT(x)`, expose `sum_x / count_x AS avg_x` through a finalizer view. Basis and
+finalizer are both SQL; the walk proves foldability of the basis; the conformance oracle
+still runs. Recognising the opportunity is not fragile raising — the function registry
+already knows `AVG` is algebraic; it is a table lookup, not pattern archaeology. The same
+shape covers `VAR`/`STDDEV` (sum, sum-of-squares, count) and generalises:
+
+- **Finer-grain basis**: persist daily grain, finalize to monthly in the view — the finer
+  grain folds where the coarser one had lost alignment.
+- **Pre-join basis**: persist the two sides' partial aggregates, finalize with the join —
+  F-IVM's whole trick; §8's "helper state as visible models" is exactly this.
+- **Where it runs out**: holistic aggregates (`MEDIAN`, exact percentiles) have *no*
+  finite foldable basis — a theorem, not a representation failure, and where §10.3's
+  approximate kinds (sketch basis, declared-approximate contract) pick up.
+
+Two architectural consequences:
+
+1. **The plan needs a slot for basis ≠ declared output.** Today one logical model maps to
+   one persisted relation with the model's own schema. This transform makes the physical
+   realisation a *pair* (base table + finalizer view) under one logical name, the public
+   schema served by the view — the logical/physical separation earning its keep, and
+   arguably the first rewrite where the physical form has a genuinely different *shape*,
+   not just different statements.
+2. **Admission runs over the basis, not the authored text.** The equivalence invariant
+   refines to: incremental basis == full-refresh basis, with output equality following by
+   construction through the (deterministic) finalizer. The walk machinery is unchanged;
+   what changes is *which SQL* it walks — the planner-derived basis query, which by the
+   §10.5 generated-denotation rule is generated, never hand-authored, and so inherits the
+   same cross-check discipline as intent nodes.
+
+Two caveats the harness would surface immediately: **float semantics** (`SUM/COUNT`
+division is not bit-identical to the engine's `AVG` under floating point — §5.5's
+equivalence-modulo-ε stops being a luxury and becomes a prerequisite for this rewrite on
+float columns) and **decimal typing** (the finalizer's division type must match `AVG`'s
+inferred type exactly; the type oracle polices this for free).
+
+For the representation debate, basis choice *strengthens* Candidate 3 rather than
+reopening Candidate 2: no neutral algebra is needed — what is needed is the plan/property
+layer **quantifying over a space of SQL-expressible bases** instead of assuming basis =
+authored query. And it converges with intent nodes: a declared windowed aggregation
+(§10.5) would generate its basis directly — the recognition path (this rewrite) and the
+declaration path (intent surfaces) target the same physical shape, a coherence check on
+the whole design.
+
+### 10.8 smelt is already building this kernel — by accident of discipline
+
+The architectural invariants the repo already enforces by CI gate *are* the kernel/kind
+boundary: maintenance-plan purity (plans are pure data derived by pure functions —
+kind-derivable), statement-emission single ownership (emitters are pure — kernel-owned),
+the property-composition walk rule (verdicts come from one shared walk — kernel-owned),
+and the generative conformance gate (the harness — kernel-owned). These exist today for
+testability; they are the same cuts a kind API needs. The research claim worth recording:
+**the kernel should be extracted from the working default implementation, not designed a
+priori.** The spec's own design notes already take this posture for the crate boundary
+("extraction-mechanical", the rejected `smelt-maintenance` crate) — the kind API is the
+same judgment at the next level up.
+
+### 10.9 Risks and sequencing
+
+The risks are §9.4's, amplified: premature API design could distort the default
+implementation, and the kernel surface is much larger than Tier-0 preference hooks. The
+sequencing that manages both: (1) keep hardening the internal boundary the CI gates already
+enforce; (2) implement the next internal features *as if they were kinds* —
+`materialized_view` delegation is already a de-facto second kind, and the SCD2-succession
+classifier is the natural shakedown for a third — extracting the kernel interface each one
+actually needed; (3) only then externalise, contract-typing first (§10.3), Rust-internal
+kinds before Python kinds. Not a near-term build, but a standing lens (§12): every
+invariant kept pure today is kernel surface bought for free.
+
+## 11. Two more product cuts: the property layer and the manipulation layer
 
 Both of smelt's internal layers could be *surfaces*, not just machinery. Neither has an IVM
 analogue, and they compose: the properties are what make the manipulations safe to expose.
 
-### 10.1 Provable properties as a product in their own right
+### 11.1 Provable properties as a product in their own right
 
 Today the property walk (grain, determinism, combiner algebra, bounded reach, partition
 alignment, FDs, event-time monotonicity) exists to feed admission. But the verdicts are
@@ -836,7 +849,7 @@ valuable independent of maintenance:
   registration anyway, so the product cut and the extensibility roadmap share one
   investment.
 
-### 10.2 The manipulation layer — verbs over cells, not models
+### 11.2 The manipulation layer — verbs over cells, not models
 
 The plan's cell decomposition (column group × trigger × input × region) is today an
 internal addressing scheme. Exposed, it becomes an operator algebra IVM structurally cannot
@@ -859,7 +872,7 @@ remains answerable after any sequence of scoped verbs, and equivalence-at-`S` st
 for the `S` actually covered. dbt's `--select` picks *models*; smelt's unit is the *cell* —
 that granularity difference is the whole feature.
 
-### 10.3 Why the two cuts are one story
+### 11.3 Why the two cuts are one story
 
 A manipulation is admissible only where a property licenses it (column-scoped backfill
 needs the column-group factoring proof; input-scoped runs need per-edge dirt; region verbs
@@ -871,7 +884,7 @@ lattice, two tenses. And it sharpens the pitch of §1: IVM sells one verb ("refr
 one contract; smelt sells a typed verb algebra whose safety is proven per cell and whose
 aftermath is graded.
 
-## 11. Ranked candidates (practical value ÷ new machinery), for discussion
+## 12. Ranked candidates (practical value ÷ new machinery), for discussion
 
 **Tier 1 — high value, mostly existing machinery:**
 
@@ -882,7 +895,7 @@ aftermath is graded.
    clamp machinery exists; needs declaration surface + audit probes.
 3. **`smelt verify` as a user-facing oracle (§7)** — the conformance harness productised;
    turns the invariant from a promise into a demo. Cheap, high trust value.
-4. **Plan/property diff in CI (§10.1)** — near-term, high leverage; machinery mostly
+4. **Plan/property diff in CI (§11.1)** — near-term, high leverage; machinery mostly
    exists (`explain` twice + diff); the marketable form of the property cut.
 5. **Work subsumption in the graph layer (§4.3)** — coalesce pending obligations across
    triggers before emitting statements; pure planning, no new contract.
@@ -895,13 +908,13 @@ aftermath is graded.
 7. **Tier-0 Python planner rules (§9.3)** — choose-among-admitted policies; the
    admitted-set + cost hooks exist, and the story ("your niche requirement is a policy
    file, not a vendor ticket") is immediately marketable.
-8. **Cell-selector surface for run/backfill (§10.2)** — the manipulation layer's first
+8. **Cell-selector surface for run/backfill (§11.2)** — the manipulation layer's first
    tranche; wants the ledger grading fully landed first.
 9. **Per-trigger engine placement (§6)** — backfill-on-cheap-engine; needs multi-backend
    maturity but no new theory.
 10. **Equivalence modulo declared indifference (§5.5)** — starts as comparison machinery in
     the conformance harness (ties, float ε), graduates to admission widening.
-11. **Algebraic-aggregate basis decomposition (§2.9)** — `AVG`/`VAR`/`STDDEV` persisted as
+11. **Algebraic-aggregate basis decomposition (§10.7)** — `AVG`/`VAR`/`STDDEV` persisted as
     foldable components + finalizer view; recognition is a registry lookup and the walk
     machinery is unchanged, but it needs the basis-≠-output plan slot (a table + view pair
     under one logical name) and, for float columns, §5.5's ε-comparison first.
@@ -916,29 +929,29 @@ aftermath is graded.
     collect yet.
 15. **Cross-source alignment declarations (§4.2, third bullet)** — real horizon wins;
     subtle audit story.
-16. **Queryable property/contract facts for consumers (§10.1)** — after the property
+16. **Queryable property/contract facts for consumers (§11.1)** — after the property
     vocabulary stabilises.
 17. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
     obligation vocabulary survives internal shakedown (succession, C1, B3).
-18. **Intent-node authoring surfaces (§2.4)** — an SCD2 or windowed-aggregation
+18. **Intent-node authoring surfaces (§10.5)** — an SCD2 or windowed-aggregation
     declaration as the pilot, generated-denotation rule from day one; gated on kernel
     stability, but the pilot doubles as the succession classifier's greenfield twin
     (same registry cells, opposite direction) and would settle the escape-slot design
     early.
-19. **Contract-annotated imperative nodes (§1.1 rung 2)** — Python/opaque models that
+19. **Contract-annotated imperative nodes (§2 rung 2)** — Python/opaque models that
     declare probed facts (schema, identity, clock, determinism, delta posture) and so
     escape total-delta propagation without changing languages; wants the Python-model
     surface and the node-claim audit probes, plus `explain` pricing opacity honestly.
 
-**Standing lens, not a build item:** the kernel/kind factoring (§2) is the long-game
+**Standing lens, not a build item:** the kernel/kind factoring (§10) is the long-game
 architecture — it should influence boundary decisions *now* (every invariant kept pure is
-kernel surface bought for free), with externalisation sequenced per §2.7.
+kernel surface bought for free), with externalisation sequenced per §10.9.
 
 **Anti-goals, restated:** no Z-set runtime, no per-tuple streaming ambitions, no competing
 with engine MVs on continuous freshness — delegate there. The gap catalogue's top-ranked
 mechanisms (A1, C1, B3) remain worth adopting, but as parity, not as the pitch.
 
-## 12. Implications for the spec (if this framing survives discussion)
+## 13. Implications for the spec (if this framing survives discussion)
 
 Not spec edits yet; where they would land:
 
@@ -952,11 +965,11 @@ Not spec edits yet; where they would land:
   subsumption, freshness budgets, and engine placement — none of which are per-model facts.
 - The **conformance harness** grows toward user-facing `smelt verify` and
   comparison-modulo-indifference.
-- **Intent nodes (§2.4)** would eventually touch `models.md`'s declaration law with one
+- **Intent nodes (§10.5)** would eventually touch `models.md`'s declaration law with one
   new rule — *every node has a denotation; a non-SQL node's denotation is generated, never
   hand-authored* — and the first intent surface (SCD2 or windowed aggregation) would be
   its own spec file, written against that rule.
-- The **kernel/kind factoring (§2)** implies no spec change yet, but boundary decisions in
+- The **kernel/kind factoring (§10)** implies no spec change yet, but boundary decisions in
   `architecture.md` (which invariants are CI-gated, where the plan/emission/walk cuts sit)
   should be reviewed with "is this kernel surface?" as an explicit question, and the next
   quasi-kinds (`materialized_view` delegation, the succession classifier) written against
