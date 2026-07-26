@@ -270,6 +270,173 @@ actually needed; (3) only then externalise, contract-typing first (§2.3), Rust-
 kinds before Python kinds. Not a near-term build, but a standing lens (§11): every
 invariant kept pure today is kernel surface bought for free.
 
+### 2.8 The canonical-form question — what is the core representation?
+
+If kinds may own authoring surfaces (§2.4), what do they all map *to*? The instinct is "a
+canonical IR that SQL and every other surface lower into". Before reaching for one, unbundle
+what the smelt CST is currently doing, because "the core representation" is three different
+jobs that happen to live in one artifact today:
+
+1. **The semantic anchor (denotation)** — what defines correctness. Today: the model's SQL,
+   because `full_refresh(inputs ∈ S)` means "run this SQL on a real engine". This is what
+   the conformance oracle executes.
+2. **The analysis substrate** — what the property walk, type inference, and admission run
+   over. Today: the Rowan CST + typed AST.
+3. **The extension/interchange protocol** — what a node must "speak" to be a graph citizen.
+   Today: implicit — the contract vocabulary (clock, identity, delta shapes, edge protocol,
+   obligations) that §2.1 names as kernel-owned.
+
+Four candidate architectures, and what each gives up:
+
+**Candidate 1 — SQL CST stays canonical; everything lowers to it** (the status quo,
+extended per §2.4). Intent surfaces generate SQL denotations; imperative nodes declare
+contracts; the walk runs over SQL. Costs: (a) SQL cannot *denote* everything — recursive
+graph algorithms, ML scoring, genuinely stateful logic have no clean SQL denotation, so
+gradient rung-2 nodes are permanently second-class; (b) cross-model optimisation (fusion,
+shared delta scans) happens as SQL-to-SQL rewriting — workable but clumsy; (c) dialect
+coupling — "SQL" is really "the dialect the parser and oracle speak", with multi-backend
+fidelity carried by the differential gates, not the representation. The raising-fragility
+cost is real but §2.4's cross-check (kind asserts axiomatically, walk re-derives from
+generated SQL) turns it into a test harness.
+
+**Candidate 2 — a neutral logical algebra as the canonical core** (Substrait / Calcite
+RelNode / DBSP-circuit shaped). SQL parses *into* the algebra; intent nodes lower *into*
+it; backends print *from* it; properties are theorems about algebra nodes. The "obviously
+right" compiler answer, and the one to resist, because of what it forfeits:
+
+- **The free oracle.** The correctness economics (§9.1: correctness purchased by tests
+  against DuckDB, not runtime engineering) depend on the canonical form being *directly
+  executable by an engine smelt doesn't maintain*. A neutral algebra has no oracle unless
+  you build a reference interpreter (DBSP did — that is a runtime, a named anti-goal) or
+  round-trip through SQL anyway — at which point SQL is still the semantic anchor and the
+  algebra is just an internal data structure.
+- **Lossless source mapping.** Rowan's whole point. Diagnostics, LSP hover, goto-def, and
+  the refusal-names-the-line experience all depend on the analysis substrate being the
+  user's text. Algebra nodes have provenance annotations at best; every IR-based system
+  fights this forever.
+- **Semantic fidelity.** Substrait's long lesson: NULL semantics, collation, three-valued
+  logic, and dialect function behaviour are brutally hard to pin in a neutral IR — you
+  re-litigate exactly the corner cases the differential gates currently settle empirically.
+- **Transparency.** Today `explain` shows SQL the user can read and run. Printed-from-IR
+  SQL moves trust into the printer.
+
+**Candidate 3 — the contract vocabulary is the canonical form; bodies are pluggable.**
+Don't canonicalise bodies at all. The stable core is the kernel vocabulary of §2.1:
+property verdicts, obligations, world-facts, the edge protocol, cell addressing, ledger
+grades. A node kind must provide two things: **a denotation** (generated SQL, per the §2.4
+rule) and **property claims** in the shared vocabulary — proved by the walk for SQL bodies,
+asserted-and-cross-checked for intent bodies, declared-and-probed for opaque bodies. The
+graph layer, planner, and ledger only ever see the vocabulary. This is the deepest line of
+§2.4 promoted to the design decision: *the graph layer never asks how a node was written;
+it asks what it dirties and what it needs* — the canonical form is the answer to those
+questions, not the body. Costs: body-level cross-surface optimisation needs a shared body
+form first (the generated denotation supplies SQL for exactly that whenever wanted); each
+surface carries its own lowering machinery; and the vocabulary must be versioned and
+stable — the MLIR lesson of §2.6, with the vocabulary playing the verifier's role.
+
+**Candidate 4 — a multi-level tower (MLIR-proper).** Intent dialects → logical algebra →
+per-dialect SQL, progressive lowering, properties attached at the level where they are
+axiomatic. Theoretically complete and wrong near-term: Candidate 2's costs plus Candidate
+3's, and MLIR only worked because LLVM IR beneath it was already twenty years stable.
+smelt does not yet have the stable bottom.
+
+**The position this note takes:** separate the anchor from the API, and stabilise them in
+the right order.
+
+1. **SQL stays the denotation anchor** — not because SQL is the ideal semantic form, but
+   because it is the only representation with a *free, external, adversarially-maintained
+   oracle* (real engines) and a free install base. Every alternative anchor makes smelt the
+   arbiter of its own correctness. The §2.4 rule generalises from an intent-node rule to
+   *the* architectural rule: **SQL is the denotation language of the system; nothing else
+   is ever the correctness reference.**
+2. **The contract vocabulary is the canonical form and the stable extension API**
+   (Candidate 3). Investment goes into naming, typing, and versioning the vocabulary. This
+   is what a dataframe frontend, a YAML SCD2 surface, a dbt import, or a Python node all
+   map to — and it is far smaller and more stabilisable than any body IR. It also subsumes
+   the tier story (§9.3): registering a pattern and registering a kind are both "speak the
+   vocabulary, carry obligations".
+3. **A logical algebra, if it ever comes, is a private planner IR** — introduced only when
+   a concrete need forces it (cross-model fusion at scale, a non-SQL backend, delta-rule
+   derivation smelt wants to own), never exposed as the extension API, never the
+   correctness anchor. Internal IRs are cheap to change; canonical IRs are forever.
+
+A two-question test for any proposed representation: **what is its oracle, and what is its
+diff?** SQL has an engine oracle and (via the walk) a property diff. A vocabulary claim has
+a probe oracle and a trivially diffable form (§10.1's refactor-safety product). A neutral
+algebra has neither without building them. This test explains why the CST has felt right so
+far and where its actual boundary is: bodies that can't be SQL — and the vocabulary layer,
+not a replacement IR, is how those get in.
+
+Named risks of the vocabulary-canonical position: **vocabulary versioning** (a kind built
+against vocabulary v1 meeting a kernel at v2 — MLIR handles this with dialect version
+negotiation, painfully) and **denotation gaps** (a node whose semantics genuinely cannot be
+generated as SQL — e.g. ML scoring — caps at gradient rung 2, declared-and-probed, with
+`explain` pricing the opacity per §1.1).
+
+### 2.9 Basis choice — properties attach to the persisted state, not the query
+
+A test case that sharpens §2.8 and exposes a fourth thing hiding inside the CST's roles:
+**the choice of persisted basis.**
+
+`AVG(x)` is *algebraic* in the aggregation-literature sense: not foldable itself, but a
+finalizer over foldable components (`SUM(x)`, `COUNT(x)`). If a model persists `avg_price`,
+the walk correctly finds no combiner algebra — two averages cannot be merged without the
+weights. If it persists `sum_price, count_price` and a view computes the division at read
+time, every persisted column folds and the model becomes maintainable.
+
+The load-bearing observation: **the denotation didn't change — the persisted state did.**
+The maintenance properties smelt proves were never really properties of "the model's SQL";
+they are properties of *the state chosen for persistence*, with the authored query fixing
+only what the output must denote. Today the two coincide because smelt persists exactly
+what the query selects. The average example shows a degree of freedom in between: pick a
+*basis* whose properties are good, plus a finalizer view bridging back to the declared
+schema.
+
+This is achievable as a SQL-only transform — which is itself evidence for §2.8's
+SQL-anchor position. The rewrite is source-to-source: `AVG(x)` → persist
+`SUM(x), COUNT(x)`, expose `sum_x / count_x AS avg_x` through a finalizer view. Basis and
+finalizer are both SQL; the walk proves foldability of the basis; the conformance oracle
+still runs. Recognising the opportunity is not fragile raising — the function registry
+already knows `AVG` is algebraic; it is a table lookup, not pattern archaeology. The same
+shape covers `VAR`/`STDDEV` (sum, sum-of-squares, count) and generalises:
+
+- **Finer-grain basis**: persist daily grain, finalize to monthly in the view — the finer
+  grain folds where the coarser one had lost alignment.
+- **Pre-join basis**: persist the two sides' partial aggregates, finalize with the join —
+  F-IVM's whole trick; §8's "helper state as visible models" is exactly this.
+- **Where it runs out**: holistic aggregates (`MEDIAN`, exact percentiles) have *no*
+  finite foldable basis — a theorem, not a representation failure, and where §2.3's
+  approximate kinds (sketch basis, declared-approximate contract) pick up.
+
+Two architectural consequences:
+
+1. **The plan needs a slot for basis ≠ declared output.** Today one logical model maps to
+   one persisted relation with the model's own schema. This transform makes the physical
+   realisation a *pair* (base table + finalizer view) under one logical name, the public
+   schema served by the view — the logical/physical separation earning its keep, and
+   arguably the first rewrite where the physical form has a genuinely different *shape*,
+   not just different statements.
+2. **Admission runs over the basis, not the authored text.** The equivalence invariant
+   refines to: incremental basis == full-refresh basis, with output equality following by
+   construction through the (deterministic) finalizer. The walk machinery is unchanged;
+   what changes is *which SQL* it walks — the planner-derived basis query, which by the
+   §2.4 generated-denotation rule is generated, never hand-authored, and so inherits the
+   same cross-check discipline as intent nodes.
+
+Two caveats the harness would surface immediately: **float semantics** (`SUM/COUNT`
+division is not bit-identical to the engine's `AVG` under floating point — §5.5's
+equivalence-modulo-ε stops being a luxury and becomes a prerequisite for this rewrite on
+float columns) and **decimal typing** (the finalizer's division type must match `AVG`'s
+inferred type exactly; the type oracle polices this for free).
+
+For the representation debate, basis choice *strengthens* Candidate 3 rather than
+reopening Candidate 2: no neutral algebra is needed — what is needed is the plan/property
+layer **quantifying over a space of SQL-expressible bases** instead of assuming basis =
+authored query. And it converges with intent nodes: a declared windowed aggregation (§2.4)
+would generate its basis directly — the recognition path (this rewrite) and the
+declaration path (intent surfaces) target the same physical shape, a coherence check on
+the whole design.
+
 ## 3. What the fixed IVM contract costs (the clauses users pay for)
 
 Enumerated so §5's relaxations have something concrete to relax:
@@ -734,27 +901,31 @@ aftermath is graded.
    maturity but no new theory.
 10. **Equivalence modulo declared indifference (§5.5)** — starts as comparison machinery in
     the conformance harness (ties, float ε), graduates to admission widening.
+11. **Algebraic-aggregate basis decomposition (§2.9)** — `AVG`/`VAR`/`STDDEV` persisted as
+    foldable components + finalizer view; recognition is a registry lookup and the walk
+    machinery is unchanged, but it needs the basis-≠-output plan slot (a table + view pair
+    under one logical name) and, for float columns, §5.5's ε-comparison first.
 
 **Tier 3 — valuable but contract-risky, demand-gated, or stability-gated:**
 
-11. **Reconciliation-point equivalence (§5.4)** — biggest expressiveness win, biggest risk
+12. **Reconciliation-point equivalence (§5.4)** — biggest expressiveness win, biggest risk
     of blessing silent approximation; only with grading fully user-visible.
-12. **External Tier-2 declaration surface (§9.3)** — gated on the `sources.md`
+13. **External Tier-2 declaration surface (§9.3)** — gated on the `sources.md`
     declared-relationship family (§4.2) landing first.
-13. **Demand-driven maintenance (§4.4)** — wants consumption metadata smelt doesn't
+14. **Demand-driven maintenance (§4.4)** — wants consumption metadata smelt doesn't
     collect yet.
-14. **Cross-source alignment declarations (§4.2, third bullet)** — real horizon wins;
+15. **Cross-source alignment declarations (§4.2, third bullet)** — real horizon wins;
     subtle audit story.
-15. **Queryable property/contract facts for consumers (§10.1)** — after the property
+16. **Queryable property/contract facts for consumers (§10.1)** — after the property
     vocabulary stabilises.
-16. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
+17. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
     obligation vocabulary survives internal shakedown (succession, C1, B3).
-17. **Intent-node authoring surfaces (§2.4)** — an SCD2 or windowed-aggregation
+18. **Intent-node authoring surfaces (§2.4)** — an SCD2 or windowed-aggregation
     declaration as the pilot, generated-denotation rule from day one; gated on kernel
     stability, but the pilot doubles as the succession classifier's greenfield twin
     (same registry cells, opposite direction) and would settle the escape-slot design
     early.
-18. **Contract-annotated imperative nodes (§1.1 rung 2)** — Python/opaque models that
+19. **Contract-annotated imperative nodes (§1.1 rung 2)** — Python/opaque models that
     declare probed facts (schema, identity, clock, determinism, delta posture) and so
     escape total-delta propagation without changing languages; wants the Python-model
     surface and the node-claim audit probes, plus `explain` pricing opacity honestly.
