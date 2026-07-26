@@ -483,6 +483,77 @@ External Tier-2 declaration surface** — gated on the sources.md declaration fa
 landing first. **(13) External Tier-1 pattern registration** — deliberately last, after
 internal shakedown.
 
+## 11. Two more product cuts: the property layer and the manipulation layer
+
+Both of smelt's internal layers could be *surfaces*, not just machinery. Neither has an IVM
+analogue, and they compose: the properties are what make the manipulations safe to expose.
+
+### 11.1 Provable properties as a product in their own right
+
+Today the property walk (grain, determinism, combiner algebra, bounded reach, partition
+alignment, FDs, event-time monotonicity) exists to feed admission. But the verdicts are
+valuable independent of maintenance:
+
+- **Queryable contract facts.** "What can be relied on about this model's output?" —
+  key-grain proof, determinism, partition alignment — answered from the SQL, not from a
+  hand-maintained YAML contract that drifts (the derive-don't-declare posture applied to
+  data contracts). Consumers, tests, and BI layers can read them.
+- **Refactor safety as a diff.** The highest-leverage form: diff the derived
+  properties/plan between two versions of a model. "This change loses the grain proof /
+  flips column group G's sensitivity to `customers` / widens the horizon from 2d to ∞ —
+  and will therefore trigger a backfill of G" *before* anything runs. This is a code-review
+  artifact no engine or dbt can produce, and it operationalises the spec's declaration law
+  (silent contract changes become visible plan diffs). CI-able: fail the PR if a declared
+  property is lost.
+- **Extensible properties.** The tier model (§10.3) extends here: org-specific properties
+  ("this column is PII-derived", "this output is idempotent-consumable") as declared facts
+  with probes (Tier 2), and eventually custom leaf classifiers over the stable walk
+  vocabulary (Tier 1-shaped). The obligations of registered patterns are already *stated
+  in* property vocabulary — exposing the vocabulary is a precondition for §10's external
+  registration anyway, so the product cut and the extensibility roadmap share one
+  investment.
+
+### 11.2 The manipulation layer — verbs over cells, not models
+
+The plan's cell decomposition (column group × trigger × input × region) is today an
+internal addressing scheme. Exposed, it becomes an operator algebra IVM structurally cannot
+offer, because engines have neither the decomposition nor a coverage ledger to grade the
+result:
+
+- **Input-scoped runs**: "update this model from `orders` only" — run only the cells whose
+  changed-input is `orders`; the dimension-mutation cells stay pending and graded.
+- **Column-scoped backfills**: "backfill just the new enrichment column" — the
+  definition-change trigger scoped to one column group, no touch on sibling groups.
+- **Region-scoped verbs**: backfill/replay/verify a partition range; freeze/thaw a region.
+- **Trigger-scoped policy**: run creation cells hourly, hold mutation cells for the nightly
+  window (the §4.2 deferral, expressed as a verb rather than a declaration).
+- **Composed selectors**: `--cells 'input=customers,columns=tier_*,window=2026-Q1'` — the
+  cell tuple is the selector grammar.
+
+Soundness is the ledger's job and is already designed: every partial manipulation leaves
+per-region/per-group coverage facts, so "what contract does the table meet right now"
+remains answerable after any sequence of scoped verbs, and equivalence-at-`S` still holds
+for the `S` actually covered. dbt's `--select` picks *models*; smelt's unit is the *cell* —
+that granularity difference is the whole feature.
+
+### 11.3 Why the two cuts are one story
+
+A manipulation is admissible only where a property licenses it (column-scoped backfill
+needs the column-group factoring proof; input-scoped runs need per-edge dirt; region verbs
+need the clock). So the property layer is the *type system* of the manipulation layer:
+verbs are total over cells the proofs admit and refused elsewhere, with the refusal naming
+the missing property. This also closes the loop with §4: a relaxation declaration is the
+*standing* form (policy) of what a manipulation verb does *once* (operation) — same
+lattice, two tenses. And it sharpens the pitch of §1: IVM sells one verb ("refresh") under
+one contract; smelt sells a typed verb algebra whose safety is proven per cell and whose
+aftermath is graded.
+
+Ranked-candidate amendments to §8: **(14) plan/property diff in CI** — near-term, high
+leverage, machinery mostly exists (`explain` twice + diff); the marketable form of the
+property cut. **(15) cell-selector surface for run/backfill** — the manipulation layer's
+first tranche; wants the ledger grading fully landed first. **(16) queryable property/
+contract facts for consumers** — after the vocabulary stabilises.
+
 ## References
 
 - `docs/specs/incremental_models.md` — the invariant, plan, admission, ledger, graph layer.
