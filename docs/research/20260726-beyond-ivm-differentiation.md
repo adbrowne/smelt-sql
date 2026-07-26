@@ -1,0 +1,380 @@
+# Beyond IVM — what smelt can offer that a native IVM engine structurally cannot
+
+**Date**: 2026-07-26
+**Status**: brainstorm for discussion — no decisions. Companion to
+`docs/research/20260724-ivm-pattern-gap-catalogue.md`, which surveyed *mechanisms* the field
+has and smelt's registry doesn't. This note asks the opposite question: where is smelt's
+approach different in kind, such that "just improve Enzyme/pg_ivm/Materialize instead" would
+not get you there?
+
+## 1. Framing: the contract is the product, not the delta rules
+
+Start from the honest premise: smelt will not out-engineer the IVM engine authors at delta
+derivation. DBSP already unifies the theory; Enzyme, Materialize, Feldera, and Snowflake
+dynamic tables are staffed teams shipping exactly that. If smelt's pitch were "a better
+incrementalizer", the right move would be to contribute to one of them.
+
+But every native IVM engine sells **one fixed contract**:
+
+> the view equals the query over the *current* base tables, maintained continuously
+> (or within a target lag), for the query classes we support, by mechanisms we choose,
+> inside our engine.
+
+Everything expensive about IVM is the price of that contract's strongest clauses:
+retraction-readiness forever (any base row might be deleted at any time), snapshot
+consistency across all inputs, maintenance coupled to ingestion, mechanism opacity, and
+engine lock-in. A user who doesn't need one of those clauses still pays for it — the engine
+has no vocabulary for *not wanting* it.
+
+smelt's invariant is deliberately weaker and deliberately explicit:
+
+```
+incremental_state(S) == full_refresh(inputs ∈ S)
+```
+
+Equivalence **up to the state we have fed it** — with `S` a first-class, queryable,
+per-input fact. That is not a worse version of the IVM contract; it is a different point in
+a **contract lattice**, and the thesis of this note is that smelt's differentiation is the
+lattice itself:
+
+- the user **declares knowledge** the engine could never assume (§3);
+- the user **relaxes clauses** they don't need, and smelt proves the relaxed contract is
+  still honoured (§4);
+- the user **keeps control** of when/where/how maintenance runs (§5);
+- everything derived is **inspectable and verifiable** (§6);
+- and smelt plans over the **whole project graph and multiple engines**, not one view in
+  one engine (§7).
+
+An IVM engine is a black box with one guarantee. smelt is a **validator over a space of
+guarantees**: you pick the point, smelt proves your SQL and declarations support it, refuses
+loudly when they don't, and tells you what each relaxation bought. On this framing, the gap
+catalogue's entries (A1 per-group recompute, C1 diff-then-patch, …) are *table stakes* —
+mechanism parity worth having — while the sections below are the reason smelt exists.
+
+## 2. What the fixed IVM contract costs (the clauses users pay for)
+
+Enumerated so §4's relaxations have something concrete to relax:
+
+1. **Retraction-readiness.** The engine must be able to un-see any row forever. This is why
+   non-invertible aggregates need per-group recompute or domain multisets, why DISTINCT
+   needs derivation counts, why state can't be frozen or dropped. Most warehouse sources are
+   append-only or bounded-late — the readiness is usually purchased and never used.
+2. **Point-in-time cross-input consistency.** The view reflects one snapshot across all base
+   tables. Requires multiversioning/coordination. Analytics consumers almost never need it —
+   they live with "orders through Tuesday, customers through Monday" every day.
+3. **Coupled maintenance.** Ingestion triggers (or target-lag schedules) maintenance; the
+   user cannot say "land the data now, repair the expensive join column this weekend".
+4. **Query-class cliffs.** An unsupported operator anywhere in the view usually means the
+   *whole view* falls off the incremental path (or is rejected). The contract is
+   all-or-nothing per view.
+5. **Mechanism opacity.** The engine decides fold-vs-recompute; you cannot pin, measure,
+   compare, or even reliably see the choice. (Enzyme's cost model chooses per refresh;
+   Snowflake documents thresholds; neither is user-steerable.)
+6. **Engine lock-in.** The view, its state, and its maintenance live and die inside one
+   engine. State is opaque operator state; disaster recovery, migration, and "run the
+   backfill somewhere cheaper" are not expressible.
+7. **Uniform freshness.** One view, one lag. No "these columns hourly, that enrichment
+   column daily".
+
+Each clause maps to at least one smelt differentiation below.
+
+## 3. Knowledge asymmetry — things smelt can know that the engine can't assume
+
+An engine must be sound for arbitrary DML from an adversarial workload. smelt sits where
+declarations, orchestration, and the whole project are visible — it can *trust and verify*
+what an engine must *defend against*.
+
+### 3.1 Declared source world-facts (already core; underweighted as differentiation)
+
+`append_only`, max lateness, `key_recurrence`, settle bounds. Each declaration deletes an
+entire branch of the engine's defensive machinery: append-only deletes retraction handling;
+bounded lateness turns "retain everything forever" into a derived finite lookback; key
+recurrence bounds dedup state. The spec has all of this — what's worth saying out loud is
+that this is not a convenience feature, it is the *primary cost lever*, and no in-engine IVM
+can offer it because the engine cannot afford to trust a user claim it can't police.
+
+smelt can, because it can **police cheaply**: emit low-cost audit probes (watermark
+monotonicity, spot-check append-only via count/max-rowid deltas, sampled recurrence-window
+checks) and fail loudly on violation. Trust-but-verify at a sliver of the cost of
+readiness-for-anything. This "declared fact + cheap validator + fail-loud" triple is a
+reusable pattern every entry below can follow.
+
+### 3.2 Declared intra-source relationships (the user's date/timestamp example)
+
+Materialized columns often have a semantic relationship the schema doesn't state:
+`event_date = CAST(event_ts AS DATE)` (or a timezone-shifted variant), `region` functionally
+determined by `country`, `order_id` monotone in `order_ts`, partition column derived from a
+payload field. Candidate declarations:
+
+- **Column FDs** (`event_date ← event_ts` via a named expression): lets the planner rewrite
+  a predicate on one column into a partition-pruning predicate on the other — constraining
+  scans and windows exactly as the user intuited. Also licenses column-group factoring
+  (a change to `event_ts` implies the derived column's change; no separate sensitivity).
+- **Cross-column monotonicity** (`order_id` non-decreasing in `event_ts`): turns a key-range
+  probe into a time-range clamp and vice versa; bounds semijoin scans in mutation cells.
+- **Cross-source alignment** (`order_events.event_ts >= orders.order_ts`, bounded skew):
+  bounds the join lookback between two feeds — today's horizon derivation must assume the
+  worst; a declared skew bound narrows it.
+- **Partition-expression truth** (`partition_column = f(event_time_column)` for a declared
+  `f`): today the spec checks alignment structurally where it can; a declared `f` extends
+  admission to sources smelt didn't create.
+
+All are the same triple: declaration → derived clamp/proof → cheap audit probe + loud
+failure. Engines have fragments (Snowflake clustering keys, Oracle dimension/hierarchy
+declarations for query rewrite — the closest prior art and worth studying), but none feed an
+IVM admission decision with user-declared semantic FDs.
+
+### 3.3 Orchestration knowledge — smelt knows about *other runs*
+
+The engine sees one refresh at a time. smelt sees the schedule and the run plan:
+
+- **Deliberate non-repair**: "this run repairs partition P only; the orchestrator will run
+  the other partitions" — the user's example. In smelt this is *already sound* because
+  equivalence is per-`S` and the ledger records what's covered; the differentiation is that
+  it's expressible at all.
+- **Work subsumption**: a scheduled backfill of March subsumes the pending mutation repairs
+  inside March — skip them. A pending definition-change backfill subsumes a pending
+  dimension repair for the overlapping column group. IVM has no notion of "pending work that
+  another job will do"; smelt's graph layer can coalesce obligations across triggers before
+  emitting statements.
+- **Cadence-fit techniques**: IVM engines optimise for per-transaction or minutes-lag
+  updates; smelt knows the model runs daily and can pick techniques whose fixed costs
+  amortise at batch cadence (bigger regions, recompute-over-fold pivots at much higher
+  delta fractions).
+- **Business-calendar horizons**: "books close on the 5th; prior months are immutable after
+  close" is orchestration-level truth. Declared as a freeze horizon (§4.3) it deletes
+  retraction-readiness for almost all of the table.
+
+### 3.4 Consumption knowledge — smelt knows who reads the output
+
+The project graph names every downstream consumer (and, eventually, BI/query logs name the
+external ones):
+
+- **Demand-driven maintenance**: if no consumer reads a column group or a region, its
+  repairs can be deferred or elided (with the ledger grading the region stale-by-choice).
+  An engine must keep the whole view correct because it can't see readers.
+- **Per-consumer freshness**: propagate a delta eagerly along the edge feeding the SLA-bound
+  mart, lazily along the edge feeding the weekly report. IVM's target lag is per-view;
+  smelt's can be per-edge.
+
+## 4. The relaxation lattice — guarantees the user can decline (the likely centre of value)
+
+The user's hunch, made systematic. Each relaxation names: the clause relaxed, what it buys,
+and how smelt keeps the *remaining* contract honest. The recurring design shape: **the
+invariant is never silently weakened — the user declares the weaker contract, smelt
+validates the declaration, and the ledger/explain surface shows exactly which contract each
+region currently satisfies.**
+
+### 4.1 Input-order freedom (relaxes clause 2/3 — already smelt's foundation)
+
+Because equivalence is over the *set* `S`, the user may: backfill history without ingesting
+the latest data; process the consumer-visible current partition first and catch up history
+later; order inputs by cost or priority. An IVM refresh takes whatever has arrived, all at
+once. This is already the spec's core; worth restating as the enabling relaxation from which
+the rest follow.
+
+### 4.2 Deferral — decouple landing from repairing (relaxes clause 3)
+
+Let the fact delta fold in now, and *defer* the expensive dimension-fanout repair to a
+declared window ("weekends", "next full run", "when delta fraction > x%"). The ledger
+already grades regions; deferral is just an admitted state ("pending mutation repair for
+column group G") with a scheduling policy attached. Buys: predictable daily runs, expensive
+repairs batched into cheap compute windows. Napa's Queryable Timestamp (gap catalogue D1) is
+the consistency-preserving form of the same idea — deferral with an explicit "consistent
+through" frontier consumers can see.
+
+### 4.3 Frozen horizons — decline retraction-readiness beyond a boundary (relaxes clause 1)
+
+Declare: output older than horizon H is **frozen**. Consequences smelt can derive: state
+needed only for retraction (counts, wide lookbacks) is dropped for the frozen region; late
+or mutating input targeting a frozen region is **refused with a diagnostic** (or routed to
+an explicit operator-approved thaw/backfill) instead of silently costing forever-readiness.
+This converts the engine's open-ended liability into a bounded one, and it matches how
+warehouses actually operate (books close; reprocessing past the close is an *incident*, not
+a Tuesday). The equivalence invariant survives in refined form: equivalence over `S`
+restricted to inputs that respect the freeze, with violations loud.
+
+### 4.4 Reconciliation-point equivalence — monotone between true-ups (relaxes clauses 1+2)
+
+Declare a column group **eventually-exact**: maintained by a cheap monotone
+under-approximation (append-only fold, retractions ignored) between periodic reconciliation
+runs that restore exact equivalence, with the ledger grading intermediate states
+"approximate since T, reconciles at R". The contract becomes: *exact at reconciliation
+points, monotone progress between*. Nothing in an IVM engine can express "I accept
+approximate counts during the day, true them up nightly" — yet that is a very common real
+posture (and today users implement it by hand, invisibly and unverifiably). Risky
+territory — approximation must never be silent — but the grading machinery is exactly what
+makes it honest.
+
+### 4.5 Equivalence modulo declared indifference (relaxes exactness where the user doesn't care)
+
+Generalise the invariant's `==` to a declared equivalence relation: row order (already
+implicit), **tie indifference** (any max-by row on tied ordering keys is acceptable —
+today's order-monotone overwrite handles ties by proof; a declared "ties are don't-care"
+admits more), floating-point tolerance for re-associated sums (declare ε; unlocks fold
+techniques over floats that exact equality refuses). Each widens admission at a point the
+user certifies they don't observe. The conformance harness already needs comparison
+machinery; "compare modulo declared indifference" is a natural extension.
+
+### 4.6 Per-column-group freshness contracts (relaxes clause 7)
+
+The composed corner already gives different cells different techniques; the natural next
+step is different cells having different *declared freshness*: transactional columns tight,
+enrichment columns loose. One table, several visible freshness contracts, each cell
+scheduled to its own budget. `explain` prints it; consumers can query it (a per-column-group
+"fresh through" fact — the per-column settle bound generalised to an SLA).
+
+### 4.7 Declared retraction policy per column group (relaxes clause 1, scoped)
+
+Paimon's per-field `ignore-retract` shows the demand: some columns should absorb
+retractions exactly (invertible fold), some should refuse them (frozen), some should ignore
+them by declared policy (a "lifetime max" that deliberately never un-sees). Today smelt has
+exact-or-refuse; a declared per-group policy with the risk stated in `explain` covers the
+middle honestly.
+
+### What makes this a lattice rather than a grab-bag
+
+Every relaxation is (a) *declared*, never inferred; (b) *validated* — smelt proves the SQL
+and declarations support the relaxed contract, refusing otherwise; (c) *graded* — the
+ledger/explain surface states which contract each region/column group currently meets; and
+(d) *composable* — freeze the far past (4.3), reconcile-point the current day (4.4), keep
+exact equivalence in between. The IVM engine's fixed contract is the lattice's top element;
+smelt sells the whole lattice with proofs at every point. This is also the honest answer to
+"why not just improve Enzyme": an engine could add any one of these as a flag, but the
+validator-over-declared-contracts *posture* — refuse-don't-approximate, grade-don't-hide —
+is smelt's architecture, not a feature to bolt on.
+
+## 5. Control and flexibility (relaxes clauses 3/5/6)
+
+Mostly already designed; listed to complete the picture and mark the genuinely new bits.
+
+- **Technique choice is user-visible and pinnable** (`prefer`/`technique`, admission-checked)
+  and **measurable** (`smelt bakeoff` — real execution, human-reviewed pins). Enzyme chooses
+  from history; smelt lets the operator measure and pin. Already spec'd; a real
+  differentiator worth marketing as such.
+- **Per-run adaptive selection** (gap catalogue D3) composes with pins: static admission
+  fixes the *sound* set; per-run cost picks within it.
+- **Operational verbs**: backfill a region without ingesting new data; replay a region;
+  rebuild one column group; dry-run a plan. IVM offers "refresh". These fall out of per-cell
+  addressing + the ledger; the differentiation is having *verbs* at all.
+- **Heterogeneous engine placement** (the user's Athena-vs-Photon example): a backfill
+  tolerates latency → cheapest scan pricing; the daily run wants latency → premium engine.
+  Because state is ordinary tables and exchange is Parquet, the *same cell* can run on
+  different engines for different triggers. Also: spot/preemptible tolerance falls out of
+  idempotent, ledger-recorded runs — a killed backfill re-runs; killed streaming operator
+  state does not. New surface needed: per-trigger (not just per-model) engine placement in
+  the plan.
+- **No query-class cliffs** (relaxes clause 4): admission is per *cell*, so an unmaintainable
+  corner degrades that cell to recompute while sibling cells still fold — and the whole
+  model can always fall back to full refresh with identical semantics, because the logical
+  SQL never contained maintenance logic. In-engine IVM rejects the view; smelt's floor is
+  "correct but slower", refusal reserved for contract violations.
+- **Portability**: the maintenance plan is derived from SQL + declarations, so it survives a
+  backend migration; an IVM view's incremental behaviour is engine property. (dbt has weak
+  portability of *declared* strategies; smelt ports the *derivation*.)
+
+## 6. Transparency and verifiability
+
+The user suspects this is "just the smarter category" — partly, but one piece is structural:
+
+- **The contract is user-checkable.** Because equivalence is against the model's own SQL
+  over a recorded `S`, a user can *run the oracle*: `smelt verify <model>` could full-refresh
+  into scratch and diff against maintained state (sampled or region-scoped), exactly what
+  the CI conformance gate does internally. No IVM engine invites you to audit it — and none
+  *could* offer region-scoped audit, lacking the ledger's notion of covered inputs.
+- **Reproducibility**: `S` is recorded, so "rebuild the table as it stood when it had
+  processed exactly S" is expressible — debugging and audit gold that opaque operator state
+  cannot offer.
+- **Refusal with reasons + declared-constraint validation**: admission verdicts, clamp
+  derivations, and grading are printable (`explain`) and assertable (grain assertions;
+  future: declared FDs, freshes, freezes). Transparency is also the *enabler* of §4: you can
+  only sell relaxed contracts if you can show which contract currently holds where.
+- **Data-quality gating at the boundary**: because maintenance is orchestrated, a delta that
+  fails a declared expectation can be quarantined *before* it enters `S` — the region stays
+  graded "held", consumers see the old exact state. An engine applies whatever committed.
+
+## 7. Whole-project compilation — the view is not the unit
+
+IVM maintains a view (or a view DAG inside one engine). smelt compiles a project:
+
+- **Shared delta scans / fused repairs**: two consumers of one source's delta share the
+  scan; adjacent cells' statements fuse where the planner proves it. Per-query optimisers
+  can't see across views.
+- **Planner-inserted helper state as visible models**: F-IVM/DBToaster view trees (gap
+  catalogue A4) land in smelt as *materialized helper models* — inspectable, costed,
+  droppable — not hidden operator state.
+- **Bounded deltas across full-refresh boundaries** (gap catalogue D5/C1): an upstream full
+  rebuild with row identity emits a diffed, bounded downstream delta; the graph layer owns
+  this, and no single-engine view stack has a graph layer that spans materialization
+  strategies (views, incremental, full-refresh, external engine MVs) uniformly.
+- **Environments**: dev/staging state layered against prod (virtual environments research)
+  composes with the ledger — "what would this definition change repair?" answered by plan
+  diff before any compute is spent.
+- **Delegation, not competition**: where an engine MV genuinely wins (Feldera-class,
+  Snowflake DTs for simple shapes), `refresh: materialized_view` delegates — smelt's graph
+  layer still owns propagation around it. Beating engines at their own game is an anti-goal;
+  surrounding them is the game.
+
+## 8. Ranked candidates (practical value ÷ new machinery), for discussion
+
+**Tier 1 — high value, mostly existing machinery:**
+
+1. **Frozen horizons (4.3)** — one declaration; deletes the biggest silent liability;
+   ledger + refusal machinery exists. Also the cleanest *story* of the lattice thesis.
+2. **Declared intra-source FDs / partition-expression truth (3.2, first two bullets)** —
+   directly serves scan/window constraint (the user's date/timestamp case); admission +
+   clamp machinery exists; needs declaration surface + audit probes.
+3. **`smelt verify` as a user-facing oracle (6)** — the conformance harness productised;
+   turns the invariant from a promise into a demo. Cheap, high trust value.
+4. **Work subsumption in the graph layer (3.3)** — coalesce pending obligations across
+   triggers before emitting statements; pure planning, no new contract.
+
+**Tier 2 — high value, real new surface:**
+
+5. **Deferral windows / per-column-group freshness (4.2, 4.6)** — the scheduling policy
+   axis; needs a declaration grammar and graph-layer scheduling, but the grading machinery
+   is the hard part and exists.
+6. **Per-trigger engine placement (5)** — backfill-on-cheap-engine; needs multi-backend
+   maturity but no new theory.
+7. **Equivalence modulo declared indifference (4.5)** — starts as comparison machinery in
+   the conformance harness (ties, float ε), graduates to admission widening.
+
+**Tier 3 — valuable but contract-risky or demand-gated:**
+
+8. **Reconciliation-point equivalence (4.4)** — biggest expressiveness win, biggest risk of
+   blessing silent approximation; only with grading fully user-visible.
+9. **Demand-driven maintenance (3.4)** — wants consumption metadata smelt doesn't collect
+   yet.
+10. **Cross-source alignment declarations (3.2, third bullet)** — real horizon wins;
+    subtle audit story.
+
+**Anti-goals, restated:** no Z-set runtime, no per-tuple streaming ambitions, no competing
+with engine MVs on continuous freshness — delegate there. The gap catalogue's Tier-1
+mechanisms (A1, C1, B3) remain worth adopting, but as parity, not as the pitch.
+
+## 9. Implications for the spec (if this framing survives discussion)
+
+Not spec edits yet; where they would land:
+
+- The **Overview's "one guarantee"** stays the top of the lattice, but the spec could name
+  the lattice: declared relaxations as first-class, each with validation + grading. Today's
+  spec already contains proto-relaxations (order freedom, per-cell freshness as the "only
+  degree of freedom", deferral implicit in the ledger) — the reframe makes them one family.
+- **`sources.md`** grows the declared-relationship family (3.2) alongside the existing
+  world-facts, with the declaration → derived clamp → audit probe triple as its template.
+- A future **`maintenance_scheduling.md`** (or graph-layer section growth) owns deferral,
+  subsumption, freshness budgets, and engine placement — none of which are per-model facts.
+- The **conformance harness** grows toward user-facing `smelt verify` and
+  comparison-modulo-indifference.
+
+## References
+
+- `docs/specs/incremental_models.md` — the invariant, plan, admission, ledger, graph layer.
+- `docs/research/20260724-ivm-pattern-gap-catalogue.md` — mechanism parity survey (the
+  complement to this note); production-engine citations for Enzyme, Snowflake, Oracle,
+  Materialize, Napa/Mesa, Paimon/Hudi behaviours are collected there.
+- `docs/research/20260703-model-updates.md` — rejection catalogue (Part 12).
+- `docs/research/20260601-virtual-environments.md` — environments/state layering.
+- DBSP (VLDB J. '25) — why delta derivation is commodity theory.
+- Oracle dimension declarations / query-rewrite constraints — closest prior art for
+  user-declared semantic facts feeding a rewrite/maintenance decision (§3.2).
