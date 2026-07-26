@@ -37,16 +37,16 @@ per-input fact. That is not a worse version of the IVM contract; it is a differe
 a **contract lattice**, and the thesis of this note is that smelt's differentiation is the
 lattice itself:
 
-- the user **declares knowledge** the engine could never assume (§3);
+- the user **declares knowledge** the engine could never assume (§4);
 - the user **relaxes clauses** they don't need, and smelt proves the relaxed contract is
-  still honoured (§4);
-- the user **keeps control** of when/where/how maintenance runs (§5);
-- everything derived is **inspectable and verifiable** (§6);
+  still honoured (§5);
+- the user **keeps control** of when/where/how maintenance runs (§6);
+- everything derived is **inspectable and verifiable** (§7);
 - smelt plans over the **whole project graph and multiple engines**, not one view in
-  one engine (§7);
+  one engine (§8);
 - and because smelt is a compiler over backends rather than a runtime, a missing
   capability is a **change you can make and test yourself** — extend, fork, or contribute
-  at bounded risk, rather than filing a vendor ticket (§10).
+  at bounded risk, rather than filing a vendor ticket (§9).
 
 An IVM engine is a black box with one guarantee. smelt is a **validator over a space of
 guarantees**: you pick the point, smelt proves your SQL and declarations support it, refuses
@@ -54,9 +54,119 @@ loudly when they don't, and tells you what each relaxation bought. On this frami
 catalogue's entries (A1 per-group recompute, C1 diff-then-patch, …) are *table stakes* —
 mechanism parity worth having — while the sections below are the reason smelt exists.
 
-## 2. What the fixed IVM contract costs (the clauses users pay for)
+The organising end-state of the whole argument comes first (§2): a **kernel** of proofs,
+state, emission, and testing, with today's incremental-models feature as the **default
+kind** built on it. Everything after §2 can be read as filling in what the kernel knows
+(§4), what contracts it can validate (§5), what control and visibility it grants (§6–§8),
+and who can extend it (§9–§10).
 
-Enumerated so §4's relaxations have something concrete to relax:
+## 2. Kernel and kinds — incremental models as the *default* implementation
+
+The strongest version of the extensibility and layer-surface arguments (developed in §9 and
+§10), proposed for examination: factor smelt into a **kernel** (the property/proof layer,
+the state/ledger substrate, the transformation/emission layer, the graph protocol, the
+conformance harness) and treat today's incremental-models feature — partition grain, key
+grain, the composed corner — as the **default model kind** implemented against that kernel.
+Other kinds, making *different trade-offs*, could then be implemented by users (or shipped
+as non-default extras) without the core contract having to bless them.
+
+### 2.1 The division of ownership
+
+**The kernel owns** (and no kind may reimplement):
+
+- **Properties and proofs**: the walk verdicts (grain, combiner algebra, bounded reach,
+  alignment, determinism, FDs), source world-facts, and the obligation vocabulary —
+  "admission as a service": *does this SQL + these declarations discharge obligation O?*
+- **State substrate**: the processed-set `S` bookkeeping, covered intervals, and grading —
+  one authority for "what contract does this region meet right now".
+- **Emission discipline**: statements are pure emitter outputs; backends execute, never
+  author (the statement-parity rule, unchanged).
+- **The graph protocol**: a typed edge interface — given upstream dirt, what does this node
+  dirty downstream; given a requested region, what does it need upstream. Kinds implement
+  it; the kernel composes it.
+- **The harness**: oracle testing as a service — a kind states its invariant; the harness
+  drives generated runs against it wherever the claim is testable.
+
+**A kind owns**: its declared surface (frontmatter grammar), its contract (which
+lattice point it claims — see §2.3), its plan derivation (properties → cells → techniques,
+using kernel proofs), and its grading semantics. The default kind's contract is exact
+equivalence-at-`S`; that never weakens.
+
+### 2.2 What could then stay out of core
+
+The gap catalogue's §E — patterns surveyed and *deliberately rejected* — reads differently
+under this factoring: it is a **kind wishlist**. Snapshot-diff SCD2 with execution-time
+stamping (SQLMesh's `SCD_TYPE_2_BY_COLUMN`), declared non-idempotent keyed upsert
+(`INCREMENTAL_BY_UNIQUE_KEY`), wall-clock rolling windows (catalogue D4), ignore-retract
+postures, approximate/sketch-backed kinds — all are things real users demonstrably want
+(SQLMesh ships them), all are things smelt's core rightly refuses to *bless as exact*, and
+all are implementable against the kernel by someone who accepts the trade-off — provided
+they declare it (§2.3). Core stops being the arbiter of every posture and becomes the
+arbiter of *honesty about postures*. The breadth of SQLMesh's kind set is itself the market
+evidence that one default kind, however good, will not cover everyone; the difference is
+that smelt's kinds would be typed by contract rather than by folklore.
+
+### 2.3 The honesty typing — kinds are points in the contract lattice
+
+The dbt-macro failure mode (an ecosystem of untyped, unverifiable extensions) is the risk.
+The defence is to reuse the relaxation lattice (§5) as the **type of a kind**: every kind
+must declare which contract it claims — exact-at-`S` / exact-at-reconciliation-points /
+exact-modulo-relation / non-idempotent (restatement requires rebuild) / best-effort — and
+the kernel enforces the consequences:
+
+- **Testable claims are tested.** An exact kind gets the full generative oracle. A
+  reconcile-point kind gets oracle checks at reconciliation points. A non-idempotent kind
+  gets its *limitations* verified (restatement genuinely refused, the non-idempotence
+  printed in `explain`).
+- **Grades propagate.** A downstream exact model consuming a non-exact upstream is tainted
+  in the ledger; the graph layer makes weak links visible instead of laundering them.
+- **Unknown is safe.** A kind that cannot (or does not) implement the graph edge interface
+  degrades to the total-delta posture — over-running, never wrong — exactly as a full
+  refresh upstream does today.
+
+This is the load-bearing move: §5 describes relaxations as *parameters of the default
+kind*; this section generalises them to *the typing discipline for all kinds*. The lattice
+is the kernel's contract language, not a feature list.
+
+### 2.4 smelt is already building this kernel — by accident of discipline
+
+The architectural invariants the repo already enforces by CI gate *are* the kernel/kind
+boundary: maintenance-plan purity (plans are pure data derived by pure functions —
+kind-derivable), statement-emission single ownership (emitters are pure — kernel-owned),
+the property-composition walk rule (verdicts come from one shared walk — kernel-owned),
+and the generative conformance gate (the harness — kernel-owned). These exist today for
+testability; they are the same cuts a kind API needs. The research claim worth recording:
+**the kernel should be extracted from the working default implementation, not designed a
+priori.** The spec's own design notes already take this posture for the crate boundary
+("extraction-mechanical", the rejected `smelt-maintenance` crate) — the kind API is the
+same judgment at the next level up.
+
+### 2.5 Precedents and their lessons
+
+- **dbt custom materializations / incremental-strategy macros** — proof of demand for
+  exactly this extension point, and proof that shipping it without a correctness story
+  yields an ecosystem nobody can trust or upgrade. The kernel's typing (§2.3) is the fix.
+- **SQLMesh model kinds** — a closed, vendor-curated kind set; demand evidence and a
+  catalogue of trade-offs users accept, but not extensible and not proof-carrying.
+- **MLIR dialects over a shared IR + verifier** — the structural analogue: kinds are
+  dialects, the property layer is the verifier, and the lesson is that the verifier and the
+  shared IR must stabilise *before* the dialect ecosystem opens.
+
+### 2.6 Risks and sequencing
+
+The risks are §9.4's, amplified: premature API design could distort the default
+implementation, and the kernel surface is much larger than Tier-0 preference hooks. The
+sequencing that manages both: (1) keep hardening the internal boundary the CI gates already
+enforce; (2) implement the next internal features *as if they were kinds* —
+`materialized_view` delegation is already a de-facto second kind, and the SCD2-succession
+classifier is the natural shakedown for a third — extracting the kernel interface each one
+actually needed; (3) only then externalise, contract-typing first (§2.3), Rust-internal
+kinds before Python kinds. Not a near-term build, but a standing lens (§11): every
+invariant kept pure today is kernel surface bought for free.
+
+## 3. What the fixed IVM contract costs (the clauses users pay for)
+
+Enumerated so §5's relaxations have something concrete to relax:
 
 1. **Retraction-readiness.** The engine must be able to un-see any row forever. This is why
    non-invertible aggregates need per-group recompute or domain multisets, why DISTINCT
@@ -81,13 +191,13 @@ Enumerated so §4's relaxations have something concrete to relax:
 
 Each clause maps to at least one smelt differentiation below.
 
-## 3. Knowledge asymmetry — things smelt can know that the engine can't assume
+## 4. Knowledge asymmetry — things smelt can know that the engine can't assume
 
 An engine must be sound for arbitrary DML from an adversarial workload. smelt sits where
 declarations, orchestration, and the whole project are visible — it can *trust and verify*
 what an engine must *defend against*.
 
-### 3.1 Declared source world-facts (already core; underweighted as differentiation)
+### 4.1 Declared source world-facts (already core; underweighted as differentiation)
 
 `append_only`, max lateness, `key_recurrence`, settle bounds. Each declaration deletes an
 entire branch of the engine's defensive machinery: append-only deletes retraction handling;
@@ -102,7 +212,7 @@ checks) and fail loudly on violation. Trust-but-verify at a sliver of the cost o
 readiness-for-anything. This "declared fact + cheap validator + fail-loud" triple is a
 reusable pattern every entry below can follow.
 
-### 3.2 Declared intra-source relationships (the user's date/timestamp example)
+### 4.2 Declared intra-source relationships (the user's date/timestamp example)
 
 Materialized columns often have a semantic relationship the schema doesn't state:
 `event_date = CAST(event_ts AS DATE)` (or a timezone-shifted variant), `region` functionally
@@ -127,7 +237,7 @@ failure. Engines have fragments (Snowflake clustering keys, Oracle dimension/hie
 declarations for query rewrite — the closest prior art and worth studying), but none feed an
 IVM admission decision with user-declared semantic FDs.
 
-### 3.3 Orchestration knowledge — smelt knows about *other runs*
+### 4.3 Orchestration knowledge — smelt knows about *other runs*
 
 The engine sees one refresh at a time. smelt sees the schedule and the run plan:
 
@@ -145,10 +255,10 @@ The engine sees one refresh at a time. smelt sees the schedule and the run plan:
   amortise at batch cadence (bigger regions, recompute-over-fold pivots at much higher
   delta fractions).
 - **Business-calendar horizons**: "books close on the 5th; prior months are immutable after
-  close" is orchestration-level truth. Declared as a freeze horizon (§4.3) it deletes
+  close" is orchestration-level truth. Declared as a freeze horizon (§5.3) it deletes
   retraction-readiness for almost all of the table.
 
-### 3.4 Consumption knowledge — smelt knows who reads the output
+### 4.4 Consumption knowledge — smelt knows who reads the output
 
 The project graph names every downstream consumer (and, eventually, BI/query logs name the
 external ones):
@@ -160,7 +270,7 @@ external ones):
   mart, lazily along the edge feeding the weekly report. IVM's target lag is per-view;
   smelt's can be per-edge.
 
-## 4. The relaxation lattice — guarantees the user can decline (the likely centre of value)
+## 5. The relaxation lattice — guarantees the user can decline (the likely centre of value)
 
 The user's hunch, made systematic. Each relaxation names: the clause relaxed, what it buys,
 and how smelt keeps the *remaining* contract honest. The recurring design shape: **the
@@ -168,7 +278,7 @@ invariant is never silently weakened — the user declares the weaker contract, 
 validates the declaration, and the ledger/explain surface shows exactly which contract each
 region currently satisfies.**
 
-### 4.1 Input-order freedom (relaxes clause 2/3 — already smelt's foundation)
+### 5.1 Input-order freedom (relaxes clause 2/3 — already smelt's foundation)
 
 Because equivalence is over the *set* `S`, the user may: backfill history without ingesting
 the latest data; process the consumer-visible current partition first and catch up history
@@ -176,7 +286,7 @@ later; order inputs by cost or priority. An IVM refresh takes whatever has arriv
 once. This is already the spec's core; worth restating as the enabling relaxation from which
 the rest follow.
 
-### 4.2 Deferral — decouple landing from repairing (relaxes clause 3)
+### 5.2 Deferral — decouple landing from repairing (relaxes clause 3)
 
 Let the fact delta fold in now, and *defer* the expensive dimension-fanout repair to a
 declared window ("weekends", "next full run", "when delta fraction > x%"). The ledger
@@ -186,7 +296,7 @@ repairs batched into cheap compute windows. Napa's Queryable Timestamp (gap cata
 the consistency-preserving form of the same idea — deferral with an explicit "consistent
 through" frontier consumers can see.
 
-### 4.3 Frozen horizons — decline retraction-readiness beyond a boundary (relaxes clause 1)
+### 5.3 Frozen horizons — decline retraction-readiness beyond a boundary (relaxes clause 1)
 
 Declare: output older than horizon H is **frozen**. Consequences smelt can derive: state
 needed only for retraction (counts, wide lookbacks) is dropped for the frozen region; late
@@ -197,7 +307,7 @@ warehouses actually operate (books close; reprocessing past the close is an *inc
 a Tuesday). The equivalence invariant survives in refined form: equivalence over `S`
 restricted to inputs that respect the freeze, with violations loud.
 
-### 4.4 Reconciliation-point equivalence — monotone between true-ups (relaxes clauses 1+2)
+### 5.4 Reconciliation-point equivalence — monotone between true-ups (relaxes clauses 1+2)
 
 Declare a column group **eventually-exact**: maintained by a cheap monotone
 under-approximation (append-only fold, retractions ignored) between periodic reconciliation
@@ -209,7 +319,7 @@ posture (and today users implement it by hand, invisibly and unverifiably). Risk
 territory — approximation must never be silent — but the grading machinery is exactly what
 makes it honest.
 
-### 4.5 Equivalence modulo declared indifference (relaxes exactness where the user doesn't care)
+### 5.5 Equivalence modulo declared indifference (relaxes exactness where the user doesn't care)
 
 Generalise the invariant's `==` to a declared equivalence relation: row order (already
 implicit), **tie indifference** (any max-by row on tied ordering keys is acceptable —
@@ -219,7 +329,7 @@ techniques over floats that exact equality refuses). Each widens admission at a 
 user certifies they don't observe. The conformance harness already needs comparison
 machinery; "compare modulo declared indifference" is a natural extension.
 
-### 4.6 Per-column-group freshness contracts (relaxes clause 7)
+### 5.6 Per-column-group freshness contracts (relaxes clause 7)
 
 The composed corner already gives different cells different techniques; the natural next
 step is different cells having different *declared freshness*: transactional columns tight,
@@ -227,7 +337,7 @@ enrichment columns loose. One table, several visible freshness contracts, each c
 scheduled to its own budget. `explain` prints it; consumers can query it (a per-column-group
 "fresh through" fact — the per-column settle bound generalised to an SLA).
 
-### 4.7 Declared retraction policy per column group (relaxes clause 1, scoped)
+### 5.7 Declared retraction policy per column group (relaxes clause 1, scoped)
 
 Paimon's per-field `ignore-retract` shows the demand: some columns should absorb
 retractions exactly (invertible fold), some should refuse them (frozen), some should ignore
@@ -240,14 +350,14 @@ middle honestly.
 Every relaxation is (a) *declared*, never inferred; (b) *validated* — smelt proves the SQL
 and declarations support the relaxed contract, refusing otherwise; (c) *graded* — the
 ledger/explain surface states which contract each region/column group currently meets; and
-(d) *composable* — freeze the far past (4.3), reconcile-point the current day (4.4), keep
+(d) *composable* — freeze the far past (§5.3), reconcile-point the current day (§5.4), keep
 exact equivalence in between. The IVM engine's fixed contract is the lattice's top element;
 smelt sells the whole lattice with proofs at every point. This is also the honest answer to
 "why not just improve Enzyme": an engine could add any one of these as a flag, but the
 validator-over-declared-contracts *posture* — refuse-don't-approximate, grade-don't-hide —
 is smelt's architecture, not a feature to bolt on.
 
-## 5. Control and flexibility (relaxes clauses 3/5/6)
+## 6. Control and flexibility (relaxes clauses 3/5/6)
 
 Mostly already designed; listed to complete the picture and mark the genuinely new bits.
 
@@ -259,7 +369,7 @@ Mostly already designed; listed to complete the picture and mark the genuinely n
   fixes the *sound* set; per-run cost picks within it.
 - **Operational verbs**: backfill a region without ingesting new data; replay a region;
   rebuild one column group; dry-run a plan. IVM offers "refresh". These fall out of per-cell
-  addressing + the ledger; the differentiation is having *verbs* at all.
+  addressing + the ledger; the differentiation is having *verbs* at all (deepened in §10.2).
 - **Heterogeneous engine placement** (the user's Athena-vs-Photon example): a backfill
   tolerates latency → cheapest scan pricing; the daily run wants latency → premium engine.
   Because state is ordinary tables and exchange is Parquet, the *same cell* can run on
@@ -276,7 +386,7 @@ Mostly already designed; listed to complete the picture and mark the genuinely n
   backend migration; an IVM view's incremental behaviour is engine property. (dbt has weak
   portability of *declared* strategies; smelt ports the *derivation*.)
 
-## 6. Transparency and verifiability
+## 7. Transparency and verifiability
 
 The user suspects this is "just the smarter category" — partly, but one piece is structural:
 
@@ -290,13 +400,13 @@ The user suspects this is "just the smarter category" — partly, but one piece 
   cannot offer.
 - **Refusal with reasons + declared-constraint validation**: admission verdicts, clamp
   derivations, and grading are printable (`explain`) and assertable (grain assertions;
-  future: declared FDs, freshes, freezes). Transparency is also the *enabler* of §4: you can
+  future: declared FDs, freshes, freezes). Transparency is also the *enabler* of §5: you can
   only sell relaxed contracts if you can show which contract currently holds where.
 - **Data-quality gating at the boundary**: because maintenance is orchestrated, a delta that
   fails a declared expectation can be quarantined *before* it enters `S` — the region stays
   graded "held", consumers see the old exact state. An engine applies whatever committed.
 
-## 7. Whole-project compilation — the view is not the unit
+## 8. Whole-project compilation — the view is not the unit
 
 IVM maintains a view (or a view DAG inside one engine). smelt compiles a project:
 
@@ -318,64 +428,12 @@ IVM maintains a view (or a view DAG inside one engine). smelt compiles a project
   layer still owns propagation around it. Beating engines at their own game is an anti-goal;
   surrounding them is the game.
 
-## 8. Ranked candidates (practical value ÷ new machinery), for discussion
-
-**Tier 1 — high value, mostly existing machinery:**
-
-1. **Frozen horizons (4.3)** — one declaration; deletes the biggest silent liability;
-   ledger + refusal machinery exists. Also the cleanest *story* of the lattice thesis.
-2. **Declared intra-source FDs / partition-expression truth (3.2, first two bullets)** —
-   directly serves scan/window constraint (the user's date/timestamp case); admission +
-   clamp machinery exists; needs declaration surface + audit probes.
-3. **`smelt verify` as a user-facing oracle (6)** — the conformance harness productised;
-   turns the invariant from a promise into a demo. Cheap, high trust value.
-4. **Work subsumption in the graph layer (3.3)** — coalesce pending obligations across
-   triggers before emitting statements; pure planning, no new contract.
-
-**Tier 2 — high value, real new surface:**
-
-5. **Deferral windows / per-column-group freshness (4.2, 4.6)** — the scheduling policy
-   axis; needs a declaration grammar and graph-layer scheduling, but the grading machinery
-   is the hard part and exists.
-6. **Per-trigger engine placement (5)** — backfill-on-cheap-engine; needs multi-backend
-   maturity but no new theory.
-7. **Equivalence modulo declared indifference (4.5)** — starts as comparison machinery in
-   the conformance harness (ties, float ε), graduates to admission widening.
-
-**Tier 3 — valuable but contract-risky or demand-gated:**
-
-8. **Reconciliation-point equivalence (4.4)** — biggest expressiveness win, biggest risk of
-   blessing silent approximation; only with grading fully user-visible.
-9. **Demand-driven maintenance (3.4)** — wants consumption metadata smelt doesn't collect
-   yet.
-10. **Cross-source alignment declarations (3.2, third bullet)** — real horizon wins;
-    subtle audit story.
-
-**Anti-goals, restated:** no Z-set runtime, no per-tuple streaming ambitions, no competing
-with engine MVs on continuous freshness — delegate there. The gap catalogue's Tier-1
-mechanisms (A1, C1, B3) remain worth adopting, but as parity, not as the pitch.
-
-## 9. Implications for the spec (if this framing survives discussion)
-
-Not spec edits yet; where they would land:
-
-- The **Overview's "one guarantee"** stays the top of the lattice, but the spec could name
-  the lattice: declared relaxations as first-class, each with validation + grading. Today's
-  spec already contains proto-relaxations (order freedom, per-cell freshness as the "only
-  degree of freedom", deferral implicit in the ledger) — the reframe makes them one family.
-- **`sources.md`** grows the declared-relationship family (3.2) alongside the existing
-  world-facts, with the declaration → derived clamp → audit probe triple as its template.
-- A future **`maintenance_scheduling.md`** (or graph-layer section growth) owns deferral,
-  subsumption, freshness budgets, and engine placement — none of which are per-model facts.
-- The **conformance harness** grows toward user-facing `smelt verify` and
-  comparison-modulo-indifference.
-
-## 10. Extensibility economics — the fork/extend/contribute pitch
+## 9. Extensibility economics — the fork/extend/contribute pitch
 
 A differentiation axis orthogonal to everything above: **who can add a missing capability,
 and what do they risk doing so.**
 
-### 10.1 The cost asymmetry
+### 9.1 The cost asymmetry
 
 A native IVM engine is a runtime: storage formats, operator state, vectorised execution,
 transaction coordination. smelt is a compiler that emits SQL and orchestrates it; execution,
@@ -399,7 +457,7 @@ runtime* — a standing operational risk. Forking or extending smelt means carry
 to a compiler whose output you can read (`explain`, emitted SQL) and whose correctness you
 can test against your own data. The risk you bear is bounded to the change you made.
 
-### 10.2 The oracle is what makes third-party extension safe
+### 9.2 The oracle is what makes third-party extension safe
 
 This is the load-bearing link to §1's thesis. The reason vendors can't accept your
 maintenance extension is not just process — it's that their correctness argument is
@@ -414,7 +472,7 @@ dbt's durable value was its package/macro ecosystem — an extension surface —
 being untyped strings with no correctness story. smelt can offer the ecosystem *with* the
 correctness story.)
 
-### 10.3 The planner-rule promise, made concrete
+### 9.3 The planner-rule promise, made concrete
 
 "User-extensible planner rules" (the standing Python-support plan) is currently a promise,
 not a truth. If §1's framing is right, the promise should be scoped by **trust tier** —
@@ -424,7 +482,7 @@ what a rule can break determines what discipline it needs:
   cost policies, per-run adaptive selection, pins, scheduling/deferral policies, engine
   placement. *Cannot break correctness by construction* (the interchangeability rule is the
   licence). This is where Python rules should land first — it is the safe 80% of the
-  practical demand (§10.4), and the API is pleasant: a function from plan + observed stats
+  practical demand (§9.4), and the API is pleasant: a function from plan + observed stats
   to choices.
 - **Tier 1 — registered patterns.** New write patterns / technique realisations that
   declare their required contract facts and equivalence obligations; **core discharges the
@@ -434,14 +492,15 @@ what a rule can break determines what discipline it needs:
 - **Tier 2 — declared truths.** User-supplied world-facts about niche sources (a vendor
   CDC's delete semantics, a Kafka compacted topic's posture, "Fivetran soft-deletes set
   `_deleted` and never physically delete") plus their audit probes. Core trusts, probes,
-  and fails loudly — the §3.1 triple, with the declaration itself extensible.
+  and fails loudly — the §4.1 triple, with the declaration itself extensible.
 - **Tier 3 — new lattice points.** Extensions to what "correct" *means* (new relaxations,
-  new equivalence relations). See §10.4 — probably not an open API.
+  new equivalence relations). See §9.4 — probably not an open API; the disciplined form of
+  Tier 3 is a whole *kind* (§2).
 
 A rule at any tier never gets to say "trust me" invisibly: whatever it chose or declared
 prints in `explain`, and anything above Tier 0 carries obligations core checks or probes.
 
-### 10.4 Can core cover everything practical? (the open question, assessed)
+### 9.4 Can core cover everything practical? (the open question, assessed)
 
 The honest answer is a split, and the split follows the tiers:
 
@@ -453,7 +512,7 @@ The honest answer is a split, and the split follows the tiers:
   examining: a small closed algebra of relaxation primitives, user-*composed* per project,
   covers the practical space — users pick and parameterise lattice points; they don't
   define new ones. If a real user need falsifies this (a relaxation not expressible in the
-  algebra), that's a core contribution, and §10.1 says contributing is cheap.
+  algebra), that's a core contribution, and §9.1 says contributing is cheap.
 - **The long tail is real, and it is Tier 0–2 shaped.** Where users will genuinely diverge:
   vendor/source idiosyncrasies (CDC dialects, soft-delete conventions, dedup contracts) —
   Tier 2; org-specific physical write conventions and table-format tricks — Tier 1;
@@ -474,21 +533,12 @@ surface: choose-among-admitted), Tier 2 second (declarations are already YAML-sh
 Tier 1 only once the registry's obligation vocabulary has survived a few internal pattern
 additions (succession, C1, B3 as the shakedown cruise).
 
-### 10.5 Ranked-candidate amendments
-
-This section adds to §8: **(11) Tier-0 Python planner rules** — high value, and the
-machinery (admitted-set + cost hooks) exists; the differentiation story ("your niche
-requirement is a policy file, not a vendor ticket") is immediately marketable. **(12)
-External Tier-2 declaration surface** — gated on the sources.md declaration family (§3.2)
-landing first. **(13) External Tier-1 pattern registration** — deliberately last, after
-internal shakedown.
-
-## 11. Two more product cuts: the property layer and the manipulation layer
+## 10. Two more product cuts: the property layer and the manipulation layer
 
 Both of smelt's internal layers could be *surfaces*, not just machinery. Neither has an IVM
 analogue, and they compose: the properties are what make the manipulations safe to expose.
 
-### 11.1 Provable properties as a product in their own right
+### 10.1 Provable properties as a product in their own right
 
 Today the property walk (grain, determinism, combiner algebra, bounded reach, partition
 alignment, FDs, event-time monotonicity) exists to feed admission. But the verdicts are
@@ -505,15 +555,15 @@ valuable independent of maintenance:
   artifact no engine or dbt can produce, and it operationalises the spec's declaration law
   (silent contract changes become visible plan diffs). CI-able: fail the PR if a declared
   property is lost.
-- **Extensible properties.** The tier model (§10.3) extends here: org-specific properties
+- **Extensible properties.** The tier model (§9.3) extends here: org-specific properties
   ("this column is PII-derived", "this output is idempotent-consumable") as declared facts
   with probes (Tier 2), and eventually custom leaf classifiers over the stable walk
   vocabulary (Tier 1-shaped). The obligations of registered patterns are already *stated
-  in* property vocabulary — exposing the vocabulary is a precondition for §10's external
+  in* property vocabulary — exposing the vocabulary is a precondition for §9's external
   registration anyway, so the product cut and the extensibility roadmap share one
   investment.
 
-### 11.2 The manipulation layer — verbs over cells, not models
+### 10.2 The manipulation layer — verbs over cells, not models
 
 The plan's cell decomposition (column group × trigger × input × region) is today an
 internal addressing scheme. Exposed, it becomes an operator algebra IVM structurally cannot
@@ -526,7 +576,7 @@ result:
   definition-change trigger scoped to one column group, no touch on sibling groups.
 - **Region-scoped verbs**: backfill/replay/verify a partition range; freeze/thaw a region.
 - **Trigger-scoped policy**: run creation cells hourly, hold mutation cells for the nightly
-  window (the §4.2 deferral, expressed as a verb rather than a declaration).
+  window (the §5.2 deferral, expressed as a verb rather than a declaration).
 - **Composed selectors**: `--cells 'input=customers,columns=tier_*,window=2026-Q1'` — the
   cell tuple is the selector grammar.
 
@@ -536,127 +586,91 @@ remains answerable after any sequence of scoped verbs, and equivalence-at-`S` st
 for the `S` actually covered. dbt's `--select` picks *models*; smelt's unit is the *cell* —
 that granularity difference is the whole feature.
 
-### 11.3 Why the two cuts are one story
+### 10.3 Why the two cuts are one story
 
 A manipulation is admissible only where a property licenses it (column-scoped backfill
 needs the column-group factoring proof; input-scoped runs need per-edge dirt; region verbs
 need the clock). So the property layer is the *type system* of the manipulation layer:
 verbs are total over cells the proofs admit and refused elsewhere, with the refusal naming
-the missing property. This also closes the loop with §4: a relaxation declaration is the
+the missing property. This also closes the loop with §5: a relaxation declaration is the
 *standing* form (policy) of what a manipulation verb does *once* (operation) — same
 lattice, two tenses. And it sharpens the pitch of §1: IVM sells one verb ("refresh") under
 one contract; smelt sells a typed verb algebra whose safety is proven per cell and whose
 aftermath is graded.
 
-Ranked-candidate amendments to §8: **(14) plan/property diff in CI** — near-term, high
-leverage, machinery mostly exists (`explain` twice + diff); the marketable form of the
-property cut. **(15) cell-selector surface for run/backfill** — the manipulation layer's
-first tranche; wants the ledger grading fully landed first. **(16) queryable property/
-contract facts for consumers** — after the vocabulary stabilises.
+## 11. Ranked candidates (practical value ÷ new machinery), for discussion
 
-## 12. Kernel and kinds — incremental models as the *default* implementation
+**Tier 1 — high value, mostly existing machinery:**
 
-The strongest version of §10+§11, proposed for examination: factor smelt into a **kernel**
-(the property/proof layer, the state/ledger substrate, the transformation/emission layer,
-the graph protocol, the conformance harness) and treat today's incremental-models feature —
-partition grain, key grain, the composed corner — as the **default model kind** implemented
-against that kernel. Other kinds, making *different trade-offs*, could then be implemented
-by users (or shipped as non-default extras) without the core contract having to bless them.
+1. **Frozen horizons (§5.3)** — one declaration; deletes the biggest silent liability;
+   ledger + refusal machinery exists. Also the cleanest *story* of the lattice thesis.
+2. **Declared intra-source FDs / partition-expression truth (§4.2, first two bullets)** —
+   directly serves scan/window constraint (the user's date/timestamp case); admission +
+   clamp machinery exists; needs declaration surface + audit probes.
+3. **`smelt verify` as a user-facing oracle (§7)** — the conformance harness productised;
+   turns the invariant from a promise into a demo. Cheap, high trust value.
+4. **Plan/property diff in CI (§10.1)** — near-term, high leverage; machinery mostly
+   exists (`explain` twice + diff); the marketable form of the property cut.
+5. **Work subsumption in the graph layer (§4.3)** — coalesce pending obligations across
+   triggers before emitting statements; pure planning, no new contract.
 
-### 12.1 The division of ownership
+**Tier 2 — high value, real new surface:**
 
-**The kernel owns** (and no kind may reimplement):
+6. **Deferral windows / per-column-group freshness (§5.2, §5.6)** — the scheduling policy
+   axis; needs a declaration grammar and graph-layer scheduling, but the grading machinery
+   is the hard part and exists.
+7. **Tier-0 Python planner rules (§9.3)** — choose-among-admitted policies; the
+   admitted-set + cost hooks exist, and the story ("your niche requirement is a policy
+   file, not a vendor ticket") is immediately marketable.
+8. **Cell-selector surface for run/backfill (§10.2)** — the manipulation layer's first
+   tranche; wants the ledger grading fully landed first.
+9. **Per-trigger engine placement (§6)** — backfill-on-cheap-engine; needs multi-backend
+   maturity but no new theory.
+10. **Equivalence modulo declared indifference (§5.5)** — starts as comparison machinery in
+    the conformance harness (ties, float ε), graduates to admission widening.
 
-- **Properties and proofs**: the walk verdicts (grain, combiner algebra, bounded reach,
-  alignment, determinism, FDs), source world-facts, and the obligation vocabulary —
-  "admission as a service": *does this SQL + these declarations discharge obligation O?*
-- **State substrate**: the processed-set `S` bookkeeping, covered intervals, and grading —
-  one authority for "what contract does this region meet right now".
-- **Emission discipline**: statements are pure emitter outputs; backends execute, never
-  author (the statement-parity rule, unchanged).
-- **The graph protocol**: a typed edge interface — given upstream dirt, what does this node
-  dirty downstream; given a requested region, what does it need upstream. Kinds implement
-  it; the kernel composes it.
-- **The harness**: oracle testing as a service — a kind states its invariant; the harness
-  drives generated runs against it wherever the claim is testable.
+**Tier 3 — valuable but contract-risky, demand-gated, or stability-gated:**
 
-**A kind owns**: its declared surface (frontmatter grammar), its contract (which
-lattice point it claims — see 12.3), its plan derivation (properties → cells → techniques,
-using kernel proofs), and its grading semantics. The default kind's contract is exact
-equivalence-at-`S`; that never weakens.
+11. **Reconciliation-point equivalence (§5.4)** — biggest expressiveness win, biggest risk
+    of blessing silent approximation; only with grading fully user-visible.
+12. **External Tier-2 declaration surface (§9.3)** — gated on the `sources.md`
+    declared-relationship family (§4.2) landing first.
+13. **Demand-driven maintenance (§4.4)** — wants consumption metadata smelt doesn't
+    collect yet.
+14. **Cross-source alignment declarations (§4.2, third bullet)** — real horizon wins;
+    subtle audit story.
+15. **Queryable property/contract facts for consumers (§10.1)** — after the property
+    vocabulary stabilises.
+16. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
+    obligation vocabulary survives internal shakedown (succession, C1, B3).
 
-### 12.2 What could then stay out of core
+**Standing lens, not a build item:** the kernel/kind factoring (§2) is the long-game
+architecture — it should influence boundary decisions *now* (every invariant kept pure is
+kernel surface bought for free), with externalisation sequenced per §2.6.
 
-The gap catalogue's §E — patterns surveyed and *deliberately rejected* — reads differently
-under this factoring: it is a **kind wishlist**. Snapshot-diff SCD2 with execution-time
-stamping (SQLMesh's `SCD_TYPE_2_BY_COLUMN`), declared non-idempotent keyed upsert
-(`INCREMENTAL_BY_UNIQUE_KEY`), wall-clock rolling windows (catalogue D4), ignore-retract
-postures, approximate/sketch-backed kinds — all are things real users demonstrably want
-(SQLMesh ships them), all are things smelt's core rightly refuses to *bless as exact*, and
-all are implementable against the kernel by someone who accepts the trade-off — provided
-they declare it (12.3). Core stops being the arbiter of every posture and becomes the
-arbiter of *honesty about postures*. The breadth of SQLMesh's kind set is itself the market
-evidence that one default kind, however good, will not cover everyone; the difference is
-that smelt's kinds would be typed by contract rather than by folklore.
+**Anti-goals, restated:** no Z-set runtime, no per-tuple streaming ambitions, no competing
+with engine MVs on continuous freshness — delegate there. The gap catalogue's top-ranked
+mechanisms (A1, C1, B3) remain worth adopting, but as parity, not as the pitch.
 
-### 12.3 The honesty typing — kinds are points in the contract lattice
+## 12. Implications for the spec (if this framing survives discussion)
 
-The dbt-macro failure mode (an ecosystem of untyped, unverifiable extensions) is the risk.
-The defence is to reuse §4's lattice as the **type of a kind**: every kind must declare
-which contract it claims — exact-at-`S` / exact-at-reconciliation-points /
-exact-modulo-relation / non-idempotent (restatement requires rebuild) / best-effort — and
-the kernel enforces the consequences:
+Not spec edits yet; where they would land:
 
-- **Testable claims are tested.** An exact kind gets the full generative oracle. A
-  reconcile-point kind gets oracle checks at reconciliation points. A non-idempotent kind
-  gets its *limitations* verified (restatement genuinely refused, the non-idempotence
-  printed in `explain`).
-- **Grades propagate.** A downstream exact model consuming a non-exact upstream is tainted
-  in the ledger; the graph layer makes weak links visible instead of laundering them.
-- **Unknown is safe.** A kind that cannot (or does not) implement the graph edge interface
-  degrades to the total-delta posture — over-running, never wrong — exactly as a full
-  refresh upstream does today.
-
-This is the load-bearing move: §4 described relaxations as *parameters of the default
-kind*; this section generalises them to *the typing discipline for all kinds*. The lattice
-is the kernel's contract language, not a feature list.
-
-### 12.4 smelt is already building this kernel — by accident of discipline
-
-The architectural invariants the repo already enforces by CI gate *are* the kernel/kind
-boundary: maintenance-plan purity (plans are pure data derived by pure functions —
-kind-derivable), statement-emission single ownership (emitters are pure — kernel-owned),
-the property-composition walk rule (verdicts come from one shared walk — kernel-owned),
-and the generative conformance gate (the harness — kernel-owned). These exist today for
-testability; they are the same cuts a kind API needs. The research claim worth recording:
-**the kernel should be extracted from the working default implementation, not designed a
-priori.** The spec's own design notes already take this posture for the crate boundary
-("extraction-mechanical", the rejected `smelt-maintenance` crate) — the kind API is the
-same judgment at the next level up.
-
-### 12.5 Precedents and their lessons
-
-- **dbt custom materializations / incremental-strategy macros** — proof of demand for
-  exactly this extension point, and proof that shipping it without a correctness story
-  yields an ecosystem nobody can trust or upgrade. The kernel's typing (12.3) is the fix.
-- **SQLMesh model kinds** — a closed, vendor-curated kind set; demand evidence and a
-  catalogue of trade-offs users accept, but not extensible and not proof-carrying.
-- **MLIR dialects over a shared IR + verifier** — the structural analogue: kinds are
-  dialects, the property layer is the verifier, and the lesson is that the verifier and the
-  shared IR must stabilise *before* the dialect ecosystem opens.
-
-### 12.6 Risks and sequencing
-
-The risks are §10.4's, amplified: premature API design could distort the default
-implementation, and the kernel surface is much larger than Tier-0 preference hooks. The
-sequencing that manages both: (1) keep hardening the internal boundary the CI gates already
-enforce; (2) implement the next internal features *as if they were kinds* —
-`materialized_view` delegation is already a de-facto second kind, and the SCD2-succession
-classifier is the natural shakedown for a third — extracting the kernel interface each one
-actually needed; (3) only then externalise, contract-typing first (12.3), Rust-internal
-kinds before Python kinds. The §8 amendment: **(17) kernel/kind factoring as the long-game
-architecture** — not a near-term build, but a lens that should already influence boundary
-decisions, because every invariant kept pure today is kernel surface bought for free.
+- The **Overview's "one guarantee"** stays the top of the lattice, but the spec could name
+  the lattice: declared relaxations as first-class, each with validation + grading. Today's
+  spec already contains proto-relaxations (order freedom, per-cell freshness as the "only
+  degree of freedom", deferral implicit in the ledger) — the reframe makes them one family.
+- **`sources.md`** grows the declared-relationship family (§4.2) alongside the existing
+  world-facts, with the declaration → derived clamp → audit probe triple as its template.
+- A future **`maintenance_scheduling.md`** (or graph-layer section growth) owns deferral,
+  subsumption, freshness budgets, and engine placement — none of which are per-model facts.
+- The **conformance harness** grows toward user-facing `smelt verify` and
+  comparison-modulo-indifference.
+- The **kernel/kind factoring (§2)** implies no spec change yet, but boundary decisions in
+  `architecture.md` (which invariants are CI-gated, where the plan/emission/walk cuts sit)
+  should be reviewed with "is this kernel surface?" as an explicit question, and the next
+  quasi-kinds (`materialized_view` delegation, the succession classifier) written against
+  the boundary deliberately.
 
 ## References
 
@@ -668,4 +682,4 @@ decisions, because every invariant kept pure today is kernel surface bought for 
 - `docs/research/20260601-virtual-environments.md` — environments/state layering.
 - DBSP (VLDB J. '25) — why delta derivation is commodity theory.
 - Oracle dimension declarations / query-rewrite constraints — closest prior art for
-  user-declared semantic facts feeding a rewrite/maintenance decision (§3.2).
+  user-declared semantic facts feeding a rewrite/maintenance decision (§4.2).
