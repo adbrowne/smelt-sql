@@ -42,8 +42,11 @@ lattice itself:
   still honoured (§4);
 - the user **keeps control** of when/where/how maintenance runs (§5);
 - everything derived is **inspectable and verifiable** (§6);
-- and smelt plans over the **whole project graph and multiple engines**, not one view in
-  one engine (§7).
+- smelt plans over the **whole project graph and multiple engines**, not one view in
+  one engine (§7);
+- and because smelt is a compiler over backends rather than a runtime, a missing
+  capability is a **change you can make and test yourself** — extend, fork, or contribute
+  at bounded risk, rather than filing a vendor ticket (§10).
 
 An IVM engine is a black box with one guarantee. smelt is a **validator over a space of
 guarantees**: you pick the point, smelt proves your SQL and declarations support it, refuses
@@ -366,6 +369,119 @@ Not spec edits yet; where they would land:
   subsumption, freshness budgets, and engine placement — none of which are per-model facts.
 - The **conformance harness** grows toward user-facing `smelt verify` and
   comparison-modulo-indifference.
+
+## 10. Extensibility economics — the fork/extend/contribute pitch
+
+A differentiation axis orthogonal to everything above: **who can add a missing capability,
+and what do they risk doing so.**
+
+### 10.1 The cost asymmetry
+
+A native IVM engine is a runtime: storage formats, operator state, vectorised execution,
+transaction coordination. smelt is a compiler that emits SQL and orchestrates it; execution,
+storage, and transactions are the backend's problem. Two consequences:
+
+- **smelt itself is cheap to build relative to its claims** — the investment is in analysis
+  (parser, type inference, the property walk, admission) rather than in a runtime. The
+  analysis layer is affordable *because of the differential-testing posture*: the parser,
+  type oracle, and maintenance plans are all checked against a real engine, so correctness
+  is purchased by tests against DuckDB rather than by runtime engineering.
+- **A niche capability is a compile-time change.** Adding a write pattern, a source-posture
+  classifier, or a scheduling policy touches plan derivation and statement emission — not a
+  storage engine. The blast radius of a mistake is a wrong *statement*, which the
+  conformance harness is specifically built to catch.
+
+For a user on a vendor platform the asymmetry is absolute: if Databricks/Snowflake lacks
+the maintenance behaviour your shape needs, there is no practical path to running your
+extension in your prod environment — you file a ticket and wait. Even the open-source
+engines (Materialize, Feldera, RisingWave, pg_ivm) require you to *operate a forked
+runtime* — a standing operational risk. Forking or extending smelt means carrying a patch
+to a compiler whose output you can read (`explain`, emitted SQL) and whose correctness you
+can test against your own data. The risk you bear is bounded to the change you made.
+
+### 10.2 The oracle is what makes third-party extension safe
+
+This is the load-bearing link to §1's thesis. The reason vendors can't accept your
+maintenance extension is not just process — it's that their correctness argument is
+internal and holistic; your patch endangers everyone's views. smelt's correctness argument
+is *external and per-model*: `incremental_state(S) == full_refresh(inputs ∈ S)`, checked
+generatively against a real backend (the maintenance-conformance gate). An extension that
+plugs into the registry inherits the oracle: write the pattern, declare its obligations,
+and the same harness that guards core techniques guards yours. "Extensions are testable
+against the invariant" is a property no IVM engine can offer, and it is what turns
+fork/extend from a liability into a supported posture. (Precedent for the moat: much of
+dbt's durable value was its package/macro ecosystem — an extension surface — despite macros
+being untyped strings with no correctness story. smelt can offer the ecosystem *with* the
+correctness story.)
+
+### 10.3 The planner-rule promise, made concrete
+
+"User-extensible planner rules" (the standing Python-support plan) is currently a promise,
+not a truth. If §1's framing is right, the promise should be scoped by **trust tier** —
+what a rule can break determines what discipline it needs:
+
+- **Tier 0 — preference.** Choose among techniques core has already admitted as equivalent:
+  cost policies, per-run adaptive selection, pins, scheduling/deferral policies, engine
+  placement. *Cannot break correctness by construction* (the interchangeability rule is the
+  licence). This is where Python rules should land first — it is the safe 80% of the
+  practical demand (§10.4), and the API is pleasant: a function from plan + observed stats
+  to choices.
+- **Tier 1 — registered patterns.** New write patterns / technique realisations that
+  declare their required contract facts and equivalence obligations; **core discharges the
+  obligations** (admission stays core-owned) and the conformance harness exercises the
+  pattern. The registry's "open, partly backend-provided" design is exactly this shape
+  already; the extension work is making registration external.
+- **Tier 2 — declared truths.** User-supplied world-facts about niche sources (a vendor
+  CDC's delete semantics, a Kafka compacted topic's posture, "Fivetran soft-deletes set
+  `_deleted` and never physically delete") plus their audit probes. Core trusts, probes,
+  and fails loudly — the §3.1 triple, with the declaration itself extensible.
+- **Tier 3 — new lattice points.** Extensions to what "correct" *means* (new relaxations,
+  new equivalence relations). See §10.4 — probably not an open API.
+
+A rule at any tier never gets to say "trust me" invisibly: whatever it chose or declared
+prints in `explain`, and anything above Tier 0 carries obligations core checks or probes.
+
+### 10.4 Can core cover everything practical? (the open question, assessed)
+
+The honest answer is a split, and the split follows the tiers:
+
+- **The invariant, admission, grading, and the relaxation lattice's *primitives* must be
+  core.** A user-defined relaxation with a subtle unsoundness would be indistinguishable
+  from a smelt bug, and grading is only trustworthy if one authority owns it. But the
+  lattice primitives look *composable and parameterisable*: freeze(horizon), defer(policy),
+  reconcile-at(points), modulo(relation), per-group-freshness(budget). The bet worth
+  examining: a small closed algebra of relaxation primitives, user-*composed* per project,
+  covers the practical space — users pick and parameterise lattice points; they don't
+  define new ones. If a real user need falsifies this (a relaxation not expressible in the
+  algebra), that's a core contribution, and §10.1 says contributing is cheap.
+- **The long tail is real, and it is Tier 0–2 shaped.** Where users will genuinely diverge:
+  vendor/source idiosyncrasies (CDC dialects, soft-delete conventions, dedup contracts) —
+  Tier 2; org-specific physical write conventions and table-format tricks — Tier 1;
+  org-specific cost models, schedules, engine-placement and deferral policies — Tier 0.
+  None of these require touching what "correct" means, which is why the extension promise
+  is plausible at all.
+- **Pattern recognizers (succession, top-N, outer-join clean-up) sit on the boundary.**
+  They need the property-walk vocabulary and produce admission-relevant verdicts, so they
+  are core-shaped today; a plausible end state is recognizers as Tier-1-style plugins over
+  a *stable walk vocabulary*, once that vocabulary stops moving. Not worth externalising
+  before then.
+
+So: core covers the *meaning* of maintenance; extensions cover the *matter* — which
+patterns, which truths, which preferences. The practical risk to the pitch is not soundness
+but **API stability**: an extension surface over a plan model that is still being redesigned
+would burn early adopters. That argues for sequencing Tier 0 first (smallest stable
+surface: choose-among-admitted), Tier 2 second (declarations are already YAML-shaped), and
+Tier 1 only once the registry's obligation vocabulary has survived a few internal pattern
+additions (succession, C1, B3 as the shakedown cruise).
+
+### 10.5 Ranked-candidate amendments
+
+This section adds to §8: **(11) Tier-0 Python planner rules** — high value, and the
+machinery (admitted-set + cost hooks) exists; the differentiation story ("your niche
+requirement is a policy file, not a vendor ticket") is immediately marketable. **(12)
+External Tier-2 declaration surface** — gated on the sources.md declaration family (§3.2)
+landing first. **(13) External Tier-1 pattern registration** — deliberately last, after
+internal shakedown.
 
 ## References
 
