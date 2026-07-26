@@ -87,10 +87,10 @@ as non-default extras) without the core contract having to bless them.
 - **The harness**: oracle testing as a service — a kind states its invariant; the harness
   drives generated runs against it wherever the claim is testable.
 
-**A kind owns**: its declared surface (frontmatter grammar), its contract (which
-lattice point it claims — see §2.3), its plan derivation (properties → cells → techniques,
-using kernel proofs), and its grading semantics. The default kind's contract is exact
-equivalence-at-`S`; that never weakens.
+**A kind owns**: its declared surface (frontmatter grammar — or an entire authoring
+surface, §2.4), its contract (which lattice point it claims — see §2.3), its plan
+derivation (properties → cells → techniques, using kernel proofs), and its grading
+semantics. The default kind's contract is exact equivalence-at-`S`; that never weakens.
 
 ### 2.2 What could then stay out of core
 
@@ -128,7 +128,69 @@ This is the load-bearing move: §5 describes relaxations as *parameters of the d
 kind*; this section generalises them to *the typing discipline for all kinds*. The lattice
 is the kernel's contract language, not a feature list.
 
-### 2.4 smelt is already building this kernel — by accident of discipline
+### 2.4 Kinds may own the authoring surface — intent nodes, not only SQL nodes
+
+The sections above still carry a hidden assumption: that every node *starts* as SQL, from
+which the kernel proves properties. That pipeline direction — SQL → AST/types → property
+proofs → plan — is **raising**: recovering intent from its lowered form. Raising is the
+compiler's fragile direction; the SCD2-succession work
+(`docs/research/20260723-scd2-succession-pattern.md`) is a case study in how much machinery
+it takes to *recognise* one pattern in lag-function SQL, and how easily a refactor breaks
+the recognition. When the pattern is the whole point of the node, the user should be able
+to say so: an **intent node** is a graph node authored in a kind-owned surface — a
+declaration, not a query — from which the properties hold **by construction** and the
+maintenance plan **lowers** directly.
+
+Concrete candidates, each with live market demand:
+
+- **SCD2 as a declaration** (`scd2: {key, change_ts, attributes, …}`) — dbt *snapshots*
+  are exactly this and are heavily used; nobody misses writing the lag-function SQL.
+- **Data vault from metadata** — hubs/links/satellites generated from entity/relationship
+  config; AutomateDV builds a business on this atop dbt string macros. The user's instinct
+  is right: a vault author never wants an "initial SQL stage we then prove something
+  about" — the config *is* the model.
+- **Declared windowed aggregations** (feature-store style, Feast/Tecton feature views) —
+  "sum of spend per customer over trailing 30d, daily grain" is a declaration whose
+  combiner algebra, clock, and grain are all axiomatic; it is precisely a maintainable
+  fold, stated without SQL.
+- **Sessionization / dedup specs** — gap-parameterised sessions, keyed dedup with a
+  recurrence window: shapes smelt currently proves out of SQL could instead be declared.
+
+**The one rule that keeps intent nodes honest: every node must have a denotation, and the
+denotation is *generated*, never hand-authored.** The equivalence invariant needs a
+full-refresh oracle — `full_refresh(inputs ∈ S)` must mean something for every node. For
+an intent node the kind *generates* the denotation (typically as SQL) from the intent.
+Generating rather than hand-writing kills the drift risk (no second source of truth), and
+it lets the generated denotation flow through the **existing pipeline**: type inference
+gives the output schema downstream models consume, diagnostics and LSP hover work
+unchanged, and the conformance harness runs the generated denotation as the oracle against
+the kind's maintenance statements. Better still, running the property *walk* over the
+generated denotation becomes a **cross-check**: the kind asserts its properties
+axiomatically, the walk re-derives them from the generated SQL, and disagreement is a bug
+in the kind's generator — the kind tests itself with kernel machinery.
+
+Graph citizenship is unchanged and is the kernel's real requirement: however a node is
+authored, it speaks the contract vocabulary — clock, identity, delta shapes in and out,
+the edge protocol. The graph layer never asks how a node was written; it asks what it
+dirties and what it needs. (Contrast today's genuinely opaque nodes — a Python model or an
+imported dbt model — which degrade to total-delta. Intent nodes are the opposite extreme:
+*maximally* transparent, because nothing about them needs recovering.)
+
+Recognition and intent are complements, not rivals: classifiers (succession, top-N) serve
+the install base — existing SQL, dbt imports — while intent surfaces serve greenfield; both
+lower into the same registry cells and the same ledger. The
+recognition-over-declaration philosophy inverts exactly when the pattern stops being an
+implementation detail of a query and becomes the node's identity.
+
+Risks, named: **expressiveness cliffs** — every config surface eventually meets a need it
+can't express (dbt snapshots' fixed strategies), so intent grammars need typed SQL escape
+slots (an expression *inside* a declaration, typed against the generated query) rather
+than an all-or-nothing fall-off to raw SQL; **surface proliferation** — kinds must stay
+few, and the mandatory generated denotation is the tax that keeps a surface from being
+cheap folklore; **per-surface tooling** — schema-validated YAML is easy, but a surface
+worth shipping needs its own diagnostics, and the LSP investment is SQL-shaped today.
+
+### 2.5 smelt is already building this kernel — by accident of discipline
 
 The architectural invariants the repo already enforces by CI gate *are* the kernel/kind
 boundary: maintenance-plan purity (plans are pure data derived by pure functions —
@@ -141,7 +203,7 @@ priori.** The spec's own design notes already take this posture for the crate bo
 ("extraction-mechanical", the rejected `smelt-maintenance` crate) — the kind API is the
 same judgment at the next level up.
 
-### 2.5 Precedents and their lessons
+### 2.6 Precedents and their lessons
 
 - **dbt custom materializations / incremental-strategy macros** — proof of demand for
   exactly this extension point, and proof that shipping it without a correctness story
@@ -150,9 +212,11 @@ same judgment at the next level up.
   catalogue of trade-offs users accept, but not extensible and not proof-carrying.
 - **MLIR dialects over a shared IR + verifier** — the structural analogue: kinds are
   dialects, the property layer is the verifier, and the lesson is that the verifier and the
-  shared IR must stabilise *before* the dialect ecosystem opens.
+  shared IR must stabilise *before* the dialect ecosystem opens. Its second lesson backs
+  §2.4: high-level dialects exist precisely because *raising* from lowered form is hard —
+  semantics carried structurally beat semantics recovered by analysis.
 
-### 2.6 Risks and sequencing
+### 2.7 Risks and sequencing
 
 The risks are §9.4's, amplified: premature API design could distort the default
 implementation, and the kernel surface is much larger than Tier-0 preference hooks. The
@@ -643,10 +707,15 @@ aftermath is graded.
     vocabulary stabilises.
 16. **External Tier-1 pattern registration (§9.3)** — deliberately last, after the
     obligation vocabulary survives internal shakedown (succession, C1, B3).
+17. **Intent-node authoring surfaces (§2.4)** — an SCD2 or windowed-aggregation
+    declaration as the pilot, generated-denotation rule from day one; gated on kernel
+    stability, but the pilot doubles as the succession classifier's greenfield twin
+    (same registry cells, opposite direction) and would settle the escape-slot design
+    early.
 
 **Standing lens, not a build item:** the kernel/kind factoring (§2) is the long-game
 architecture — it should influence boundary decisions *now* (every invariant kept pure is
-kernel surface bought for free), with externalisation sequenced per §2.6.
+kernel surface bought for free), with externalisation sequenced per §2.7.
 
 **Anti-goals, restated:** no Z-set runtime, no per-tuple streaming ambitions, no competing
 with engine MVs on continuous freshness — delegate there. The gap catalogue's top-ranked
@@ -666,6 +735,10 @@ Not spec edits yet; where they would land:
   subsumption, freshness budgets, and engine placement — none of which are per-model facts.
 - The **conformance harness** grows toward user-facing `smelt verify` and
   comparison-modulo-indifference.
+- **Intent nodes (§2.4)** would eventually touch `models.md`'s declaration law with one
+  new rule — *every node has a denotation; a non-SQL node's denotation is generated, never
+  hand-authored* — and the first intent surface (SCD2 or windowed aggregation) would be
+  its own spec file, written against that rule.
 - The **kernel/kind factoring (§2)** implies no spec change yet, but boundary decisions in
   `architecture.md` (which invariants are CI-gated, where the plan/emission/walk cuts sit)
   should be reviewed with "is this kernel surface?" as an explicit question, and the next
