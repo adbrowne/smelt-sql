@@ -1426,3 +1426,116 @@ fn f1_plain_union_refuses() {
     );
     assert!(targeted.is_empty());
 }
+
+// ===== C2 regression: representative matching is qualifier-aware, not
+// bare-name keyed (final-review finding C2) — a qualified dependency must
+// only resolve against a representative bound to that same qualifier and
+// raw column name, never against an unrelated representative that merely
+// shares the same *output* name. I1 (unqualified-reference alias sweep,
+// fixed alongside C2) is covered by
+// `i1_unqualified_dim_reference_in_where_refuses_b4` below. =====
+
+#[test]
+fn c2_qualified_dependency_does_not_collide_with_differently_sourced_representative() {
+    // The exact reproduction from the final review: a pre-existing,
+    // unchanged join (`orders o LEFT JOIN dim d`, present in both
+    // definitions — never routed through B4's added-join admission at all)
+    // already has a stored representative named 'region' (`o.rc AS
+    // region`). Adding `d.region AS region_u` must NOT be admitted by
+    // matching the *unrelated* 'region' representative just because the
+    // bare output names collide — 'region_u' depends on `d.region`, a
+    // different qualifier and a different raw column, which has no
+    // representative of its own (no source is declared for alias 'd' at
+    // all here) — both B1 and B3 must refuse.
+    let before_sql = "SELECT o.rc AS region FROM orders o LEFT JOIN dim d ON o.order_id = \
+                       d.order_id";
+    let after_sql = "SELECT o.rc AS region, d.region AS region_u FROM orders o LEFT JOIN dim d \
+                      ON o.order_id = d.order_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[("region_u", "TEXT")]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("d.region")),
+        "expected a refusal naming the qualified dependency 'd.region', got: {:?}",
+        atom.inadmissible
+    );
+    // The unsound pre-fix behaviour emitted `UPDATE t SET region_u = region`
+    // — reading the fact's own stored 'region' column. No option at all
+    // (let alone one shaped like that) may be admitted.
+    for option in &atom.options {
+        for stmt in &option.statements {
+            assert!(
+                !stmt.contains("region_u = region"),
+                "must never emit the unsound self-read collision, got: {stmt}"
+            );
+        }
+    }
+}
+
+#[test]
+fn c2_qualified_dependency_via_where_conjunct_does_not_collide_e1() {
+    // The same qualifier-collision hole, reached through E1's WHERE-conjunct
+    // requalification rather than B1's SELECT-list requalification: a
+    // pre-existing, unchanged join already has a stored representative named
+    // 'region' (`o.region AS region`); adding a WHERE conjunct on the
+    // *dimension's* 'region' column (`d.region = 'east'`) must not resolve
+    // against the fact-side representative just because the bare names
+    // collide.
+    let before_sql =
+        "SELECT o.region AS region FROM orders o LEFT JOIN dim d ON o.order_id = d.order_id";
+    let after_sql = "SELECT o.region AS region FROM orders o LEFT JOIN dim d ON o.order_id = \
+                      d.order_id WHERE d.region = 'east'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("region") && r.reason.contains("no stored representative")),
+        "expected a refusal naming 'region' with no stored representative (the qualified \
+         `d.region` dependency must not collide with the fact-side `o.region` representative), \
+         got: {:?}",
+        atom.inadmissible
+    );
+}
+
+// ===== I1 regression: the B4 "nothing else references it" alias sweep must
+// fail closed on an unqualified reference it cannot prove fact-side (fixed
+// alongside C2 — final-review finding I1). =====
+
+#[test]
+fn i1_unqualified_dim_reference_in_where_refuses_b4() {
+    // 'active' is never stored anywhere in the fact's own output — an
+    // unqualified reference to it inside the WHERE clause cannot be proven
+    // fact-side, so it must be treated exactly like a qualified reference to
+    // the added join's alias would be: the join is not a pure enrichment,
+    // and B4 refuses.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id WHERE active = TRUE";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("where")),
+        "expected a refusal naming the WHERE reference, got: {:?}",
+        atom.inadmissible
+    );
+}

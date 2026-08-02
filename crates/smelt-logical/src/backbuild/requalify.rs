@@ -16,37 +16,47 @@
 //! `analysis::walk::own_region_text_excluding_self_relations` already uses
 //! elsewhere in this crate (replacement here rather than exclusion).
 
-use std::collections::BTreeSet;
-
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{ColumnRef, Expr, SyntaxKind, TextRange};
 
+use super::{resolve_representative, RepresentativeSource};
+
 /// Requalify every column reference inside `expr` against
-/// `representatives` (the exact set of stored 1:1 representative output
-/// column names — bare pull-throughs unchanged between both definitions,
-/// per the uniform rule).
+/// `representative_sources` (the stored 1:1 representative set — bare
+/// pull-throughs unchanged between both definitions, per the uniform rule),
+/// resolved by [`resolve_representative`] — qualifier-and-raw-name matching
+/// for a qualified reference, name-preserving matching for a bare one (the
+/// fix for final-review finding C2: matching must never fall back to a bare
+/// output-name lookup that discards a reference's own qualifier).
 ///
 /// Walks the same recognised expression shapes as
 /// [`crate::analysis::model_diff::collect_dependencies`] (column reference,
 /// function call, binary, `CASE`, `CAST`, literal). By the time this is
 /// called, that walk has already proven the whole expression is built from
-/// exactly these shapes and that every dependency resolves to a name in
-/// `representatives` — so an unrecognised shape or an unresolved name here
-/// would be an internal-invariant violation, not a legitimate refusal path.
-/// It is still reported as an `Err` rather than panicking (fail-loud
-/// discipline: `docs/specs/architecture.md` §"Fail-loud discipline").
+/// exactly these shapes and that every dependency resolves against
+/// `representative_sources` — so an unrecognised shape or an unresolved
+/// reference here would be an internal-invariant violation, not a
+/// legitimate refusal path. It is still reported as an `Err` rather than
+/// panicking (fail-loud discipline: `docs/specs/architecture.md`
+/// §"Fail-loud discipline").
 ///
-/// A qualified reference (`o.price`) is rewritten to its bare
-/// representative name (`price`); an already-bare reference matching a
-/// representative is left as-is (rewritten to itself, byte-identical).
-pub fn requalify(expr: &Expr, representatives: &BTreeSet<String>) -> Result<String, String> {
+/// A qualified reference (`o.price`) bound to a representative is rewritten
+/// to that representative's stored output name; an already-bare reference
+/// matching a name-preserving representative is left as-is (rewritten to
+/// itself, byte-identical).
+pub fn requalify(
+    expr: &Expr,
+    representative_sources: &[RepresentativeSource],
+) -> Result<String, String> {
     collect_and_splice(expr, &|col| {
-        representatives.get(col.name()).cloned().ok_or_else(|| {
-            format!(
-                "column '{}' has no stored representative to requalify against",
-                col.name()
-            )
-        })
+        resolve_representative(col.qualifier(), col.name(), representative_sources)
+            .map(|r| r.output_name.clone())
+            .ok_or_else(|| {
+                format!(
+                    "column '{}' has no stored representative to requalify against",
+                    col.name()
+                )
+            })
     })
 }
 
@@ -272,8 +282,23 @@ mod tests {
             .expect("expression")
     }
 
-    fn reps(names: &[&str]) -> BTreeSet<String> {
-        names.iter().map(|n| n.to_string()).collect()
+    /// Build a representative set where every name is a genuine bare
+    /// pull-through (`o.<name> AS <name>` — raw name identical to the
+    /// stored output name) bound to the `o` qualifier this test module's
+    /// qualified-reference fixtures use throughout. Under
+    /// [`resolve_representative`]'s bare-dependency rule (name-preserving:
+    /// `raw_name == output_name == n`), a bare reference resolves against
+    /// these regardless of their own qualifier — only a *qualified*
+    /// dependency needs to match the qualifier exactly.
+    fn reps(names: &[&str]) -> Vec<RepresentativeSource> {
+        names
+            .iter()
+            .map(|n| RepresentativeSource {
+                output_name: n.to_string(),
+                qualifier: Some("o".to_string()),
+                raw_name: n.to_string(),
+            })
+            .collect()
     }
 
     #[test]
@@ -321,7 +346,7 @@ mod tests {
     #[test]
     fn a_literal_is_reproduced_verbatim() {
         let e = expr("'active'");
-        let out = requalify(&e, &BTreeSet::new()).expect("requalify");
+        let out = requalify(&e, &[]).expect("requalify");
         assert_eq!(out, "'active'");
     }
 
@@ -338,7 +363,7 @@ mod tests {
     #[test]
     fn a_dependency_with_no_representative_fails_closed() {
         let e = expr("o.region_name");
-        let err = requalify(&e, &BTreeSet::new()).unwrap_err();
+        let err = requalify(&e, &[]).unwrap_err();
         assert!(err.contains("region_name"));
     }
 

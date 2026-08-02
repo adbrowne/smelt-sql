@@ -220,6 +220,64 @@ impl SetOpDiff {
 // and the only place ordered statement scripts get assembled from them
 // (`assemble`); this module just carries the pure data shapes.
 
+/// One stored 1:1 representative's own upstream provenance (research §4
+/// intro "Derivability representatives — one uniform rule"): the FROM-tree
+/// qualifier its bare pull-through expression reads from (`None` for an
+/// unqualified reference), the raw column name at that qualifier, and the
+/// representative's own output name — the name actually stored in the
+/// deployed table. `classify.rs` builds these from the diff's `unchanged`
+/// SELECT items; `requalify.rs` and `classify.rs`'s B1/D1 derivability
+/// proofs both resolve a dependency against them via
+/// [`resolve_representative`] — the single provenance-matching machinery
+/// every derivability/grain-link proof in this module shares (B1/D1/E1/E2/E4
+/// via [`resolve_representative`]; B3/B4/B7/D2 via a direct
+/// qualifier-and-raw-name match against this same struct, since those proofs
+/// already know which single alias they are binding to).
+#[derive(Debug, Clone)]
+pub struct RepresentativeSource {
+    pub output_name: String,
+    pub qualifier: Option<String>,
+    pub raw_name: String,
+}
+
+/// Resolve one column-reference dependency — `(qualifier, raw_name)`, read
+/// straight off the CST — against the stored 1:1 representative set, per the
+/// uniform rule (research §4 intro) and the fix for final-review finding C2.
+///
+/// A **qualified** dependency `q.n` is satisfied only by a representative
+/// whose own provenance is bound to exactly that qualifier and raw column
+/// name (`qualifier == Some(q) && raw_name == n`) — never by any
+/// representative that merely happens to share output name `n` under a
+/// *different* qualifier, or none at all. A **bare** (unqualified)
+/// dependency `n` is satisfied only by a name-preserving representative
+/// (`raw_name == output_name == n`) — the representative's own source column
+/// is *also* named `n`, so an unqualified reference to `n` cannot be
+/// confused with a same-named-but-differently-sourced qualified
+/// representative.
+///
+/// This is the fix for the reproduced C2 unsoundness: matching by bare
+/// output name alone (ignoring the dependency's own qualifier entirely) let
+/// a qualified reference to a brand-new join alias (`d.region_u`, whose
+/// dependency walk previously discarded the qualifier down to bare `region`)
+/// silently resolve against an unrelated pre-existing representative that
+/// also happened to be named `region` (`o.rc AS region`) — emitting a
+/// self-read `UPDATE` that read the wrong stored column instead of refusing
+/// (or routing to an upstream-read technique).
+pub(crate) fn resolve_representative<'a>(
+    qualifier: Option<&str>,
+    raw_name: &str,
+    representative_sources: &'a [RepresentativeSource],
+) -> Option<&'a RepresentativeSource> {
+    match qualifier {
+        Some(q) => representative_sources
+            .iter()
+            .find(|r| r.qualifier.as_deref() == Some(q) && r.raw_name == raw_name),
+        None => representative_sources
+            .iter()
+            .find(|r| r.raw_name == raw_name && r.output_name == raw_name),
+    }
+}
+
 /// Physical facts about the deployed model and its inputs, supplied
 /// alongside the two SQL definitions (research §3 "Inputs and outputs").
 /// Type inference over `added_column_types` lives in `smelt-db`, above this

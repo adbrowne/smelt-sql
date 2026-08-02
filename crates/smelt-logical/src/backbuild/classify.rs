@@ -31,9 +31,10 @@ use smelt_parser::{Expr, JoinClause, JoinType, SelectStmt, SyntaxKind};
 use crate::analysis::model_diff;
 
 use super::{
-    AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption, BackbuildOptions,
-    BackbuildRefusal, ChangedColumn, ComparableDiff, ConjunctDiff, DefinitionDiff, HSlot,
-    SelectColumn, SelectListDiff, SetOpDiff, SkeletonDiff, Technique, WriteScope,
+    resolve_representative, AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption,
+    BackbuildOptions, BackbuildRefusal, ChangedColumn, ComparableDiff, ConjunctDiff,
+    DefinitionDiff, HSlot, RepresentativeSource, SelectColumn, SelectListDiff, SetOpDiff,
+    SkeletonDiff, Technique, WriteScope,
 };
 
 use super::emit;
@@ -166,12 +167,12 @@ fn unclassified_refusal_named(atom: &str) -> AtomAnalysis {
 fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) -> Vec<AtomAnalysis> {
     let mut atoms = Vec::new();
 
-    let (representatives, after_columns) = match &comparable.select_list {
+    let (representative_sources, after_columns) = match &comparable.select_list {
         SelectListDiff::Opaque { reason } => {
             atoms.push(unclassified_refusal_named(&format!(
                 "select-list: {reason}"
             )));
-            (BTreeSet::new(), None)
+            (Vec::new(), None)
         }
         SelectListDiff::Diffed {
             added,
@@ -179,33 +180,30 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
             changed,
             unchanged,
         } => {
-            let representatives = representative_names(unchanged);
             let representative_sources = representative_sources(unchanged);
             let changed_names: BTreeSet<String> = changed.iter().map(|c| c.name.clone()).collect();
             atoms.extend(classify_select_list(
                 added,
                 dropped,
-                &representatives,
                 &representative_sources,
                 inputs,
             ));
             for c in changed {
                 atoms.push(classify_changed_column(
                     c,
-                    &representatives,
                     &representative_sources,
                     &changed_names,
                     inputs,
                 ));
             }
             let after_columns = after_column_names(unchanged, changed, added);
-            (representatives, Some(after_columns))
+            (representative_sources, Some(after_columns))
         }
     };
 
     atoms.extend(classify_where_clause(
         &comparable.where_clause,
-        &representatives,
+        &representative_sources,
         after_columns.as_deref(),
         inputs,
     ));
@@ -333,7 +331,7 @@ fn e_class_where_refusal(reason: String) -> AtomAnalysis {
 /// needs no column list at all).
 fn classify_where_clause(
     where_clause: &ConjunctDiff,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     after_columns: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
@@ -341,9 +339,13 @@ fn classify_where_clause(
         ConjunctDiff::Diffed { added, removed, .. } if added.is_empty() && removed.is_empty() => {
             Vec::new()
         }
-        ConjunctDiff::Diffed { added, removed, .. } => {
-            classify_conjunct_diff(added, removed, representatives, after_columns, inputs)
-        }
+        ConjunctDiff::Diffed { added, removed, .. } => classify_conjunct_diff(
+            added,
+            removed,
+            representative_sources,
+            after_columns,
+            inputs,
+        ),
         ConjunctDiff::Opaque { reason, .. } => vec![e_class_where_refusal(format!(
             "E-class (row-set/predicate techniques) refused: the WHERE-clause diff could not \
              be factored into a conjunct-set add/remove — a non-conjunctive rewrite (e.g. `a \
@@ -356,7 +358,7 @@ fn classify_where_clause(
 fn classify_conjunct_diff(
     added: &[Expr],
     removed: &[Expr],
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     after_columns: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
@@ -393,7 +395,12 @@ fn classify_conjunct_diff(
             if let Some(Ok(proof)) = &e4_pair {
                 if g.group_by_column_names.contains(&proof.column_name) {
                     if g.single_alias_from {
-                        return vec![build_e4_atom(proof, representatives, after_columns, inputs)];
+                        return vec![build_e4_atom(
+                            proof,
+                            representative_sources,
+                            after_columns,
+                            inputs,
+                        )];
                     }
                     return vec![e_class_where_refusal(format!(
                         "E4's group-key carve-out requires the model's FROM tree to have a \
@@ -418,14 +425,21 @@ fn classify_conjunct_diff(
     }
 
     if let Some(Ok(proof)) = &e4_pair {
-        return vec![build_e4_atom(proof, representatives, after_columns, inputs)];
+        return vec![build_e4_atom(
+            proof,
+            representative_sources,
+            after_columns,
+            inputs,
+        )];
     }
 
     if removed.is_empty() {
         return added
             .iter()
             .enumerate()
-            .map(|(index, conjunct)| classify_e1_conjunct(index, conjunct, representatives, inputs))
+            .map(|(index, conjunct)| {
+                classify_e1_conjunct(index, conjunct, representative_sources, inputs)
+            })
             .collect();
     }
 
@@ -443,7 +457,7 @@ fn classify_conjunct_diff(
         return vec![build_e2_atom(
             0,
             &removed[0],
-            representatives,
+            representative_sources,
             after_columns,
             inputs,
         )];
@@ -486,13 +500,13 @@ fn classify_conjunct_diff(
                 .iter()
                 .enumerate()
                 .map(|(index, conjunct)| {
-                    classify_e1_conjunct(index, conjunct, representatives, inputs)
+                    classify_e1_conjunct(index, conjunct, representative_sources, inputs)
                 })
                 .collect();
             atoms.push(build_e2_atom(
                 0,
                 &removed[0],
-                representatives,
+                representative_sources,
                 after_columns,
                 inputs,
             ));
@@ -543,12 +557,12 @@ fn classify_conjunct_diff(
 fn build_e2_atom(
     index: usize,
     removed: &Expr,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     after_columns: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
     let atom_change = AtomicChange::RemovedConjunct { index };
-    match build_e2_option(removed, representatives, after_columns, inputs) {
+    match build_e2_option(removed, representative_sources, after_columns, inputs) {
         Ok(option) => AtomAnalysis {
             change: atom_change,
             options: vec![option],
@@ -572,7 +586,7 @@ fn build_e2_atom(
 /// removed/added conjuncts are range predicates on one column").
 fn build_e2_option(
     removed: &Expr,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     after_columns: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
@@ -587,7 +601,7 @@ fn build_e2_option(
         );
     }
 
-    let requalified_removed = requalify::requalify(removed, representatives)
+    let requalified_removed = requalify::requalify(removed, representative_sources)
         .map_err(|reason| format!("E2 (filter loosened) refused: {reason}"))?;
 
     // Same key-addressability obligation as E4's identity anti-join guard
@@ -623,11 +637,11 @@ fn build_e2_option(
 fn classify_e1_conjunct(
     index: usize,
     conjunct: &Expr,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
     let atom_change = AtomicChange::AddedConjunct { index };
-    match try_e1(conjunct, representatives, inputs) {
+    match try_e1(conjunct, representative_sources, inputs) {
         Ok(option) => AtomAnalysis {
             change: atom_change,
             options: vec![option],
@@ -649,10 +663,10 @@ fn classify_e1_conjunct(
 /// `DELETE FROM t WHERE (<q'>) IS NOT TRUE;` — no upstream read.
 fn try_e1(
     conjunct: &Expr,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
-    let requalified = requalify::requalify(conjunct, representatives)
+    let requalified = requalify::requalify(conjunct, representative_sources)
         .map_err(|reason| format!("E1 (filter tightened) refused: {reason}"))?;
 
     let statement = emit::emit_predicate_delete(&inputs.table, &requalified);
@@ -969,14 +983,14 @@ fn is_widened_lower_bound(kind: RangeLiteralKind, b: &str, a: &str) -> Result<bo
 
 fn build_e4_atom(
     proof: &RangePairProof,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     after_columns: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
     let atom_change = AtomicChange::RangePredicateChange {
         column: proof.column_name.clone(),
     };
-    match build_e4_option(proof, representatives, after_columns, inputs) {
+    match build_e4_option(proof, representative_sources, after_columns, inputs) {
         Ok(option) => AtomAnalysis {
             change: atom_change,
             options: vec![option],
@@ -999,7 +1013,7 @@ fn build_e4_atom(
 /// the same rule E1 uses.
 fn build_e4_option(
     proof: &RangePairProof,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     after_columns: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
@@ -1015,8 +1029,8 @@ fn build_e4_option(
         );
     }
 
-    let requalified_removed =
-        requalify::requalify(&proof.removed_expr, representatives).map_err(|reason| {
+    let requalified_removed = requalify::requalify(&proof.removed_expr, representative_sources)
+        .map_err(|reason| {
             format!(
                 "E4 (time-horizon extension) refused for range predicate on '{}': {reason}",
                 proof.column_name
@@ -1260,14 +1274,15 @@ fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
 
 /// Rename pairing (B2) runs *before* add/drop classification, then every
 /// remaining added column is classified as B1 or refused (research §4 B1,
-/// B2, §7.2 "Rename-match ambiguity"). `representatives` is the caller's
-/// already-computed [`representative_names`] set — shared with the sibling
-/// `changed`-column (D1) classification so both draw from exactly the same
-/// stored-representative set (research §4 intro "one uniform rule").
+/// B2, §7.2 "Rename-match ambiguity"). `representative_sources` is the
+/// caller's already-computed representative set (research §4 intro "one
+/// uniform rule") — shared with the sibling `changed`-column (D1)
+/// classification so both draw from exactly the same stored-representative
+/// provenance, resolved by [`resolve_representative`] (C2 fix), never by
+/// bare output name alone.
 fn classify_select_list(
     added: &[SelectColumn],
     dropped: &[SelectColumn],
-    representatives: &BTreeSet<String>,
     representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
@@ -1285,7 +1300,6 @@ fn classify_select_list(
         }
         rename_atoms.push(classify_added_column(
             col,
-            representatives,
             representative_sources,
             None,
             inputs,
@@ -1295,34 +1309,15 @@ fn classify_select_list(
     rename_atoms
 }
 
-/// The stored 1:1 representative output-column names (research §4 intro
-/// "Derivability representatives — one uniform rule"): every SELECT-list
-/// output column present, unchanged, in both definitions (`unchanged`) *and*
-/// whose own expression is a bare column reference — a bare pull-through,
-/// never a computed expression. A changed column is never a representative
-/// by construction (it is not in `unchanged` at all).
-fn representative_names(unchanged: &[SelectColumn]) -> BTreeSet<String> {
-    unchanged
-        .iter()
-        .filter(|c| c.expr.as_column_ref().is_some())
-        .map(|c| c.name.clone())
-        .collect()
-}
-
-/// One stored 1:1 representative's own upstream provenance: the FROM-tree
-/// qualifier its bare pull-through expression reads from (`None` for an
-/// unqualified reference) and the raw column name at that qualifier,
-/// alongside the representative's own output name. Built from the same
-/// `unchanged` SELECT items [`representative_names`] draws from — the B3/D2
-/// grain-link proof (research §4 B3/D2: "the pulled-through key and the
-/// added expression must resolve to the SAME alias") needs the qualifier
-/// `representative_names`'s plain name set discards.
-struct RepresentativeSource {
-    output_name: String,
-    qualifier: Option<String>,
-    raw_name: String,
-}
-
+/// The stored 1:1 representative set (research §4 intro "Derivability
+/// representatives — one uniform rule"), with full provenance: every
+/// SELECT-list output column present, unchanged, in both definitions
+/// (`unchanged`) *and* whose own expression is a bare column reference — a
+/// bare pull-through, never a computed expression. A changed column is never
+/// a representative by construction (it is not in `unchanged` at all). Every
+/// derivability/grain-link proof in this module resolves a dependency
+/// against this set via [`resolve_representative`] (never by bare output
+/// name alone — the C2 fix, `super::resolve_representative`'s doc comment).
 fn representative_sources(unchanged: &[SelectColumn]) -> Vec<RepresentativeSource> {
     unchanged
         .iter()
@@ -1339,7 +1334,6 @@ fn representative_sources(unchanged: &[SelectColumn]) -> Vec<RepresentativeSourc
 
 fn classify_added_column(
     col: &SelectColumn,
-    representatives: &BTreeSet<String>,
     representative_sources: &[RepresentativeSource],
     join_admission: Option<&JoinAdmission>,
     inputs: &BackbuildInputs,
@@ -1374,7 +1368,7 @@ fn classify_added_column(
         }
     }
 
-    match try_b1(col, representatives, inputs) {
+    match try_b1(col, representative_sources, inputs) {
         Ok(option) => AtomAnalysis {
             change: atom_change,
             options: vec![option],
@@ -1421,45 +1415,61 @@ fn classify_added_column(
     }
 }
 
+/// Render a `(qualifier, raw_name)` dependency for an error message —
+/// `q.n` when qualified, bare `n` otherwise.
+fn format_dependency(qualifier: &Option<String>, raw_name: &str) -> String {
+    match qualifier {
+        Some(q) => format!("{q}.{raw_name}"),
+        None => raw_name.to_string(),
+    }
+}
+
 /// B1 admission (research §4 B1): every dependency of `col`'s expression
-/// must resolve to a stored 1:1 representative. Reuses
-/// `analysis::model_diff::collect_dependencies` — the same dependency walk
-/// `additive_only_diff` uses, not a fork of it (`docs/specs/architecture.md`
-/// §"Property composition walk rule") — which already fails closed on
-/// subqueries, window `OVER` clauses, unregistered functions, and
-/// non-deterministic functions (research §2 "Determinism caveat").
+/// must resolve to a stored 1:1 representative, matched by qualifier and raw
+/// column name via [`resolve_representative`] (C2 fix) — never by bare
+/// output name alone, which would let a qualified dependency collide with an
+/// unrelated same-named representative. Uses
+/// [`collect_qualified_dependencies`] — the same dependency walk B3/B4 use,
+/// itself built over `analysis::model_diff::collect_dependencies`'s
+/// validation (subquery/window/opaque-function/non-determinism fail-closed,
+/// research §2 "Determinism caveat"; `docs/specs/architecture.md` §"Property
+/// composition walk rule") — rather than the bare-name-only
+/// `collect_dependencies` directly.
 fn try_b1(
     col: &SelectColumn,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
-    let deps = model_diff::collect_dependencies(&col.expr).map_err(|reason| {
+    let deps = collect_qualified_dependencies(&col.expr).map_err(|reason| {
         format!(
             "B1 (self-derivable column add) refused for '{}': {reason}",
             col.name
         )
     })?;
 
-    let mut missing: Vec<&String> = deps
+    let mut missing: Vec<String> = deps
         .iter()
-        .filter(|d| !representatives.contains(*d))
+        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
+        .map(|(q, n)| format_dependency(q, n))
         .collect();
     missing.sort();
     if let Some(dep) = missing.first() {
         return Err(format!(
             "B1 (self-derivable column add) refused for '{}': depends on '{dep}', which has no \
-             1:1 stored representative (a bare pull-through unchanged between both definitions) \
-             in the model's own output — an upstream-only dependency needs B3, not B1",
+             1:1 stored representative (a bare pull-through unchanged between both definitions, \
+             matched by qualifier and raw column name) in the model's own output — an \
+             upstream-only dependency needs B3, not B1",
             col.name
         ));
     }
 
-    let requalified = requalify::requalify(&col.expr, representatives).map_err(|reason| {
-        format!(
-            "B1 (self-derivable column add) refused for '{}': {reason}",
-            col.name
-        )
-    })?;
+    let requalified =
+        requalify::requalify(&col.expr, representative_sources).map_err(|reason| {
+            format!(
+                "B1 (self-derivable column add) refused for '{}': {reason}",
+                col.name
+            )
+        })?;
 
     build_b1_option(col, &requalified, inputs)
 }
@@ -1796,12 +1806,28 @@ fn join_reference_name(join: &JoinClause) -> Option<String> {
 /// diff could not be factored" must never be misread as "nothing changed",
 /// since `where_diff` returns `Opaque` independently of whether the alias
 /// is actually referenced.
-fn where_clause_references_alias(where_clause: &ConjunctDiff, alias: &str) -> bool {
+///
+/// I1 fix (final-review finding): the sweep is qualifier-*and*-unqualified
+/// aware — SQL permits an unqualified reference to resolve to any
+/// unambiguous column in scope, including the newly-added join's own
+/// column, so a sweep that only ever checked qualified references could miss
+/// a real dim-side reference hiding behind a bare name. See
+/// [`references_alias_or_unproven_bare`].
+fn where_clause_references_alias(
+    where_clause: &ConjunctDiff,
+    alias: &str,
+    representative_sources: &[RepresentativeSource],
+) -> bool {
     match where_clause {
-        ConjunctDiff::Diffed { added, .. } => added.iter().any(|w| references_alias(w, alias)),
+        ConjunctDiff::Diffed { added, .. } => added
+            .iter()
+            .any(|w| references_alias_or_unproven_bare(w, alias, representative_sources)),
         ConjunctDiff::Opaque { before, after, .. } => {
-            before.as_ref().is_some_and(|e| references_alias(e, alias))
-                || after.as_ref().is_some_and(|e| references_alias(e, alias))
+            before.as_ref().is_some_and(|e| {
+                references_alias_or_unproven_bare(e, alias, representative_sources)
+            }) || after.as_ref().is_some_and(|e| {
+                references_alias_or_unproven_bare(e, alias, representative_sources)
+            })
         }
     }
 }
@@ -1846,16 +1872,21 @@ fn admit_added_left_join(
         "the added join's table reference has no resolvable alias or identifier".to_string()
     })?;
 
-    if where_clause_references_alias(where_clause, &alias) {
+    if where_clause_references_alias(where_clause, &alias, representative_sources) {
         return Err(format!(
-            "the WHERE clause now references the added join's alias '{alias}' — the join is not \
-             a pure enrichment (the row set is no longer preserved by the join alone)"
+            "the WHERE clause now references the added join's alias '{alias}' (directly, or via \
+             an unqualified reference that cannot be proven fact-side) — the join is not a pure \
+             enrichment (the row set is no longer preserved by the join alone)"
         ));
     }
-    if let Some(c) = changed.iter().find(|c| references_alias(&c.after, &alias)) {
+    if let Some(c) = changed
+        .iter()
+        .find(|c| references_alias_or_unproven_bare(&c.after, &alias, representative_sources))
+    {
         return Err(format!(
-            "changed column '{}' now references the added join's alias '{alias}' — B4 only \
-             admits a join that feeds solely added columns",
+            "changed column '{}' now references the added join's alias '{alias}' (directly, or \
+             via an unqualified reference that cannot be proven fact-side) — B4 only admits a \
+             join that feeds solely added columns",
             c.name
         ));
     }
@@ -2017,17 +2048,33 @@ fn split_top_level_and(expr: &Expr, out: &mut Vec<Expr>) {
     out.push(expr.clone());
 }
 
-/// Whether `expr`'s subtree contains any column reference qualified by
-/// `alias` — a permissive existence probe over one already-bounded node (a
-/// WHERE conjunct or a changed column's expression), unlike the fail-closed
-/// `collect_qualified_dependencies`/`model_diff::collect_dependencies`
-/// walks elsewhere in this file: this is a leaf classifier answering "does
-/// this reference the alias at all", not a derivability proof, so an
-/// unrecognised sub-shape is simply walked through rather than refused.
+/// Whether `expr`'s subtree contains any column reference that could
+/// plausibly resolve to the newly-added join's alias `alias` — either
+/// directly qualified with it, or unqualified and not provably resolvable to
+/// the *fact* side instead (I1 fix, final-review finding: SQL permits an
+/// unqualified reference to resolve to any unambiguous column in scope,
+/// including a newly-added join's own column, so a sweep that only ever
+/// checked qualified references could miss a real dim-side reference).
+///
+/// An unqualified reference is only provably fact-side when it resolves to a
+/// *name-preserving* stored representative
+/// ([`resolve_representative`]'s bare-dependency rule) — same posture as the
+/// C2 derivability fix: fail closed (treat as possibly dim-side) rather than
+/// assume. This is a permissive existence probe over one already-bounded
+/// node (a `WHERE` conjunct or a changed column's expression), unlike the
+/// fail-closed `collect_qualified_dependencies`/`model_diff::collect_dependencies`
+/// walks elsewhere in this file: an unrecognised sub-shape is simply walked
+/// through rather than refused outright — the *conclusion* it feeds
+/// (`admit_added_left_join`'s "nothing else references it" sweep) is what
+/// fails closed, by treating "cannot prove otherwise" as "references it".
 /// Mirrors the `collect_column_refs`/`_rec` shape duplicated across this
 /// crate's analysis modules (e.g. `analysis/fingerprint.rs`).
-fn references_alias(expr: &Expr, alias: &str) -> bool {
-    references_alias_node(expr.syntax(), alias)
+fn references_alias_or_unproven_bare(
+    expr: &Expr,
+    alias: &str,
+    representative_sources: &[RepresentativeSource],
+) -> bool {
+    references_alias_or_unproven_bare_node(expr.syntax(), alias, representative_sources)
 }
 
 /// Every bare column name `expr` references anywhere in its subtree — the
@@ -2072,14 +2119,33 @@ fn collect_column_names(node: &SyntaxNode, out: &mut HashSet<String>) {
     }
 }
 
-fn references_alias_node(node: &SyntaxNode, alias: &str) -> bool {
+fn references_alias_or_unproven_bare_node(
+    node: &SyntaxNode,
+    alias: &str,
+    representative_sources: &[RepresentativeSource],
+) -> bool {
     if node.kind() == SyntaxKind::EXPRESSION {
         if let Some(col) = Expr::cast(node.clone()).and_then(|e| e.as_column_ref()) {
-            return col.qualifier() == Some(alias);
+            return match col.qualifier() {
+                Some(q) => q == alias,
+                // The lexer has no dedicated `TRUE`/`FALSE` keyword token —
+                // both lex as plain `IDENT`, so a bare boolean literal is
+                // otherwise indistinguishable from an unqualified column
+                // reference at this AST layer (`ColumnRef::from_expr`).
+                // Treat them as the literals they are, not a candidate
+                // dim-side reference, so `WHERE d.active = TRUE` doesn't
+                // spuriously fail-close every *other* added join too.
+                None if col.name().eq_ignore_ascii_case("TRUE")
+                    || col.name().eq_ignore_ascii_case("FALSE") =>
+                {
+                    false
+                }
+                None => resolve_representative(None, col.name(), representative_sources).is_none(),
+            };
         }
     }
     node.children()
-        .any(|child| references_alias_node(&child, alias))
+        .any(|child| references_alias_or_unproven_bare_node(&child, alias, representative_sources))
 }
 
 /// Whether every dependency of `expr` is qualified with `alias` — the B4
@@ -2276,7 +2342,6 @@ fn classify_single_added_left_join(
         } => (added, dropped, changed, unchanged),
     };
 
-    let representatives = representative_names(unchanged);
     let representative_sources = representative_sources(unchanged);
 
     let admission = match admit_added_left_join(
@@ -2304,7 +2369,6 @@ fn classify_single_added_left_join(
         }
         atoms.push(classify_added_column(
             col,
-            &representatives,
             &representative_sources,
             Some(&admission),
             inputs,
@@ -2315,7 +2379,6 @@ fn classify_single_added_left_join(
     for c in changed {
         atoms.push(classify_changed_column(
             c,
-            &representatives,
             &representative_sources,
             &changed_names,
             inputs,
@@ -2325,7 +2388,7 @@ fn classify_single_added_left_join(
     let after_columns = after_column_names(unchanged, changed, added);
     atoms.extend(classify_where_clause(
         &comparable.where_clause,
-        &representatives,
+        &representative_sources,
         Some(&after_columns),
         inputs,
     ));
@@ -2517,7 +2580,6 @@ fn classify_b7_diff(
         Err(reason) => return vec![added_left_join_refusal(&reason)],
     };
 
-    let representatives = representative_names(unchanged);
     let mut representative_sources = representative_sources(unchanged);
 
     let mut admissions: BTreeMap<String, JoinAdmission> = BTreeMap::new();
@@ -2577,7 +2639,6 @@ fn classify_b7_diff(
                 handled.insert(col.name.clone());
                 atoms.push(classify_added_column(
                     col,
-                    &representatives,
                     &representative_sources,
                     Some(admission),
                     inputs,
@@ -2596,7 +2657,6 @@ fn classify_b7_diff(
         }
         atoms.push(classify_added_column(
             col,
-            &representatives,
             &representative_sources,
             None,
             inputs,
@@ -2607,7 +2667,6 @@ fn classify_b7_diff(
     for c in changed {
         atoms.push(classify_changed_column(
             c,
-            &representatives,
             &representative_sources,
             &changed_names,
             inputs,
@@ -2617,7 +2676,7 @@ fn classify_b7_diff(
     let after_columns = after_column_names(unchanged, changed, added);
     atoms.extend(classify_where_clause(
         &comparable.where_clause,
-        &representatives,
+        &representative_sources,
         Some(&after_columns),
         inputs,
     ));
@@ -2652,7 +2711,6 @@ fn classify_b7_diff(
 /// worth reporting) — the same invariant every other atom kind upholds.
 fn classify_changed_column(
     changed: &ChangedColumn,
-    representatives: &BTreeSet<String>,
     representative_sources: &[RepresentativeSource],
     changed_names: &BTreeSet<String>,
     inputs: &BackbuildInputs,
@@ -2672,10 +2730,10 @@ fn classify_changed_column(
         };
     }
 
-    let d1_result = try_d1(changed, representatives, changed_names, inputs);
+    let d1_result = try_d1(changed, representative_sources, changed_names, inputs);
     let attempt_d2 = match &d1_result {
         Ok(_) => true,
-        Err(_) => d1_failure_licenses_d2_attempt(changed, representatives, changed_names),
+        Err(_) => d1_failure_licenses_d2_attempt(changed, representative_sources, changed_names),
     };
     let d2_result = if attempt_d2 {
         Some(try_d2(changed, representative_sources, inputs))
@@ -2716,27 +2774,28 @@ fn classify_changed_column(
 }
 
 /// Whether a failed D1 licenses attempting D2 (see `classify_changed_column`
-/// doc comment). Re-derives D1's own "first missing dependency" (same sort
-/// order `try_d1` uses) rather than threading a richer error type back from
-/// `try_d1` — `try_d1` already fully validated the expression by the time
-/// this runs, so `collect_dependencies` here is guaranteed `Ok` in every
-/// reachable case except the one it exists to detect (an expression-validity
-/// failure, which also means "don't attempt D2").
+/// doc comment). Re-derives D1's own "first missing dependency" (same
+/// qualifier-aware match order `try_d1` uses, C2 fix) rather than threading a
+/// richer error type back from `try_d1` — `try_d1` already fully validated
+/// the expression by the time this runs, so `collect_qualified_dependencies`
+/// here is guaranteed `Ok` in every reachable case except the one it exists
+/// to detect (an expression-validity failure, which also means "don't
+/// attempt D2").
 fn d1_failure_licenses_d2_attempt(
     changed: &ChangedColumn,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     changed_names: &BTreeSet<String>,
 ) -> bool {
-    let Ok(deps) = model_diff::collect_dependencies(&changed.after) else {
+    let Ok(deps) = collect_qualified_dependencies(&changed.after) else {
         return false;
     };
-    let mut missing: Vec<&String> = deps
-        .iter()
-        .filter(|d| !representatives.contains(*d))
+    let mut missing: Vec<(Option<String>, String)> = deps
+        .into_iter()
+        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
         .collect();
     missing.sort();
     match missing.first() {
-        Some(dep) => !changed_names.contains(dep.as_str()),
+        Some((_, dep)) => !changed_names.contains(dep.as_str()),
         // No missing dependency at all means D1 should have succeeded —
         // unreachable from the `Err` branch that calls this, but false is
         // the safe (skip D2) answer either way.
@@ -2746,13 +2805,14 @@ fn d1_failure_licenses_d2_attempt(
 
 /// D1 admission (research §4 D1): every dependency of the column's *new*
 /// expression must resolve to a stored 1:1 representative under exactly the
-/// same uniform rule B1 uses (research §4 intro) — representatives are drawn
-/// only from `unchanged` output columns, so the changed column itself and
-/// any changed sibling are never representatives by construction. This is
-/// what makes self-substitution (a new expression reading the column's own
-/// old value) and a mutual swap (`x AS a, y AS b` → `y AS a, x AS b`) both
-/// refuse: neither `a` nor `b` is ever in `representatives`, since both are
-/// in `changed`, not `unchanged`.
+/// same uniform rule B1 uses (research §4 intro), matched by qualifier and
+/// raw column name via [`resolve_representative`] (C2 fix) — representatives
+/// are drawn only from `unchanged` output columns, so the changed column
+/// itself and any changed sibling are never representatives by construction.
+/// This is what makes self-substitution (a new expression reading the
+/// column's own old value) and a mutual swap (`x AS a, y AS b` → `y AS a, x
+/// AS b`) both refuse: neither `a` nor `b` is ever a representative, since
+/// both are in `changed`, not `unchanged`.
 ///
 /// The new expression is defined over *inputs*, not over the old column
 /// value — this proof finds stored representatives of those inputs, it
@@ -2769,7 +2829,7 @@ fn d1_failure_licenses_d2_attempt(
 /// must never be pointed at D2).
 fn try_d1(
     changed: &ChangedColumn,
-    representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     changed_names: &BTreeSet<String>,
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
@@ -2780,20 +2840,21 @@ fn try_d1(
         ));
     }
 
-    let deps = model_diff::collect_dependencies(&changed.after).map_err(|reason| {
+    let deps = collect_qualified_dependencies(&changed.after).map_err(|reason| {
         format!(
             "D1 (stored-derivable expression change) refused for '{}': {reason}",
             changed.name
         )
     })?;
 
-    let mut missing: Vec<&String> = deps
-        .iter()
-        .filter(|d| !representatives.contains(*d))
+    let mut missing: Vec<(Option<String>, String)> = deps
+        .into_iter()
+        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
         .collect();
     missing.sort();
-    if let Some(dep) = missing.first() {
-        return Err(if changed_names.contains(dep.as_str()) {
+    if let Some((qualifier, name)) = missing.first() {
+        let dep = format_dependency(qualifier, name);
+        return Err(if changed_names.contains(name.as_str()) {
             format!(
                 "D1 (stored-derivable expression change) refused for '{}': depends on '{dep}', \
                  which also changed in this same edit — a changed column is never a stored \
@@ -2806,19 +2867,20 @@ fn try_d1(
             format!(
                 "D1 (stored-derivable expression change) refused for '{}': depends on '{dep}', \
                  which has no 1:1 stored representative (a bare pull-through unchanged between \
-                 both definitions) in the model's own output — an upstream-only dependency \
-                 needs a later phase's D2, not D1",
+                 both definitions, matched by qualifier and raw column name) in the model's own \
+                 output — an upstream-only dependency needs D2, not D1",
                 changed.name
             )
         });
     }
 
-    let requalified = requalify::requalify(&changed.after, representatives).map_err(|reason| {
-        format!(
-            "D1 (stored-derivable expression change) refused for '{}': {reason}",
-            changed.name
-        )
-    })?;
+    let requalified =
+        requalify::requalify(&changed.after, representative_sources).map_err(|reason| {
+            format!(
+                "D1 (stored-derivable expression change) refused for '{}': {reason}",
+                changed.name
+            )
+        })?;
 
     let update = emit::emit_in_place_update(&inputs.table, &[(changed.name.clone(), requalified)]);
 

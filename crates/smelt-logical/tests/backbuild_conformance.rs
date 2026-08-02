@@ -1410,7 +1410,9 @@ fn e4_upper_bound_strict_lt_narrowing_refuses_number() {
     );
     assert_eq!(atom.inadmissible.len(), 1, "{atom:?}");
     assert!(
-        atom.inadmissible[0].reason.contains("does not provably widen"),
+        atom.inadmissible[0]
+            .reason
+            .contains("does not provably widen"),
         "expected the range-widening refusal reason, got: {}",
         atom.inadmissible[0].reason
     );
@@ -1531,7 +1533,9 @@ fn e4_upper_bound_strict_lt_narrowing_refuses_text() {
     );
     assert_eq!(atom.inadmissible.len(), 1, "{atom:?}");
     assert!(
-        atom.inadmissible[0].reason.contains("does not provably widen"),
+        atom.inadmissible[0]
+            .reason
+            .contains("does not provably widen"),
         "expected the range-widening refusal reason, got: {}",
         atom.inadmissible[0].reason
     );
