@@ -1781,10 +1781,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#remove-comments" class="md-nav__link">
+  <a href="#comment-folding" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Remove comments
+        Comment folding
       
     </span>
   </a>
@@ -2761,10 +2761,10 @@
 </li>
       
         <li class="md-nav__item">
-  <a href="#remove-comments" class="md-nav__link">
+  <a href="#comment-folding" class="md-nav__link">
     <span class="md-ellipsis">
       
-        Remove comments
+        Comment folding
       
     </span>
   </a>
@@ -2871,11 +2871,12 @@ display-only: selecting it does not run anything, and it has no effect on which 
 real run will actually use. To change what a real run does, use the model's
 <code>maintenance:</code> frontmatter, as described in
 <a href="../incremental-models/#steering-prefer--technique">Incremental Models</a>.</p>
-<h2 id="remove-comments">Remove comments<a class="headerlink" href="#remove-comments" title="Permanent link">&para;</a></h2>
-<p>A single "Remove comments" toggle at the top of the page applies to every SQL viewer on the
-page at once — the model's own SQL and every technique preview's statements — stripping <code>--</code>
-and <code>/* */</code> comments while leaving the surrounding formatting untouched. This is purely a
-display filter; it doesn't change what SQL a run would execute.</p>
+<h2 id="comment-folding">Comment folding<a class="headerlink" href="#comment-folding" title="Permanent link">&para;</a></h2>
+<p>Every SQL viewer on the page — the model's own SQL and every technique preview's statements —
+folds <code>--</code> and <code>/* */</code> comments by default, so the SQL itself is easier to scan. A folded
+comment isn't deleted: click its viewer's fold marker to expand it back, independently of every
+other viewer on the page. This is purely a display convenience; it doesn't change what SQL a
+run would execute.</p>
 <h2 id="further-reading">Further reading<a class="headerlink" href="#further-reading" title="Permanent link">&para;</a></h2>
 <ul>
 <li><a href="../web-ui/">Web UI</a> for the graph view and the rest of the UI's features.</li>
