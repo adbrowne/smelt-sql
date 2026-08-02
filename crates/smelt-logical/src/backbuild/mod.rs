@@ -9,9 +9,13 @@
 //! module is deliberately unwired: nothing outside `smelt-logical` calls it
 //! yet.
 
+pub mod classify;
 pub mod diff;
 
+pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
+
+use std::collections::BTreeMap;
 
 use smelt_parser::{Expr, JoinClause, SelectStmt};
 
@@ -193,4 +197,177 @@ impl SetOpDiff {
             SetOpDiff::Opaque { .. } => false,
         }
     }
+}
+
+// ===== The option-set data model (research §2 "Options, not choices"; §3
+// "Inputs and outputs"; §6 architecture) =====
+//
+// `classify.rs` is the only producer of these values (`derive_backbuild_options`)
+// and the only place ordered statement scripts get assembled from them
+// (`assemble`); this module just carries the pure data shapes.
+
+/// Physical facts about the deployed model and its inputs, supplied
+/// alongside the two SQL definitions (research §3 "Inputs and outputs").
+/// Type inference over `added_column_types` lives in `smelt-db`, above this
+/// crate — tests hand-write it.
+#[derive(Debug, Clone)]
+pub struct BackbuildInputs {
+    /// Physical name of the deployed table.
+    pub table: String,
+    /// The after-definition's SQL text, verbatim. Needed for the
+    /// model-level `FullRefresh` baseline (`CREATE OR REPLACE TABLE t AS
+    /// <after>`) — not part of research §3's original field sketch, added
+    /// here because [`DefinitionDiff`] deliberately does not retain either
+    /// whole definition's raw text (see `diff.rs`'s clause-by-clause
+    /// factoring), so classification has no other way to reconstruct it.
+    pub after_sql: String,
+    /// Declared row identity, or derived from `GROUP BY` — `None` when the
+    /// model has neither.
+    pub row_identity: Option<Vec<String>>,
+    /// Added output column name → SQL type string.
+    pub added_column_types: BTreeMap<String, String>,
+    /// Upstream name (as referenced in the model's FROM/JOIN tree) → source
+    /// facts.
+    pub sources: BTreeMap<String, SourceRef>,
+}
+
+/// One upstream's physical facts, as declared to [`BackbuildInputs`].
+#[derive(Debug, Clone)]
+pub struct SourceRef {
+    pub physical_name: String,
+    pub unique_key: Option<Vec<String>>,
+}
+
+/// Every admissible technique for one atomic change, plus every named
+/// inadmissibility, and the always-present model-level `FullRefresh`
+/// baseline (research §2 "Options, not choices").
+#[derive(Debug, Clone)]
+pub struct BackbuildOptions {
+    /// Per-atom analysis. Empty exactly when the diff is a no-op (research
+    /// catalogue case A0) — never empty for a diff that changed something,
+    /// even when nothing is classified yet, per fail-loud discipline: a
+    /// diff this phase cannot factor into an admissible technique still
+    /// yields a named refusal, never a silent "nothing to do".
+    pub atoms: Vec<AtomAnalysis>,
+    /// The model-level baseline: `CREATE OR REPLACE TABLE t AS <after>`.
+    /// Always present, regardless of `atoms`, so the eventual cost model
+    /// always has something to compare targeted scripts against.
+    pub full_refresh: BackbuildOption,
+}
+
+/// One atomic change (research §4's "atoms") and everything classification
+/// could prove or refuse about it.
+#[derive(Debug, Clone)]
+pub struct AtomAnalysis {
+    pub change: AtomicChange,
+    /// Every independently-proven admissible technique (research §2
+    /// "Options, not choices" — never a single "chosen" verdict; a chooser
+    /// picking among these is deliberately deferred).
+    pub options: Vec<BackbuildOption>,
+    /// Every named reason a technique was NOT admitted for this atom
+    /// (fail-loud discipline — never a silent omission).
+    pub inadmissible: Vec<BackbuildRefusal>,
+}
+
+/// This phase's atom granularity is coarse — a diff factors into at most
+/// one atom, describing the whole definition or its skeleton. Later phases'
+/// classifiers explode a diff into the finer per-column, per-conjunct,
+/// per-join atoms research §4's catalogue cases describe (B1/B2/D1/…), each
+/// getting its own [`AtomAnalysis`].
+#[derive(Debug, Clone)]
+pub enum AtomicChange {
+    /// The whole model definition, when the pure diff could not factor it
+    /// at all ([`DefinitionDiff::Opaque`] — a changed CTE section, or
+    /// one/both definitions not a plain `SELECT` this module recognises).
+    WholeDefinition { reason: String },
+    /// The FROM/JOIN tree, `GROUP BY`, `DISTINCT`, or another
+    /// post-processing clause changed in a way the shared grain/join guards
+    /// (research §4 intro, G-class) refuse outright — a grain change (G1)
+    /// or a join-multiplicity change (G2).
+    Skeleton { reason: String },
+    /// A non-empty, non-skeleton-refused diff this phase does not yet
+    /// classify into admissible techniques (research catalogue classes
+    /// B/C/D/E/F — arriving in later phases). A conservative catch-all: an
+    /// honest "not yet handled" refusal, never a silently empty atom list
+    /// for a definition that did change.
+    Unclassified,
+}
+
+/// One admissible technique for an atom (or the model-level `FullRefresh`
+/// baseline), carrying its own statement script plus the research §2
+/// cost/safety metadata a future chooser needs. Every option carries its
+/// own proof path — there is no chooser or cost logic anywhere in this
+/// module.
+#[derive(Debug, Clone)]
+pub struct BackbuildOption {
+    pub technique: Technique,
+    /// This option's place in research §4 "H. Composites"'s ordering
+    /// (`renames → ALTER ADD/TYPE → DELETEs → UPDATEs/MERGEs → INSERTs →
+    /// ALTER DROPs`), or `None` for a technique that is never composed into
+    /// a targeted, per-atom script — today only [`Technique::FullRefresh`].
+    pub slot: Option<HSlot>,
+    /// The ordered statement strings this option executes, authored once
+    /// here and only executed by callers (statement single-ownership,
+    /// `docs/specs/architecture.md` §"Constraints & Invariants" item 12).
+    /// Statement count (research §2 metadata) is `statements.len()` —
+    /// see [`Self::statement_count`].
+    pub statements: Vec<String>,
+    pub write_scope: WriteScope,
+    pub reads_upstream: bool,
+    /// Whether re-running this option's statements against a table it has
+    /// already applied to reproduces the same result (research §2
+    /// "Idempotence").
+    pub rerun_safe: bool,
+}
+
+impl BackbuildOption {
+    /// Research §2 metadata: statement count, derived rather than stored
+    /// separately so it can never drift from `statements`.
+    pub fn statement_count(&self) -> usize {
+        self.statements.len()
+    }
+}
+
+/// The technique a [`BackbuildOption`] implements. Only
+/// [`Technique::FullRefresh`] exists this phase; later phases add one
+/// variant per research §4 catalogue case (B1's in-place update, B2's
+/// rename, …).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Technique {
+    /// `CREATE OR REPLACE TABLE t AS <after>` — the always-present
+    /// model-level baseline (research §2).
+    FullRefresh,
+}
+
+/// The research §2 "write scope" option metadata.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WriteScope {
+    None,
+    ColumnScoped,
+    RowSubset,
+    FullWrite,
+}
+
+/// The research §4 "H. Composites" ordering slots:
+/// `renames → ALTER ADD/TYPE → DELETEs → UPDATEs/MERGEs → INSERTs → ALTER
+/// DROPs`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum HSlot {
+    Rename,
+    Alter,
+    Delete,
+    UpdateMerge,
+    Insert,
+    Drop,
+}
+
+/// A named, fail-closed reason one technique was not admitted for `atom`
+/// (research §2 "Refusal posture" — fail-loud discipline: every refusal is
+/// named, never a silent fallback; actionable refusals name what would
+/// admit the technique where a small edit or declaration would supply the
+/// missing fact).
+#[derive(Debug, Clone)]
+pub struct BackbuildRefusal {
+    pub atom: String,
+    pub reason: String,
 }
