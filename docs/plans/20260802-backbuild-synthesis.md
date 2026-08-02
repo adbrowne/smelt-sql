@@ -44,7 +44,9 @@ subagent → reviewer subagent → iterate → record + commit + push.
 
 - Red-green TDD: failing test before any implementation.
 - Oracle tests run against real DuckDB (the crate's existing `duckdb` dev-dependency);
-  multiset equality per research §6 "Conformance harness".
+  multiset equality per research §6 "Conformance harness". A case admitting several
+  options verifies **every** option independently, each against a fresh copy of the
+  staged before-table.
 - Verification gate is `bash .claude/scripts/verify-phase.sh` (one call; failures-only
   output) — do not run the four commands separately.
 - Atomic per-phase commits with the phase's `Commit.` line verbatim.
@@ -64,17 +66,23 @@ subagent → reviewer subagent → iterate → record + commit + push.
 
 Between "fingerprint-equal ⇒ reuse" and "changed ⇒ full refresh" sits a class of model edits
 reachable by targeted scripts (research §0). This plan builds the pure derivation:
-`(before CST, after CST, BackbuildInputs) → BackbuildPlan → statement strings`, as a
+`(before CST, after CST, BackbuildInputs) → BackbuildOptions → statement strings`, as a
 standalone `smelt-logical` module with DuckDB oracle-equivalence tests, priority-ordered per
-research §5. Wiring (CLI verb, virtual-environment acceleration, maintained-model ledger
-integration, Spark dialect) is explicitly out of scope.
+research §5. Classification returns **every** admissible technique per atomic change
+(research §2 "Options, not choices") — there is no cost model and no chooser in this plan;
+callers select, and tests verify each option independently. Wiring (CLI verb,
+virtual-environment acceleration, maintained-model ledger integration, Spark dialect, the
+cost model) is explicitly out of scope.
 
 ## Scope
 
 ### In scope (research coverage)
 
-- Research §4 cases: A0, B1, B2, B3, B4, D1, D2, E1, E2, E4, F1; G-class and CTE-change
-  refusals; H composite ordering.
+- Research §4 cases: A0, B1, B2, B3, B4, B7, D1, D2, E1, E2, E4, F1; G-class and
+  CTE-change refusals; H composite ordering.
+- Option enumeration per research §2 "Options, not choices": per-atom option sets, the
+  always-present model-level `FullRefresh` baseline, `assemble(options, selection)`. No
+  cost model, no chooser.
 - Research §6 architecture: `backbuild/{mod,diff,classify,requalify,emit}.rs` plus the
   `backbuild_conformance` oracle harness.
 
@@ -101,6 +109,7 @@ integration, Spark dialect) is explicitly out of scope.
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 | 8     | pending  |        |      |
+| 9     | pending  |        |      |
 
 ---
 
@@ -126,8 +135,9 @@ prefix diffs the final SELECT; changed CTE → `Changed::Opaque`).
 - `::where_conjunct_diff_added_and_removed` — `WHERE a AND b` → `WHERE a AND c` yields
   removed `{b}`, added `{c}`; a non-conjunctive rewrite (`a OR b` → `a`) yields
   `ConjunctDiff::Opaque`.
-- `::skeleton_join_add_detected` — an added LEFT JOIN with otherwise-unchanged FROM yields
-  `SkeletonDiff::AddedLeftJoin`; a changed join condition yields `SkeletonDiff::Changed`.
+- `::skeleton_join_add_detected` — added LEFT JOINs with otherwise-unchanged FROM yield
+  `SkeletonDiff::AddedLeftJoins` (a list, one entry per added join); a changed join
+  condition yields `SkeletonDiff::Changed`.
 - `::union_branch_diff` — an added UNION ALL branch is isolated; reordered identical
   branches are unchanged.
 - `::changed_cte_is_opaque` — an edit inside a CTE body yields the opaque/refuse-carrying
@@ -157,34 +167,44 @@ comparator. Conjunct split at top-level `AND` only. Pure data out; no classifica
 
 ---
 
-### Phase 2: Plan assembly, refusals, and the DuckDB conformance harness
+### Phase 2: Option enumeration, refusals, and the DuckDB conformance harness
 
-**Goal.** `BackbuildPlan { steps, refusals }` with the H-ordering slots (research §4H) and
-whole-model refusal semantics (one refused atom ⇒ no steps offered); G-class and
-CTE-change refusals; the reusable oracle harness. End state: A0 produces an empty verified
-script, a grain change produces a named refusal.
+**Goal.** The option-set data model (research §2 "Options, not choices"):
+`BackbuildOptions` with per-atom option sets and named inadmissibility records, the
+always-present model-level `FullRefresh` baseline, `assemble(options, selection)` with the
+H-ordering slots (research §4H); G-class and CTE-change refusals; the reusable oracle
+harness. End state: A0 yields an empty targeted script plus the verified `FullRefresh`
+baseline; a grain change yields `FullRefresh`-only with a named refusal.
 
 **Pre-conditions.** Phase 1 (`DefinitionDiff`).
 
 **TDD tests to write first.**
 - `crates/smelt-logical/tests/backbuild_conformance.rs::harness_smoke_a0_noop` — harness
-  helpers (`stage_inputs`, `build_before`, `apply_script`, `assert_matches_full_rebuild`)
-  work end-to-end on a real DuckDB: A0 case emits zero statements and the table already
-  equals the full rebuild.
-- `::g1_group_by_change_refuses` — GROUP BY key added ⇒ `BackbuildRefusal` naming the
-  grain change; `plan.steps` empty.
+  helpers (`stage_inputs`, `build_before`, `verify_option`, `assert_matches_full_rebuild`)
+  work end-to-end on a real DuckDB: the A0 case's targeted script is empty (table already
+  equals the full rebuild) and the `FullRefresh` baseline option is present and
+  oracle-verified.
+- `::g1_group_by_change_refuses` — GROUP BY key added ⇒ named refusal on the atom; the
+  model's only option is `FullRefresh`.
 - `::g1_distinct_toggle_refuses`, `::g2_join_condition_change_refuses`,
-  `::changed_cte_refuses` — named reasons, no steps.
-- `crates/smelt-logical/tests/backbuild_plan.rs::refused_atom_refuses_whole_model` — a
-  diff with one admissible atom and one inadmissible atom yields refusals and **no** steps.
+  `::changed_cte_refuses` — named reasons; `FullRefresh`-only.
+- `crates/smelt-logical/tests/backbuild_plan.rs::atom_without_options_leaves_only_full_refresh`
+  — a diff with one admissible atom and one inadmissible atom yields **no** composed
+  targeted script (partial application never offered); refusals name the blocked atom;
+  `FullRefresh` remains.
 
-**Implementation shape.** `backbuild/mod.rs` grows `BackbuildStep` (variants filled in by
-later phases), `BackbuildRefusal { atom: String, reason: String }`,
-`pub fn derive_backbuild(diff: &DefinitionDiff, inputs: &BackbuildInputs) -> BackbuildPlan`
-in `classify.rs` (this phase: only the refusal paths + empty-diff ⇒ empty plan).
-`BackbuildInputs` per research §3. Harness helpers in
-`tests/backbuild_conformance/harness.rs` (or a `#[path]` shared module): multiset equality
-via two-way `EXCEPT ALL` plus column name/type check, per research §6.
+**Implementation shape.** `backbuild/mod.rs`:
+`BackbuildOptions { atoms: Vec<AtomAnalysis> }`,
+`AtomAnalysis { change: AtomicChange, options: Vec<BackbuildOption>, inadmissible: Vec<BackbuildRefusal> }`,
+`BackbuildOption` (technique variant + statement data; variants filled in by later phases),
+`BackbuildRefusal { atom: String, reason: String }`. `classify.rs`:
+`pub fn derive_backbuild_options(diff: &DefinitionDiff, inputs: &BackbuildInputs) -> BackbuildOptions`
+(this phase: refusal paths, empty-diff ⇒ no atoms, `FullRefresh` baseline).
+`assemble(&BackbuildOptions, &Selection) -> Vec<String>` (this phase: empty and
+`FullRefresh` paths only). `BackbuildInputs` per research §3. Harness helpers in
+`tests/backbuild_conformance/harness.rs` (or a `#[path]` shared module): `verify_option`
+applies one option's script to a fresh copy of the before-table; multiset equality via
+two-way `EXCEPT ALL` plus column name/type check, per research §6.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{mod,classify}.rs`
@@ -193,11 +213,14 @@ via two-way `EXCEPT ALL` plus column name/type check, per research §6.
 
 **Review checklist** (material findings only):
 - [ ] TDD tests listed above exist and assert what's specified
-- [ ] Refusals carry atom + named reason (fail-loud); no silent fallback path exists
-- [ ] Harness asserts multiset + schema equality exactly as research §6 specifies
-- [ ] Plan is pure data; harness executes statements, never authors them
+- [ ] Refusals carry atom + named reason (fail-loud); an empty option set leaves
+      `FullRefresh` as the only model option — no silent fallback, no partial script
+- [ ] Every option carries its own proof path; no chooser/cost logic anywhere
+- [ ] Harness asserts multiset + schema equality exactly as research §6 specifies, per
+      option on a fresh table copy
+- [ ] Options are pure data; harness executes statements, never authors them
 
-**Commit.** `feat(logical): backbuild plan assembly, refusals, and DuckDB conformance harness`
+**Commit.** `feat(logical): backbuild option enumeration, refusals, and DuckDB conformance harness`
 
 ---
 
@@ -311,6 +334,9 @@ upstream's declared unique key), emitted as a column-scoped `UPDATE … FROM`.
 - `::d2_changed_expression_from_upstream` — existing column's formula now reads a
   different upstream column; single-column `UPDATE … FROM`; oracle-equal; siblings
   untouched.
+- `::d_dual_derivable_yields_both_options` — a changed expression derivable **both** from
+  stored columns (D1) and from upstream (D2) returns both the in-place `UPDATE` and the
+  `UPDATE … FROM` options; each independently oracle-verified on a fresh table copy.
 - `::b3_stale_upstream_documents_precondition` — upstream mutated after `build_before`
   (precondition §2 violated); the test **demonstrates the divergence**: the backfilled
   column reflects current upstream while sibling columns reflect the stale build, so the
@@ -351,26 +377,27 @@ alias), emitted as a fan-out backfill.
 
 **TDD tests to write first.**
 - `backbuild_conformance.rs::b4_left_join_enrichment_fanout` — fact×dim with genuine
-  fan-out (many fact rows per dim row); bare `d.x` pull; `UPDATE … FROM` shape;
-  oracle-equal.
+  fan-out (many fact rows per dim row); bare `d.x` pull ⇒ **both** emitter shapes offered
+  (`UPDATE … FROM` and scalar-subquery); each independently oracle-verified.
 - `::b4_unmatched_rows_null_extend` — fact rows with no dim match end NULL, matching the
   rebuild exactly.
 - `::b4_general_expression_null_extension` — added column is `COALESCE(d.x, 'none')`;
-  the scalar-subquery shape evaluates the expression for unmatched rows; oracle-equal
-  (this is the case the bare `UPDATE … FROM` shape would get wrong — assert the emitter
-  chose correctly).
+  only the scalar-subquery option is offered (the bare `UPDATE … FROM` shape would skip
+  NULL-extension and get unmatched rows wrong — assert the option *set*, then
+  oracle-verify the offered option).
 - `backbuild_plan.rs::b4_inner_join_refuses` — added INNER JOIN ⇒ refusal (can drop
   rows).
 - `::b4_nonunique_dim_key_refuses` — no declared/derived uniqueness ⇒ refusal.
 - `::b4_alias_referenced_in_where_refuses` — new alias in WHERE ⇒ refusal (row set no
   longer preserved).
 
-**Implementation shape.** `classify.rs`: consumes `SkeletonDiff::AddedLeftJoin`;
+**Implementation shape.** `classify.rs`: consumes `SkeletonDiff::AddedLeftJoins` with
+exactly one element (two or more is Phase 9's B7 — refuse here with a named reason);
 uniqueness from `BackbuildInputs.sources[dim].unique_key` or
 `analysis::functional_dependency` where derivable; alias-reference sweep over every
-non-added clause. `emit.rs`: shape selection — bare column pull ⇒ `UPDATE … FROM`;
-any other expression ⇒ scalar-subquery `UPDATE` (research §4 B4, including the
-free multiplicity guard it provides).
+non-added clause. `emit.rs`: shape *enumeration* is expression-driven — bare column pull
+⇒ both `UPDATE … FROM` and scalar-subquery options; any other expression ⇒
+scalar-subquery only (research §4 B4, including the free multiplicity guard it provides).
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{classify,emit}.rs`
@@ -380,8 +407,8 @@ free multiplicity guard it provides).
 - [ ] TDD tests listed above exist and assert what's specified
 - [ ] Row-set-preservation proof requires all three legs (LEFT, uniqueness, no stray
       references) — dropping any one is a demonstrated refusal
-- [ ] Emitter shape selection is expression-driven and the NULL-extension case is
-      oracle-verified
+- [ ] Shape enumeration is expression-driven; the NULL-extension case demonstrates a
+      *narrowed* option set, and every offered option is oracle-verified
 - [ ] Uniqueness consumed from declared facts / existing FD analysis, not re-derived ad hoc
 
 **Commit.** `feat(logical): backbuild B4 — join-enrichment backfill with row-set-preservation proof`
@@ -443,19 +470,20 @@ proven end-to-end.
 - `backbuild_conformance.rs::e2_loosen_inserts_difference` — removed conjunct `q`; insert
   slice is after-SELECT `AND (q IS NOT TRUE)`; oracle-equal.
 - `::f1_union_branch_insert` — added UNION ALL branch inserted alone; oracle-equal.
-- `::h_composite_rename_add_tighten` — one diff combining B2 + B1 + E1; statements in
-  the H order (rename → alter/add → delete → update); oracle-equal. The ordering is the
-  assertion — shuffled statements must fail the oracle (verify by construction in a
-  comment, not a second test).
-- `::h_composite_with_refused_atom_refuses_all` — same composite plus a G1 edit ⇒ zero
-  steps, refusals name the G1 atom.
+- `::h_composite_rename_add_tighten` — one diff combining B2 + B1 + E1; assemble a
+  selection (one option per atom); statements in the H order (rename → alter/add →
+  delete → update); oracle-equal. The ordering is the assertion — shuffled statements
+  must fail the oracle (verify by construction in a comment, not a second test).
+- `::h_composite_with_blocked_atom_yields_only_full_refresh` — same composite plus a G1
+  edit ⇒ no composed targeted script; refusals name the G1 atom; `FullRefresh` remains
+  the only model option.
 - `backbuild_plan.rs::f1_plain_union_refuses` — `UNION` (dedup) ⇒ refusal; only
   `UNION ALL` admits.
 
 **Implementation shape.** `classify.rs`: E2 from removed conjuncts (difference predicate
-in `IS NOT TRUE` form); F1 from `set_ops` branch diff. `mod.rs`: `BackbuildPlan::steps`
-emission finalises the H ordering (`rename → alter → delete → update/merge → insert →
-drop`) as a total order over step variants.
+in `IS NOT TRUE` form); F1 from `set_ops` branch diff. `mod.rs`: `assemble` finalises the
+H ordering (`rename → alter → delete → update/merge → insert → drop`) as a total order
+over the selected options' variants.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{mod,classify,emit}.rs`
@@ -463,12 +491,54 @@ drop`) as a total order over step variants.
 
 **Review checklist** (material findings only):
 - [ ] TDD tests listed above exist and assert what's specified
-- [ ] H ordering is a property of plan assembly (one place), not per-case emission
+- [ ] H ordering is a property of `assemble` (one place), not per-case emission
 - [ ] `UNION` vs `UNION ALL` distinction enforced
 - [ ] Catalogue cases admitted so far are all conformance-tested; refusal reasons cover
       every inadmissible branch touched in this plan
 
 **Commit.** `feat(logical): backbuild E2/F1 and composite ordering — Tier-1/2 catalogue complete`
+
+---
+
+### Phase 9: B7 — sequential multi-join enrichment
+
+**Goal.** Two or more added LEFT JOINs backfilled as ordered steps (research §4 B7): each
+join passes the full B4 proof, a later join's key may reference a column an earlier step
+backfills (stored by the time the step runs), and the steps run in derived dependency
+order within the update slot.
+
+**Pre-conditions.** Phases 6 (B4 proof + emitters) and 8 (`assemble` ordering).
+
+**TDD tests to write first.**
+- `backbuild_conformance.rs::b7_two_joins_sequential_backfill` — fact + dim1 + dim2 where
+  dim2's ON keys on a column dim1 provides *and* the model stores; script backfills
+  dim1's columns first, then dim2's keyed on the now-stored column; oracle-equal.
+- `::b7_independent_joins_either_order` — two added joins each keyed on already-stored
+  columns (no inter-dependency); both backfills emitted; oracle-equal.
+- `backbuild_plan.rs::b7_unstored_intermediate_refuses` — dim2 keys on a dim1 column the
+  model does **not** store ⇒ named refusal (multi-hop; research §7.7).
+- `::b7_per_join_proof_still_enforced` — second join is INNER, or its alias leaks into
+  WHERE ⇒ refusal naming that join (B4's three legs hold per join, not just for the
+  first).
+
+**Implementation shape.** `classify.rs`: consume the full `SkeletonDiff::AddedLeftJoins`
+list; build the reference-dependency order (a later join's ON referencing an earlier
+join's output columns); run the B4 proof per join with the derivability environment
+extended by earlier steps' backfilled columns; cycle or unresolvable ordering ⇒ refusal.
+`mod.rs`: within-slot ordering of B7 steps in `assemble` (the one data-dependent ordering;
+research §4H).
+
+**Critical files (allowed to touch in this phase).**
+- `crates/smelt-logical/src/backbuild/{mod,classify,emit}.rs`
+- both test files
+
+**Review checklist** (material findings only):
+- [ ] TDD tests listed above exist and assert what's specified
+- [ ] Per-join proof is the unmodified B4 proof plus only the stored-by-then extension
+- [ ] Dependency ordering derived from CST references, fail-closed on cycles
+- [ ] Unstored-intermediate refusal names the join and the missing column
+
+**Commit.** `feat(logical): backbuild B7 — sequential multi-join enrichment`
 
 ---
 

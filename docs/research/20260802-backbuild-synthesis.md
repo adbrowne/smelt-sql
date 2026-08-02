@@ -72,10 +72,21 @@ than a data change.
   precondition. The oracle harness includes a stale-input case that *demonstrates* the
   divergence, so the contract's edge is tested, not just stated.
 
-**Refusal posture.** Admission is fail-closed: every atom the classifier cannot prove yields a
-named refusal (`fail-loud discipline`, `architecture.md`), and one refused atom refuses the
-whole model — a one-shot script must reach the after-state exactly, so partial application is
-never offered. Full refresh remains the caller's fallback for refused models.
+**Options, not choices.** For each atomic change the classifier returns *every* admissible
+technique, each independently proven — an option set, not a verdict (2026-08-02 decision).
+Cases are not mutually exclusive: a changed expression derivable both from stored columns and
+from upstream yields both the in-place `UPDATE` and the column-scoped merge; a bare B4
+pull-through admits both emitter shapes. Choosing among options is a cost model's job,
+deliberately deferred — until it exists, callers select, and tests verify every option
+independently. The model-level baseline option **FullRefresh**
+(`CREATE OR REPLACE TABLE t AS <after>`) is always present, so the eventual cost model
+compares targeted scripts against the rebuild uniformly.
+
+**Refusal posture.** Admission stays fail-closed per technique: everything the classifier
+cannot prove for an atom is a named inadmissibility record (`fail-loud discipline`,
+`architecture.md`). A *composed targeted script* exists only when every atom has at least one
+admissible option — partial application is never offered; an atom with an empty option set
+leaves `FullRefresh` as the model's only option, with the refusals naming why.
 
 **Idempotence.** `UPDATE`-family steps are idempotent for deterministic expressions. Plain
 `INSERT`-family steps (E2/E4/F1) are not; each carries an anti-join guard on row identity
@@ -135,7 +146,9 @@ byte-for-byte observable (the statement-parity posture). Two consequences:
 ## 4. The catalogue
 
 Case IDs (A0, B1, …) are the canonical names used by tests and the plan. Per case: what in
-the `DefinitionDiff` detects it, what must be proven, and the script shape.
+the `DefinitionDiff` detects it, what must be proven, and the script shape. A case describes
+one admissible *technique*; when an atom satisfies several cases' proofs, all the resulting
+techniques are returned as options (§2 "Options, not choices").
 
 ### A. No-op class
 
@@ -162,7 +175,9 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   column `a` whose expression is identical (modulo trivia) to `d`'s old expression — matched
   as a pair *before* B1/C1 classification so drop+add is not misread. *Script*:
   `ALTER TABLE t RENAME COLUMN d TO a;` — zero rows touched. Ambiguity (two dropped columns
-  with identical expressions) refuses rather than guessing.
+  with identical expressions) refuses rather than guessing. On backends without column
+  rename the same atom admits an `ADD` + copy-`UPDATE` + `DROP` option — enumerated when
+  dialect variants arrive with wiring.
 - **B3 — 1:1 pull-through from an upstream at the model's own grain** (user's scenario 1).
   *Detect*: added SELECT item whose dependencies resolve to columns of an upstream already
   in the FROM tree. *Prove*: the output contains a 1:1 pull-through of that upstream's
@@ -173,9 +188,9 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   `emit_column_scoped_merge` family). Rows filtered out of `t` by the model's WHERE are
   simply never matched — the join touches only existing rows.
 - **B4 — new column via a newly-added LEFT JOIN** (user's scenario 2; fan-out — one
-  dimension row enriches many target rows). *Detect*: FROM-tree diff = exactly one added
-  LEFT JOIN; added SELECT items reference the new alias; nothing else references it
-  (WHERE/GROUP BY/other SELECT items unchanged). *Prove* the join cannot change the row
+  dimension row enriches many target rows). *Detect*: FROM-tree diff = one added
+  LEFT JOIN (two or more: B7); added SELECT items reference the new alias; nothing else
+  references it (WHERE/GROUP BY/other SELECT items unchanged). *Prove* the join cannot change the row
   set: LEFT JOIN (never removes rows) + at-most-one match (join key unique on the dimension
   side — declared `unique_key` or the FD machinery `analysis/functional_dependency.rs`).
   *Script*: two shapes, chosen by expression:
@@ -196,6 +211,17 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   *Script*: self-read
   `UPDATE t SET c = s.c FROM (SELECT <id>, <window> AS c FROM t) s WHERE t.<id> = s.<id>` —
   needs row identity, no upstream. Tier 3.
+- **B7 — sequential multi-join enrichment** (two or more added LEFT JOINs, backfilled one
+  step at a time — e.g. fact → dim1, then dim2 keyed on a column dim1 provides). *Detect*:
+  FROM-tree diff = k added LEFT JOINs, ordered by reference dependency (a later join's ON
+  condition references columns an earlier join provides). *Prove*: per join, the full B4
+  row-set-preservation proof (LEFT + unique key on the joined side + no stray references),
+  with one extension — a later join's key may reference a column an *earlier step
+  backfills*, provided that column is part of the added output and therefore stored by the
+  time the step runs. *Script*: the B4 backfill per join, in dependency order — backfill
+  join 1's columns first, then join 2's backfill keys on the now-stored column. A later
+  join keying on an earlier join's column that is **not** stored in the output refuses
+  (the step would need a multi-hop traversal; §7).
 
 ### C. Removals and type changes
 
@@ -286,15 +312,18 @@ dependency order:
 
 ```text
 renames (B2) → ALTER ADD / ALTER TYPE (B*, C2) → DELETEs (E1) →
-column UPDATEs/MERGEs (B1/B3/B4/D*) → INSERTs (E2/E4/F1) → ALTER DROPs (C1)
+column UPDATEs/MERGEs (B1/B3/B4/B7/D*) → INSERTs (E2/E4/F1) → ALTER DROPs (C1)
 ```
 
 Rationale: renames first so requalified expressions reference final names; deletes before
 updates so updates touch fewer rows; inserts after updates because inserted rows come from
 the after-definition SELECT and are already correct (a deterministic re-update would be
-harmless but wasted); drops last so nothing mid-script loses a column it reads. Any refused
-atom refuses the model. The oracle harness includes composite cases precisely because
-ordering bugs are silent in single-atom tests.
+harmless but wasted); drops last so nothing mid-script loses a column it reads. Within the
+update slot, B7 steps run in their derived dependency order — the one place ordering is
+data-dependent rather than fixed by variant. An atom with no admissible option blocks any
+composed targeted script — `FullRefresh` stays the model's only option (§2). The oracle
+harness includes composite cases precisely because ordering bugs are silent in single-atom
+tests.
 
 ## 5. Priority ranking
 
@@ -312,21 +341,27 @@ pipelines and how galling the full refresh it replaces is:
 | 7 | E4 | "Extend the history window" is among the most common real model edits |
 | 8 | E2 + D2 | Rounds out predicates and expression changes; reuses earlier machinery |
 | 9 | F1 | Cheap detection (branch diff), cheap script |
-| 10+ | B5, B6, F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
+| 10 | B7 | Sequential multi-join enrichment; builds directly on B4's proof, adds only the dependency ordering |
+| 11+ | B5, B6, F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
 
 ## 6. Architecture
 
 ```text
 crates/smelt-logical/src/backbuild/
-  mod.rs        — BackbuildPlan { steps: Vec<BackbuildStep>, refusals: Vec<BackbuildRefusal> }
-                  (pure data, mirrors maintenance::MaintenancePlan's role)
+  mod.rs        — BackbuildOptions { atoms: Vec<AtomAnalysis> } where AtomAnalysis =
+                  { change: AtomicChange, options: Vec<BackbuildOption>,
+                    inadmissible: Vec<BackbuildRefusal> } — every admissible technique per
+                  atom (§2 "Options, not choices"), plus the always-present model-level
+                  FullRefresh baseline; assemble(options, selection) applies the H ordering
+                  to one chosen option per atom (pure data throughout, mirrors
+                  maintenance::MaintenancePlan's role)
   diff.rs       — DefinitionDiff: CST-level factoring of (before, after)
                     select_list: added / dropped / changed / unchanged (per column, Expr pairs)
                     where_clause: conjunct-set diff (top-level ANDs)
-                    skeleton: FROM/JOIN tree, GROUP BY, dedup — unchanged | added_left_join | changed
+                    skeleton: FROM/JOIN tree, GROUP BY, dedup — unchanged | added_left_joins | changed
                     set_ops: UNION ALL branch multiset diff
-  classify.rs   — per-atom proofs → steps; consumes analysis::{model_diff dependency walk,
-                  functional_dependency, discriminants}; fail-closed
+  classify.rs   — per-atom proofs → option sets; consumes analysis::{model_diff dependency
+                  walk, functional_dependency, discriminants}; fail-closed
   requalify.rs  — CST-fragment column-reference rewriter (expression → statement context)
   emit.rs       — backbuild statement emitters (ALTER ADD/RENAME/DROP, UPDATE FROM,
                   scalar-subquery UPDATE, DELETE … IS NOT TRUE, guarded INSERT);
@@ -351,8 +386,10 @@ already has a `duckdb` dev-dependency): stage inputs → `CREATE TABLE t AS <bef
 apply script → `CREATE TABLE expected AS <after>` → assert multiset equality
 (`EXCEPT ALL` in both directions — plain `EXCEPT` is set-based and would miss duplicate-row
 count drift — plus column name/type comparison). Refusal goldens assert the
-named reason. One stale-input case documents the §2 precondition. Explicit BB-case tests
-now; generative recipe sampling (testkit-style, à la `maintenance_conformance`) deferred.
+named reason. One stale-input case documents the §2 precondition. Every enumerated option is verified
+independently — each option's script applies to a fresh copy of the staged before-table, so
+a case admitting two techniques proves both. Explicit BB-case tests now; generative recipe
+sampling (testkit-style, à la `maintenance_conformance`) deferred.
 
 ## 7. Open questions
 
@@ -361,9 +398,11 @@ now; generative recipe sampling (testkit-style, à la `maintenance_conformance`)
    identity-less models refuse INSERT-family atoms outright?
 2. **Rename-match ambiguity.** Two dropped columns with syntactically identical expressions:
    refuse (current position) or match by position? Refusal is sound; revisit if it bites.
-3. **Cost model.** For small tables a full refresh is simpler and possibly faster than a
-   multi-statement script. Backbuild-vs-refresh choice is a wiring-time policy (possibly
-   size-thresholded); the pure module only ever says what is *admissible*.
+3. **Cost model.** Deliberately deferred (2026-08-02): the module enumerates every
+   admissible option per atom and never chooses. The open question narrows to the eventual
+   chooser's inputs — table/upstream sizes, backend capabilities (a rename is free on
+   DuckDB but a copy on Spark+Parquet), staleness tolerance — and where it runs (wiring
+   layer, comparing targeted scripts against the always-present FullRefresh baseline).
 4. **Where "before" comes from when wired.** `.smelt/schemas/` stores schema + hash, not
    SQL; the expanded-logical-SQL snapshot (`run_state.md` §"Snapshot and environment
    store") is the principled source and also what fingerprint comparison wants. Wiring
@@ -376,9 +415,11 @@ now; generative recipe sampling (testkit-style, à la `maintenance_conformance`)
 6. **Spark dialect.** Emitters are DuckDB-dialect first. `UPDATE … FROM` and scalar-subquery
    UPDATE have Spark/Delta variants (`MERGE`-based); the `MaintenanceDialect` enum is the
    template. Deferred with the rest of wiring.
-7. **Beyond one atom per clause.** Two added joins, or an added join *plus* a changed
-   expression referencing it, currently refuse unless each factors cleanly. How far the
-   composite factoring should stretch is open — driven by real examples, not speculation.
+7. **Multi-hop enrichment beyond B7.** B7 covers added-join chains whose intermediates are
+   stored output columns. A later join keying on an earlier join's *unstored* column would
+   need a multi-hop backfill statement (one UPDATE traversing both joins, or a temp
+   intermediate) — refused for now with a named reason. Likewise an added join plus a
+   changed expression referencing it. Stretch driven by real examples, not speculation.
 
 ## References
 
