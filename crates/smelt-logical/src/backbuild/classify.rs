@@ -10,25 +10,29 @@
 //! outright — G1 (grain change), G2 (join-multiplicity change), and a
 //! changed CTE (or any other whole-definition opacity) — the A0 no-op
 //! short-circuit, the always-present model-level `FullRefresh` baseline,
-//! and the first two admissible targeted techniques: B1 (a new column that
-//! is a pure function of existing stored columns) and B2 (a rename, paired
-//! *before* B1/add-drop classification). Every other diff shape — a
-//! changed existing column (D-class), a dropped column not paired into a
-//! rename (C1), a `WHERE`/set-operation change (E/F-class), an ambiguous
-//! rename cluster — still yields a named, fail-closed refusal rather than a
-//! silently empty atom list — fail-loud discipline
-//! (`docs/specs/architecture.md` §"Fail-loud discipline").
+//! and three admissible targeted techniques: B1 (a new column that is a
+//! pure function of existing stored columns), B2 (a rename, paired *before*
+//! B1/add-drop classification), and D1 (a changed existing-column
+//! expression derivable from stored columns — the "fix one column of a huge
+//! table" case, admitted through the same uniform-representative
+//! derivability check as B1, plus the D-class `SELECT DISTINCT`/`LIMIT`
+//! grain guards). Every other diff shape — a dropped column not paired
+//! into a rename (C1), a changed expression needing an upstream read (D2),
+//! a `WHERE`/set-operation change (E/F-class), an ambiguous rename cluster
+//! — still yields a named, fail-closed refusal rather than a silently empty
+//! atom list — fail-loud discipline (`docs/specs/architecture.md`
+//! §"Fail-loud discipline").
 
 use std::collections::{BTreeSet, HashSet};
 
-use smelt_parser::Expr;
+use smelt_parser::{Expr, SelectStmt};
 
 use crate::analysis::model_diff;
 
 use super::{
     AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption, BackbuildOptions,
-    BackbuildRefusal, ComparableDiff, ConjunctDiff, DefinitionDiff, HSlot, SelectColumn,
-    SelectListDiff, SetOpDiff, SkeletonDiff, Technique, WriteScope,
+    BackbuildRefusal, ChangedColumn, ComparableDiff, ConjunctDiff, DefinitionDiff, HSlot,
+    SelectColumn, SelectListDiff, SetOpDiff, SkeletonDiff, Technique, WriteScope,
 };
 
 use super::emit;
@@ -174,9 +178,15 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
             changed,
             unchanged,
         } => {
-            atoms.extend(classify_select_list(added, dropped, unchanged, inputs));
+            let representatives = representative_names(unchanged);
+            atoms.extend(classify_select_list(
+                added,
+                dropped,
+                &representatives,
+                inputs,
+            ));
             for c in changed {
-                atoms.push(changed_column_unclassified(&c.name));
+                atoms.push(classify_changed_column(c, &representatives, inputs));
             }
         }
     }
@@ -208,19 +218,6 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
     atoms
 }
 
-fn changed_column_unclassified(name: &str) -> AtomAnalysis {
-    AtomAnalysis {
-        change: AtomicChange::Unclassified,
-        options: Vec::new(),
-        inadmissible: vec![BackbuildRefusal {
-            atom: format!("changed column '{name}'"),
-            reason: "a changed existing-column expression (research §4 D-class) is not yet \
-                     classified into an admissible technique by this phase"
-                .to_string(),
-        }],
-    }
-}
-
 fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
     AtomAnalysis {
         change: AtomicChange::Unclassified,
@@ -236,14 +233,16 @@ fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
 
 /// Rename pairing (B2) runs *before* add/drop classification, then every
 /// remaining added column is classified as B1 or refused (research §4 B1,
-/// B2, §7.2 "Rename-match ambiguity").
+/// B2, §7.2 "Rename-match ambiguity"). `representatives` is the caller's
+/// already-computed [`representative_names`] set — shared with the sibling
+/// `changed`-column (D1) classification so both draw from exactly the same
+/// stored-representative set (research §4 intro "one uniform rule").
 fn classify_select_list(
     added: &[SelectColumn],
     dropped: &[SelectColumn],
-    unchanged: &[SelectColumn],
+    representatives: &BTreeSet<String>,
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
-    let representatives = representative_names(unchanged);
     let RenamePairing {
         atoms: mut rename_atoms,
         consumed_added,
@@ -256,7 +255,7 @@ fn classify_select_list(
             // renamed column" B1 atom, for a tie-break loser).
             continue;
         }
-        rename_atoms.push(classify_added_column(col, &representatives, inputs));
+        rename_atoms.push(classify_added_column(col, representatives, inputs));
     }
 
     rename_atoms
@@ -386,6 +385,139 @@ fn build_b1_option(
         // re-runnable"), even though the paired `UPDATE` alone would be.
         rerun_safe: false,
     })
+}
+
+// ===== D1: changed existing-column expression, derivable from stored
+// columns (research §4 D1) =====
+
+fn classify_changed_column(
+    changed: &ChangedColumn,
+    representatives: &BTreeSet<String>,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    match try_d1(changed, representatives, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: AtomicChange::ChangedColumn {
+                name: changed.name.clone(),
+            },
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: AtomicChange::ChangedColumn {
+                name: changed.name.clone(),
+            },
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("changed column '{}'", changed.name),
+                reason,
+            }],
+        },
+    }
+}
+
+/// D1 admission (research §4 D1): every dependency of the column's *new*
+/// expression must resolve to a stored 1:1 representative under exactly the
+/// same uniform rule B1 uses (research §4 intro) — representatives are drawn
+/// only from `unchanged` output columns, so the changed column itself and
+/// any changed sibling are never representatives by construction. This is
+/// what makes self-substitution (a new expression reading the column's own
+/// old value) and a mutual swap (`x AS a, y AS b` → `y AS a, x AS b`) both
+/// refuse: neither `a` nor `b` is ever in `representatives`, since both are
+/// in `changed`, not `unchanged`.
+///
+/// The new expression is defined over *inputs*, not over the old column
+/// value — this proof finds stored representatives of those inputs, it
+/// never substitutes the old expression or the old column's own value.
+fn try_d1(
+    changed: &ChangedColumn,
+    representatives: &BTreeSet<String>,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    if let Some(reason) = grain_guard_refusal(&changed.after) {
+        return Err(format!(
+            "D1 (stored-derivable expression change) refused for '{}': {reason}",
+            changed.name
+        ));
+    }
+
+    let deps = model_diff::collect_dependencies(&changed.after).map_err(|reason| {
+        format!(
+            "D1 (stored-derivable expression change) refused for '{}': {reason}",
+            changed.name
+        )
+    })?;
+
+    let mut missing: Vec<&String> = deps
+        .iter()
+        .filter(|d| !representatives.contains(*d))
+        .collect();
+    missing.sort();
+    if let Some(dep) = missing.first() {
+        return Err(format!(
+            "D1 (stored-derivable expression change) refused for '{}': depends on '{dep}', which \
+             has no 1:1 stored representative (a bare pull-through unchanged between both \
+             definitions) in the model's own output — an upstream-only dependency, or a \
+             dependency on a changed sibling, needs a later phase's D2, not D1",
+            changed.name
+        ));
+    }
+
+    let requalified = requalify::requalify(&changed.after, representatives).map_err(|reason| {
+        format!(
+            "D1 (stored-derivable expression change) refused for '{}': {reason}",
+            changed.name
+        )
+    })?;
+
+    let update = emit::emit_in_place_update(&inputs.table, &[(changed.name.clone(), requalified)]);
+
+    Ok(BackbuildOption {
+        technique: Technique::SelfDerivedColumnRewrite,
+        // A single `UPDATE` — the H-ordering "UPDATEs/MERGEs" bucket
+        // (research §4 "H. Composites"). No `ALTER` step, so unlike B1
+        // there is nothing that must flush before it.
+        slot: Some(HSlot::UpdateMerge),
+        statements: vec![update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: false,
+        // Plain DML over representatives that are themselves unchanged
+        // stored columns: re-running the same `UPDATE` reproduces the same
+        // result (no DDL step, unlike B1's paired `ALTER ADD`).
+        rerun_safe: true,
+    })
+}
+
+/// The D-class shared grain guards (research §4 intro): `SELECT DISTINCT`
+/// refuses every D-class atom outright (an `UPDATE` cannot merge two stored
+/// rows that now agree on every column, while the rebuild's `DISTINCT`
+/// would — the multisets diverge), and any `LIMIT` in the definition
+/// refuses every non-A0 atom (row selection under `LIMIT` is not stable
+/// under a value change). `classify_comparable` only reaches D-class atoms
+/// once `SkeletonDiff::Unchanged` has already proven `DISTINCT`-ness and the
+/// `LIMIT` clause identical between both versions, so walking up from
+/// either version's own expression node to its enclosing `SelectStmt` (the
+/// same recognised CST navigation `smelt-db`'s type inference already uses
+/// to find an expression's enclosing SELECT — e.g.
+/// `type_inference/function_call.rs`'s `is_grouped_query`) reports the same
+/// verdict regardless of which version's `Expr` is passed in.
+fn grain_guard_refusal(expr: &Expr) -> Option<String> {
+    let stmt = expr.syntax().ancestors().find_map(SelectStmt::cast)?;
+    if stmt.is_distinct() {
+        return Some(
+            "D-class refuses under SELECT DISTINCT — an UPDATE cannot merge rows a rebuild's \
+             DISTINCT would (research §4 intro grain guards)"
+                .to_string(),
+        );
+    }
+    if stmt.limit_clause().is_some() {
+        return Some(
+            "D-class refuses when the definition has a LIMIT — row selection under LIMIT is not \
+             stable under a value change (research §4 intro grain guards)"
+                .to_string(),
+        );
+    }
+    None
 }
 
 struct RenamePairing {

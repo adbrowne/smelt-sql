@@ -102,6 +102,21 @@ fn except_all_count(conn: &Connection, left_sql: &str, right_sql: &str) -> i64 {
     .expect("except all count query")
 }
 
+/// Collect the first column of `sql`'s result rows as strings, in result
+/// order. Used to snapshot column values directly (as text) before and after
+/// applying an option's script — the D1 sibling-untouched assertion needs a
+/// direct value comparison, not just the multiset oracle (which would not
+/// catch a sibling column silently rewritten to a value that happens to
+/// already be present elsewhere in the table).
+pub fn text_column(conn: &Connection, sql: &str) -> Vec<String> {
+    let mut stmt = conn.prepare(sql).expect("prepare text_column query");
+    let rows = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .expect("text_column query rows");
+    rows.collect::<Result<Vec<_>, _>>()
+        .expect("collect text_column rows")
+}
+
 fn describe(conn: &Connection, relation: &str) -> Vec<(String, String)> {
     let mut stmt = conn
         .prepare(&format!("DESCRIBE {relation}"))

@@ -432,3 +432,154 @@ fn b2_one_dropped_two_added_pins_lexicographic() {
     // Exactly two atoms: the rename and b's B1-via-rename atom.
     assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
 }
+
+// ===== D1 (task-4-brief.md) =====
+
+#[test]
+fn d1_new_expr_reading_own_old_value_refuses() {
+    // The new expression's only dependency is the column's own (changed)
+    // name — never a legitimate representative, so this must refuse rather
+    // than blindly substituting the old value.
+    let before_sql = "SELECT id, amount FROM orders";
+    let after_sql = "SELECT id, amount * 1.1 AS amount FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert!(matches!(
+        &atom.change,
+        AtomicChange::ChangedColumn { name } if name == "amount"
+    ));
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.contains("amount"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn d1_swapped_columns_refuse() {
+    // `x AS a, y AS b` -> `y AS a, x AS b`: a weaker "not its own value"
+    // rule would admit both (neither new expression reads its own old
+    // name), but the uniform representative rule refuses both — `a` and
+    // `b` are both `changed`, so neither `x` nor `y` (referenced only via
+    // the other's old name) has a stored representative.
+    let before_sql = "SELECT id, x AS a, y AS b FROM orders";
+    let after_sql = "SELECT id, y AS a, x AS b FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    for atom in &options.atoms {
+        assert!(matches!(&atom.change, AtomicChange::ChangedColumn { .. }));
+        assert_refused(atom);
+    }
+}
+
+#[test]
+fn d1_lateral_alias_to_changed_sibling_refuses() {
+    // `net` is derivable straight from stored `amount` and admits D1; `gross`
+    // reads `net`'s *new* value via a bare reference to its output alias —
+    // but `net` itself changed, so it is not a representative, and `gross`
+    // must refuse rather than treat a same-select-list alias as stored.
+    let before_sql = "SELECT id, amount, amount AS net, amount AS gross FROM orders";
+    let after_sql = "SELECT id, amount, amount * 0.9 AS net, net * 1.05 AS gross FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+
+    let net_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, AtomicChange::ChangedColumn { name } if name == "net"))
+        .expect("net atom");
+    assert_eq!(net_atom.options.len(), 1, "net_atom: {net_atom:?}");
+    assert!(net_atom.inadmissible.is_empty());
+    assert_eq!(
+        net_atom.options[0].technique,
+        Technique::SelfDerivedColumnRewrite
+    );
+
+    let gross_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, AtomicChange::ChangedColumn { name } if name == "gross"))
+        .expect("gross atom");
+    assert_refused(gross_atom);
+    assert!(
+        gross_atom.inadmissible[0].reason.contains("net"),
+        "expected the refusal to name the changed sibling 'net', got: {}",
+        gross_atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn d1_distinct_model_refuses() {
+    let before_sql = "SELECT DISTINCT id, amount, amount AS amount_usd FROM orders";
+    let after_sql = "SELECT DISTINCT id, amount, amount * 1.1 AS amount_usd FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .to_lowercase()
+            .contains("distinct"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn d1_limit_model_refuses() {
+    let before_sql = "SELECT id, amount, amount AS amount_usd FROM orders LIMIT 10";
+    let after_sql = "SELECT id, amount, amount * 1.1 AS amount_usd FROM orders LIMIT 10";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.to_lowercase().contains("limit"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn d1_upstream_dependency_refuses_until_d2() {
+    let before_sql = "SELECT o.id AS id, o.amount AS amount FROM orders o \
+                       JOIN regions r ON o.region_id = r.region_id";
+    let after_sql = "SELECT o.id AS id, r.region_name AS amount FROM orders o \
+                      JOIN regions r ON o.region_id = r.region_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert!(matches!(
+        &atom.change,
+        AtomicChange::ChangedColumn { name } if name == "amount"
+    ));
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.contains("D2"),
+        "expected the refusal to point at D2 (upstream read), got: {}",
+        atom.inadmissible[0].reason
+    );
+}

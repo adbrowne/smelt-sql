@@ -297,12 +297,17 @@ pub enum AtomicChange {
     /// (research §4 B2 "rename") — matched *before* add/drop classification
     /// so a genuine rename is never misread as a drop-plus-unrelated-add.
     RenamedColumn { from: String, to: String },
+    /// A SELECT-list output column present in both versions under the same
+    /// name whose computing expression differs (research §4 D-class; D1 in
+    /// this phase, D2 in a later one). `name` is the column's output name.
+    ChangedColumn { name: String },
     /// A non-empty, non-skeleton-refused diff this phase does not yet
     /// classify into admissible techniques (research catalogue classes
-    /// C/D/E/F, an unpaired dropped column, an ambiguous rename cluster, or
-    /// an opaque SELECT-list/WHERE/set-operation diff). A conservative
-    /// catch-all: an honest "not yet handled" refusal, never a silently
-    /// empty atom list for a definition that did change.
+    /// C/E/F, an unpaired dropped column, an ambiguous rename cluster, a
+    /// D-class change this phase cannot admit as D1, or an opaque
+    /// SELECT-list/WHERE/set-operation diff). A conservative catch-all: an
+    /// honest "not yet handled" refusal, never a silently empty atom list
+    /// for a definition that did change.
     Unclassified,
 }
 
@@ -355,6 +360,10 @@ pub enum Technique {
     /// B2 — rename (research §4): `ALTER TABLE t RENAME COLUMN d TO a;`,
     /// zero rows touched.
     Rename,
+    /// D1 — changed existing-column expression, derivable from stored
+    /// columns (research §4): `UPDATE t SET c = <requalified expr>;` —
+    /// siblings untouched, no `ALTER`, no upstream read.
+    SelfDerivedColumnRewrite,
 }
 
 /// The research §2 "write scope" option metadata.

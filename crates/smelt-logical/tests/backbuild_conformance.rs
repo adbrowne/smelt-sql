@@ -24,7 +24,8 @@ use std::collections::BTreeMap;
 use duckdb::Connection;
 
 use smelt_logical::backbuild::{
-    assemble, definition_diff, derive_backbuild_options, BackbuildInputs, DefinitionDiff, Selection,
+    assemble, definition_diff, derive_backbuild_options, BackbuildInputs, DefinitionDiff,
+    SelectListDiff, Selection,
 };
 
 fn parse(sql: &str) -> smelt_parser::File {
@@ -330,6 +331,102 @@ fn b2_rename_touches_no_rows() {
     );
 
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+// ===== D1 (task-4-brief.md) =====
+
+#[test]
+fn d1_changed_expression_updates_one_column() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, amount INTEGER, rate INTEGER);
+         INSERT INTO orders VALUES (1, 100, 2), (2, 50, 3), (3, 10, 5);",
+    );
+
+    // The "before" formula forgot to apply the conversion rate; "after"
+    // fixes it. `amount` and `rate` are unchanged, bare pull-throughs, so
+    // both are stored 1:1 representatives `amount_usd`'s fixed formula can
+    // be derived from.
+    let before_sql = "SELECT id, amount, rate, amount AS amount_usd FROM orders";
+    let after_sql = "SELECT id, amount, rate, amount * rate AS amount_usd FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    assert!(atom.inadmissible.is_empty());
+    let option = &atom.options[0];
+    assert_eq!(option.statements.len(), 1, "{option:?}");
+    assert_eq!(
+        option.statements[0],
+        "UPDATE t SET amount_usd = amount * rate"
+    );
+
+    harness::build_before(&conn, "t", before_sql);
+
+    let sibling_sql =
+        "SELECT id::VARCHAR || '|' || amount::VARCHAR || '|' || rate::VARCHAR FROM t ORDER BY id";
+    let siblings_before = harness::text_column(&conn, sibling_sql);
+
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply D1 update `{stmt}`: {e}"));
+    }
+
+    let siblings_after = harness::text_column(&conn, sibling_sql);
+    assert_eq!(
+        siblings_before, siblings_after,
+        "sibling columns (id, amount, rate) must be byte-identical to their pre-script values — \
+         D1 must touch only amount_usd"
+    );
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
+#[test]
+fn d1_formatting_only_change_is_noop() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, price INTEGER, qty INTEGER);
+         INSERT INTO orders VALUES (1, 10, 2), (2, 5, 3);",
+    );
+
+    let before_sql = "SELECT id, price*qty AS total FROM orders";
+    let after_sql = "SELECT id, price  *  qty AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(
+        diff.is_noop(),
+        "a whitespace-only reformat of a column expression must be a no-op diff: {diff:?}"
+    );
+    match &diff {
+        DefinitionDiff::Comparable(c) => match &c.select_list {
+            SelectListDiff::Diffed { changed, .. } => assert!(
+                changed.is_empty(),
+                "a formatting-only expression change must not appear in `changed`, got \
+                 {changed:?}"
+            ),
+            other => panic!("expected a Diffed select-list, got {other:?}"),
+        },
+        other => panic!("expected a Comparable diff, got {other:?}"),
+    }
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert!(
+        options.atoms.is_empty(),
+        "a formatting-only reformat must yield no atoms, got {:?}",
+        options.atoms
+    );
+
+    let targeted = assemble(&options, &targeted_of_len(0));
+    assert!(targeted.is_empty());
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
 }
 
 #[test]
