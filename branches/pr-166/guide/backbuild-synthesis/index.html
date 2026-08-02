@@ -3560,10 +3560,10 @@ be proven to hold everywhere it needs to), or when two branches share the same
 constant (the resulting predicate would delete a surviving branch's rows too).
 Plain <code>UNION</code> refuses here for the same reason it does on the add side.</p>
 <h3 id="several-changes-at-once">Several changes at once<a class="headerlink" href="#several-changes-at-once" title="Permanent link">&para;</a></h3>
-<p>Atomic changes compose. Rename a column, add a derived one, and tighten the
-filter in a single edit:</p>
+<p>Atomic changes compose. Rename a column, add a derived one, tighten the
+filter, and drop an unrelated column, all in a single edit:</p>
 <div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="c1">-- before</span>
-<a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
+<a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="n">extra</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 <a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="c1">-- after</span>
 <a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">unit_price</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">list_price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
 </code></pre></div>
@@ -3572,16 +3572,23 @@ filter in a single edit:</p>
 <a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">;</span>
 <a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
 <a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">;</span>
+<a id="__codelineno-28-5" name="__codelineno-28-5" href="#__codelineno-28-5"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">DROP</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">extra</span><span class="p">;</span>
 </code></pre></div>
 <p>Statements run in a fixed dependency order — renames first (so later
 expressions reference final names), then each added column's <code>ALTER ADD</code> with
 its backfill, deletes, remaining column updates (so they touch fewer rows),
-inserts, and drops last. Notice <code>unit_price</code>'s update reads <code>list_price</code>, the
+inserts, and dropped columns <strong>last</strong>, strictly after every statement that
+might still read them. Notice <code>unit_price</code>'s update reads <code>list_price</code>, the
 rename's <em>target</em> name — that is why renames go first. And note the
 composition rule: a targeted script is
 offered only when <strong>every</strong> atom in the edit has at least one admissible
 technique. One unprovable atom means full refresh is the only option, with the
 refusal naming the culprit — partial migration is never offered.</p>
+<p>Dropping a column discards data irreversibly, so backbuild only ever
+<em>sequences</em> the <code>ALTER ... DROP COLUMN</code> statement into the right place in the
+script — it never decides on its own whether the drop is allowed to run.
+Column removal stays an explicit opt-in at run time (see <a href="../schema-evolution/">schema
+evolution</a>), applied independently of this ordering.</p>
 <h2 id="when-smelt-refuses">When smelt refuses<a class="headerlink" href="#when-smelt-refuses" title="Permanent link">&para;</a></h2>
 <p>Refusals are first-class output, not error noise. Three flavors:</p>
 <p><strong>Structural refusals</strong> — changes that are effectively a different model. A
@@ -3641,11 +3648,14 @@ converts a full rebuild into a column-scoped update.</p>
 <li>smelt <strong>enumerates options; it does not yet choose</strong> between a targeted
   script and full refresh — a cost model over the recorded option metadata is
   the planned chooser.</li>
-<li>Not yet classified: dropped columns (owned by
-  <a href="../schema-evolution/">schema evolution</a>), refs repointed to a different
-  upstream. These refuse with named reasons today. (A changed <em>cast</em> is not a
-  type change — it is a changed expression, handled above; a bare type change
-  with no expression change has no trigger in a definition diff at all.)</li>
+<li>Dropped columns are sequenced into the script (<code>ALTER ... DROP COLUMN</code>,
+  always last), but whether a drop is <em>allowed to run at all</em> stays owned by
+  <a href="../schema-evolution/">schema evolution</a>'s <code>--allow-column-removal</code> opt-in —
+  backbuild only orders the statement, never gates it.</li>
+<li>Not yet classified: refs repointed to a different upstream. These refuse
+  with named reasons today. (A changed <em>cast</em> is not a type change — it is a
+  changed expression, handled above; a bare type change with no expression
+  change has no trigger in a definition diff at all.)</li>
 </ul>
 <h2 id="related-pages">Related pages<a class="headerlink" href="#related-pages" title="Permanent link">&para;</a></h2>
 <ul>
