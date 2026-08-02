@@ -1,14 +1,27 @@
-//! Pure statement emitters for backbuild's B1 (self-derivable column add)
-//! and B2 (rename) techniques — the only statement-authoring surface for
-//! those scripts (statement single-ownership,
+//! Pure statement emitters for backbuild — the sole statement-authoring
+//! surface for every technique's script (`FullRefresh`, B1–B7, D1–D2,
+//! E1–E4, F1; statement single-ownership,
 //! `docs/specs/architecture.md` §"Constraints & Invariants" item 12).
 //! Callers (`classify.rs`, the conformance harness) only ever execute the
 //! strings these functions return; nothing outside this module composes
-//! backbuild DDL/DML text.
+//! backbuild DDL/DML text. Deliberately open-ended rather than an
+//! enumerated per-technique list here — that list has gone stale before
+//! (final-review batched finding: this doc comment once claimed only "B1
+//! and B2" while the module had long since grown E-class/F1/B3/B4
+//! emitters too).
 //!
 //! DuckDB-dialect, test-grade, per research
 //! `docs/research/20260802-backbuild-synthesis.md` §3 ("DDL strings emitted
 //! here are test-grade DuckDB dialect").
+
+/// `CREATE OR REPLACE TABLE t AS <after>;` — the always-present model-level
+/// `FullRefresh` baseline (research §2). Moved here from `classify.rs`'s
+/// `full_refresh_option` (final-review batched finding) so every backbuild
+/// statement, including the baseline every targeted script is compared
+/// against, has exactly one authoring site.
+pub fn emit_full_refresh(table: &str, after_sql: &str) -> String {
+    format!("CREATE OR REPLACE TABLE {table} AS {after_sql}")
+}
 
 /// `ALTER TABLE t ADD COLUMN c <ty>;` — research §4 B1/B2/B3's first
 /// H-slot step for every newly stored column.
@@ -203,6 +216,14 @@ pub fn emit_branch_insert(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn full_refresh_shape() {
+        assert_eq!(
+            emit_full_refresh("t", "SELECT id FROM orders"),
+            "CREATE OR REPLACE TABLE t AS SELECT id FROM orders"
+        );
+    }
 
     #[test]
     fn alter_add_column_shape() {

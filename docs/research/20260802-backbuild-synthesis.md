@@ -190,6 +190,17 @@ Three obligations are shared across cases rather than restated per case:
   would otherwise emit self-invalidating updates in either order), and a lateral-alias
   reference to a changed sibling refuses. This rule is also what keeps the H update slot
   order-free: every update statement reads only unchanged columns.
+  **Trap (final review, fixed):** the rule is over *provenance* (qualifier **and** raw
+  column name), never over bare output name alone. Matching a dependency by bare output
+  name only — the shape "does some representative's *output* name equal this reference's
+  bare name" — lets a qualified reference collide with an unrelated representative that
+  merely shares the same output name: with a pre-existing `orders o LEFT JOIN dim d` and a
+  stored `o.rc AS region`, adding `d.region AS region_u` must not resolve `d.region`
+  against the `region` representative just because the names coincide — it has a different
+  qualifier and a different raw column, and (absent a declared `dim` source) no
+  representative of its own. B1/D1's dependency check and E1/E2/E4's requalification all
+  key their lookup on (qualifier, raw name), never on bare output name — see
+  `resolve_representative` (`crates/smelt-logical/src/backbuild/mod.rs`).
 - **Grain guards.** Under `SELECT DISTINCT`, B-class adds stay sound — but by a different
   argument than skeleton-unchanged: the added column is a function of the stored tuple
   (via its own values or a key it contains), so distinct rows stay distinct — while
@@ -337,6 +348,21 @@ SELECT list unchanged; the WHERE diff is a **conjunct-set diff** (split at top-l
 only — a syntactic conjunct algebra, deliberately not a general implication prover; anything
 not expressible as added/removed conjuncts refuses).
 
+**Trap (final review, fixed): the conjunct-set diff's own soundness precondition, under a
+multi-branch `UNION ALL` definition.** The WHERE-clause (and SELECT-list, and skeleton)
+diff is computed positionally from each definition's own *first* branch only, while the
+set-operation diff compares branches as a *multiset* (branch reorder is a no-op there). A
+pure branch reorder can therefore make the first-branch pair diverge — a phantom removed
+conjunct, say — even though no branch's own content changed at all, and (pre-fix) that
+phantom diff was classified exactly as if it described the whole definition: a phantom
+removed-conjunct-only shape unconditionally admits E2's difference INSERT, sourced from the
+*entire* (all-branches) after-definition, duplicating rows an unrelated branch's swap never
+touched. Fix: whenever more than one branch is in play, the SELECT-list/WHERE/skeleton
+diffs are trusted only when every one of them is independently a no-op; otherwise the whole
+diff refuses by name rather than classifying atoms from a diff that may not describe any
+single branch's real change (`multi_branch_pure_diff_gate`,
+`crates/smelt-logical/src/backbuild/classify.rs`).
+
 **Grain precondition** (shared guards, §4 intro): E-class requires no `GROUP BY`, no
 `DISTINCT`, no `LIMIT`. Under GROUP BY a predicate change re-partitions *inputs to
 aggregates*, not stored rows — a slice INSERT double-counts groups that already exist (and
@@ -368,6 +394,15 @@ so set complements must be written `IS NOT TRUE`, never bare `NOT`:
   NULL case right by construction; the range view is used for *classification only*
   (same column, same comparison operator, provably widened literal — mixed operators like
   `>` → `>=` refuse rather than trusting literal arithmetic at the boundary).
+  **Trap (final review, fixed):** the widening proof for an upper bound (`<`/`<=`) is not
+  the lower-bound proof run "backwards" by negation — it is a *different* comparison
+  (`removed < added`, not `!(removed < added)`), and computing it correctly already gives
+  the right answer without any negation at all. A negated call silently swapped which
+  direction counted as "widened": a genuine widening (`ts < '2024-01-01'` →
+  `ts < '2025-01-01'`) was refused, while a *narrowing* (`ts < '2025-01-01'` →
+  `ts < '2024-01-01'`) was admitted, emitting a no-op INSERT and silently leaving rows a
+  rebuild would drop. See `try_e4_pair`'s `"<" | "<="` arm
+  (`crates/smelt-logical/src/backbuild/classify.rs`).
 
 ### F. Structural class
 
@@ -375,6 +410,19 @@ so set complements must be written `IS NOT TRUE`, never bare `NOT`:
   equality; exactly one added branch, others unchanged. *Script*: `INSERT INTO t SELECT …
   <branch>;` — UNION ALL is additive, the branch is exactly the delta. (Plain `UNION`
   dedups across branches: refuse.)
+  **Trap (final review, fixed):** `UNION ALL` binds columns *positionally*, not by name — a
+  real rebuild's `CREATE TABLE ... AS <after>` takes every branch's column names from the
+  *first* branch alone; a later branch's own declared names are irrelevant to what a
+  rebuild actually does with its values, only their *order* is. This emitter's script is
+  name-based (`INSERT INTO t (<cols>) SELECT <cols> FROM (<branch>) …`), so an added branch
+  whose own declared column names/order do not exactly match the first branch's would bind
+  different values under the same names than a real rebuild's positional binding would —
+  e.g. an added branch declaring `SELECT kind, id` against a first branch declaring
+  `SELECT id, kind` silently swaps which value lands in which column. F1 now requires the
+  added branch's own declared output column names, in order, to exactly equal the first
+  branch's declared order, refusing by name otherwise (`build_f1_option`'s
+  `branch_output_column_names` check,
+  `crates/smelt-logical/src/backbuild/classify.rs`).
 - **F2 — removed UNION ALL branch.** Needs a provenance predicate distinguishing the
   branch's rows in the stored table (a discriminator constant/column —
   `analysis/discriminants.rs`); with one, `DELETE WHERE <discriminator>`; without, refuse.

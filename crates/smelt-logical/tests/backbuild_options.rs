@@ -846,11 +846,29 @@ fn b4_nullable_join_key_refuses() {
 }
 
 #[test]
-fn b4_inner_join_refuses() {
-    // A bare `JOIN` (no LEFT keyword) defaults to INNER — `diff.rs` never
-    // even produces `SkeletonDiff::AddedLeftJoins` for it (it lands in
-    // `SkeletonDiff::Changed`'s G2 refusal), so this never reaches B4's own
-    // admission code at all.
+fn g2_bare_join_defaults_to_inner_refuses() {
+    // Renamed from `b4_inner_join_refuses` (final-review finding I2): this
+    // was misnamed and reason-blind — despite the name, it refuses at the
+    // *skeleton* level (G2, join-multiplicity change), never reaching B4's
+    // own admission code at all, and the original assertion never pinned
+    // the reason substring. A bare `JOIN` (no LEFT keyword) defaults to
+    // INNER — `diff.rs`'s `diff_joins` only ever recognises an *added* LEFT
+    // JOIN as `SkeletonDiff::AddedLeftJoins`; anything else (including a
+    // bare/INNER added join) routes to `SkeletonDiff::Changed`, refused by
+    // `classify_skeleton_reason` with a "G2" label before B4's
+    // `admit_added_left_join` is ever called.
+    //
+    // Whether a *true* B4-level INNER-join refusal is reachable at all: it
+    // is not. `admit_added_left_join`'s own `join.join_type() !=
+    // Some(JoinType::Left)` check is explicitly documented as "Defensive
+    // only ... never reachable in practice", because `diff_joins` never
+    // constructs `SkeletonDiff::AddedLeftJoins` for a non-LEFT added join in
+    // the first place — every diff shape that could reach B4's admission
+    // code already has skeleton = `AddedLeftJoins`, which by construction
+    // only ever contains LEFT joins. So there is no diff shape that gets
+    // past G2 with an added INNER join and an otherwise-unchanged skeleton;
+    // this skeleton-level refusal is the only one reachable, hence it is
+    // what this test (correctly, now) pins.
     let before_sql = "SELECT o.order_id AS order_id FROM orders o";
     let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o JOIN dims \
                       d ON o.order_id = d.order_id";
@@ -862,6 +880,11 @@ fn b4_inner_join_refuses() {
     let options = derive_backbuild_options(&diff, &inputs);
     let atom = single_atom(&options);
     assert_refused(atom);
+    assert!(
+        atom.inadmissible.iter().any(|r| r.reason.contains("G2")),
+        "expected a G2-labelled refusal (join-multiplicity change), got: {:?}",
+        atom.inadmissible
+    );
 }
 
 #[test]

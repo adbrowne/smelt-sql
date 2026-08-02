@@ -89,10 +89,10 @@ fn full_refresh_option(inputs: &BackbuildInputs) -> BackbuildOption {
     BackbuildOption {
         technique: Technique::FullRefresh,
         slot: None,
-        statements: vec![format!(
-            "CREATE OR REPLACE TABLE {} AS {}",
-            inputs.table, inputs.after_sql
-        )],
+        // Statement authored in `emit::emit_full_refresh`, not inline here
+        // (final-review batched finding — every backbuild statement,
+        // including this baseline, has exactly one authoring site).
+        statements: vec![emit::emit_full_refresh(&inputs.table, &inputs.after_sql)],
         write_scope: WriteScope::FullWrite,
         reads_upstream: true,
         // CREATE OR REPLACE TABLE ... AS <after> re-evaluated against the
