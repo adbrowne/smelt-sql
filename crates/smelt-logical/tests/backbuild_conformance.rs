@@ -1344,6 +1344,260 @@ fn e4_group_key_range_admits() {
     harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
 }
 
+// ===== C1 regression: E4 upper-bound (`<`/`<=`) widening (final-review
+// finding C1) — `try_e4_pair`'s `"<" | "<="` arm called
+// `is_widened_lower_bound` (already the correct upper-bound widening
+// condition) and then wrongly negated it, so a genuine upper-bound widening
+// was refused while a narrowing was silently admitted (emitting a no-op
+// `INSERT` and leaving rows a rebuild would drop). Covered for both
+// comparison operators (`<` and `<=`) and both literal kinds (Number and
+// the ISO-8601 Text shape) per the reviewer's fixture list. =====
+
+#[test]
+fn e4_upper_bound_strict_lt_widening_admits_number() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE readings (amount INTEGER);
+         INSERT INTO readings VALUES (50), (150), (250);",
+    );
+
+    let before_sql = "SELECT amount FROM readings WHERE amount < 100";
+    let after_sql = "SELECT amount FROM readings WHERE amount < 200";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "a genuine upper-bound widening must admit E4, got {atom:?}"
+    );
+    assert_eq!(atom.options[0].technique, Technique::HorizonExtensionInsert);
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}
+
+#[test]
+fn e4_upper_bound_strict_lt_narrowing_refuses_number() {
+    // The exact C1 counter-example, adapted to `<`: narrowing the upper
+    // bound must never be admitted — it would emit a no-op INSERT (nothing
+    // satisfies the always-complement predicate) and silently leave rows a
+    // rebuild would drop.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE readings (amount INTEGER);
+         INSERT INTO readings VALUES (50), (150), (250);",
+    );
+
+    let before_sql = "SELECT amount FROM readings WHERE amount < 200";
+    let after_sql = "SELECT amount FROM readings WHERE amount < 100";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "an upper-bound narrowing must refuse E4, got {:?}",
+        atom.options
+    );
+    assert_eq!(atom.inadmissible.len(), 1, "{atom:?}");
+    assert!(
+        atom.inadmissible[0].reason.contains("does not provably widen"),
+        "expected the range-widening refusal reason, got: {}",
+        atom.inadmissible[0].reason
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
+#[test]
+fn e4_upper_bound_lte_widening_admits_number() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE readings (amount INTEGER);
+         INSERT INTO readings VALUES (50), (150), (250);",
+    );
+
+    let before_sql = "SELECT amount FROM readings WHERE amount <= 100";
+    let after_sql = "SELECT amount FROM readings WHERE amount <= 200";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "a genuine upper-bound widening must admit E4, got {atom:?}"
+    );
+    assert_eq!(atom.options[0].technique, Technique::HorizonExtensionInsert);
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}
+
+#[test]
+fn e4_upper_bound_lte_narrowing_refuses_number() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE readings (amount INTEGER);
+         INSERT INTO readings VALUES (50), (150), (250);",
+    );
+
+    let before_sql = "SELECT amount FROM readings WHERE amount <= 200";
+    let after_sql = "SELECT amount FROM readings WHERE amount <= 100";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "an upper-bound narrowing must refuse E4, got {:?}",
+        atom.options
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
+#[test]
+fn e4_upper_bound_strict_lt_widening_admits_text() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           ('2022-06-01', 1),
+           ('2023-06-01', 2),
+           ('2025-06-01', 3);",
+    );
+
+    let before_sql = "SELECT ts, amount FROM events WHERE ts < '2023-01-01'";
+    let after_sql = "SELECT ts, amount FROM events WHERE ts < '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "a genuine upper-bound widening must admit E4, got {atom:?}"
+    );
+    assert_eq!(atom.options[0].technique, Technique::HorizonExtensionInsert);
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}
+
+#[test]
+fn e4_upper_bound_strict_lt_narrowing_refuses_text() {
+    // The literal C1 counter-example from the final review: `ts < X` -> `ts
+    // < Y` with `Y < X` (a narrowing) must refuse, not admit a no-op INSERT
+    // that silently leaves rows a rebuild would drop.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           ('2022-06-01', 1),
+           ('2023-06-01', 2),
+           ('2025-06-01', 3);",
+    );
+
+    let before_sql = "SELECT ts, amount FROM events WHERE ts < '2025-01-01'";
+    let after_sql = "SELECT ts, amount FROM events WHERE ts < '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "an upper-bound narrowing must refuse E4, got {:?}",
+        atom.options
+    );
+    assert_eq!(atom.inadmissible.len(), 1, "{atom:?}");
+    assert!(
+        atom.inadmissible[0].reason.contains("does not provably widen"),
+        "expected the range-widening refusal reason, got: {}",
+        atom.inadmissible[0].reason
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
+#[test]
+fn e4_upper_bound_lte_widening_admits_text() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           ('2022-06-01', 1),
+           ('2023-06-01', 2),
+           ('2025-06-01', 3);",
+    );
+
+    let before_sql = "SELECT ts, amount FROM events WHERE ts <= '2023-01-01'";
+    let after_sql = "SELECT ts, amount FROM events WHERE ts <= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "a genuine upper-bound widening must admit E4, got {atom:?}"
+    );
+    assert_eq!(atom.options[0].technique, Technique::HorizonExtensionInsert);
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}
+
+#[test]
+fn e4_upper_bound_lte_narrowing_refuses_text() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           ('2022-06-01', 1),
+           ('2023-06-01', 2),
+           ('2025-06-01', 3);",
+    );
+
+    let before_sql = "SELECT ts, amount FROM events WHERE ts <= '2025-01-01'";
+    let after_sql = "SELECT ts, amount FROM events WHERE ts <= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "an upper-bound narrowing must refuse E4, got {:?}",
+        atom.options
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
 // ===== E2/F1/H (task-8-brief.md) =====
 
 #[test]

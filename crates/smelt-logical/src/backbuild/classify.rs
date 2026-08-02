@@ -808,7 +808,14 @@ fn try_e4_pair(removed: &Expr, added: &Expr) -> Result<RangePairProof, String> {
             &removed_shape.literal_text,
             &added_shape.literal_text,
         )?,
-        "<" | "<=" => !is_widened_lower_bound(
+        // C1 fix (final-review finding): this call already computes the
+        // upper-bound widening condition directly (`removed < added`, via
+        // `is_widened_lower_bound(kind, b=added, a=removed) = a < b`) — it
+        // must NOT be negated. The prior negated form silently admitted a
+        // narrowing (`ts < '2025-01-01'` -> `ts < '2024-01-01'`, emitting a
+        // no-op INSERT that leaves rows a rebuild would drop) while refusing
+        // a genuine widening.
+        "<" | "<=" => is_widened_lower_bound(
             removed_shape.literal_kind,
             &added_shape.literal_text,
             &removed_shape.literal_text,
