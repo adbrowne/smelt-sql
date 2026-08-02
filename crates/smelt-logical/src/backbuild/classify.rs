@@ -1660,50 +1660,53 @@ fn classify_added_column(
         }
     }
 
-    match try_b1(col, representative_sources, inputs) {
-        Ok(option) => AtomAnalysis {
-            change: atom_change,
-            options: vec![option],
-            inadmissible: Vec::new(),
-        },
-        Err(b1_reason) => {
-            // B3 shares B1's expression-validity leaf check (subquery/
-            // window/opaque function/non-determinism, research §4 intro) —
-            // when that is what refused B1, B3 would refuse identically, so
-            // it is never attempted (avoids a redundant, confusing second
-            // refusal for the exact same underlying reason).
-            if model_diff::collect_dependencies(&col.expr).is_err() {
-                return AtomAnalysis {
-                    change: atom_change,
-                    options: Vec::new(),
-                    inadmissible: vec![BackbuildRefusal {
-                        atom: format!("added column '{}'", col.name),
-                        reason: b1_reason,
-                    }],
-                };
-            }
-            match try_b3(col, representative_sources, inputs) {
-                Ok(option) => AtomAnalysis {
-                    change: atom_change,
-                    options: vec![option],
-                    inadmissible: Vec::new(),
-                },
-                Err(b3_reason) => AtomAnalysis {
-                    change: atom_change,
-                    options: Vec::new(),
-                    inadmissible: vec![
-                        BackbuildRefusal {
-                            atom: format!("added column '{}'", col.name),
-                            reason: b1_reason,
-                        },
-                        BackbuildRefusal {
-                            atom: format!("added column '{}'", col.name),
-                            reason: b3_reason,
-                        },
-                    ],
-                },
-            }
+    // B1 and B3 are attempted independently (research §2 "Options, not
+    // choices"): an added column derivable both from stored columns and
+    // from an upstream pull-through must carry *both* options on one atom,
+    // mirroring the D-class dual-derivability symmetry
+    // (`d_dual_derivable_yields_both_options`). A refusal on one side is
+    // recorded regardless of whether the other side is admitted — options
+    // and refusals are not mutually exclusive
+    // (`b_dual_derivable_refusals_still_recorded`).
+    let b1_result = try_b1(col, representative_sources, inputs);
+
+    // B3 shares B1's expression-validity leaf check (subquery/window/opaque
+    // function/non-determinism, research §4 intro) — when B1's failure came
+    // from that shared leaf check, B3 would refuse identically, so it is
+    // never attempted (avoids a redundant, confusing second refusal for the
+    // exact same underlying reason). This only ever short-circuits when B1
+    // *failed*; if B1 succeeded, B3 is still attempted independently.
+    let expr_is_invalid = model_diff::collect_dependencies(&col.expr).is_err();
+    let attempt_b3 = b1_result.is_ok() || !expr_is_invalid;
+    let b3_result = if attempt_b3 {
+        Some(try_b3(col, representative_sources, inputs))
+    } else {
+        None
+    };
+
+    let mut options = Vec::new();
+    let mut inadmissible = Vec::new();
+    match b1_result {
+        Ok(option) => options.push(option),
+        Err(reason) => inadmissible.push(BackbuildRefusal {
+            atom: format!("added column '{}'", col.name),
+            reason,
+        }),
+    }
+    if let Some(b3_result) = b3_result {
+        match b3_result {
+            Ok(option) => options.push(option),
+            Err(reason) => inadmissible.push(BackbuildRefusal {
+                atom: format!("added column '{}'", col.name),
+                reason,
+            }),
         }
+    }
+
+    AtomAnalysis {
+        change: atom_change,
+        options,
+        inadmissible,
     }
 }
 

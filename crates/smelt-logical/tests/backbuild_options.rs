@@ -312,7 +312,16 @@ fn b1_constant_and_arithmetic_columns_admit_alter_plus_update() {
         .find(|a| matches!(&a.change, AtomicChange::AddedColumn { name } if name == "status"))
         .expect("status atom");
     assert_eq!(status_atom.options.len(), 1, "options: {status_atom:?}");
-    assert!(status_atom.inadmissible.is_empty());
+    // B3 is attempted independently and refuses (a literal constant has no
+    // column dependency to bind an upstream alias to) but coexists with
+    // the admitted B1 option (`b_dual_derivable_refusals_still_recorded`).
+    assert_eq!(
+        status_atom.inadmissible.len(),
+        1,
+        "{:?}",
+        status_atom.inadmissible
+    );
+    assert!(status_atom.inadmissible[0].reason.contains("B3"));
     let status_option = &status_atom.options[0];
     assert_eq!(status_option.technique, Technique::SelfDerivedColumnAdd);
     assert_eq!(status_option.slot, Some(HSlot::Alter));
@@ -689,6 +698,46 @@ fn b3_undeclared_unique_key_refuses() {
             .iter()
             .any(|r| r.reason.to_lowercase().contains("unique_key")),
         "expected a refusal naming the missing unique_key, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b_dual_derivable_refusals_still_recorded() {
+    // `amount_copy` is a bare copy of `amount`, which is already a stored,
+    // unchanged bare pull-through of alias `o` — B1 is admissible
+    // regardless of `o`'s declared keys. B3 is attempted independently and
+    // refuses (no declared `unique_key`, same shape as
+    // `b3_undeclared_unique_key_refuses`). Options and refusals are not
+    // mutually exclusive (research §2 "Options, not choices"): the atom
+    // must carry the admitted B1 option *and* the B3 refusal.
+    let before_sql = "SELECT o.order_id AS order_id, o.amount AS amount FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.amount AS amount, o.amount AS amount_copy \
+                      FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = inputs_with_sources(
+        &[("amount_copy", "INTEGER")],
+        &[("o", source_ref("orders", None, &[]))],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "expected only the B1 option to be admitted, got {:?}",
+        atom.options
+    );
+    assert_eq!(atom.options[0].technique, Technique::SelfDerivedColumnAdd);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B3") && r.reason.to_lowercase().contains("unique_key")),
+        "expected the B3 refusal to still be recorded alongside the admitted B1 option, got: \
+         {:?}",
         atom.inadmissible
     );
 }

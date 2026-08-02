@@ -264,7 +264,13 @@ fn b1_constant_column() {
     assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
     let atom = &options.atoms[0];
     assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
-    assert!(atom.inadmissible.is_empty());
+    // B3 is attempted independently (research §2 "Options, not choices")
+    // and refuses — a literal constant has no column dependency to bind an
+    // upstream alias to — but that refusal coexists with the admitted B1
+    // option rather than being suppressed by it
+    // (`b_dual_derivable_refusals_still_recorded`).
+    assert_eq!(atom.inadmissible.len(), 1, "{:?}", atom.inadmissible);
+    assert!(atom.inadmissible[0].reason.contains("B3"));
     let option = &atom.options[0];
     assert_eq!(option.statements.len(), 2, "{option:?}");
     assert!(option.statements[0].starts_with("ALTER TABLE"));
@@ -303,7 +309,12 @@ fn b1_arithmetic_over_stored_columns() {
     assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
     let atom = &options.atoms[0];
     assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
-    assert!(atom.inadmissible.is_empty());
+    // B3 is attempted independently and refuses — `price`/`qty` are
+    // unqualified, so the grain-link proof cannot bind a FROM-tree alias —
+    // but the refusal coexists with the admitted B1 option
+    // (`b_dual_derivable_refusals_still_recorded`).
+    assert_eq!(atom.inadmissible.len(), 1, "{:?}", atom.inadmissible);
+    assert!(atom.inadmissible[0].reason.contains("B3"));
 
     harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
 }
@@ -528,7 +539,12 @@ fn b3_upstream_pullthrough() {
     assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
     let atom = &options.atoms[0];
     assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
-    assert!(atom.inadmissible.is_empty());
+    // B1 is attempted independently and refuses — `discount` is not
+    // (yet) a stored representative of this model, only an upstream-only
+    // dependency — but the refusal coexists with the admitted B3 option
+    // (`b_dual_derivable_refusals_still_recorded`).
+    assert_eq!(atom.inadmissible.len(), 1, "{:?}", atom.inadmissible);
+    assert!(atom.inadmissible[0].reason.contains("B1"));
     let option = &atom.options[0];
     assert_eq!(option.statements.len(), 2, "{option:?}");
     assert!(option.statements[0].starts_with("ALTER TABLE t ADD COLUMN discount"));
@@ -568,6 +584,63 @@ fn b3_respects_model_filter() {
     // model's WHERE are simply never matched — the join touches only
     // existing rows").
     harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}
+
+#[test]
+fn b_dual_derivable_added_column_yields_both_options() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, amount INTEGER);
+         INSERT INTO orders VALUES (1, 100), (2, 50), (3, 10);",
+    );
+
+    // `amount_copy` is a bare copy of `amount`, which is *already* a
+    // stored, unchanged bare pull-through of alias `o` — the same
+    // dual-derivability shape as `d_dual_derivable_yields_both_options`
+    // (research §2 "Options, not choices"), but for an *added* column
+    // (B1/B3) rather than a changed one (D1/D2): readable both from the
+    // model's own stored `amount` column (B1, self-read) and by rereading
+    // upstream `orders` directly through its declared, NOT-NULL,
+    // stored-bare-pull-through `order_id` key (B3, upstream read).
+    let before_sql = "SELECT o.order_id AS order_id, o.amount AS amount FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.amount AS amount, o.amount AS amount_copy \
+                      FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = orders_pullthrough_inputs(after_sql, &[("amount_copy", "INTEGER")]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(
+        atom.options.len(),
+        2,
+        "expected both B1 and B3 options, got {:?}",
+        atom.options
+    );
+    assert!(atom.inadmissible.is_empty());
+
+    let self_read = atom
+        .options
+        .iter()
+        .find(|o| !o.reads_upstream)
+        .expect("a self-read (B1) option");
+    assert_eq!(self_read.technique, Technique::SelfDerivedColumnAdd);
+
+    let upstream_read = atom
+        .options
+        .iter()
+        .find(|o| o.reads_upstream)
+        .expect("an upstream-read (B3) option");
+    assert_eq!(upstream_read.technique, Technique::UpstreamPullthrough);
+
+    // Each option independently reaches the same, correct end state from a
+    // fresh copy of the before-table (research §6: "each option's script
+    // applies to a fresh copy of the staged before-table").
+    harness::verify_option(&conn, "t", before_sql, after_sql, self_read);
+    harness::verify_option(&conn, "t", before_sql, after_sql, upstream_read);
 }
 
 #[test]

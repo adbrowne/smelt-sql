@@ -643,6 +643,9 @@ research §4H).
   A symmetry gap against research §2 "returns every admissible technique", not a
   correctness bug — every offered option remains proven. Revisit when the cost model
   arrives (it is the only consumer that benefits from the second option).
+  Closed by `docs/plans/20260802-backbuild-followups.md` Phase 2 (2026-08-02):
+  `classify_added_column` now attempts B1 and B3 independently and merges both option and
+  refusal lists on one atom.
 - **B4 dim-key uniqueness: the FD route is redundant, not blocked** (surfaced in Phase 6
   review, 2026-08-02; rationale corrected 2026-08-02 after a scoped re-review caught the
   first write-up over-claiming): the brief's implementation shape names
