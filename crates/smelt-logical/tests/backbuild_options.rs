@@ -5,7 +5,7 @@
 //! option set leaves FullRefresh as the model's only option") and
 //! `.superpowers/sdd/20260802-backbuild-synthesis/task-2-brief.md`.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smelt_logical::backbuild::{
     assemble, definition_diff, derive_backbuild_options, AtomAnalysis, AtomicChange,
@@ -23,6 +23,7 @@ fn inputs(added_column_types: &[(&str, &str)]) -> BackbuildInputs {
         table: "t".to_string(),
         after_sql: "SELECT 1".to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types: added_column_types
             .iter()
             .map(|(name, ty)| (name.to_string(), ty.to_string()))
@@ -117,6 +118,7 @@ fn unclassified_diff_still_refuses_rather_than_reporting_no_atoms() {
         table: "t".to_string(),
         after_sql: after_sql.to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types: BTreeMap::new(),
         sources: BTreeMap::new(),
     };
@@ -1044,6 +1046,83 @@ fn e4_mixed_operator_refuses() {
     let reason = atom.inadmissible[0].reason.to_lowercase();
     assert!(reason.contains("mixed"), "reason: {reason}");
     assert!(reason.contains("operator"), "reason: {reason}");
+}
+
+#[test]
+fn e4_nonpadded_date_literal_refuses() {
+    // The counter-example: `'2025-9-1'` (Sept 1) -> `'2025-10-1'` (Oct 1) is
+    // chronologically a NARROWING for a `>=` lower bound (the threshold
+    // moved later), but `'2025-10-1' < '2025-9-1'` lexicographically (`'1'`
+    // < `'9'` at the first differing byte) — a naive lexicographic compare
+    // would wrongly admit this as "widened". Neither literal is a
+    // fixed-width `YYYY-MM-DD` (single-digit month/day), so this must
+    // refuse rather than trust the comparison.
+    let before_sql = "SELECT ts FROM events WHERE ts >= '2025-9-1'";
+    let after_sql = "SELECT ts FROM events WHERE ts >= '2025-10-1'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("iso-8601") || reason.contains("fixed-width"),
+        "reason: {reason}"
+    );
+}
+
+#[test]
+fn e4_quoted_numeric_literal_refuses() {
+    // `'9'` -> `'100'`: chronologically/numerically a NARROWING for a `>=`
+    // lower bound (100 > 9), but `'100' < '9'` lexicographically (`'1'` <
+    // `'9'`) — a naive lexicographic compare would wrongly admit this as
+    // "widened". Quoted plain numbers are not a fixed-width ISO-8601
+    // date/timestamp, so this must refuse.
+    let before_sql = "SELECT id FROM events WHERE id >= '9'";
+    let after_sql = "SELECT id FROM events WHERE id >= '100'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("iso-8601") || reason.contains("fixed-width"),
+        "reason: {reason}"
+    );
+}
+
+#[test]
+fn e4_group_key_carve_out_refuses_across_multiple_aliases() {
+    // Two aliases (`o`, `d`) expose a same-named `report_date` column; the
+    // GROUP BY key is `o.report_date` but the range predicate is on
+    // `d.report_date` — a genuinely different column that a bare-name-only
+    // match would wrongly treat as the same group key. `SkeletonDiff`
+    // proves the FROM tree *unchanged* between versions, not single-alias,
+    // so the carve-out must refuse whenever more than one alias is joined
+    // in, regardless of whether the names happen to coincide.
+    let before_sql = "SELECT o.report_date AS report_date, SUM(o.amount) AS total FROM orders o \
+                       JOIN dim_calendar d ON o.report_date = d.report_date \
+                       WHERE d.report_date >= '2025-01-01' GROUP BY o.report_date";
+    let after_sql = "SELECT o.report_date AS report_date, SUM(o.amount) AS total FROM orders o \
+                      JOIN dim_calendar d ON o.report_date = d.report_date \
+                      WHERE d.report_date >= '2024-01-01' GROUP BY o.report_date";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("single") || reason.contains("alias"),
+        "reason: {reason}"
+    );
 }
 
 #[test]

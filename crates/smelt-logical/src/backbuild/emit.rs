@@ -131,9 +131,13 @@ pub fn emit_predicate_delete(table: &str, predicate: &str) -> String {
 /// [`emit_predicate_delete`].
 ///
 /// `identity_columns` is `None` when `BackbuildInputs::row_identity` is
-/// undeclared — the caller then records `rerun_safe: false` on the option
-/// this backs (research §2 "Idempotence": "Plain INSERT-family steps … are
-/// not [idempotent]; each carries an anti-join guard on row identity where
+/// undeclared, or declared but not every identity column is provably NOT
+/// NULL (`BackbuildInputs::not_null_columns` — an equality anti-join never
+/// matches a NULL-keyed row, so a nullable identity column would let a
+/// rerun silently re-insert; research §4 intro "Key addressability") — the
+/// caller then records `rerun_safe: false` on the option this backs
+/// (research §2 "Idempotence": "Plain INSERT-family steps … are not
+/// [idempotent]; each carries an anti-join guard on row identity where
 /// identity is available … and is otherwise documented one-shot").
 pub fn emit_difference_insert(
     table: &str,

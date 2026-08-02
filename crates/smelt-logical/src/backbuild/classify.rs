@@ -270,7 +270,25 @@ struct EClassGrain {
     /// `date_trunc('day', ts)`) is simply absent here, which safely refuses
     /// the carve-out for it (fail-closed) without misreporting "no GROUP BY
     /// at all".
+    ///
+    /// Deliberately name-only, ignoring qualifiers — sound only when
+    /// [`single_alias_from`](Self::single_alias_from) also holds, since a
+    /// bare name is otherwise ambiguous across two different FROM-tree
+    /// aliases exposing same-named columns (e.g. `GROUP BY o.report_date`
+    /// vs. a range predicate on `d.report_date` from a joined dimension).
     group_by_column_names: BTreeSet<String>,
+    /// Whether the model's FROM tree has at most one table reference in
+    /// scope (no `JOIN` at all). `group_by_column_names` and
+    /// [`RangeConjunctShape::name`] are both qualifier-blind (bare column
+    /// names only), which is sound only when there is a single alias to
+    /// begin with — `SkeletonDiff::Unchanged` proves the FROM tree
+    /// *unchanged* between versions, not single-alias, so a pre-existing
+    /// multi-table FROM with a same-named column on two different aliases
+    /// would otherwise let the E4 group-key carve-out wrongly match a GROUP
+    /// BY key against an unrelated column of a different table. The E4
+    /// group-key carve-out requires this to be `true`; it never gates E1,
+    /// the plain (no-group-by) E4 path, or the general GROUP BY refusal.
+    single_alias_from: bool,
 }
 
 fn e_class_grain(expr: &Expr) -> Option<EClassGrain> {
@@ -284,11 +302,16 @@ fn e_class_grain(expr: &Expr) -> Option<EClassGrain> {
                 .collect()
         })
         .unwrap_or_default();
+    let single_alias_from = stmt
+        .from_clause()
+        .map(|f| f.joins().count() == 0)
+        .unwrap_or(true);
     Some(EClassGrain {
         distinct: stmt.is_distinct(),
         has_limit: stmt.limit_clause().is_some(),
         has_group_by: group_by.is_some(),
         group_by_column_names,
+        single_alias_from,
     })
 }
 
@@ -374,7 +397,17 @@ fn classify_conjunct_diff(
         if g.has_group_by {
             if let Some(Ok(proof)) = &e4_pair {
                 if g.group_by_column_names.contains(&proof.column_name) {
-                    return vec![build_e4_atom(proof, representatives, after_columns, inputs)];
+                    if g.single_alias_from {
+                        return vec![build_e4_atom(proof, representatives, after_columns, inputs)];
+                    }
+                    return vec![e_class_where_refusal(format!(
+                        "E4's group-key carve-out requires the model's FROM tree to have a \
+                         single table reference in scope — a bare column-name match between \
+                         the GROUP BY key and the range predicate's column '{}' cannot be \
+                         trusted to mean the same column when more than one alias is joined in \
+                         (research §4 E-class grain precondition, group-key carve-out)",
+                        proof.column_name
+                    ))];
                 }
             }
             return vec![e_class_where_refusal(
@@ -628,18 +661,97 @@ fn try_e4_pair(removed: &Expr, added: &Expr) -> Result<RangePairProof, String> {
     })
 }
 
+/// A fixed-width ISO-8601 date/timestamp shape a text literal can match.
+/// Two literals of the *same* shape compare lexicographically exactly like
+/// they compare chronologically, since every field occupies the same fixed
+/// character width at the same position in both. `sep` (the exact byte
+/// separating the date and time parts, `b'T'` or `b' '`) is part of the
+/// shape too — a differing separator byte at that shared fixed position
+/// would make an ordinary string comparison compare unrelated bytes there
+/// instead of comparable date/time content.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Iso8601Shape {
+    Date,
+    Timestamp { sep: u8 },
+    TimestampFractional { sep: u8, frac_width: usize },
+}
+
+/// Recognise `s` as a fixed-width `YYYY-MM-DD` date, optionally followed by
+/// a fixed-width `[T ]HH:MM:SS[.fraction]` time. `None` for anything that
+/// doesn't match byte-for-byte: a non-padded month/day (`2025-9-1`), a
+/// quoted plain number (`'9'`, `'100'`), a named month, a timezone suffix,
+/// or any other text shape. This is the *only* text-literal shape E4's
+/// widening proof trusts lexicographic order for — fail-closed for
+/// everything else, pending real type information at wiring (research §4
+/// E4: a non-ISO-8601 quoted literal cannot be proven to widen from text
+/// alone; a naive lexicographic compare on e.g. `'2025-9-1'` vs
+/// `'2025-10-1'`, or `'9'` vs `'100'`, would silently misjudge the
+/// chronological/numeric order).
+fn iso8601_fixed_width_shape(s: &str) -> Option<Iso8601Shape> {
+    let b = s.as_bytes();
+    if b.len() < 10 {
+        return None;
+    }
+    let date_ok = b[0].is_ascii_digit()
+        && b[1].is_ascii_digit()
+        && b[2].is_ascii_digit()
+        && b[3].is_ascii_digit()
+        && b[4] == b'-'
+        && b[5].is_ascii_digit()
+        && b[6].is_ascii_digit()
+        && b[7] == b'-'
+        && b[8].is_ascii_digit()
+        && b[9].is_ascii_digit();
+    if !date_ok {
+        return None;
+    }
+    if b.len() == 10 {
+        return Some(Iso8601Shape::Date);
+    }
+    if b.len() < 19 {
+        return None;
+    }
+    let sep = b[10];
+    if sep != b'T' && sep != b' ' {
+        return None;
+    }
+    let time_ok = b[11].is_ascii_digit()
+        && b[12].is_ascii_digit()
+        && b[13] == b':'
+        && b[14].is_ascii_digit()
+        && b[15].is_ascii_digit()
+        && b[16] == b':'
+        && b[17].is_ascii_digit()
+        && b[18].is_ascii_digit();
+    if !time_ok {
+        return None;
+    }
+    if b.len() == 19 {
+        return Some(Iso8601Shape::Timestamp { sep });
+    }
+    if b[19] != b'.' {
+        return None;
+    }
+    let frac = &b[20..];
+    if frac.is_empty() || !frac.iter().all(u8::is_ascii_digit) {
+        return None;
+    }
+    Some(Iso8601Shape::TimestampFractional {
+        sep,
+        frac_width: frac.len(),
+    })
+}
+
 /// Whether `a` is strictly less than `b`, for a lower-bound (`>`/`>=`)
 /// widening check: `a < b` means moving the bound from `b` to `a` admits
 /// more rows. Numeric literals compare as parsed `f64`s (fail-closed on an
 /// unparseable literal — this should be unreachable given `bare_literal`
 /// only ever tags `NUMBER`-kind tokens this way, but a lexer accepting a
 /// shape `f64::from_str` rejects is reported, not panicked, per fail-loud
-/// discipline). Text literals compare lexicographically — sound for
-/// ISO-8601-shaped date/timestamp literals (the common E4 case), and
-/// conservative for anything else: a format where lexicographic order
-/// disagrees with the intended order simply fails to prove widening (`Ok`
-/// only asserts *this* comparison; a caller misreading it as "not widened"
-/// stays fail-closed, never fail-open).
+/// discipline). Text literals compare lexicographically *only* when both
+/// match the same [`iso8601_fixed_width_shape`] — refused otherwise
+/// (fail-closed; see that function's doc comment for the counter-examples
+/// this guards against).
 fn is_widened_lower_bound(kind: RangeLiteralKind, b: &str, a: &str) -> Result<bool, String> {
     match kind {
         RangeLiteralKind::Number => {
@@ -651,7 +763,30 @@ fn is_widened_lower_bound(kind: RangeLiteralKind, b: &str, a: &str) -> Result<bo
             })?;
             Ok(a < b)
         }
-        RangeLiteralKind::Text => Ok(a < b),
+        RangeLiteralKind::Text => {
+            let shape_b = iso8601_fixed_width_shape(b).ok_or_else(|| {
+                "a quoted literal is not a fixed-width ISO-8601 date/timestamp (e.g. \
+                 'YYYY-MM-DD') — widening cannot be proven from a string literal without real \
+                 type information, pending wiring-time type inference"
+                    .to_string()
+            })?;
+            let shape_a = iso8601_fixed_width_shape(a).ok_or_else(|| {
+                "a quoted literal is not a fixed-width ISO-8601 date/timestamp (e.g. \
+                 'YYYY-MM-DD') — widening cannot be proven from a string literal without real \
+                 type information, pending wiring-time type inference"
+                    .to_string()
+            })?;
+            if shape_b != shape_a {
+                return Err(
+                    "the removed and added conjuncts' literals have different fixed-width \
+                     date/timestamp shapes (date-only vs timestamp, or a differing separator or \
+                     fractional-second precision) — lexicographic comparison is not sound \
+                     across differing shapes"
+                        .to_string(),
+                );
+            }
+            Ok(a < b)
+        }
     }
 }
 
@@ -711,13 +846,26 @@ fn build_e4_option(
             )
         })?;
 
-    let identity_columns = inputs.row_identity.clone();
+    // The identity anti-join guard is only sound when every identity column
+    // is provably NOT NULL (research §4 intro "Key addressability" — the
+    // shared obligation identity anti-join guards share with B3/B4/B6's
+    // equality addressing): `t.<id> = __backbuild_diff.<id>` never matches a
+    // NULL-keyed row on either side, so a nullable identity column would let
+    // a rerun silently re-insert an already-inserted row rather than being
+    // suppressed by the guard. A declared identity that isn't provably NOT
+    // NULL is treated exactly like no declared identity at all — the guard
+    // is omitted and the option is recorded one-shot, never a refusal (the
+    // script itself is still correct on a single application).
+    let identity_columns = inputs.row_identity.as_ref().filter(|cols| {
+        cols.iter()
+            .all(|c| inputs.not_null_columns.contains(c.as_str()))
+    });
     let statement = emit::emit_difference_insert(
         &inputs.table,
         after_columns,
         &inputs.after_sql,
         &requalified_removed,
-        identity_columns.as_deref(),
+        identity_columns.map(Vec::as_slice),
     );
 
     Ok(BackbuildOption {
@@ -726,9 +874,9 @@ fn build_e4_option(
         statements: vec![statement],
         write_scope: WriteScope::RowSubset,
         reads_upstream: true,
-        // An anti-join guard on the declared identity makes a rerun safe;
-        // without identity this is documented one-shot (research §2
-        // "Idempotence").
+        // An anti-join guard on a NOT-NULL-proven identity makes a rerun
+        // safe; without one (undeclared, or declared but not proven NOT
+        // NULL) this is documented one-shot (research §2 "Idempotence").
         rerun_safe: identity_columns.is_some(),
     })
 }

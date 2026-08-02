@@ -19,7 +19,7 @@
 #[path = "backbuild_conformance/harness.rs"]
 mod harness;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use duckdb::Connection;
 
@@ -38,6 +38,7 @@ fn inputs(table: &str, after_sql: &str) -> BackbuildInputs {
         table: table.to_string(),
         after_sql: after_sql.to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types: BTreeMap::new(),
         sources: BTreeMap::new(),
     }
@@ -254,6 +255,7 @@ fn b1_constant_column() {
         table: "t".to_string(),
         after_sql: after_sql.to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types,
         sources: BTreeMap::new(),
     };
@@ -292,6 +294,7 @@ fn b1_arithmetic_over_stored_columns() {
         table: "t".to_string(),
         after_sql: after_sql.to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types,
         sources: BTreeMap::new(),
     };
@@ -495,6 +498,7 @@ fn orders_pullthrough_inputs(
         table: "t".to_string(),
         after_sql: after_sql.to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types: added_column_types
             .iter()
             .map(|(name, ty)| (name.to_string(), ty.to_string()))
@@ -761,6 +765,7 @@ fn customers_join_inputs(after_sql: &str, added_column_types: &[(&str, &str)]) -
         table: "t".to_string(),
         after_sql: after_sql.to_string(),
         row_identity: None,
+        not_null_columns: BTreeSet::new(),
         added_column_types: added_column_types
             .iter()
             .map(|(name, ty)| (name.to_string(), ty.to_string()))
@@ -1058,13 +1063,14 @@ fn e4_idempotent_with_identity() {
 
     let mut backbuild_inputs = inputs("t", after_sql);
     backbuild_inputs.row_identity = Some(vec!["id".to_string()]);
+    backbuild_inputs.not_null_columns = BTreeSet::from(["id".to_string()]);
 
     let options = derive_backbuild_options(&diff, &backbuild_inputs);
     let atom = &options.atoms[0];
     let option = &atom.options[0];
     assert!(
         option.rerun_safe,
-        "a declared row identity must make E4's INSERT rerun-safe"
+        "a declared, NOT-NULL-proven row identity must make E4's INSERT rerun-safe"
     );
     assert!(
         option.statements[0].to_uppercase().contains("NOT EXISTS"),
@@ -1085,6 +1091,53 @@ fn e4_idempotent_with_identity() {
     }
 
     harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
+#[test]
+fn e4_nullable_identity_is_one_shot() {
+    // A declared row identity that is NOT proven NOT NULL must not get the
+    // anti-join guard: `t.id = __backbuild_diff.id` never matches a NULL
+    // `id` on either side, so a rerun would silently re-insert an
+    // already-inserted NULL-identity row — the guard is only sound once the
+    // identity is provably NOT NULL (research §4 intro "Key
+    // addressability"). Undeclared-NOT-NULL is treated exactly like no
+    // declared identity: no guard, `rerun_safe: false`, but the script
+    // itself is still correct on a single application.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (id INTEGER, ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           (1, '2023-06-01', 10),
+           (2, '2024-06-01', 20),
+           (3, '2025-06-01', 30);",
+    );
+
+    let before_sql = "SELECT id, ts, amount FROM events WHERE ts >= '2025-01-01'";
+    let after_sql = "SELECT id, ts, amount FROM events WHERE ts >= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", after_sql);
+    backbuild_inputs.row_identity = Some(vec!["id".to_string()]);
+    // Deliberately no `not_null_columns` declaration for `id`.
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    let atom = &options.atoms[0];
+    let option = &atom.options[0];
+    assert!(
+        !option.rerun_safe,
+        "an identity not proven NOT NULL must not be treated as rerun-safe"
+    );
+    assert!(
+        !option.statements[0].to_uppercase().contains("NOT EXISTS"),
+        "expected no identity anti-join guard, got: {:?}",
+        option.statements
+    );
+
+    // The script is still correct on a single application.
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
 #[test]

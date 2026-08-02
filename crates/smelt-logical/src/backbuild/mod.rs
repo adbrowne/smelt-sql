@@ -238,6 +238,18 @@ pub struct BackbuildInputs {
     /// Declared row identity, or derived from `GROUP BY` — `None` when the
     /// model has neither.
     pub row_identity: Option<Vec<String>>,
+    /// Declared NOT NULL columns of the model's own deployed table (a schema
+    /// fact, not derived here — mirrors [`SourceRef::not_null_columns`], but
+    /// for `table` itself rather than an upstream). Consumed by the shared
+    /// key-addressability obligation (research §4 intro "Key
+    /// addressability") for E4's identity anti-join guard: `t.<id> =
+    /// __backbuild_diff.<id>` never matches a NULL-keyed row on either side,
+    /// so a NULL `row_identity` column would let a rerun silently re-insert
+    /// an already-inserted row — the guard (and `rerun_safe: true`) is only
+    /// admitted when every `row_identity` column is present here. Missing
+    /// here means "not proven" — fail-closed, never assumed, same posture
+    /// as `SourceRef::not_null_columns`.
+    pub not_null_columns: BTreeSet<String>,
     /// Added output column name → SQL type string.
     pub added_column_types: BTreeMap<String, String>,
     /// Upstream name (as referenced in the model's FROM/JOIN tree) → source
@@ -461,10 +473,14 @@ pub enum Technique {
     /// conjunct is already implied by reading the after-definition; the
     /// script adds `AND (<removed conjunct>) IS NOT TRUE`, requalified to
     /// stored columns) — this gets every boundary and NULL case right by
-    /// construction (research §4 E4). Carries an identity anti-join guard
-    /// when `BackbuildInputs::row_identity` is declared, making reruns safe;
-    /// otherwise the option records `rerun_safe: false` (research §2
-    /// "Idempotence").
+    /// construction (research §4 E4). Carries an identity anti-join guard,
+    /// making reruns safe, only when `BackbuildInputs::row_identity` is
+    /// declared *and* every identity column is present in
+    /// `BackbuildInputs::not_null_columns` — an equality anti-join never
+    /// matches a NULL-keyed row on either side, so a nullable identity
+    /// column would let a rerun silently re-insert (research §4 intro "Key
+    /// addressability"). Otherwise the option omits the guard and records
+    /// `rerun_safe: false` (research §2 "Idempotence").
     HorizonExtensionInsert,
 }
 
