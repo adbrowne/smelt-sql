@@ -115,7 +115,7 @@ cost model) is explicitly out of scope.
 | 2     | done     | 95fb691a | 2026-08-02 |
 | 3     | done     | 35e70b98 | 2026-08-02 |
 | 4     | done     | 54663e46, a764a45b | 2026-08-02 |
-| 5     | pending  |        |      |
+| 5     | done     | 80a352c0 | 2026-08-02 |
 | 6     | pending  |        |      |
 | 7     | pending  |        |      |
 | 8     | pending  |        |      |
@@ -635,6 +635,14 @@ research §4H).
 ## Deferred during implementation
 
 (Append-only. Items surfaced during the work that we chose not to handle in this plan.)
+
+- **B1/B3 dual-derivability for added columns** (surfaced in Phase 5 review, 2026-08-02):
+  `classify_added_column` tries B1 first and attempts B3 only after B1 fails, so an added
+  column derivable both from stored columns and from an upstream pull-through yields one
+  option where the D-class analogue (`d_dual_derivable_yields_both_options`) yields both.
+  A symmetry gap against research §2 "returns every admissible technique", not a
+  correctness bug — every offered option remains proven. Revisit when the cost model
+  arrives (it is the only consumer that benefits from the second option).
 
 ## Verification
 
