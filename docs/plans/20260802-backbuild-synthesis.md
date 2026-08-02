@@ -697,6 +697,22 @@ research §4H).
   *edited* survivor (e.g. diffing a matched branch pair's own `SELECT`-list/`WHERE` the same
   way the top-level (branch-0-only) diff already does, rather than requiring exact text
   equality) — out of scope for this plan (touches `diff.rs`, explicitly not a Phase 8 file).
+- **Two residual corners from the final whole-branch review's fix wave** (surfaced
+  2026-08-02, judged non-blocking by the scoped re-review):
+  - *C4 contrived corner*: `first_branch_order` pins the F1 column-order check to the
+    **before**-definition's first branch, and the multi-branch pure-diff gate's
+    `select_list.is_noop()` is name-keyed, so a before-definition that already contains two
+    branches with identical name-sets/expressions/FROM/WHERE but mutually swapped declared
+    orders could, in a single reorder+append edit, slip a positional/name-order divergence
+    past the check. Requires the before-definition to already embed the positional trap
+    internally; revisit if branch matching is ever generalized.
+  - *Quoted identifiers are invisible to `ColumnRef`-based sweeps*: the lexer emits quoted
+    identifiers (`d."col"`) as `STRING` tokens parser-wide, so they never form a
+    `ColumnRef` and are unseen by the alias sweeps and dependency walks (including
+    `model_diff.rs`'s pre-existing walk). Composed scripts still fail closed (the conjunct's
+    own classification refuses), but per-option proof claims should not rely on sweeping
+    quoted references until the parser lexes them as identifiers. Pre-existing,
+    parser-level; belongs to wiring-time hardening.
 
 ## Verification
 
