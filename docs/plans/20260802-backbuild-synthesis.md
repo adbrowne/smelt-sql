@@ -112,7 +112,7 @@ cost model) is explicitly out of scope.
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
 | 1     | done     | b5a35cba, 47355cc9 | 2026-08-02 |
-| 2     | pending  |        |      |
+| 2     | done     | 95fb691a | 2026-08-02 |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
 | 5     | pending  |        |      |
