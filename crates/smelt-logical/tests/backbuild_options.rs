@@ -811,6 +811,126 @@ fn b3_self_join_binds_per_alias() {
     );
 }
 
+// ===== B5 (research §4 B5: new aggregate column at unchanged GROUP BY
+// grain) =====
+
+/// `BackbuildInputs` for a B5 refusal test: no declared `sources` (mirrors
+/// `backbuild_conformance.rs`'s `group_by_inputs` — B5's re-aggregation
+/// reads the model's own FROM/WHERE text directly, and leaving `sources`
+/// empty keeps B3 from ever admitting the same aggregate expression
+/// instead, since `admit_upstream_pullthrough` always refuses without a
+/// declared source).
+fn group_by_inputs(
+    added_column_types: &[(&str, &str)],
+    not_null_group_keys: &[&str],
+) -> BackbuildInputs {
+    let mut built = inputs(added_column_types);
+    built.not_null_columns = not_null_group_keys.iter().map(|s| s.to_string()).collect();
+    built
+}
+
+#[test]
+fn b5_nullable_group_key_refuses() {
+    let before_sql = "SELECT o.customer_id AS customer_id, count(*) AS n FROM orders o GROUP BY \
+         o.customer_id";
+    let after_sql = "SELECT o.customer_id AS customer_id, count(*) AS n, SUM(o.qty) AS \
+                      total_qty FROM orders o GROUP BY o.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    // `customer_id` is pulled through and unchanged, but not declared NOT
+    // NULL.
+    let options =
+        derive_backbuild_options(&diff, &group_by_inputs(&[("total_qty", "HUGEINT")], &[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B5") && r.reason.to_lowercase().contains("not null")),
+        "expected a B5 NOT NULL refusal for the GROUP BY key, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b5_group_key_not_pulled_through_refuses() {
+    // The model groups by `o.region`, but never selects it — there is no
+    // stored bare pull-through to address a backfill by.
+    let before_sql = "SELECT count(*) AS n FROM orders o GROUP BY o.region";
+    let after_sql = "SELECT count(*) AS n, SUM(o.qty) AS total_qty FROM orders o GROUP BY \
+                      o.region";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options =
+        derive_backbuild_options(&diff, &group_by_inputs(&[("total_qty", "HUGEINT")], &[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B5") && r.reason.contains("no addressable identity")),
+        "expected a B5 'no addressable identity' refusal for the ungrouped-key, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b5_volatile_aggregate_input_refuses() {
+    let before_sql = "SELECT o.customer_id AS customer_id, count(*) AS n FROM orders o GROUP BY \
+         o.customer_id";
+    let after_sql = "SELECT o.customer_id AS customer_id, count(*) AS n, SUM(random()) AS \
+                      total_qty FROM orders o GROUP BY o.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(
+        &diff,
+        &group_by_inputs(&[("total_qty", "HUGEINT")], &["customer_id"]),
+    );
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B5")
+                && r.reason.to_lowercase().contains("non-deterministic")),
+        "expected a B5 refusal naming the non-deterministic aggregate input, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b5_changed_skeleton_refuses() {
+    // The aggregate add is bundled with a FROM-tree change (a newly added
+    // INNER JOIN, a join-multiplicity change) — the shared skeleton guard
+    // refuses the whole diff before B5 (or any other targeted technique)
+    // ever gets a chance: the row-set-unchanged proof B5 needs simply does
+    // not hold. The refused atom is the coarse skeleton atom, not a
+    // per-column B5 atom — "the atom lands wherever the skeleton diff
+    // sends it" (research §4 B5).
+    let before_sql = "SELECT o.customer_id AS customer_id, count(*) AS n FROM orders o GROUP BY \
+         o.customer_id";
+    let after_sql = "SELECT o.customer_id AS customer_id, count(*) AS n, SUM(o.qty) AS \
+                      total_qty FROM orders o JOIN regions r ON o.customer_id = r.customer_id \
+                      GROUP BY o.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(
+        &diff,
+        &group_by_inputs(&[("total_qty", "HUGEINT")], &["customer_id"]),
+    );
+    let atom = single_atom(&options);
+    assert!(matches!(&atom.change, AtomicChange::Skeleton { .. }));
+    assert_refused(atom);
+}
+
 // ===== B4 (task-6-brief.md) =====
 
 fn dims_inputs(

@@ -632,6 +632,17 @@ pub enum Technique {
     /// (unlike `FilterLoosenInsert`/`HorizonExtensionInsert`). Carries the
     /// same identity anti-join guard posture as those two techniques.
     UnionBranchInsert,
+    /// B5 — new aggregate column at unchanged `GROUP BY` grain (research
+    /// §4): `ALTER TABLE t ADD COLUMN c <ty>;` then a matched-only column
+    /// backfill from the after-definition's own re-aggregation — full
+    /// `FROM`/`WHERE` tree, `GROUP BY` keys — via
+    /// `emit::emit_column_backfill_update_from_subquery`, never the plain
+    /// upstream-table shape `UpstreamPullthrough` uses (a bare
+    /// `SELECT <keys>, <agg> FROM <upstream> GROUP BY <keys>` over-counts
+    /// rows the model's own `WHERE` filters out). No insert arm: a group
+    /// absent from `t` is a group the row-set-unchanged proof already
+    /// guarantees cannot exist.
+    AggregateColumnBackfill,
 }
 
 /// The research §2 "write scope" option metadata.

@@ -518,6 +518,175 @@ fn orders_pullthrough_inputs(
     }
 }
 
+/// `BackbuildInputs` for a `GROUP BY` model's B5 tests: no declared
+/// `sources` (B5's re-aggregation reads the model's own FROM/WHERE text
+/// directly, never `BackbuildInputs::sources` — and leaving it empty also
+/// keeps B3 from spuriously attempting the same aggregate expression, since
+/// `admit_upstream_pullthrough` always refuses without a declared source
+/// for the aggregate's FROM-tree alias). `not_null_group_keys` declares
+/// which `GROUP BY` key output columns are provably `NOT NULL` (research §4
+/// intro "Key addressability").
+fn group_by_inputs(
+    after_sql: &str,
+    added_column_types: &[(&str, &str)],
+    not_null_group_keys: &[&str],
+) -> BackbuildInputs {
+    BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: not_null_group_keys.iter().map(|s| s.to_string()).collect(),
+        added_column_types: added_column_types
+            .iter()
+            .map(|(name, ty)| (name.to_string(), ty.to_string()))
+            .collect(),
+        sources: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn b5_aggregate_column_backfill() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (customer_id INTEGER, qty INTEGER);
+         INSERT INTO orders VALUES (1, 5), (1, 3), (2, 10), (3, 7), (3, 1);",
+    );
+
+    let before_sql = "SELECT o.customer_id AS customer_id, count(*) AS n FROM orders o GROUP BY \
+         o.customer_id";
+    let after_sql = "SELECT o.customer_id AS customer_id, count(*) AS n, SUM(o.qty) AS \
+                      total_qty FROM orders o GROUP BY o.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = group_by_inputs(after_sql, &[("total_qty", "HUGEINT")], &["customer_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::AggregateColumnBackfill);
+    assert_eq!(option.statements.len(), 2, "{option:?}");
+    assert!(option.statements[0].starts_with("ALTER TABLE t ADD COLUMN total_qty"));
+    assert!(
+        option.statements[1].starts_with("UPDATE t SET total_qty = s.total_qty FROM (SELECT"),
+        "{}",
+        option.statements[1]
+    );
+    assert!(option.statements[1].contains("GROUP BY o.customer_id"));
+    assert!(option.statements[1].contains("WHERE t.customer_id = s.customer_id"));
+
+    // Sibling column `n` must be byte-identical before/after — B5 only
+    // ever touches its own freshly-added column.
+    harness::build_before(&conn, "t", before_sql);
+    let sibling_sql = "SELECT n::VARCHAR FROM t ORDER BY customer_id";
+    let siblings_before = harness::text_column(&conn, sibling_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply B5 statement `{stmt}`: {e}"));
+    }
+    let siblings_after = harness::text_column(&conn, sibling_sql);
+    assert_eq!(
+        siblings_after, siblings_before,
+        "sibling column `n` must be byte-identical to its pre-script values — B5 must touch \
+         only total_qty"
+    );
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
+#[test]
+fn b5_where_clause_is_carried() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (customer_id INTEGER, qty INTEGER);
+         INSERT INTO orders VALUES
+           (1, 5), (1, -100),
+           (2, 10), (2, 3),
+           (3, -1);",
+    );
+
+    // Every customer has at least one row the model's own WHERE drops
+    // (customer 1's -100, customer 3's only row). A bare re-aggregation
+    // over `<upstream> GROUP BY <keys>` (skipping the WHERE) would
+    // over-count customer 1's total and wrongly materialize a group for
+    // customer 3 — the research §4 B5 trap made executable.
+    let before_sql = "SELECT o.customer_id AS customer_id, count(*) AS n FROM orders o WHERE \
+                       o.qty > 0 GROUP BY o.customer_id";
+    let after_sql = "SELECT o.customer_id AS customer_id, count(*) AS n, SUM(o.qty) AS \
+                      total_qty FROM orders o WHERE o.qty > 0 GROUP BY o.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = group_by_inputs(after_sql, &[("total_qty", "HUGEINT")], &["customer_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    let option = &atom.options[0];
+    assert!(
+        option.statements[1].contains("WHERE o.qty > 0"),
+        "the re-aggregation subquery must carry the model's own WHERE verbatim: {}",
+        option.statements[1]
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn b5_update_is_matched_only() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (customer_id INTEGER, status TEXT, qty INTEGER);
+         INSERT INTO orders VALUES
+           (1, 'active', 5), (1, 'active', 3),
+           (2, 'inactive', 10),
+           (3, 'active', 7);",
+    );
+
+    // Customer 2 is entirely `inactive` — the model's own WHERE has always
+    // filtered it out, so `t` never has a row for it, before or after.
+    let before_sql = "SELECT o.customer_id AS customer_id, count(*) AS n FROM orders o WHERE \
+                       o.status = 'active' GROUP BY o.customer_id";
+    let after_sql = "SELECT o.customer_id AS customer_id, count(*) AS n, SUM(o.qty) AS \
+                      total_qty FROM orders o WHERE o.status = 'active' GROUP BY o.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = group_by_inputs(after_sql, &[("total_qty", "HUGEINT")], &["customer_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    let option = &atom.options[0];
+
+    harness::build_before(&conn, "t", before_sql);
+    let count_before: i64 = conn
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .expect("count before");
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply B5 statement `{stmt}`: {e}"));
+    }
+    let count_after: i64 = conn
+        .query_row("SELECT count(*) FROM t", [], |row| row.get(0))
+        .expect("count after");
+    assert_eq!(
+        count_before, count_after,
+        "B5 must be matched-only — customer 2's group (filtered out by the model's own WHERE) \
+         must never be inserted"
+    );
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
 #[test]
 fn b3_upstream_pullthrough() {
     let conn = Connection::open_in_memory().expect("duckdb");

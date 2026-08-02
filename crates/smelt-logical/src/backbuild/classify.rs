@@ -27,6 +27,7 @@ use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{Expr, JoinClause, JoinType, SelectEntry, SelectStmt, SyntaxKind};
+use smelt_types::SqlFunction;
 
 use crate::analysis::model_diff;
 
@@ -1684,6 +1685,18 @@ fn classify_added_column(
         None
     };
 
+    // B5 (research §4 B5) is only attempted when `col`'s expression is
+    // itself a registry-recognized aggregate call under a GROUP BY model
+    // (`is_group_by_aggregate_shape`) — gated the same way B4's
+    // `join_admission` branch above is, so an ordinary B1/B3-shaped added
+    // column under a GROUP BY model (e.g. a bare pull-through of a stored
+    // GROUP BY key) never picks up a spurious "not an aggregate" refusal.
+    let b5_result = if is_group_by_aggregate_shape(&col.expr) {
+        Some(try_b5(col, representative_sources, inputs))
+    } else {
+        None
+    };
+
     let mut options = Vec::new();
     let mut inadmissible = Vec::new();
     match b1_result {
@@ -1695,6 +1708,15 @@ fn classify_added_column(
     }
     if let Some(b3_result) = b3_result {
         match b3_result {
+            Ok(option) => options.push(option),
+            Err(reason) => inadmissible.push(BackbuildRefusal {
+                atom: format!("added column '{}'", col.name),
+                reason,
+            }),
+        }
+    }
+    if let Some(b5_result) = b5_result {
+        match b5_result {
             Ok(option) => options.push(option),
             Err(reason) => inadmissible.push(BackbuildRefusal {
                 atom: format!("added column '{}'", col.name),
@@ -2061,6 +2083,231 @@ fn try_d2(
         // Plain DML, no DDL step — deterministic and re-runnable, same as
         // D1.
         rerun_safe: true,
+    })
+}
+
+// ===== B5: new aggregate column at unchanged GROUP BY grain (research §4
+// B5) =====
+
+/// The B5 attempt gate: `expr` must itself be a registry-recognized
+/// aggregate call (`SqlFunction::is_aggregate`, the same registry-backed
+/// leaf classification `analysis::mod::classify_select_items` uses) sitting
+/// inside a `GROUP BY` model. Deliberately checked *before* [`try_b5`] is
+/// ever called — an ordinary B1/B3-shaped added column under a `GROUP BY`
+/// model (e.g. a bare pull-through of a stored `GROUP BY` key) must never
+/// pick up a spurious "not an aggregate" refusal alongside its admitted B1
+/// option, mirroring how `depends_only_on_join_alias` gates the B4 attempt
+/// above.
+fn is_group_by_aggregate_shape(expr: &Expr) -> bool {
+    let Some(func) = expr.as_function_call() else {
+        return false;
+    };
+    let Some(name) = func.name() else {
+        return false;
+    };
+    if !SqlFunction::from_name(&name).is_some_and(|f| f.is_aggregate()) {
+        return false;
+    }
+    expr.syntax()
+        .ancestors()
+        .find_map(SelectStmt::cast)
+        .and_then(|stmt| stmt.group_by_clause())
+        .is_some()
+}
+
+/// One `GROUP BY` key's addressable identity (research §4 intro "Key
+/// addressability" + "one uniform rule"): the key's own qualified source
+/// text (spliced verbatim into the re-aggregation subquery's own `SELECT`
+/// list, aliased to the representative's stored output name so the
+/// backfill's join predicate can address it by that name) and the stored
+/// output name the `UPDATE ... FROM` predicate matches on.
+struct GroupKeyBinding {
+    /// `<qualifier>.<raw_name> AS <output_name>` (or bare `<raw_name> AS
+    /// <output_name>` when unqualified) — this key's own entry in the
+    /// re-aggregation subquery's `SELECT` list.
+    select_item: String,
+    /// The model's own stored column name for this key — used on both
+    /// sides of the `UPDATE ... FROM` predicate
+    /// (`emit::emit_column_backfill_update_from_subquery`'s `key_pairs`).
+    output_name: String,
+}
+
+/// Resolve one `GROUP BY` key expression to its [`GroupKeyBinding`]: it must
+/// be a bare column reference with a stored 1:1 pull-through representative
+/// (research §4 intro "one uniform rule"), and that representative's own
+/// output column must be declared `NOT NULL`
+/// (`BackbuildInputs::not_null_columns` — the shared key-addressability
+/// obligation: an equality match never addresses a NULL-keyed row).
+fn resolve_group_key(
+    key_expr: &Expr,
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<GroupKeyBinding, String> {
+    let col_ref = key_expr.as_column_ref().ok_or_else(|| {
+        format!(
+            "GROUP BY key '{}' is not a bare column reference — no addressable identity can be \
+             derived for a computed grouping key",
+            key_expr.text().trim()
+        )
+    })?;
+    let qualifier = col_ref.qualifier().map(|q| q.to_string());
+    let raw_name = col_ref.name().to_string();
+
+    let rep = resolve_representative(qualifier.as_deref(), &raw_name, representative_sources)
+        .ok_or_else(|| {
+            format!(
+                "GROUP BY key '{}' has no 1:1 stored bare pull-through (unchanged between both \
+                 definitions) in the model's own output — no addressable identity",
+                format_dependency(&qualifier, &raw_name)
+            )
+        })?;
+
+    if !inputs.not_null_columns.contains(rep.output_name.as_str()) {
+        return Err(format!(
+            "GROUP BY key '{}' is not declared NOT NULL (BackbuildInputs::not_null_columns) — \
+             an equality match never addresses a NULL-keyed row",
+            rep.output_name
+        ));
+    }
+
+    Ok(GroupKeyBinding {
+        select_item: format!("{} AS {}", key_expr.text().trim(), rep.output_name),
+        output_name: rep.output_name.clone(),
+    })
+}
+
+/// B5 (research §4 B5): an added SELECT item that is itself a registry-
+/// recognized aggregate call over a `GROUP BY` model whose skeleton is
+/// unchanged (`is_group_by_aggregate_shape` already proved both, as this
+/// function's caller's gate). *Script*: `ALTER TABLE t ADD COLUMN c <ty>;`
+/// then a matched-only column backfill from the after-definition's own
+/// re-aggregation — full `FROM`/`WHERE` tree, `GROUP BY` keys — via
+/// `emit::emit_column_backfill_update_from_subquery`: a bare `SELECT
+/// <keys>, <agg> FROM <upstream> GROUP BY <keys>` would over-count rows the
+/// model's own `WHERE` filters out (research §4 B5's named trap), so the
+/// re-aggregation carries the model's `WHERE` verbatim. No insert arm: a
+/// group absent from `t` is a group the row-set-unchanged proof already
+/// guarantees cannot exist.
+fn try_b5(
+    col: &SelectColumn,
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    // Determinism/registry validation of the aggregate's own arguments
+    // (fail-closed on a volatile or unregistered nested call — research §2
+    // "Determinism caveat": "a volatile or unrecognised function in an
+    // added or changed expression refuses the atom"), reusing the same
+    // leaf check B1/B3 use rather than re-deriving it.
+    model_diff::collect_dependencies(&col.expr).map_err(|reason| {
+        format!(
+            "B5 (aggregate column add) refused for '{}': {reason}",
+            col.name
+        )
+    })?;
+
+    let stmt = col
+        .expr
+        .syntax()
+        .ancestors()
+        .find_map(SelectStmt::cast)
+        .ok_or_else(|| {
+            format!(
+                "B5 (aggregate column add) refused for '{}': could not locate the enclosing \
+                 SELECT statement",
+                col.name
+            )
+        })?;
+
+    let group_by = stmt.group_by_clause().ok_or_else(|| {
+        format!(
+            "B5 (aggregate column add) refused for '{}': the model has no GROUP BY clause",
+            col.name
+        )
+    })?;
+    if group_by.is_all() {
+        return Err(format!(
+            "B5 (aggregate column add) refused for '{}': GROUP BY ALL has no explicit \
+             grouping-key expressions to re-aggregate on",
+            col.name
+        ));
+    }
+
+    let mut key_pairs = Vec::new();
+    let mut select_items = Vec::new();
+    for key_expr in group_by.expressions() {
+        let binding =
+            resolve_group_key(&key_expr, representative_sources, inputs).map_err(|reason| {
+                format!(
+                    "B5 (aggregate column add) refused for '{}': {reason}",
+                    col.name
+                )
+            })?;
+        key_pairs.push((binding.output_name.clone(), binding.output_name));
+        select_items.push(binding.select_item);
+    }
+    if key_pairs.is_empty() {
+        return Err(format!(
+            "B5 (aggregate column add) refused for '{}': the GROUP BY clause has no explicit \
+             grouping-key expressions",
+            col.name
+        ));
+    }
+
+    let from_text = stmt.from_clause().map(|f| f.text()).ok_or_else(|| {
+        format!(
+            "B5 (aggregate column add) refused for '{}': the model has no FROM clause",
+            col.name
+        )
+    })?;
+    let where_text = stmt.where_clause().map(|w| w.text()).unwrap_or_default();
+    let group_by_text = group_by.syntax().text().to_string();
+
+    let agg_text = col.expr.text();
+    let mut subquery_parts = vec![
+        format!(
+            "SELECT {}, {} AS {}",
+            select_items.join(", "),
+            agg_text.trim(),
+            col.name
+        ),
+        from_text.trim().to_string(),
+    ];
+    if !where_text.trim().is_empty() {
+        subquery_parts.push(where_text.trim().to_string());
+    }
+    subquery_parts.push(group_by_text.trim().to_string());
+    let subquery = subquery_parts.join(" ");
+
+    let sql_type = inputs.added_column_types.get(&col.name).ok_or_else(|| {
+        format!(
+            "B5 (aggregate column add) refused for '{}': no declared SQL type in \
+             BackbuildInputs::added_column_types",
+            col.name
+        )
+    })?;
+
+    let alter = emit::emit_alter_add_column(&inputs.table, &col.name, sql_type);
+    let update = emit::emit_column_backfill_update_from_subquery(
+        &inputs.table,
+        &[(col.name.clone(), format!("s.{}", col.name))],
+        &subquery,
+        "s",
+        &key_pairs,
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::AggregateColumnBackfill,
+        // Same H-slot bucket as B1/B3's `ALTER ADD` + paired `UPDATE`
+        // (`build_b1_option`'s doc comment) — the `ALTER ADD` must flush
+        // before any rename-dependent add, and the paired `UPDATE` only
+        // ever touches this atom's own freshly-added column.
+        slot: Some(HSlot::Alter),
+        statements: vec![alter, update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: true,
+        // The `ALTER ADD` step is DDL and not re-runnable (research §2
+        // "Idempotence"), same as B1/B3.
+        rerun_safe: false,
     })
 }
 

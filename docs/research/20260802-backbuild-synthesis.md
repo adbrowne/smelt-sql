@@ -279,16 +279,29 @@ rows exist is a grain change), derived from the diff rather than the maintenance
     zero rows makes the whole scalar NULL and the `COALESCE` never fires.) Each subquery
     also *errors on multiple matches* — a free runtime uniqueness probe. The oracle
     verifies every offered shape; choosing is the deferred cost model's job.
-- **B5 — new aggregate column at unchanged GROUP BY grain.** *Prove*: skeleton unchanged;
-  aggregate inputs available upstream; shared NOT NULL obligation on the group keys.
+- **B5 — new aggregate column at unchanged GROUP BY grain.** *Detect*: an added SELECT
+  item that is itself a registry-recognized aggregate call (`SqlFunction::is_aggregate`,
+  the same registry-backed classification `analysis::classify_select_items` uses) under a
+  `GROUP BY` model — checked before admission is ever attempted, so an ordinary B1/B3-shaped
+  add under a `GROUP BY` model (a bare pull-through of a stored `GROUP BY` key) never
+  picks up a spurious "not an aggregate" refusal alongside its own admitted option. *Prove*:
+  skeleton unchanged; every `GROUP BY` key is a stored bare pull-through unchanged between
+  both definitions (the uniform representative rule) and declared NOT NULL (the shared
+  key-addressability obligation); the aggregate's own arguments pass the same
+  registry-backed determinism/opaqueness leaf check B1/B3 use (fail-closed on a volatile or
+  unregistered nested call — `SUM(random())` refuses by name). `GROUP BY ALL` (no explicit
+  grouping-key expressions) refuses outright — there is nothing to re-aggregate on.
   *Script*: a matched-only column backfill from the **after-definition's own skeleton**
   projected to keys + the new column — the re-aggregation must carry the model's full
-  FROM tree and WHERE (a bare `SELECT <keys>, <agg> FROM <upstream> GROUP BY <keys>`
-  over-counts filtered rows), it updates matched keys only (no insert arm — an insert
-  would add groups the stored row set proves cannot exist), and it uses the same
-  update-from emitter as B3, not `emit_column_scoped_merge` (whose `SET *` contract
-  requires a full-row source projection). Full upstream scan, but only one column
-  written. Tier 3.
+  FROM tree and WHERE verbatim (a bare `SELECT <keys>, <agg> FROM <upstream> GROUP BY
+  <keys>` over-counts filtered rows — read straight off the after-definition's own CST
+  clauses, never reconstructed from `BackbuildInputs::sources`), it updates matched keys
+  only (no insert arm — an insert would add groups the stored row set proves cannot
+  exist), and it uses a dedicated derived-subquery update-from emitter
+  (`emit_column_backfill_update_from_subquery`) — the source is a subquery, not a plain
+  upstream table, so it is a distinct shape from B3's `emit_column_backfill_update_from`,
+  and neither is `emit_column_scoped_merge` (whose `SET *` contract requires a full-row
+  source projection). Full upstream scan, but only one column written.
 - **B6 — new window-function column over stored columns** (`ROW_NUMBER() OVER
   (PARTITION BY stored ORDER BY stored)`). *Prove*: window reads only stored columns.
   *Script*: self-read
@@ -527,7 +540,7 @@ pipelines and how galling the full refresh it replaces is:
 | 8 | E2 + D2 | Rounds out predicates and expression changes; reuses earlier machinery |
 | 9 | F1 | Cheap detection (branch diff), cheap script |
 | 10 | B7 | Sequential multi-join enrichment; builds directly on B4's proof, adds only the dependency ordering |
-| 11+ | B5, B6, F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
+| 11+ | B6, F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
 
 ## 6. Architecture
 

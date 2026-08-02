@@ -204,6 +204,37 @@ UPDATE t SET discount = u.discount FROM orders u WHERE t.order_id = u.order_id;
 Rows the model's WHERE clause filtered out simply never match — the join
 touches only rows the table already has.
 
+### Add an aggregate at the model's own grain
+
+```sql
+-- before
+SELECT o.customer_id AS customer_id, count(*) AS n
+FROM orders o WHERE o.qty > 0 GROUP BY o.customer_id
+-- after
+SELECT o.customer_id AS customer_id, count(*) AS n, SUM(o.qty) AS total_qty
+FROM orders o WHERE o.qty > 0 GROUP BY o.customer_id
+```
+
+The new column is a recognized aggregate call, the `GROUP BY` grain is
+unchanged, and the grouping key (`customer_id`) is a stored, `NOT NULL`
+pull-through — so each stored group can be re-derived and matched by key:
+
+```sql
+ALTER TABLE t ADD COLUMN total_qty HUGEINT;
+UPDATE t SET total_qty = s.total_qty
+FROM (
+  SELECT o.customer_id AS customer_id, SUM(o.qty) AS total_qty
+  FROM orders o WHERE o.qty > 0 GROUP BY o.customer_id
+) s
+WHERE t.customer_id = s.customer_id;
+```
+
+The re-aggregation carries the model's `WHERE` clause verbatim — a bare
+`SELECT <keys>, <agg> FROM <upstream> GROUP BY <keys>` would over-count rows
+the model's own filter drops. There is no insert arm: a key group missing
+from `t` is one the model's own row-set already proves cannot exist, so the
+backfill only ever updates matched keys.
+
 ### Enrich via a new LEFT JOIN
 
 ```sql
@@ -464,11 +495,11 @@ converts a full rebuild into a column-scoped update.
   script and full refresh — a cost model over the recorded option metadata is
   the planned chooser.
 - Not yet classified: dropped columns (owned by
-  [schema evolution](schema-evolution.md)), new aggregate or window-function
-  columns, removed `UNION ALL` branches, refs repointed to a different
-  upstream. These refuse with named reasons today. (A changed *cast* is not a
-  type change — it is a changed expression, handled above; a bare type change
-  with no expression change has no trigger in a definition diff at all.)
+  [schema evolution](schema-evolution.md)), new window-function columns,
+  removed `UNION ALL` branches, refs repointed to a different upstream. These
+  refuse with named reasons today. (A changed *cast* is not a type change —
+  it is a changed expression, handled above; a bare type change with no
+  expression change has no trigger in a definition diff at all.)
 
 ## Related pages
 

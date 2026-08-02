@@ -82,6 +82,37 @@ pub fn emit_column_backfill_update_from(
     format!("UPDATE {table} SET {sets} FROM {upstream_physical} {upstream_alias} WHERE {predicate}")
 }
 
+/// `UPDATE t SET c1 = s.c1, ... FROM (<subquery_sql>) s WHERE t.k1 = s.k1
+/// AND ...` — research §4 B5's matched-only column backfill from a derived
+/// subquery, rather than a bare upstream table
+/// ([`emit_column_backfill_update_from`]'s `upstream_physical` is a plain
+/// table reference; B5's source is instead the after-definition's own
+/// re-aggregation — full `FROM`/`WHERE` tree, `GROUP BY` keys — so the
+/// subquery text itself is wrapped in parens here, mirroring
+/// [`emit_difference_insert`]'s `after_sql` treatment). **No insert arm**:
+/// a group whose key does not already exist in `t` is a group the stored
+/// row set proves cannot exist (the model's row-set-unchanged proof), so
+/// only matched keys are ever updated (research §4 B5).
+pub fn emit_column_backfill_update_from_subquery(
+    table: &str,
+    assignments: &[(String, String)],
+    subquery_sql: &str,
+    subquery_alias: &str,
+    key_pairs: &[(String, String)],
+) -> String {
+    let sets = assignments
+        .iter()
+        .map(|(c, expr)| format!("{c} = {expr}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate = key_pairs
+        .iter()
+        .map(|(t_col, s_col)| format!("{table}.{t_col} = {subquery_alias}.{s_col}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("UPDATE {table} SET {sets} FROM ({subquery_sql}) {subquery_alias} WHERE {predicate}")
+}
+
 /// `(SELECT <alias>.<dim_col> FROM <physical> <alias> WHERE <table>.<k1> =
 /// <alias>.<k1> AND ...)` — research §4 B4's per-reference substituted
 /// scalar-subquery shape: called once per dimension-column reference inside
@@ -292,6 +323,23 @@ mod tests {
             ),
             "UPDATE t SET total = u.amount FROM orders u WHERE t.region = u.region AND \
              t.order_id = u.order_id"
+        );
+    }
+
+    #[test]
+    fn column_backfill_update_from_subquery_shape_single_key() {
+        assert_eq!(
+            emit_column_backfill_update_from_subquery(
+                "t",
+                &[("total_qty".to_string(), "s.total_qty".to_string())],
+                "SELECT o.customer_id AS customer_id, SUM(o.qty) AS total_qty FROM orders o \
+                 GROUP BY o.customer_id",
+                "s",
+                &[("customer_id".to_string(), "customer_id".to_string())],
+            ),
+            "UPDATE t SET total_qty = s.total_qty FROM (SELECT o.customer_id AS customer_id, \
+             SUM(o.qty) AS total_qty FROM orders o GROUP BY o.customer_id) s WHERE \
+             t.customer_id = s.customer_id"
         );
     }
 
