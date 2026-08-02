@@ -1191,6 +1191,58 @@ fn e3_same_column_pair_still_refuses() {
     assert!(targeted.is_empty());
 }
 
+/// Regression: the disjointness gate must never be a *second* admission
+/// check on top of E1's own — it only decides whether the composition is
+/// attempted at all, by column name, never by whether an added conjunct is
+/// independently well-formed (that's `classify_e1_conjunct`/`try_e1`'s own
+/// job, via `requalify::requalify`, exercised on this same conjunct here).
+/// The added conjunct (`created_at < NOW()`) calls a non-deterministic
+/// function on a column disjoint from the removed conjunct's (`region`) —
+/// with the pre-fix `analysis::model_diff::collect_dependencies`-based gate
+/// this would have wrongly refused the whole composition (that walk rejects
+/// `NOW()`), even though `requalify::requalify` (E1's actual validator)
+/// never checks determinism and would admit it on its own.
+#[test]
+fn e3_disjoint_composition_tolerates_nondeterministic_added_conjunct() {
+    // `NOW() - INTERVAL '1 day'` (not bare `NOW()`) deliberately: a bare
+    // zero-arg function call as a *direct* comparison operand hits an
+    // unrelated, pre-existing `Expr::as_column_ref`/`as_function_call`
+    // AST-cast ambiguity (both return `Some` for the same `FUNCTION_CALL`
+    // node in that position) that is orthogonal to this fix — the
+    // `NOW() - INTERVAL` shape is the same one
+    // `e2_nondeterministic_removed_conjunct_still_admits`
+    // (`backbuild_conformance.rs`) already uses, confirmed clear of it.
+    let before_sql = "SELECT id, region, created_at FROM orders WHERE region = 'EU'";
+    let after_sql =
+        "SELECT id, region, created_at FROM orders WHERE created_at < NOW() - INTERVAL '1 day'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    for atom in &options.atoms {
+        assert_eq!(
+            atom.options.len(),
+            1,
+            "expected both the added (E1) and removed (E2) atoms admissible: {atom:?}"
+        );
+    }
+    assert!(
+        matches!(
+            &options.atoms[0].change,
+            AtomicChange::AddedConjunct { index: 0 }
+        ),
+        "expected the non-deterministic added conjunct to still classify as E1, got {:?}",
+        options.atoms[0].change
+    );
+    assert!(
+        options.atoms[0].options[0].statements[0].contains("NOW()"),
+        "expected NOW() preserved verbatim: {:?}",
+        options.atoms[0].options[0].statements
+    );
+}
+
 // ===== F1 (task-8-brief.md) =====
 
 #[test]

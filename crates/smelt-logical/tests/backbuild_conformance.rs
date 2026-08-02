@@ -1225,6 +1225,60 @@ fn e2_loosen_inserts_difference() {
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
+/// Regression: gating E2's *pure-loosen* admission (no composition —
+/// `added` empty) on `analysis::model_diff::collect_dependencies` (the
+/// pre-fix shape of the disjointness check below) wrongly refused a removed
+/// conjunct that calls a non-deterministic function like `NOW()` —
+/// `collect_dependencies` rejects those because B1/D1 *re-derive* a stored
+/// value from the expression, where determinism genuinely matters; E2's
+/// difference `INSERT` evaluates the removed conjunct once, directly (same
+/// as a real rebuild's `WHERE` clause would), so determinism was never a
+/// real precondition — `build_e2_atom`'s own validator
+/// (`requalify::requalify`) never checked it, and still doesn't.
+///
+/// Classification-only, not full oracle verification via
+/// `harness::verify_option`: the predicate's truth value depends on
+/// wall-clock time, which would make a row-level equality check needlessly
+/// time-sensitive for something this test doesn't need to prove — the
+/// emitted `INSERT`'s difference-slice shape is already oracle-covered by
+/// `e2_loosen_inserts_difference`; this test only needs to prove
+/// *admission still happens* for a conjunct `collect_dependencies` alone
+/// would reject.
+#[test]
+fn e2_nondeterministic_removed_conjunct_still_admits() {
+    let before_sql =
+        "SELECT id, created_at FROM events WHERE created_at < NOW() - INTERVAL '30 days'";
+    let after_sql = "SELECT id, created_at FROM events";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        matches!(
+            &atom.change,
+            smelt_logical::backbuild::AtomicChange::RemovedConjunct { index: 0 }
+        ),
+        "expected a RemovedConjunct (E2) atom despite the non-deterministic function, got {:?}",
+        atom.change
+    );
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "expected E2 to admit unconditionally for a pure loosen: {atom:?}"
+    );
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::FilterLoosenInsert);
+    assert!(
+        option.statements[0].contains("NOW()"),
+        "expected the non-deterministic function preserved verbatim in the difference \
+         predicate, got {:?}",
+        option.statements
+    );
+}
+
 /// E3 (research §4: "arbitrary predicate change = added ∧ removed
 /// conjuncts: compose E1 + E2") via the disjoint-column middle path: the
 /// removed conjunct (`region = 'EU'`) and the added conjunct (`qty > 0`)

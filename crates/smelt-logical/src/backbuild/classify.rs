@@ -428,49 +428,74 @@ fn classify_conjunct_diff(
             .collect();
     }
 
-    // E2 (research §4: "filter loosened"), and E3 by disjoint-column
-    // composition (research §4: "E3 — arbitrary predicate change = added ∧
-    // removed conjuncts: compose E1 + E2"): admitted when there is exactly
-    // one removed conjunct, AND every added conjunct's own bare-column
-    // dependency set is disjoint from the removed conjunct's. Disjointness
-    // is the middle path between "pure loosen" (`added` empty — trivially
-    // disjoint) and the *same-column* pair E4 exclusively owns: E1's DELETE
-    // and E2's INSERT are each independently sound in isolation (E1 shrinks
-    // the table to the intersection of before/after regardless of what else
-    // changed; E2's difference INSERT reads the after-definition — which
-    // already reflects every added conjunct — filtered by the removed
-    // conjunct's three-valued-safe complement), so composing them never
-    // needs the added and removed conjuncts to interact *unless they share
-    // a column*, in which case only a proof like E4's range-widening (same
-    // column, same operator, provably widened literal) can be trusted — an
-    // unrelated column swap on the *same* column (e.g. an equality change,
-    // or a mixed-operator/non-ISO-8601-literal pair E4 itself refuses,
-    // research §4 E4) is deliberately NOT re-admitted here: disjointness
-    // fails for those (they share the column), so they fall through to the
-    // refusal below unchanged.
+    // E2 (research §4: "filter loosened") — a single removed conjunct with
+    // no added conjunct alongside it is admitted unconditionally: no
+    // disjoint-column proof is needed (there is nothing to be disjoint
+    // *from*), so this short-circuits straight to `build_e2_atom` without
+    // ever touching the column-name machinery below — `build_e2_atom`'s own
+    // validator (`requalify::requalify`, inside `build_e2_option`) is the
+    // only check this shape needs, and unlike the disjointness check it
+    // never rejects a non-deterministic or unregistered-function predicate
+    // (E2's difference `INSERT` evaluates the removed conjunct once,
+    // directly — it has no B1/D1-style re-derivation requirement).
+    if added.is_empty() && removed.len() == 1 {
+        return vec![build_e2_atom(
+            0,
+            &removed[0],
+            representatives,
+            after_columns,
+            inputs,
+        )];
+    }
+
+    // E3 by disjoint-column composition (research §4: "E3 — arbitrary
+    // predicate change = added ∧ removed conjuncts: compose E1 + E2"):
+    // admitted when there is exactly one removed conjunct AND every added
+    // conjunct's own referenced-column set ([`conjunct_column_names`] —
+    // deliberately permissive; see its doc comment for why this must not be
+    // `analysis::model_diff::collect_dependencies`, which would wrongly
+    // reject a non-deterministic/unregistered-function added conjunct E1's
+    // own classification would admit on its own merits) is disjoint from
+    // the removed conjunct's. Disjointness is the middle path between "pure
+    // loosen" (handled above) and the *same-column* pair E4 exclusively
+    // owns: E1's DELETE and E2's INSERT are each independently sound in
+    // isolation (E1 shrinks the table to the intersection of before/after
+    // regardless of what else changed; E2's difference INSERT reads the
+    // after-definition — which already reflects every added conjunct —
+    // filtered by the removed conjunct's three-valued-safe complement), so
+    // composing them never needs the added and removed conjuncts to
+    // interact *unless they share a column*, in which case only a proof
+    // like E4's range-widening (same column, same operator, provably
+    // widened literal) can be trusted — an unrelated column swap on the
+    // *same* column (e.g. an equality change, or a mixed-operator/non-
+    // ISO-8601-literal pair E4 itself refuses, research §4 E4) is
+    // deliberately NOT re-admitted here: disjointness fails for those (they
+    // share the column), so they fall through to the refusal below
+    // unchanged. Each added conjunct still goes through its own
+    // `classify_e1_conjunct`/`try_e1` admission below — the disjointness
+    // check here only decides *whether to attempt* the composition, never
+    // substitutes for E1's own validation of any individual added conjunct.
     if removed.len() == 1 {
-        if let Ok(removed_cols) = model_diff::collect_dependencies(&removed[0]) {
-            let disjoint = added.iter().all(|conjunct| {
-                model_diff::collect_dependencies(conjunct)
-                    .is_ok_and(|added_cols| added_cols.is_disjoint(&removed_cols))
-            });
-            if disjoint {
-                let mut atoms: Vec<AtomAnalysis> = added
-                    .iter()
-                    .enumerate()
-                    .map(|(index, conjunct)| {
-                        classify_e1_conjunct(index, conjunct, representatives, inputs)
-                    })
-                    .collect();
-                atoms.push(build_e2_atom(
-                    0,
-                    &removed[0],
-                    representatives,
-                    after_columns,
-                    inputs,
-                ));
-                return atoms;
-            }
+        let removed_cols = conjunct_column_names(&removed[0]);
+        let disjoint = added
+            .iter()
+            .all(|conjunct| conjunct_column_names(conjunct).is_disjoint(&removed_cols));
+        if disjoint {
+            let mut atoms: Vec<AtomAnalysis> = added
+                .iter()
+                .enumerate()
+                .map(|(index, conjunct)| {
+                    classify_e1_conjunct(index, conjunct, representatives, inputs)
+                })
+                .collect();
+            atoms.push(build_e2_atom(
+                0,
+                &removed[0],
+                representatives,
+                after_columns,
+                inputs,
+            ));
+            return atoms;
         }
     }
 
@@ -499,16 +524,13 @@ fn classify_conjunct_diff(
                  either; only a same-column proof like E4's range-widening can admit this shape"
             ),
             // `removed.len() == 1` but `added.len() != 1` (so `e4_pair` was
-            // never attempted) and the disjointness check above failed —
-            // some added conjunct shares a column with the removed one, or
-            // a conjunct's own dependencies could not be determined (a
-            // subquery, window, or unregistered/non-deterministic function
-            // — the same leaf check B1/E1 share).
-            _ => "at least one added conjunct shares a column with the removed conjunct (or a \
-                  conjunct's own dependencies could not be determined) — E3 (arbitrary \
-                  predicate change, composing E1 + E2) only admits a removed conjunct whose \
-                  column set is disjoint from every added conjunct's; a shared column needs a \
-                  same-column proof like E4's range-widening instead"
+            // never attempted) and the disjointness check above failed — at
+            // least one added conjunct shares a referenced column name with
+            // the removed one.
+            _ => "at least one added conjunct shares a referenced column with the removed \
+                  conjunct — E3 (arbitrary predicate change, composing E1 + E2) only admits a \
+                  removed conjunct whose column set is disjoint from every added conjunct's; a \
+                  shared column needs a same-column proof like E4's range-widening instead"
                 .to_string(),
         }
     };
@@ -1998,6 +2020,48 @@ fn split_top_level_and(expr: &Expr, out: &mut Vec<Expr>) {
 /// crate's analysis modules (e.g. `analysis/fingerprint.rs`).
 fn references_alias(expr: &Expr, alias: &str) -> bool {
     references_alias_node(expr.syntax(), alias)
+}
+
+/// Every bare column name `expr` references anywhere in its subtree — the
+/// E3 disjoint-column middle path's column-set extractor (research §4 E3),
+/// used only to prove that an added and a removed `WHERE` conjunct could
+/// not possibly address the same stored column. Deliberately more
+/// permissive than `analysis::model_diff::collect_dependencies` (B1/D1's
+/// derivability tool), same posture as [`references_alias_node`] just
+/// above: no subquery/window fail-close and no determinism/registry check.
+/// Those checks answer "can this expression be safely *re-derived* from
+/// stored columns" — B1/D1's question, since a self-derived `UPDATE`
+/// literally re-evaluates the expression — which is simply the wrong
+/// question for E1/E2: a `WHERE` conjunct's `DELETE`/difference `INSERT`
+/// evaluates the predicate once, directly, against real data (their own
+/// validator, `requalify::requalify`, never checks determinism either), so
+/// gating disjointness on `collect_dependencies` would wrongly refuse an
+/// otherwise-admissible conjunct like `created_at < now() - INTERVAL '30
+/// days'` purely because it *couldn't prove disjointness*, not because
+/// either conjunct was actually inadmissible. A qualified reference's bare
+/// name is collected the same as an unqualified one — disjointness only
+/// needs "could these two possibly address the same stored column", and a
+/// qualifier mismatch only makes two conjuncts *more* obviously unrelated,
+/// never less; over-collecting (e.g. reaching into a subquery's own,
+/// unrelated column references) only ever makes this proof *more*
+/// conservative (a spurious shared name blocks composition, fail-closed),
+/// never less sound.
+fn conjunct_column_names(expr: &Expr) -> HashSet<String> {
+    let mut out = HashSet::new();
+    collect_column_names(expr.syntax(), &mut out);
+    out
+}
+
+fn collect_column_names(node: &SyntaxNode, out: &mut HashSet<String>) {
+    if node.kind() == SyntaxKind::EXPRESSION {
+        if let Some(col) = Expr::cast(node.clone()).and_then(|e| e.as_column_ref()) {
+            out.insert(col.name().to_string());
+            return;
+        }
+    }
+    for child in node.children() {
+        collect_column_names(&child, out);
+    }
 }
 
 fn references_alias_node(node: &SyntaxNode, alias: &str) -> bool {
