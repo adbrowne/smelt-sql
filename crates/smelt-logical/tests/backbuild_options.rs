@@ -931,6 +931,127 @@ fn b5_changed_skeleton_refuses() {
     assert_refused(atom);
 }
 
+// ===== B6 (research §4 B6) =====
+
+/// `BackbuildInputs` for a B6 window-column test: `identity` sets both
+/// `row_identity` and, when `not_null` is `true`, the matching
+/// `not_null_columns` entries (a declared identity that is not provably NOT
+/// NULL must be treated as unaddressable — `b6_nullable_identity_refuses`
+/// pins this by passing `not_null: false`).
+fn window_inputs(
+    added_column_types: &[(&str, &str)],
+    identity: Option<&[&str]>,
+    not_null: bool,
+) -> BackbuildInputs {
+    let mut built = inputs(added_column_types);
+    built.row_identity = identity.map(|cols| cols.iter().map(|s| s.to_string()).collect());
+    if not_null {
+        if let Some(cols) = identity {
+            built.not_null_columns = cols.iter().map(|s| s.to_string()).collect();
+        }
+    }
+    built
+}
+
+#[test]
+fn b6_no_row_identity_refuses() {
+    let before_sql = "SELECT o.order_id AS order_id, o.status AS status FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, ROW_NUMBER() OVER \
+                      (PARTITION BY status ORDER BY order_id) AS rn FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &window_inputs(&[("rn", "BIGINT")], None, false));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B6") && r.reason.contains("row_identity")),
+        "expected a B6 refusal naming the missing row_identity, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b6_nullable_identity_refuses() {
+    let before_sql = "SELECT o.order_id AS order_id, o.status AS status FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, ROW_NUMBER() OVER \
+                      (PARTITION BY status ORDER BY order_id) AS rn FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    // `row_identity` is declared but not proven NOT NULL.
+    let options = derive_backbuild_options(
+        &diff,
+        &window_inputs(&[("rn", "BIGINT")], Some(&["order_id"]), false),
+    );
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B6") && r.reason.to_lowercase().contains("not null")),
+        "expected a B6 NOT NULL refusal for the identity column, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b6_window_reading_unstored_column_refuses() {
+    // `region` is never pulled through into the model's own output — the
+    // window's PARTITION BY has no addressable stored representative.
+    let before_sql = "SELECT o.order_id AS order_id, o.status AS status FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, ROW_NUMBER() OVER \
+                      (PARTITION BY o.region ORDER BY order_id) AS rn FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(
+        &diff,
+        &window_inputs(&[("rn", "BIGINT")], Some(&["order_id"]), true),
+    );
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible.iter().any(|r| r.reason.contains("B6")
+            && r.reason.contains("region")
+            && r.reason.contains("no 1:1 stored representative")),
+        "expected a B6 refusal naming the unstored 'region' dependency, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b6_nondeterministic_order_refuses() {
+    // No ORDER BY in the OVER clause — the window's draw within each
+    // partition is underdetermined and can never be proven equal to a
+    // rebuild's own draw (research §4 B6, §2 "Determinism caveat").
+    let before_sql = "SELECT o.order_id AS order_id, o.status AS status FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, ROW_NUMBER() OVER \
+                      (PARTITION BY status) AS rn FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(
+        &diff,
+        &window_inputs(&[("rn", "BIGINT")], Some(&["order_id"]), true),
+    );
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("B6") && r.reason.contains("ORDER BY")),
+        "expected a B6 refusal naming the missing ORDER BY, got: {:?}",
+        atom.inadmissible
+    );
+}
+
 // ===== B4 (task-6-brief.md) =====
 
 fn dims_inputs(

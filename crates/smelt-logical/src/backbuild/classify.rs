@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::{Expr, JoinClause, JoinType, SelectEntry, SelectStmt, SyntaxKind};
+use smelt_parser::{Expr, JoinClause, JoinType, SelectEntry, SelectStmt, SyntaxKind, TextRange};
 use smelt_types::SqlFunction;
 
 use crate::analysis::model_diff;
@@ -1697,6 +1697,21 @@ fn classify_added_column(
         None
     };
 
+    // B6 (research §4 B6) is only attempted when `col`'s expression is
+    // itself a window-function call (`OVER` present) — gated the same way
+    // B4/B5's own shape gates are, so an ordinary non-window added column
+    // never picks up a spurious B6 refusal alongside its own B1/B3
+    // options. This is also the narrowing research §4's intro promises: a
+    // window in an added column no longer refuses unconditionally (B1/B3's
+    // shared leaf check still refuses it, via `model_diff::collect_dependencies`'s
+    // window fail-close) — B6 is the dedicated admission path for exactly
+    // this shape.
+    let b6_result = if is_window_column_shape(&col.expr) {
+        Some(try_b6(col, representative_sources, inputs))
+    } else {
+        None
+    };
+
     let mut options = Vec::new();
     let mut inadmissible = Vec::new();
     match b1_result {
@@ -1717,6 +1732,15 @@ fn classify_added_column(
     }
     if let Some(b5_result) = b5_result {
         match b5_result {
+            Ok(option) => options.push(option),
+            Err(reason) => inadmissible.push(BackbuildRefusal {
+                atom: format!("added column '{}'", col.name),
+                reason,
+            }),
+        }
+    }
+    if let Some(b6_result) = b6_result {
+        match b6_result {
             Ok(option) => options.push(option),
             Err(reason) => inadmissible.push(BackbuildRefusal {
                 atom: format!("added column '{}'", col.name),
@@ -2307,6 +2331,356 @@ fn try_b5(
         reads_upstream: true,
         // The `ALTER ADD` step is DDL and not re-runnable (research §2
         // "Idempotence"), same as B1/B3.
+        rerun_safe: false,
+    })
+}
+
+// ===== B6: new window-function column over stored columns (research §4
+// B6) =====
+
+/// The B6 attempt gate: `expr` is itself a window-function call (`OVER`
+/// present) — checked before [`try_b6`] is ever called, mirroring how
+/// `is_group_by_aggregate_shape` gates B5's attempt so an ordinary
+/// non-window added column never picks up a spurious "no OVER clause"
+/// refusal alongside its own admitted B1/B3 options.
+fn is_window_column_shape(expr: &Expr) -> bool {
+    expr.as_function_call().is_some() && expr.window_spec().is_some()
+}
+
+/// Collect every column dependency of a window-function expression's own
+/// pieces — the function's own arguments, and the `OVER` clause's
+/// `PARTITION BY`/`ORDER BY` key expressions — preserving qualifiers
+/// (`resolve_representative` needs qualifier + raw name, research §4 intro
+/// "one uniform rule"). Unlike `model_diff::collect_dependencies`, this walk
+/// does not fail closed on the window shape itself — proving *that* shape
+/// safe is exactly B6's job — but every individual piece is validated
+/// through [`collect_qualified_dependencies`] (registry determinism/
+/// opaqueness leaf check, subquery/nested-window fail-close), so a volatile
+/// or unrecognised function nested inside an argument or ordering
+/// expression still refuses.
+fn collect_window_dependencies(expr: &Expr) -> Result<Vec<(Option<String>, String)>, String> {
+    let func = expr
+        .as_function_call()
+        .ok_or_else(|| "is not a window function call".to_string())?;
+    let window = expr
+        .window_spec()
+        .ok_or_else(|| "has no OVER clause".to_string())?;
+
+    let mut deps = Vec::new();
+    for arg in func.arguments() {
+        deps.extend(collect_qualified_dependencies(&arg)?);
+    }
+    if let Some(partition_by) = window.partition_by() {
+        for e in partition_by.expressions() {
+            deps.extend(collect_qualified_dependencies(&e)?);
+        }
+    }
+    if let Some(order_by) = window.order_by() {
+        for item in order_by.items() {
+            if let Some(e) = item.expression() {
+                deps.extend(collect_qualified_dependencies(&e)?);
+            }
+        }
+    }
+    Ok(deps)
+}
+
+/// Requalify a window-function expression's own pieces (the function's
+/// arguments, `PARTITION BY`, `ORDER BY` key expressions) to their stored
+/// 1:1 representative names, for splicing into B6's self-read `SELECT
+/// <id...>, <window> AS c FROM t` projection (research §4 B6, §3 "Alias
+/// requalification is a CST rewrite, not string surgery"). A window's
+/// `OVER` clause sits outside `requalify.rs`'s recognised shapes — that
+/// module never needed to rewrite one before B6 — and this phase's file
+/// scope does not include `requalify.rs`, so this is a small, deliberately
+/// local CST-fragment rewrite (mirroring `requalify::requalify`'s
+/// positional-splice approach) scoped to exactly the pieces B6 needs.
+fn requalify_window_expr(
+    expr: &Expr,
+    representative_sources: &[RepresentativeSource],
+) -> Result<String, String> {
+    let func = expr
+        .as_function_call()
+        .ok_or_else(|| "is not a window function call".to_string())?;
+    let window = expr
+        .window_spec()
+        .ok_or_else(|| "has no OVER clause".to_string())?;
+
+    let mut spans: Vec<(TextRange, String)> = Vec::new();
+    for arg in func.arguments() {
+        collect_window_replacements(&arg, representative_sources, &mut spans)?;
+    }
+    if let Some(partition_by) = window.partition_by() {
+        for e in partition_by.expressions() {
+            collect_window_replacements(&e, representative_sources, &mut spans)?;
+        }
+    }
+    if let Some(order_by) = window.order_by() {
+        for item in order_by.items() {
+            if let Some(e) = item.expression() {
+                collect_window_replacements(&e, representative_sources, &mut spans)?;
+            }
+        }
+    }
+    spans.sort_by_key(|(range, _)| range.start());
+    Ok(splice_window_text(expr.syntax(), &spans))
+}
+
+/// Mirrors `requalify::collect_replacements`'s recognised shapes (column
+/// reference, function call, binary, `CASE`, `CAST`) — duplicated locally
+/// rather than imported, since `requalify.rs` is outside this phase's file
+/// scope (see [`requalify_window_expr`]'s doc comment).
+fn collect_window_replacements(
+    expr: &Expr,
+    representative_sources: &[RepresentativeSource],
+    out: &mut Vec<(TextRange, String)>,
+) -> Result<(), String> {
+    if let Some(col) = expr.as_column_ref() {
+        let rep = resolve_representative(col.qualifier(), col.name(), representative_sources)
+            .ok_or_else(|| {
+                format!(
+                    "column '{}' has no stored representative to requalify against",
+                    col.name()
+                )
+            })?;
+        out.push((window_trimmed_range(expr.syntax()), rep.output_name.clone()));
+        return Ok(());
+    }
+    if let Some(func) = expr.as_function_call() {
+        for arg in func.arguments() {
+            collect_window_replacements(&arg, representative_sources, out)?;
+        }
+        return Ok(());
+    }
+    if let Some(bin) = expr.as_binary() {
+        for side in [bin.left(), bin.right()].into_iter().flatten() {
+            collect_window_replacements(&side, representative_sources, out)?;
+        }
+        return Ok(());
+    }
+    if let Some(case) = expr.as_case() {
+        if let Some(value) = case.case_value() {
+            collect_window_replacements(&value, representative_sources, out)?;
+        }
+        for when in case.when_clauses() {
+            for arm in [when.condition(), when.result()].into_iter().flatten() {
+                collect_window_replacements(&arm, representative_sources, out)?;
+            }
+        }
+        if let Some(else_expr) = case.else_expr() {
+            collect_window_replacements(&else_expr, representative_sources, out)?;
+        }
+        return Ok(());
+    }
+    if let Some(cast) = expr.as_cast() {
+        return match cast.expression() {
+            Some(inner) => collect_window_replacements(&inner, representative_sources, out),
+            None => Err("CAST has no inner expression to requalify".to_string()),
+        };
+    }
+    let has_ident = expr
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .any(|t| t.kind() == SyntaxKind::IDENT);
+    if has_ident {
+        return Err(
+            "expression shape is not recognised by the window requalification walk".to_string(),
+        );
+    }
+    Ok(())
+}
+
+/// The range spanning `node`'s own first through last *non-trivia* token —
+/// mirrors `requalify::trimmed_range` (duplicated locally per
+/// [`requalify_window_expr`]'s doc comment).
+fn window_trimmed_range(node: &SyntaxNode) -> TextRange {
+    let mut first = None;
+    let mut last = None;
+    for tok in node
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+    {
+        if first.is_none() {
+            first = Some(tok.text_range().start());
+        }
+        last = Some(tok.text_range().end());
+    }
+    match (first, last) {
+        (Some(start), Some(end)) => TextRange::new(start, end),
+        _ => node.text_range(),
+    }
+}
+
+/// Rebuild `node`'s own (trivia-trimmed) text, splicing in each recorded
+/// `(range, replacement)` span — mirrors `requalify::splice` (duplicated
+/// locally per [`requalify_window_expr`]'s doc comment).
+fn splice_window_text(node: &SyntaxNode, spans: &[(TextRange, String)]) -> String {
+    let node_start = u32::from(node.text_range().start());
+    let full_text = node.text().to_string();
+    let content = window_trimmed_range(node);
+    let content_start = u32::from(content.start());
+    let content_end = u32::from(content.end());
+
+    let mut out = String::new();
+    let mut cursor = content_start;
+    for (range, replacement) in spans {
+        let start = u32::from(range.start());
+        let end = u32::from(range.end());
+        if start < cursor {
+            continue;
+        }
+        out.push_str(&full_text[(cursor - node_start) as usize..(start - node_start) as usize]);
+        out.push_str(replacement);
+        cursor = end;
+    }
+    out.push_str(&full_text[(cursor - node_start) as usize..(content_end - node_start) as usize]);
+    out
+}
+
+/// B6 (research §4 B6): an added SELECT item that is itself a window-
+/// function call (`is_window_column_shape` already proved the shape, as
+/// this function's caller's gate). *Prove*: an explicit `ORDER BY` inside
+/// the `OVER` clause (fail-closed refusal otherwise — a missing `ORDER BY`
+/// leaves the window's draw within each partition underdetermined, and an
+/// underdetermined draw can never be proven equal to a rebuild's own draw);
+/// every dependency of the window's own arguments/`PARTITION BY`/`ORDER BY`
+/// resolves to a stored 1:1 representative (the uniform representative
+/// rule); a declared `BackbuildInputs::row_identity`, every column of which
+/// is proven `NOT NULL` (key addressability — the backfill joins the
+/// window's computed rows back to `t` by this identity). *Script*:
+/// `ALTER TABLE t ADD COLUMN c <ty>;` then a self-read column backfill via
+/// `emit::emit_column_backfill_update_from_subquery` whose source subquery
+/// reads the deployed table `t` itself — `SELECT <id...>, <window> AS c
+/// FROM t` — never an upstream: computing the window over the *stored* rows
+/// is exactly what makes its draw match the rebuild's (research §2
+/// "self-read scripts").
+fn try_b6(
+    col: &SelectColumn,
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let window = col.expr.window_spec().ok_or_else(|| {
+        format!(
+            "B6 (window column add) refused for '{}': not a window function call",
+            col.name
+        )
+    })?;
+
+    // research §4 B6 + §2 "Determinism caveat": a window with no ORDER BY
+    // has an underdetermined draw within each partition — a rank-family
+    // function's result can differ run to run, so it can never be proven
+    // equal to a rebuild's own draw. Named refusal, fail-closed.
+    let has_order_by = window
+        .order_by()
+        .is_some_and(|o| o.items().next().is_some());
+    if !has_order_by {
+        return Err(format!(
+            "B6 (window column add) refused for '{}': the window has no ORDER BY clause — an \
+             underdetermined window draw can never be proven equal to a rebuild's draw",
+            col.name
+        ));
+    }
+
+    let deps = collect_window_dependencies(&col.expr).map_err(|reason| {
+        format!(
+            "B6 (window column add) refused for '{}': {reason}",
+            col.name
+        )
+    })?;
+    let mut missing: Vec<String> = deps
+        .iter()
+        .filter(|(q, n)| resolve_representative(q.as_deref(), n, representative_sources).is_none())
+        .map(|(q, n)| format_dependency(q, n))
+        .collect();
+    missing.sort();
+    if let Some(dep) = missing.first() {
+        return Err(format!(
+            "B6 (window column add) refused for '{}': depends on '{dep}', which has no 1:1 \
+             stored representative (a bare pull-through unchanged between both definitions, \
+             matched by qualifier and raw column name) in the model's own output — a window can \
+             only be backfilled from what the table already stores",
+            col.name
+        ));
+    }
+
+    // Key addressability (research §4 intro): the self-read backfill joins
+    // the window's own computed rows back to `t` by row identity, so the
+    // identity must be declared and every identity column proven NOT NULL.
+    let identity = inputs
+        .row_identity
+        .as_ref()
+        .filter(|cols| !cols.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "B6 (window column add) refused for '{}': no declared row_identity — a self-read \
+                 window backfill needs an addressable identity to join the window's computed rows \
+                 back to the stored table",
+                col.name
+            )
+        })?;
+    let mut nullable_identity: Vec<&String> = identity
+        .iter()
+        .filter(|c| !inputs.not_null_columns.contains(c.as_str()))
+        .collect();
+    nullable_identity.sort();
+    if let Some(missing_not_null) = nullable_identity.first() {
+        return Err(format!(
+            "B6 (window column add) refused for '{}': row_identity column '{missing_not_null}' \
+             is not declared NOT NULL — an equality match never addresses a NULL-keyed row",
+            col.name
+        ));
+    }
+
+    let requalified =
+        requalify_window_expr(&col.expr, representative_sources).map_err(|reason| {
+            format!(
+                "B6 (window column add) refused for '{}': {reason}",
+                col.name
+            )
+        })?;
+
+    let sql_type = inputs.added_column_types.get(&col.name).ok_or_else(|| {
+        format!(
+            "B6 (window column add) refused for '{}': no declared SQL type in \
+             BackbuildInputs::added_column_types",
+            col.name
+        )
+    })?;
+
+    // Self-read subquery: reads the deployed table `t` itself — the
+    // proof-carrying construction that makes the window's draw match the
+    // rebuild's (research §4 B6, §2's "self-read scripts" family):
+    // `SELECT <id...>, <window> AS c FROM t`.
+    let select_items: Vec<String> = identity
+        .iter()
+        .cloned()
+        .chain(std::iter::once(format!("{requalified} AS {}", col.name)))
+        .collect();
+    let subquery = format!("SELECT {} FROM {}", select_items.join(", "), inputs.table);
+    let key_pairs: Vec<(String, String)> =
+        identity.iter().map(|c| (c.clone(), c.clone())).collect();
+
+    let alter = emit::emit_alter_add_column(&inputs.table, &col.name, sql_type);
+    let update = emit::emit_column_backfill_update_from_subquery(
+        &inputs.table,
+        &[(col.name.clone(), format!("s.{}", col.name))],
+        &subquery,
+        "s",
+        &key_pairs,
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::WindowColumnBackfill,
+        // Same H-slot bucket as B1/B3/B5's `ALTER ADD` + paired `UPDATE`
+        // (`build_b1_option`'s doc comment).
+        slot: Some(HSlot::Alter),
+        statements: vec![alter, update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: false,
+        // The `ALTER ADD` step is DDL and not re-runnable (research §2
+        // "Idempotence"), same as B1/B3/B5.
         rerun_safe: false,
     })
 }

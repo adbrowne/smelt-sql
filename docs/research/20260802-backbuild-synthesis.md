@@ -303,10 +303,20 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   and neither is `emit_column_scoped_merge` (whose `SET *` contract requires a full-row
   source projection). Full upstream scan, but only one column written.
 - **B6 — new window-function column over stored columns** (`ROW_NUMBER() OVER
-  (PARTITION BY stored ORDER BY stored)`). *Prove*: window reads only stored columns.
-  *Script*: self-read
+  (PARTITION BY stored ORDER BY stored)`). *Prove*: every dependency of the window's own
+  arguments, `PARTITION BY`, and `ORDER BY` resolves to a stored bare representative (the
+  uniform representative rule); the shared key-addressability obligation on a declared,
+  NOT-NULL-proven `row_identity`; and an explicit `ORDER BY` inside the `OVER` clause — a
+  window with no `ORDER BY` has an underdetermined draw within each partition (a
+  rank-family function's row order is whatever the engine happens to produce), which can
+  never be proven equal to a rebuild's own draw, so it refuses by name (this is B6's own
+  instance of §2's "Determinism caveat", made concrete: an *added* expression's
+  determinism is refused fail-closed, and an underdetermined window ordering is exactly
+  that). *Script*: self-read
   `UPDATE t SET c = s.c FROM (SELECT <id>, <window> AS c FROM t) s WHERE t.<id> = s.<id>` —
-  needs row identity, no upstream. Tier 3.
+  needs row identity, no upstream. The source subquery reads the deployed table `t`
+  itself, never an upstream, so the window computes over exactly the rows `t` already has
+  — matching the rebuild by construction (§2 "self-read scripts").
 - **B7 — sequential multi-join enrichment** (two or more added LEFT JOINs, backfilled one
   step at a time — e.g. fact → dim1, then dim2 keyed on a column dim1 provides). *Detect*:
   FROM-tree diff = k added LEFT JOINs, ordered by reference dependency (a later join's ON
@@ -540,7 +550,7 @@ pipelines and how galling the full refresh it replaces is:
 | 8 | E2 + D2 | Rounds out predicates and expression changes; reuses earlier machinery |
 | 9 | F1 | Cheap detection (branch diff), cheap script |
 | 10 | B7 | Sequential multi-join enrichment; builds directly on B4's proof, adds only the dependency ordering |
-| 11+ | B6, F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
+| 11+ | F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
 
 ## 6. Architecture
 

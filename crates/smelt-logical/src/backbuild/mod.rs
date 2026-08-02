@@ -643,6 +643,24 @@ pub enum Technique {
     /// absent from `t` is a group the row-set-unchanged proof already
     /// guarantees cannot exist.
     AggregateColumnBackfill,
+    /// B6 — new window-function column over stored columns (research §4):
+    /// `ALTER TABLE t ADD COLUMN c <ty>;` then a self-read column backfill —
+    /// `UPDATE t SET c = s.c FROM (SELECT <id...>, <window> AS c FROM t) s
+    /// WHERE t.<id> = s.<id>` — via
+    /// `emit::emit_column_backfill_update_from_subquery`, the source
+    /// subquery reading the deployed table `t` itself rather than any
+    /// upstream (`reads_upstream: false`): computing the window over the
+    /// *stored* rows is exactly what makes its draw match a rebuild's
+    /// (research §2 "self-read scripts"), so no additional row-set proof is
+    /// needed beyond the window's own dependencies resolving to stored bare
+    /// representatives. Requires a declared, NOT-NULL-proven
+    /// `BackbuildInputs::row_identity` (key addressability — the join back
+    /// to `t` needs an addressable identity) and an explicit `ORDER BY`
+    /// inside the `OVER` clause: without one, the window's draw within each
+    /// partition is underdetermined and can never be proven equal to a
+    /// rebuild's own draw (research §2 "Determinism caveat" narrowed to
+    /// this technique's own obligation).
+    WindowColumnBackfill,
 }
 
 /// The research §2 "write scope" option metadata.

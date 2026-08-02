@@ -687,6 +687,136 @@ fn b5_update_is_matched_only() {
     harness::assert_matches_full_rebuild(&conn, "t", after_sql);
 }
 
+/// `BackbuildInputs` for a B6 window-column test: a declared `row_identity`
+/// (proven NOT NULL) is the only fact B6's self-read proof needs beyond the
+/// window's own dependency resolution — no declared `sources` (B6 never
+/// reads upstream).
+fn row_identity_inputs(
+    after_sql: &str,
+    added_column_types: &[(&str, &str)],
+    identity: &[&str],
+) -> BackbuildInputs {
+    BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: Some(identity.iter().map(|s| s.to_string()).collect()),
+        not_null_columns: identity.iter().map(|s| s.to_string()).collect(),
+        added_column_types: added_column_types
+            .iter()
+            .map(|(name, ty)| (name.to_string(), ty.to_string()))
+            .collect(),
+        sources: BTreeMap::new(),
+    }
+}
+
+#[test]
+fn b6_row_number_over_stored_columns() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, status TEXT, amount INTEGER);
+         INSERT INTO orders VALUES
+           (1, 'open', 10), (2, 'open', 20), (3, 'closed', 5), (4, 'closed', 7),
+           (5, 'open', 1);",
+    );
+
+    let before_sql =
+        "SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount, \
+                      ROW_NUMBER() OVER (PARTITION BY status ORDER BY order_id) AS rn FROM \
+                      orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = row_identity_inputs(after_sql, &[("rn", "BIGINT")], &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::WindowColumnBackfill);
+    assert_eq!(option.statements.len(), 2, "{option:?}");
+    assert!(option.statements[0].starts_with("ALTER TABLE t ADD COLUMN rn"));
+    assert!(
+        option.statements[1].starts_with("UPDATE t SET rn = s.rn FROM (SELECT"),
+        "{}",
+        option.statements[1]
+    );
+    assert!(
+        option.statements[1].contains("ROW_NUMBER() OVER (PARTITION BY status ORDER BY order_id)"),
+        "{}",
+        option.statements[1]
+    );
+    assert!(
+        option.statements[1].contains("FROM t)"),
+        "{}",
+        option.statements[1]
+    );
+    assert!(
+        option.statements[1].contains("WHERE t.order_id = s.order_id"),
+        "{}",
+        option.statements[1]
+    );
+
+    // Sibling columns must be byte-identical before/after — B6 only ever
+    // touches its own freshly-added column.
+    harness::build_before(&conn, "t", before_sql);
+    let sibling_sql = "SELECT status || ':' || amount::VARCHAR FROM t ORDER BY order_id";
+    let siblings_before = harness::text_column(&conn, sibling_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply B6 statement `{stmt}`: {e}"));
+    }
+    let siblings_after = harness::text_column(&conn, sibling_sql);
+    assert_eq!(
+        siblings_after, siblings_before,
+        "sibling columns must be byte-identical to their pre-script values — B6 must touch only \
+         rn"
+    );
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
+#[test]
+fn b6_window_respects_stored_row_set() {
+    // The model's own WHERE filters some rows out of `t` entirely (order 3
+    // never lands in the stored table). B6's self-read subquery computes
+    // the window over `t` itself, so it can only ever see the rows the
+    // model's own WHERE admits — matching the rebuild by construction.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, status TEXT, amount INTEGER);
+         INSERT INTO orders VALUES
+           (1, 'open', 10), (2, 'open', 20), (3, 'open', -5), (4, 'closed', 7),
+           (5, 'open', 1);",
+    );
+
+    let before_sql = "SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount \
+                       FROM orders o WHERE o.amount > 0";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount, \
+                      ROW_NUMBER() OVER (PARTITION BY status ORDER BY order_id) AS rn FROM \
+                      orders o WHERE o.amount > 0";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = row_identity_inputs(after_sql, &[("rn", "BIGINT")], &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    let option = &atom.options[0];
+
+    // If the self-read subquery somehow read the raw `orders` source
+    // instead of the stored table `t`, order 3 (filtered by amount > 0)
+    // would still be visible to the window and would shift the rank of
+    // order 5 within the 'open' partition — the oracle catches that
+    // divergence directly.
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
 #[test]
 fn b3_upstream_pullthrough() {
     let conn = Connection::open_in_memory().expect("duckdb");

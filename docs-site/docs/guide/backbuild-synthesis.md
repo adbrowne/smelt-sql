@@ -304,6 +304,42 @@ wrapped carrier like `COALESCE(d1.region_id, 0) AS region_id` would store `0`
 where a rebuild has `NULL`, and the second join would then hit dimension rows
 the rebuild's `NULL` key misses — so that shape refuses.
 
+### Add a window column
+
+```sql
+-- before
+SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount FROM orders o
+-- after
+SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount,
+       ROW_NUMBER() OVER (PARTITION BY status ORDER BY order_id) AS rn
+FROM orders o
+```
+
+The window's `PARTITION BY` and `ORDER BY` reference only stored, bare
+columns, and the model declares a `NOT NULL` row identity (`order_id`). smelt
+backfills it with a **self-read**: the source subquery reads the deployed
+table itself, not the upstream, so the window computes over exactly the rows
+`t` already has — matching a rebuild by construction, even when the model's
+own `WHERE` has filtered rows out along the way.
+
+```sql
+ALTER TABLE t ADD COLUMN rn BIGINT;
+UPDATE t SET rn = s.rn
+FROM (
+  SELECT order_id, ROW_NUMBER() OVER (PARTITION BY status ORDER BY order_id) AS rn
+  FROM t
+) s
+WHERE t.order_id = s.order_id;
+```
+
+An `OVER` clause with no `ORDER BY` refuses outright: within a partition, a
+rank-family function's row order is whatever the engine happens to produce —
+different each run, and never provably the same draw a rebuild would take. A
+window whose `PARTITION BY`/`ORDER BY`/arguments reach outside the model's own
+stored columns refuses too, the same uniform-representative rule every other
+backfill uses — add the missing column to the `SELECT` list to make it
+backfillable.
+
 ### Tighten a filter
 
 ```sql
@@ -446,7 +482,9 @@ fail-closed today: a changed CTE, a `SELECT *` or
 [spread expression](../meta-language/lists.md) in the select list, a top-level
 `OR` in a diffed WHERE clause, volatile or unrecognised functions in an added
 or changed expression (a volatile backfill could never match a rebuild),
-expression changes under `DISTINCT` or `LIMIT`.
+expression changes under `DISTINCT` or `LIMIT`, and an added window column
+whose `OVER` clause has no `ORDER BY` — an underdetermined draw within a
+partition can never be proven equal to a rebuild's own draw.
 
 **Actionable refusals** — the most useful kind: the missing fact is something
 you can supply. Real messages from the classifier:
@@ -495,11 +533,11 @@ converts a full rebuild into a column-scoped update.
   script and full refresh — a cost model over the recorded option metadata is
   the planned chooser.
 - Not yet classified: dropped columns (owned by
-  [schema evolution](schema-evolution.md)), new window-function columns,
-  removed `UNION ALL` branches, refs repointed to a different upstream. These
-  refuse with named reasons today. (A changed *cast* is not a type change —
-  it is a changed expression, handled above; a bare type change with no
-  expression change has no trigger in a definition diff at all.)
+  [schema evolution](schema-evolution.md)), removed `UNION ALL` branches, refs
+  repointed to a different upstream. These refuse with named reasons today.
+  (A changed *cast* is not a type change — it is a changed expression, handled
+  above; a bare type change with no expression change has no trigger in a
+  definition diff at all.)
 
 ## Related pages
 
