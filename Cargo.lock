@@ -4272,6 +4272,7 @@ name = "smelt-logical"
 version = "0.3.2"
 dependencies = [
  "duckdb",
+ "proptest",
  "serde",
  "serde_yaml",
  "smelt-core",

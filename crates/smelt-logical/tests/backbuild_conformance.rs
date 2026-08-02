@@ -24,8 +24,8 @@ use std::collections::{BTreeMap, BTreeSet};
 use duckdb::Connection;
 
 use smelt_logical::backbuild::{
-    assemble, definition_diff, derive_backbuild_options, BackbuildInputs, DefinitionDiff,
-    SelectListDiff, Selection, SourceRef, Technique,
+    assemble, definition_diff, derive_backbuild_options, AtomicChange, BackbuildInputs,
+    DefinitionDiff, SelectListDiff, Selection, SourceRef, Technique,
 };
 
 fn parse(sql: &str) -> smelt_parser::File {
@@ -2870,4 +2870,213 @@ fn c1_drop_of_column_read_by_update_sequences_safely() {
 
     // FullRefresh remains the model's only option — still oracle-verified.
     harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
+/// `Technique::WindowColumnBackfill` (B6) composed in the *same* script with
+/// a row-set-changing sibling atom (here `Technique::HorizonExtensionInsert`,
+/// E4) is refused by a cross-atom guard (`apply_b6_row_set_change_guard` in
+/// `crates/smelt-logical/src/backbuild/classify.rs`), rather than silently
+/// admitted and diverging from the full-rebuild oracle.
+///
+/// Root cause the guard closes: `assemble`'s H-ordering (`renames → ALTER
+/// ADD/TYPE → DELETEs → UPDATEs/MERGEs → INSERTs → ALTER DROPs`) buckets a
+/// whole `BackbuildOption`'s statements by one [`HSlot`] — B6's `ALTER ADD
+/// COLUMN` + its self-read `UPDATE t SET c = s.c FROM (SELECT <id>, <window>
+/// FROM t) s` both land in [`HSlot::Alter`], which runs *before* the
+/// `Insert`/`Delete` bucket a composed sibling atom's row-set change lands
+/// in. So B6's self-read window would be computed over `t`'s row-set
+/// *before* the sibling atom's insert/delete has run — not the full final
+/// row-set a real rebuild's window partitions over. Reordering alone cannot
+/// fix this either (an inserted row's window value is drawn from the
+/// after-definition SELECT over upstream slices, not from a second pass over
+/// the final table), so refusal is the right posture — see
+/// `apply_b6_row_set_change_guard`'s doc comment for the full mechanism.
+///
+/// Below: `orders` has an `open` order (`id=1`) outside the *old* horizon
+/// and two rows already inside it (`id=2` open, `id=3` closed). Widening the
+/// `ts` horizon (E4) would otherwise compose with adding a
+/// `ROW_NUMBER() OVER (PARTITION BY status ORDER BY id)` column (B6) — this
+/// test proves the composition never reaches that divergence: the E4 atom
+/// still admits its own `HorizonExtensionInsert` option, but the B6 atom's
+/// only option is stripped and replaced with a named refusal, so no
+/// composed targeted script exists at all (`assemble` returns empty, since a
+/// blocked atom blocks the whole composition — research §2 "Refusal
+/// posture").
+#[test]
+fn b6_composed_with_row_set_change_refuses() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER NOT NULL, status VARCHAR NOT NULL, \
+         ts DATE NOT NULL);
+         INSERT INTO orders VALUES
+           (1, 'open', DATE '2024-06-01'),
+           (2, 'open', DATE '2025-02-01'),
+           (3, 'closed', DATE '2025-03-01');",
+    );
+
+    let before_sql = "SELECT o.order_id AS order_id, o.status AS status, o.ts AS ts FROM \
+                       orders o WHERE o.ts >= '2025-01-01'";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, o.ts AS ts, \
+                      ROW_NUMBER() OVER (PARTITION BY o.status ORDER BY o.order_id) AS rn FROM \
+                      orders o WHERE o.ts >= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "o".to_string(),
+        SourceRef {
+            physical_name: "orders".to_string(),
+            unique_key: Some(vec!["order_id".to_string()]),
+            not_null_columns: ["order_id", "status", "ts"]
+                .into_iter()
+                .map(str::to_string)
+                .collect(),
+        },
+    );
+    let backbuild_inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: Some(vec!["order_id".to_string()]),
+        not_null_columns: ["order_id", "status", "ts"]
+            .into_iter()
+            .map(str::to_string)
+            .collect(),
+        added_column_types: [("rn".to_string(), "BIGINT".to_string())]
+            .into_iter()
+            .collect(),
+        sources,
+    };
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+
+    // The B6 (window column) atom must no longer carry a
+    // `WindowColumnBackfill` option, and must carry a named refusal
+    // explaining why — this is the desired behaviour: the composability
+    // hazard is caught and named, not silently admitted.
+    let window_atom = options
+        .atoms
+        .iter()
+        .find(|atom| matches!(&atom.change, AtomicChange::AddedColumn { name } if name == "rn"))
+        .expect("expected an AddedColumn('rn') atom for the window column");
+    assert!(
+        !window_atom
+            .options
+            .iter()
+            .any(|o| o.technique == Technique::WindowColumnBackfill),
+        "B6 must be refused once the diff also carries a row-set-changing atom, got: \
+         {window_atom:?}"
+    );
+    assert!(
+        window_atom
+            .inadmissible
+            .iter()
+            .any(|r| r.reason.contains("row-set-changing")),
+        "expected a named refusal citing the row-set-changing composability hazard, got: \
+         {window_atom:?}"
+    );
+
+    // The E4 (horizon-widening) atom is unaffected — it still admits its own
+    // `HorizonExtensionInsert` option on its own merits.
+    let horizon_atom = options
+        .atoms
+        .iter()
+        .find(|atom| matches!(&atom.change, AtomicChange::RangePredicateChange { .. }))
+        .expect("expected a RangePredicateChange atom for the widened ts horizon");
+    assert!(
+        horizon_atom
+            .options
+            .iter()
+            .any(|o| o.technique == Technique::HorizonExtensionInsert),
+        "the row-set-changing sibling atom itself must remain admissible on its own merits, \
+         got: {horizon_atom:?}"
+    );
+
+    // No composed targeted script exists: B6 was the window atom's only
+    // option, so with it stripped the atom has none, and `assemble` refuses
+    // the whole composition (partial application is never offered).
+    let script = assemble(&options, &targeted_of_len(options.atoms.len()));
+    assert!(
+        script.is_empty(),
+        "a blocked B6 atom must block the whole composed targeted script, got {script:?}"
+    );
+
+    // FullRefresh remains available and correct.
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
+/// Guard-boundary positive: B6 composed with a row-set-*preserving* sibling
+/// atom (here a plain B1 self-derived added column, `doubled = amount * 2`,
+/// reading only stored columns) is left untouched by
+/// `apply_b6_row_set_change_guard` — both atoms still admit their own
+/// option, and the composed targeted script is oracle-equal. The guard's
+/// trigger is the atomic-change *class* (E-class conjuncts /
+/// `RangePredicateChange` / set-operation branch atoms), not "any other atom
+/// exists alongside B6" — an ordinary column add never changes the row set,
+/// so it must never be caught by the guard.
+#[test]
+fn b6_composed_with_row_set_preserving_sibling_still_admits() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, status TEXT, amount INTEGER);
+         INSERT INTO orders VALUES
+           (1, 'open', 10), (2, 'open', 20), (3, 'closed', 5), (4, 'closed', 7),
+           (5, 'open', 1);",
+    );
+
+    let before_sql =
+        "SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount, \
+                      ROW_NUMBER() OVER (PARTITION BY o.status ORDER BY o.order_id) AS rn, \
+                      o.amount * 2 AS doubled FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = row_identity_inputs(
+        after_sql,
+        &[("rn", "BIGINT"), ("doubled", "INTEGER")],
+        &["order_id"],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+
+    let rn_atom = options
+        .atoms
+        .iter()
+        .find(|atom| matches!(&atom.change, AtomicChange::AddedColumn { name } if name == "rn"))
+        .expect("expected an AddedColumn('rn') atom");
+    assert!(
+        rn_atom
+            .options
+            .iter()
+            .any(|o| o.technique == Technique::WindowColumnBackfill),
+        "B6 must remain admissible when composed only with a row-set-preserving sibling, got: \
+         {rn_atom:?}"
+    );
+
+    let doubled_atom = options
+        .atoms
+        .iter()
+        .find(
+            |atom| matches!(&atom.change, AtomicChange::AddedColumn { name } if name == "doubled"),
+        )
+        .expect("expected an AddedColumn('doubled') atom");
+    assert!(
+        doubled_atom
+            .options
+            .iter()
+            .any(|o| o.technique == Technique::SelfDerivedColumnAdd),
+        "the row-set-preserving sibling must remain admissible on its own merits, got: \
+         {doubled_atom:?}"
+    );
+
+    // Every atom admits its first (and only) option — the composed targeted
+    // script is oracle-equal.
+    let script = assemble(&options, &targeted_of_len(options.atoms.len()));
+    assert!(!script.is_empty(), "expected a non-empty composed script");
+    harness::verify_script(&conn, "t", before_sql, after_sql, &script);
 }

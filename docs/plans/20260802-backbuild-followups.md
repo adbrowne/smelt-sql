@@ -124,8 +124,8 @@ deferred (data-dependent contract; now recorded in `docs/ROADMAP.md` What's Next
 | 3     | done     | a89078df | 2026-08-02 |
 | 4     | done     | 0e94acbf | 2026-08-02 |
 | 5     | done     | 771cbb4a | 2026-08-02 |
-| 6     | done     |        | 2026-08-02 |
-| 7     | pending  |        |      |
+| 6     | done     | 81f1987a | 2026-08-02 |
+| 7     | done     |        | 2026-08-03 |
 | 8     | pending  |        |      |
 
 ---
@@ -541,6 +541,9 @@ case runs before any generator breadth exists; breadth lands with the generators
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/Cargo.toml` — `proptest` dev-dependency
 - `crates/smelt-logical/tests/backbuild_property.rs` + `tests/backbuild_property/*.rs`
+- `crates/smelt-logical/src/backbuild/{mod,classify}.rs` — only for classifier/emitter
+  unsoundness the generative gate itself surfaces (fail-closed cross-atom guards), with
+  the bug pinned as an explicit conformance regression test first
 - `docs/research/20260802-backbuild-synthesis.md` §6 — harness description gains the
   generative gate (timeless)
 

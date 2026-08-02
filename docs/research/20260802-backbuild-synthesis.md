@@ -316,7 +316,13 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   `UPDATE t SET c = s.c FROM (SELECT <id>, <window> AS c FROM t) s WHERE t.<id> = s.<id>` —
   needs row identity, no upstream. The source subquery reads the deployed table `t`
   itself, never an upstream, so the window computes over exactly the rows `t` already has
-  — matching the rebuild by construction (§2 "self-read scripts").
+  — matching the rebuild by construction (§2 "self-read scripts"). **Composability
+  obligation**: B6's self-read reads `t`'s *entire* current row-set, not just unchanged
+  columns the way B1/B3/B4/B5's row-local updates do, so it is refused outright whenever
+  the same diff also carries a row-set-changing sibling atom (E1 `PredicateTightenDelete`,
+  E2 `FilterLoosenInsert`, E4 `HorizonExtensionInsert`, F1 `UnionBranchInsert`, F2
+  `DiscriminatedBranchDelete`) — see §4H "Composites" for the mechanism and why refusal,
+  not reordering, is the right posture.
 - **B7 — sequential multi-join enrichment** (two or more added LEFT JOINs, backfilled one
   step at a time — e.g. fact → dim1, then dim2 keyed on a column dim1 provides). *Detect*:
   FROM-tree diff = k added LEFT JOINs, ordered by reference dependency (a later join's ON
@@ -576,6 +582,49 @@ composed targeted script — `FullRefresh` stays the model's only option (§2). 
 harness includes composite cases precisely because ordering bugs are silent in single-atom
 tests.
 
+**B6 composability: a second exception to "order-free by construction," guarded.** B6's
+self-read `UPDATE t SET c = s.c FROM (SELECT <id...>, <window> FROM t) s` does not read
+only unchanged columns the way B1/B3/B4/B5's row-local updates do — it reads the window
+function's whole partition, i.e. `t`'s entire current row-set. Composed with a sibling atom
+whose technique changes that row-set (E1 `PredicateTightenDelete`, E2 `FilterLoosenInsert`,
+E4 `HorizonExtensionInsert`, F1 `UnionBranchInsert`, F2 `DiscriminatedBranchDelete` —
+anything landing in the `DELETEs`/`INSERTs` slots), B6's update would run in the earlier
+`ALTER ADD` slot and see the row-set *before* the sibling's delete/insert has run, so its
+window values would be computed over the wrong partition population and diverge from a full
+rebuild. Reordering alone cannot fix this either: an inserted row's own window value is
+drawn from the after-definition SELECT over upstream slices, not from a second pass over the
+final table, so even a post-INSERT re-run of B6's update would not by itself reproduce a
+rebuild's single coherent partition.
+
+`derive_backbuild_options` closes this with a cross-atom guard
+(`apply_b6_row_set_change_guard` in `crates/smelt-logical/src/backbuild/classify.rs`),
+applied as a post-pass over the classified atoms: whenever the diff's atoms include both a
+`WindowColumnBackfill` option and any atom whose atomic-change class is row-set-changing (an
+E-class conjunct atom, `RangePredicateChange`, or an added/removed set-operation branch), the
+`WindowColumnBackfill` option is stripped from every atom that carries it and replaced with a
+named, actionable refusal ("apply the row-set change first, then add the window column in a
+second edit") — fail-closed, per §2's refusal posture, rather than a silent divergence.
+`FullRefresh` stays the model option when B6 was the atom's only option; the atom is left
+untouched, and B6 remains admitted, when composed only with row-set-*preserving* siblings
+(B1/B2/B3/B4/B5/D1/D2, or a C1 drop of some other column — a dropped column never changes the
+row set). Regression test: `b6_composed_with_row_set_change_refuses` in
+`crates/smelt-logical/tests/backbuild_conformance.rs`, with a guard-boundary positive sibling
+in `b6_composed_with_row_set_preserving_sibling_still_admits`. The generative conformance gate
+(`crates/smelt-logical/tests/backbuild_property.rs`) draws this composition like any other
+case — the guard's "no admissible option, named refusal, empty targeted script" branch
+exercises it directly, with no generator-side exclusion needed.
+
+**Generative conformance.** Alongside the explicit BB-case suite, a property-based gate
+(`crates/smelt-logical/tests/backbuild_property.rs`, `proptest`-driven,
+`TestRunner::deterministic()`) draws structural before-definitions and edits over a fixed
+source pool, stages generated data, and asserts every option `derive_backbuild_options`
+returns — and every bounded composed selection `assemble` can build from them — is
+multiset-equal to a full rebuild on a real DuckDB. A per-atom refusal path, an adversarial
+edit axis (grain change, non-`LEFT` join, volatile function, opaque predicate rewrite), and
+the stale-upstream precondition (§2) each get their own generative case; a per-[`Technique`]
+coverage tally and an admission-rate floor keep the gate from going vacuously green if a
+generator stops reaching some technique.
+
 ## 5. Priority ranking
 
 Ranked by practical value ÷ new machinery, weighing how often the edit occurs in real
@@ -639,8 +688,9 @@ apply script → `CREATE TABLE expected AS <after>` → assert multiset equality
 count drift — plus column name/type comparison). Refusal goldens assert the
 named reason. One stale-input case documents the §2 precondition. Every enumerated option is verified
 independently — each option's script applies to a fresh copy of the staged before-table, so
-a case admitting two techniques proves both. Explicit BB-case tests now; generative recipe
-sampling (testkit-style, à la `maintenance_conformance`) deferred.
+a case admitting two techniques proves both. A generative recipe-sampling gate
+(testkit-style, à la `maintenance_conformance`) sits alongside the explicit BB-case suite —
+see "Generative conformance" below.
 
 ## 7. Open questions
 

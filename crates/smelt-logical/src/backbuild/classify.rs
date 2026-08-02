@@ -48,7 +48,7 @@ pub fn derive_backbuild_options(
 ) -> BackbuildOptions {
     let full_refresh = full_refresh_option(inputs);
 
-    let atoms = match diff {
+    let mut atoms = match diff {
         DefinitionDiff::Opaque { reason } => vec![whole_definition_refusal(reason)],
         DefinitionDiff::Comparable(comparable) => {
             if diff.is_noop() {
@@ -83,9 +83,112 @@ pub fn derive_backbuild_options(
         }
     };
 
+    apply_b6_row_set_change_guard(&mut atoms);
+
     BackbuildOptions {
         atoms,
         full_refresh,
+    }
+}
+
+/// Cross-atom guard (research §4 "H. Composites" "B6 composability"): B6
+/// (`Technique::WindowColumnBackfill`) is a self-read `UPDATE ... FROM
+/// (SELECT <id...>, <window> FROM t) s` that reads `t`'s *entire current
+/// row-set* — not just unchanged columns the way B1/B3/B4/B5's row-local
+/// updates do — so it is unsound whenever the same script also runs a
+/// sibling atom whose technique changes that row-set. `assemble`'s fixed
+/// H-ordering (`renames → ALTER ADD/TYPE → DELETEs → UPDATEs/MERGEs →
+/// INSERTs → ALTER DROPs`) always schedules B6's self-read `UPDATE` in the
+/// `Alter`/`UpdateMerge` slots, strictly before the `Delete`/`Insert` slots a
+/// row-set-changing sibling lands in, so B6's window is computed over the
+/// row population *before* the sibling's delete/insert has run — diverging
+/// from a full rebuild (research §4H). Reordering alone cannot fix this
+/// either: an inserted row's own window value is drawn from the
+/// after-definition SELECT over upstream slices, not from a second pass over
+/// the final table, so even a post-INSERT re-run of B6's update would not by
+/// itself reproduce a rebuild's single coherent partition — refusal is the
+/// right posture here, not reordering.
+///
+/// Triggered by *atomic-change class* alone (`is_row_set_changing_atom`),
+/// not by whether that sibling atom itself ended up admissible: the
+/// composability hazard is about what the *diff* contains, independent of
+/// whether classification later also refused the sibling atom for an
+/// unrelated reason. When triggered, every B6 option is stripped from every
+/// atom that carries one and replaced with a named, actionable refusal —
+/// `FullRefresh` remains the model-level baseline throughout (it never
+/// touches per-atom options). B6 composed only with row-set-*preserving*
+/// siblings (B1/B2/B3/B4/B5/D1/D2, or a C1 drop of some *other* column — a
+/// dropped column never changes the row set) is left untouched.
+fn apply_b6_row_set_change_guard(atoms: &mut [AtomAnalysis]) {
+    let row_set_change_present = atoms
+        .iter()
+        .any(|atom| is_row_set_changing_atom(&atom.change));
+    if !row_set_change_present {
+        return;
+    }
+
+    for atom in atoms.iter_mut() {
+        let Some(pos) = atom
+            .options
+            .iter()
+            .position(|option| option.technique == Technique::WindowColumnBackfill)
+        else {
+            continue;
+        };
+        atom.options.remove(pos);
+        atom.inadmissible.push(BackbuildRefusal {
+            atom: atom_change_label(&atom.change),
+            reason: "B6 (window column add) refused: window backfill is not composable with \
+                     row-set-changing changes in the same diff — B6's self-read UPDATE reads \
+                     t's entire current row-set, which a row-set-changing sibling atom (a \
+                     tightened/loosened filter, a widened time horizon, or an added/removed \
+                     UNION ALL branch) changes later in the script's fixed H-ordering, so the \
+                     window would be computed over the wrong partition population; apply the \
+                     row-set change first, then add the window column in a second edit"
+                .to_string(),
+        });
+    }
+}
+
+/// Whether `change`'s admitted technique(s) — by atomic-change *class*,
+/// independent of whether that atom ended up admissible — write a row
+/// subset or otherwise change the deployed table's row set: the E-class
+/// conjunct atoms (E1 `AddedConjunct`/`PredicateTightenDelete`, E2
+/// `RemovedConjunct`/`FilterLoosenInsert`, E4 `RangePredicateChange`/
+/// `HorizonExtensionInsert`) and the F-class set-operation atoms (F1
+/// `AddedSetOpBranch`/`UnionBranchInsert`, F2 `RemovedSetOpBranch`/
+/// `DiscriminatedBranchDelete`) — see [`apply_b6_row_set_change_guard`].
+fn is_row_set_changing_atom(change: &AtomicChange) -> bool {
+    matches!(
+        change,
+        AtomicChange::AddedConjunct { .. }
+            | AtomicChange::RemovedConjunct { .. }
+            | AtomicChange::RangePredicateChange { .. }
+            | AtomicChange::AddedSetOpBranch { .. }
+            | AtomicChange::RemovedSetOpBranch { .. }
+    )
+}
+
+/// A short, human-readable label for an [`AtomicChange`], used by
+/// [`apply_b6_row_set_change_guard`]'s cross-atom refusal (mirrors the
+/// per-site `atom: format!(...)` naming convention used throughout this
+/// module's own single-atom refusals).
+fn atom_change_label(change: &AtomicChange) -> String {
+    match change {
+        AtomicChange::WholeDefinition { .. } => "whole-definition".to_string(),
+        AtomicChange::Skeleton { .. } => "skeleton".to_string(),
+        AtomicChange::AddedColumn { name } => format!("added column '{name}'"),
+        AtomicChange::RenamedColumn { from, to } => format!("renamed column '{from}' -> '{to}'"),
+        AtomicChange::DroppedColumn { name } => format!("dropped column '{name}'"),
+        AtomicChange::ChangedColumn { name } => format!("changed column '{name}'"),
+        AtomicChange::AddedConjunct { index } => format!("added conjunct #{index}"),
+        AtomicChange::RangePredicateChange { column } => format!("range predicate on '{column}'"),
+        AtomicChange::RemovedConjunct { index } => format!("removed conjunct #{index}"),
+        AtomicChange::AddedSetOpBranch { index } => format!("added set-operation branch #{index}"),
+        AtomicChange::RemovedSetOpBranch { index } => {
+            format!("removed set-operation branch #{index}")
+        }
+        AtomicChange::Unclassified => "unclassified".to_string(),
     }
 }
 
