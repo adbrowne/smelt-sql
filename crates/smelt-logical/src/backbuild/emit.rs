@@ -35,6 +35,14 @@ pub fn emit_alter_rename_column(table: &str, from: &str, to: &str) -> String {
     format!("ALTER TABLE {table} RENAME COLUMN {from} TO {to}")
 }
 
+/// `ALTER TABLE t DROP COLUMN d;` — research §4 C1's sole statement, always
+/// composed into the H "ALTER DROPs" slot (`HSlot::Drop`), last, after
+/// every statement that might still read the column
+/// (`docs/research/20260802-backbuild-synthesis.md` §4 "H. Composites").
+pub fn emit_alter_drop_column(table: &str, column: &str) -> String {
+    format!("ALTER TABLE {table} DROP COLUMN {column}")
+}
+
 /// `UPDATE t SET c1 = e1, c2 = e2, ...;` — the unregioned sibling of
 /// `maintenance::emit::emit_in_place_update` (which requires a maintenance
 /// `Region` bound for a partition-scoped backfill). Backbuild's B1/D1
@@ -284,6 +292,14 @@ mod tests {
         assert_eq!(
             emit_alter_rename_column("t", "old_name", "new_name"),
             "ALTER TABLE t RENAME COLUMN old_name TO new_name"
+        );
+    }
+
+    #[test]
+    fn alter_drop_column_shape() {
+        assert_eq!(
+            emit_alter_drop_column("t", "extra"),
+            "ALTER TABLE t DROP COLUMN extra"
         );
     }
 

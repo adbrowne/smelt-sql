@@ -463,6 +463,15 @@ pub enum AtomicChange {
     /// (research §4 B2 "rename") — matched *before* add/drop classification
     /// so a genuine rename is never misread as a drop-plus-unrelated-add.
     RenamedColumn { from: String, to: String },
+    /// One dropped SELECT-list output column left over after rename pairing
+    /// (research §4 C1). `name` is the before-definition's output column
+    /// name. Classification here only *sequences* the drop (research §4 "H.
+    /// Composites": last, after every statement that might read the
+    /// column); whether drops are permitted at all
+    /// (`--allow-column-removal`) is a policy decision this module never
+    /// makes — it stays owned by `docs/specs/schema_evolution.md` and is
+    /// applied at wiring time.
+    DroppedColumn { name: String },
     /// A SELECT-list output column present in both versions under the same
     /// name whose computing expression differs (research §4 D-class; D1 in
     /// this phase, D2 in a later one). `name` is the column's output name.
@@ -500,13 +509,12 @@ pub enum AtomicChange {
     /// admits a single removed branch at a time).
     RemovedSetOpBranch { index: usize },
     /// A non-empty, non-skeleton-refused diff this phase does not yet
-    /// classify into admissible techniques (research catalogue classes
-    /// C/F, an unpaired dropped column, an ambiguous rename cluster, a
-    /// D-class change this phase cannot admit as D1, a `WHERE`-clause change
-    /// this phase's E-class (E1/E4 only) cannot admit, or an opaque
-    /// SELECT-list/WHERE/set-operation diff). A conservative catch-all: an
-    /// honest "not yet handled" refusal, never a silently empty atom list
-    /// for a definition that did change.
+    /// classify into admissible techniques (research catalogue class F, an
+    /// ambiguous rename cluster, a D-class change this phase cannot admit as
+    /// D1, a `WHERE`-clause change this phase's E-class (E1/E4 only) cannot
+    /// admit, or an opaque SELECT-list/WHERE/set-operation diff). A
+    /// conservative catch-all: an honest "not yet handled" refusal, never a
+    /// silently empty atom list for a definition that did change.
     Unclassified,
 }
 
@@ -687,15 +695,37 @@ pub enum Technique {
     /// rebuild's own draw (research §2 "Determinism caveat" narrowed to
     /// this technique's own obligation).
     WindowColumnBackfill,
+    /// C1 — dropped column (research §4): `ALTER TABLE t DROP COLUMN d;`.
+    /// This technique only *sequences* the drop into the H "ALTER DROPs"
+    /// slot, last, after every statement that might still read the column
+    /// (research §4 "H. Composites"); it carries
+    /// [`WriteScope::Destructive`] metadata so a wiring-time chooser can
+    /// gate it behind the `--allow-column-removal` opt-in doctrine
+    /// (`docs/specs/schema_evolution.md`) without re-classifying — that
+    /// policy decision is never made in this pure module.
+    ColumnDrop,
 }
 
-/// The research §2 "write scope" option metadata.
+/// The research §2 "write scope" option metadata — coarse cost/safety
+/// classification of what an option's statements touch.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WriteScope {
+    /// No row or schema mutation (e.g. [`Technique::FullRefresh`]'s sibling
+    /// techniques that touch zero rows, such as a pure rename).
     None,
+    /// One or more columns of every (or a matched subset of) existing rows.
     ColumnScoped,
+    /// A row-level insert or delete over a subset of rows.
     RowSubset,
+    /// A full-table rewrite (`CREATE OR REPLACE TABLE …`,
+    /// [`Technique::FullRefresh`]).
     FullWrite,
+    /// An irreversible schema change that discards data
+    /// ([`Technique::ColumnDrop`]) — distinct from [`Self::ColumnScoped`]
+    /// (which only ever *updates* column values, never removes the column
+    /// itself) so a wiring-time chooser can require the
+    /// `--allow-column-removal` opt-in without inspecting the technique.
+    Destructive,
 }
 
 /// The research §4 "H. Composites" ordering slots:

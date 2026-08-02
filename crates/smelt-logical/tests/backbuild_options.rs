@@ -2141,3 +2141,64 @@ fn branch_swap_with_edit_refuses_phantom_top_level_diff() {
         "expected FullRefresh-only (no targeted atoms), got: {targeted:?}"
     );
 }
+
+#[test]
+fn c1_option_marked_destructive() {
+    let before_sql = "SELECT id, extra FROM orders";
+    let after_sql = "SELECT id FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    match &atom.change {
+        AtomicChange::DroppedColumn { name } => assert_eq!(name, "extra"),
+        other => panic!("expected a DroppedColumn atom, got {other:?}"),
+    }
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::ColumnDrop);
+    assert_eq!(option.slot, Some(HSlot::Drop));
+    assert_eq!(option.statements, vec!["ALTER TABLE t DROP COLUMN extra"]);
+    // The metadata records a write scope distinct from a plain column-value
+    // update (`WriteScope::ColumnScoped`) — so a wiring-time chooser can
+    // gate this technique behind the `--allow-column-removal` opt-in
+    // doctrine without re-classifying (research §4 C1's "Classification and
+    // the opt-in flag doctrine ... stay owned by schema_evolution.md").
+    assert_eq!(option.write_scope, WriteScope::Destructive);
+    assert_ne!(option.write_scope, WriteScope::ColumnScoped);
+    assert!(atom.inadmissible.is_empty());
+}
+
+#[test]
+fn c1_rename_pairing_still_wins() {
+    // A dropped column whose expression matches an added one must still
+    // classify as B2 (rename), never as a C1 drop paired with an unrelated
+    // B1 add — a regression guard on pairing order (rename pairing runs
+    // *before* C1/B1 classification).
+    let before_sql = "SELECT id, amount FROM orders";
+    let after_sql = "SELECT id, amount AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    assert!(
+        !options
+            .atoms
+            .iter()
+            .any(|a| matches!(&a.change, AtomicChange::DroppedColumn { .. })),
+        "expected no DroppedColumn atom — 'amount' must pair into the rename, got {:?}",
+        options.atoms
+    );
+    let atom = single_atom(&options);
+    match &atom.change {
+        AtomicChange::RenamedColumn { from, to } => {
+            assert_eq!(from, "amount");
+            assert_eq!(to, "total");
+        }
+        other => panic!("expected a RenamedColumn atom, got {other:?}"),
+    }
+    assert_eq!(atom.options[0].technique, Technique::Rename);
+}

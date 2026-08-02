@@ -1838,16 +1838,37 @@ fn branch_own_text(branch: &SelectStmt) -> String {
     }
 }
 
-fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
+/// A dropped column left over after rename pairing (research §4 C1):
+/// `ALTER TABLE t DROP COLUMN d;`, sequenced into the H "ALTER DROPs" slot
+/// (`HSlot::Drop`, last — `assemble`'s composition order). This function
+/// only *sequences* the drop; whether drops are permitted at all
+/// (`--allow-column-removal`) is a policy decision that stays owned by
+/// `docs/specs/schema_evolution.md` and is applied at wiring time, never
+/// here (research §4 C1: "Classification and the opt-in flag doctrine ...
+/// stay owned by schema_evolution.md; backbuild's job is only to *sequence*
+/// the drop").
+fn dropped_column_atom(table: &str, name: &str) -> AtomAnalysis {
+    let stmt = emit::emit_alter_drop_column(table, name);
     AtomAnalysis {
-        change: AtomicChange::Unclassified,
-        options: Vec::new(),
-        inadmissible: vec![BackbuildRefusal {
-            atom: format!("dropped column '{name}'"),
-            reason: "a dropped column not paired into a rename (research §4 C1) is not yet \
-                     classified into an admissible technique by this phase"
-                .to_string(),
+        change: AtomicChange::DroppedColumn {
+            name: name.to_string(),
+        },
+        options: vec![BackbuildOption {
+            technique: Technique::ColumnDrop,
+            slot: Some(HSlot::Drop),
+            statements: vec![stmt],
+            // Destructive, distinct from `ColumnScoped` (research §4 C1's
+            // metadata requirement): this is what lets a wiring-time
+            // chooser gate the technique behind `--allow-column-removal`
+            // without re-classifying.
+            write_scope: WriteScope::Destructive,
+            reads_upstream: false,
+            // DDL drop is not re-runnable — a second `ALTER TABLE ... DROP
+            // COLUMN` on an already-dropped column errors (research §2
+            // "Idempotence"), same posture as `Technique::Rename`.
+            rerun_safe: false,
         }],
+        inadmissible: Vec::new(),
     }
 }
 
@@ -4169,7 +4190,7 @@ fn pair_renames(
         if cluster.len() == 1 {
             let d = cluster[0];
             match candidates.len() {
-                0 => atoms.push(dropped_column_unclassified(&d.name)),
+                0 => atoms.push(dropped_column_atom(&inputs.table, &d.name)),
                 1 => {
                     let winner = candidates[0];
                     atoms.push(rename_atom(&inputs.table, &d.name, &winner.name));
@@ -4189,7 +4210,7 @@ fn pair_renames(
             }
         } else if candidates.is_empty() {
             for d in &cluster {
-                atoms.push(dropped_column_unclassified(&d.name));
+                atoms.push(dropped_column_atom(&inputs.table, &d.name));
             }
         } else {
             let sibling_names: Vec<String> = cluster.iter().map(|d| d.name.clone()).collect();

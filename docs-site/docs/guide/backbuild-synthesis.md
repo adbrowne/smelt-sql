@@ -477,12 +477,12 @@ Plain `UNION` refuses here for the same reason it does on the add side.
 
 ### Several changes at once
 
-Atomic changes compose. Rename a column, add a derived one, and tighten the
-filter in a single edit:
+Atomic changes compose. Rename a column, add a derived one, tighten the
+filter, and drop an unrelated column, all in a single edit:
 
 ```sql
 -- before
-SELECT id, price, qty FROM orders
+SELECT id, price, extra, qty FROM orders
 -- after
 SELECT id, price AS unit_price, price AS list_price, qty FROM orders WHERE qty > 0
 ```
@@ -494,17 +494,25 @@ ALTER TABLE t RENAME COLUMN price TO list_price;
 ALTER TABLE t ADD COLUMN unit_price INTEGER;
 UPDATE t SET unit_price = list_price;
 DELETE FROM t WHERE (qty > 0) IS NOT TRUE;
+ALTER TABLE t DROP COLUMN extra;
 ```
 
 Statements run in a fixed dependency order — renames first (so later
 expressions reference final names), then each added column's `ALTER ADD` with
 its backfill, deletes, remaining column updates (so they touch fewer rows),
-inserts, and drops last. Notice `unit_price`'s update reads `list_price`, the
+inserts, and dropped columns **last**, strictly after every statement that
+might still read them. Notice `unit_price`'s update reads `list_price`, the
 rename's *target* name — that is why renames go first. And note the
 composition rule: a targeted script is
 offered only when **every** atom in the edit has at least one admissible
 technique. One unprovable atom means full refresh is the only option, with the
 refusal naming the culprit — partial migration is never offered.
+
+Dropping a column discards data irreversibly, so backbuild only ever
+*sequences* the `ALTER ... DROP COLUMN` statement into the right place in the
+script — it never decides on its own whether the drop is allowed to run.
+Column removal stays an explicit opt-in at run time (see [schema
+evolution](schema-evolution.md)), applied independently of this ordering.
 
 ## When smelt refuses
 
@@ -572,11 +580,14 @@ converts a full rebuild into a column-scoped update.
 - smelt **enumerates options; it does not yet choose** between a targeted
   script and full refresh — a cost model over the recorded option metadata is
   the planned chooser.
-- Not yet classified: dropped columns (owned by
-  [schema evolution](schema-evolution.md)), refs repointed to a different
-  upstream. These refuse with named reasons today. (A changed *cast* is not a
-  type change — it is a changed expression, handled above; a bare type change
-  with no expression change has no trigger in a definition diff at all.)
+- Dropped columns are sequenced into the script (`ALTER ... DROP COLUMN`,
+  always last), but whether a drop is *allowed to run at all* stays owned by
+  [schema evolution](schema-evolution.md)'s `--allow-column-removal` opt-in —
+  backbuild only orders the statement, never gates it.
+- Not yet classified: refs repointed to a different upstream. These refuse
+  with named reasons today. (A changed *cast* is not a type change — it is a
+  changed expression, handled above; a bare type change with no expression
+  change has no trigger in a definition diff at all.)
 
 ## Related pages
 

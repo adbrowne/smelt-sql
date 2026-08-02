@@ -335,9 +335,21 @@ rows exist is a grain change), derived from the diff rather than the maintenance
 
 ### C. Removals and type changes
 
-- **C1 — dropped column** → `ALTER TABLE t DROP COLUMN d;`. Classification and the
-  opt-in flag doctrine (`--allow-column-removal`) stay owned by `schema_evolution.md`;
-  backbuild's job is only to *sequence* the drop (last, after rename extraction).
+- **C1 — dropped column** → `ALTER TABLE t DROP COLUMN d;`. A SELECT-list output column
+  left over after rename pairing (research §4 B2 runs first, so a genuine rename is never
+  misread as a drop) classifies as a `Technique::ColumnDrop` option carrying destructive
+  write-scope metadata (`WriteScope::Destructive`, distinct from `ColumnScoped` — every
+  other column-touching technique only ever *updates* values, never removes the column),
+  sequenced into the `HSlot::Drop` composition slot — last, after every statement that
+  might still read the column. The *opt-in flag doctrine* (`--allow-column-removal`) stays
+  owned by `schema_evolution.md`: backbuild's classifier enumerates the drop as an
+  admissible technique unconditionally, never deciding on its own whether the drop is
+  permitted to run — that policy gate applies at wiring time. A changed column whose new
+  expression depends on a column dropped in the same edit refuses D1 by the uniform
+  representative rule (§4 intro): a dropped column is absent from `after` entirely, so it
+  is never "unchanged between both definitions" and is never a stored representative —
+  there is no shape where a drop could run ahead of an update that still needs the old
+  value, because that update never admits in the first place.
 - **C2 — type change**: safe widening → `ALTER COLUMN TYPE` (schema evolution owns the
   widening table); a representation change (`c` now cast differently) is not a C-case at
   all — it is a changed expression, D1/D2. A bare C2 atom is essentially unreachable from
@@ -581,7 +593,7 @@ pipelines and how galling the full refresh it replaces is:
 | 8 | E2 + D2 | Rounds out predicates and expression changes; reuses earlier machinery |
 | 9 | F1 | Cheap detection (branch diff), cheap script |
 | 10 | B7 | Sequential multi-join enrichment; builds directly on B4's proof, adds only the dependency ordering |
-| 11+ | C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
+| 11+ | probe-gated G2 | Tier 3 — needing runtime probes |
 
 ## 6. Architecture
 

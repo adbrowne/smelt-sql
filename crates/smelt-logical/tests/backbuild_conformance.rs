@@ -2674,3 +2674,200 @@ fn h_composite_with_blocked_atom_yields_only_full_refresh() {
     assert_eq!(full_refresh_script, options.full_refresh.statements);
     harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
 }
+
+/// research §4 C1 sequencing: a composite diff combining a B2 rename, a B1
+/// add reading the renamed column, and a C1 drop of a *different* column —
+/// the drop must land strictly last in the composed script (research §4 "H.
+/// Composites": "drops last so nothing mid-script loses a column it
+/// reads"), after the rename, the alter/update pair, and the delete.
+#[test]
+fn c1_dropped_column_drops_last() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, price INTEGER, extra INTEGER, qty INTEGER);
+         INSERT INTO orders VALUES (1, 10, 999, 3), (2, 20, 888, 0), (3, 30, 777, 5);",
+    );
+
+    let before_sql = "SELECT id, price, extra, qty FROM orders";
+    let after_sql = "SELECT id, price AS unit_price, price AS list_price, qty FROM orders \
+                      WHERE qty > 0";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut added_column_types = BTreeMap::new();
+    added_column_types.insert("unit_price".to_string(), "INTEGER".to_string());
+    let backbuild_inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types,
+        sources: BTreeMap::new(),
+    };
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 4, "atoms: {:?}", options.atoms);
+    for atom in &options.atoms {
+        assert_eq!(
+            atom.options.len(),
+            1,
+            "expected every atom admissible: {atom:?}"
+        );
+    }
+
+    let drop_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, smelt_logical::backbuild::AtomicChange::DroppedColumn { name } if name == "extra"))
+        .expect("a DroppedColumn atom for 'extra'");
+    assert_eq!(drop_atom.options[0].technique, Technique::ColumnDrop);
+    assert_eq!(
+        drop_atom.options[0].slot,
+        Some(smelt_logical::backbuild::HSlot::Drop)
+    );
+
+    let selection = targeted_of_len(4);
+    let script = assemble(&options, &selection);
+    assert_eq!(
+        script.last(),
+        Some(&"ALTER TABLE t DROP COLUMN extra".to_string()),
+        "the drop must be strictly last: {script:?}"
+    );
+    assert_eq!(
+        script,
+        vec![
+            "ALTER TABLE t RENAME COLUMN price TO list_price".to_string(),
+            "ALTER TABLE t ADD COLUMN unit_price INTEGER".to_string(),
+            "UPDATE t SET unit_price = list_price".to_string(),
+            "DELETE FROM t WHERE (qty > 0) IS NOT TRUE".to_string(),
+            "ALTER TABLE t DROP COLUMN extra".to_string(),
+        ],
+        "H order: rename -> alter/add -> delete -> update/merge -> insert -> drop"
+    );
+
+    harness::verify_script(&conn, "t", before_sql, after_sql, &script);
+}
+
+/// research §4 C1: a diff whose *only* change is a dropped column — no
+/// rename, no rewrite, no filter change alongside it. Pins the minimal
+/// single-atom `ColumnDrop` case end-to-end against a real DuckDB, distinct
+/// from `c1_dropped_column_drops_last` (which composes the drop with a
+/// rename, an add, and a filter change and only pins H-ordering).
+#[test]
+fn c1_drop_only_column() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, amount INTEGER, extra INTEGER);
+         INSERT INTO orders VALUES (1, 10, 999), (2, 20, 888), (3, 30, 777);",
+    );
+
+    let before_sql =
+        "SELECT o.order_id AS order_id, o.amount AS amount, o.extra AS extra FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.amount AS amount FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let backbuild_inputs = inputs("t", after_sql);
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    assert!(
+        matches!(
+            &options.atoms[0].change,
+            smelt_logical::backbuild::AtomicChange::DroppedColumn { name } if name == "extra"
+        ),
+        "expected the sole atom to be a DroppedColumn for 'extra': {:?}",
+        options.atoms[0]
+    );
+    assert_eq!(options.atoms[0].options.len(), 1);
+    assert_eq!(options.atoms[0].options[0].technique, Technique::ColumnDrop);
+
+    let selection = targeted_of_len(1);
+    let script = assemble(&options, &selection);
+    assert_eq!(script, vec!["ALTER TABLE t DROP COLUMN extra".to_string()]);
+
+    harness::verify_script(&conn, "t", before_sql, after_sql, &script);
+}
+
+/// research §4 C1: a D1 rewrite whose expression depends on a column that
+/// is *also* dropped in the same diff. The uniform representative rule
+/// (research §4 intro: an admissible representative is a bare pull-through
+/// unchanged between both definitions) already excludes a dropped column as
+/// a representative — it is not "unchanged", it is absent from `after`
+/// entirely — so D1 refuses by name rather than ever risking the drop
+/// running before an update that still reads it. This pins that refusal
+/// rather than an ordering assertion: there is nothing to order because the
+/// changed-column atom never admits an option.
+#[test]
+fn c1_drop_of_column_read_by_update_sequences_safely() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, cost INTEGER, qty INTEGER);
+         INSERT INTO orders VALUES (1, 10, 3), (2, 20, 4), (3, 30, 5);",
+    );
+
+    let before_sql = "SELECT id, cost, qty, cost * qty AS total FROM orders";
+    let after_sql = "SELECT id, qty, cost * 1.5 AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let backbuild_inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types: BTreeMap::new(),
+        sources: BTreeMap::new(),
+    };
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+
+    // The dropped 'cost' column still classifies as an admissible C1 atom —
+    // dropping it is not itself unsafe, only sequencing it ahead of a
+    // sibling read would be.
+    let drop_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, smelt_logical::backbuild::AtomicChange::DroppedColumn { name } if name == "cost"))
+        .expect("a DroppedColumn atom for 'cost'");
+    assert_eq!(drop_atom.options.len(), 1, "{drop_atom:?}");
+
+    // The changed 'total' column can never admit D1: its new expression
+    // depends on 'cost', which has no stored representative (dropped, not
+    // unchanged) — named refusal, not a silent block.
+    let changed_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, smelt_logical::backbuild::AtomicChange::ChangedColumn { name } if name == "total"))
+        .expect("a ChangedColumn atom for 'total'");
+    assert!(
+        changed_atom.options.is_empty(),
+        "expected 'total' to refuse D1 rather than read the dropped 'cost' column: {changed_atom:?}"
+    );
+    assert!(
+        changed_atom
+            .inadmissible
+            .iter()
+            .any(|r| r.reason.contains("cost") && r.reason.contains("no 1:1 stored representative")),
+        "expected a named refusal citing 'cost' has no stored representative, got {:?}",
+        changed_atom.inadmissible
+    );
+
+    // Partial application is never offered: the whole composed targeted
+    // script is empty because 'total' has no admissible option, regardless
+    // of the drop atom's own admissibility.
+    let targeted = assemble(&options, &targeted_of_len(options.atoms.len()));
+    assert!(
+        targeted.is_empty(),
+        "a blocked sibling atom must block the composed targeted script, got {targeted:?}"
+    );
+
+    // FullRefresh remains the model's only option — still oracle-verified.
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
