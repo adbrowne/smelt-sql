@@ -26,7 +26,7 @@
 use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::{Expr, JoinClause, JoinType, SelectStmt, SyntaxKind};
+use smelt_parser::{Expr, JoinClause, JoinType, SelectEntry, SelectStmt, SyntaxKind};
 
 use crate::analysis::model_diff;
 
@@ -56,6 +56,12 @@ pub fn derive_backbuild_options(
                 // empty (`assemble` over zero atoms); `FullRefresh` remains
                 // available regardless.
                 Vec::new()
+            } else if let Some(refusal) = multi_branch_pure_diff_gate(comparable) {
+                // C3 fix (final-review finding): whenever more than one
+                // UNION ALL branch is in play, the select-list/WHERE/skeleton
+                // diffs below are trusted only when they are all
+                // independently no-ops — see the gate's own doc comment.
+                vec![refusal]
             } else {
                 match &comparable.skeleton {
                     SkeletonDiff::Changed { reason } => vec![skeleton_refusal(reason)],
@@ -142,6 +148,73 @@ fn classify_skeleton_reason(reason: &str) -> String {
     }
 }
 
+/// C3 fix (final-review finding): `diff.rs`'s clause-by-clause diffs
+/// (`select_list`, `where_clause`, `skeleton`) are computed positionally
+/// from each definition's *first* `UNION ALL` branch only (`definition_diff`
+/// calls `select_list_diff`/`where_diff`/`skeleton_diff` over
+/// `before_stmt`/`after_stmt`, which — for a multi-branch chain — are just
+/// the outer, first branch of each side), while `set_ops` diffs branches as
+/// a *multiset* (`diff.rs`'s `set_op_diff`/`branch_token_seq`). A pure
+/// branch *reorder* is a semantic no-op under the multiset view, but can
+/// make the first-branch pair diverge even though no branch's own content
+/// actually changed — producing phantom added/removed/changed atoms from
+/// the positional diffs (a phantom removed `WHERE` conjunct wrongly admits
+/// E2's difference INSERT, duplicating rows the branch reorder never
+/// touched; analogously for a phantom `select_list`/`skeleton` diff).
+///
+/// Whenever either side of the diff has more than one `UNION ALL` branch (or
+/// the branch diff itself could not be factored at all — `SetOpDiff::Opaque`
+/// may still hide more than one branch, so this stays conservative there
+/// too), the `select_list`/`where_clause`/`skeleton` diffs are trusted only
+/// when every one of them is independently a no-op; otherwise the whole
+/// diff refuses with a named reason rather than classifying atoms from a
+/// diff that may not describe any single branch's actual change. F1's pure
+/// append case (every branch unchanged, one new branch at the tail) still
+/// passes this gate, since in that shape the first branch genuinely is
+/// unchanged between versions — `select_list`/`where_clause`/`skeleton` are
+/// all no-ops by construction.
+fn multi_branch_pure_diff_gate(comparable: &ComparableDiff) -> Option<AtomAnalysis> {
+    let multi_branch = match &comparable.set_ops {
+        SetOpDiff::NotApplicable => false,
+        SetOpDiff::Branches {
+            added,
+            removed,
+            unchanged,
+        } => unchanged.len() + added.len() > 1 || unchanged.len() + removed.len() > 1,
+        SetOpDiff::Opaque { .. } => true,
+    };
+    if !multi_branch {
+        return None;
+    }
+
+    let clean = comparable.select_list.is_noop()
+        && comparable.where_clause.is_noop()
+        && comparable.skeleton.is_noop();
+    if clean {
+        return None;
+    }
+
+    Some(multi_branch_definition_changed_refusal(
+        "the SELECT-list/WHERE/skeleton diff (computed from each definition's own first UNION \
+         ALL branch) shows a change, which cannot be trusted once more than one branch is in \
+         play — a branch reorder alone can make the first-branch pair diverge without any \
+         branch's own content actually changing",
+    ))
+}
+
+fn multi_branch_definition_changed_refusal(reason: &str) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Unclassified,
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: "multi-branch definition".to_string(),
+            reason: format!(
+                "multi-branch definition changed outside a pure branch add/remove — {reason}"
+            ),
+        }],
+    }
+}
+
 fn unclassified_refusal_named(atom: &str) -> AtomAnalysis {
     AtomAnalysis {
         change: AtomicChange::Unclassified,
@@ -167,12 +240,13 @@ fn unclassified_refusal_named(atom: &str) -> AtomAnalysis {
 fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) -> Vec<AtomAnalysis> {
     let mut atoms = Vec::new();
 
-    let (representative_sources, after_columns) = match &comparable.select_list {
+    let (representative_sources, after_columns, first_branch_order) = match &comparable.select_list
+    {
         SelectListDiff::Opaque { reason } => {
             atoms.push(unclassified_refusal_named(&format!(
                 "select-list: {reason}"
             )));
-            (Vec::new(), None)
+            (Vec::new(), None, None)
         }
         SelectListDiff::Diffed {
             added,
@@ -197,7 +271,24 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
                 ));
             }
             let after_columns = after_column_names(unchanged, changed, added);
-            (representative_sources, Some(after_columns))
+            // C4 fix: the first branch's own declared output column order
+            // (research §4 "H. Composites" positional-`UNION-ALL` note) —
+            // sound to read off `unchanged` here because the C3 gate
+            // (`multi_branch_pure_diff_gate`) already refused this diff
+            // outright, before `classify_comparable` was ever called,
+            // unless `select_list.is_noop()` holds whenever more than one
+            // branch is in play — meaning `added`/`dropped`/`changed` are
+            // all empty and `unchanged` is exactly the first branch's own
+            // SELECT list, in its original declared order (`diff.rs`'s
+            // `select_list_diff` preserves `before_cols`' iteration order
+            // into `unchanged`).
+            let first_branch_order: Vec<String> =
+                unchanged.iter().map(|c| c.name.clone()).collect();
+            (
+                representative_sources,
+                Some(after_columns),
+                Some(first_branch_order),
+            )
         }
     };
 
@@ -211,6 +302,7 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
     atoms.extend(classify_set_ops(
         &comparable.set_ops,
         after_columns.as_deref(),
+        first_branch_order.as_deref(),
         inputs,
     ));
 
@@ -1096,15 +1188,26 @@ fn set_op_refusal(atom: &str, reason: String) -> AtomAnalysis {
 /// declared output column list (the branches' shared column names, research
 /// §4 "H. Composites"' explicit-column-list requirement) — `None` only when
 /// the SELECT-list diff itself is opaque, which blocks F1 (its `INSERT`
-/// needs an explicit column list) exactly like it blocks E4.
+/// needs an explicit column list) exactly like it blocks E4. `first_branch_order`
+/// is the first branch's own output column names in declared order (C4 fix,
+/// final-review finding) — `None` from either call site that cannot supply
+/// it (the added-left-join paths, which the C3 gate already refuses ahead of
+/// reaching here whenever a genuine multi-branch F1 shape is in play).
 fn classify_set_ops(
     set_ops: &SetOpDiff,
     after_columns: Option<&[String]>,
+    first_branch_order: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
     match set_ops {
         SetOpDiff::Branches { added, removed, .. } if added.len() == 1 && removed.is_empty() => {
-            vec![build_f1_atom(0, &added[0], after_columns, inputs)]
+            vec![build_f1_atom(
+                0,
+                &added[0],
+                after_columns,
+                first_branch_order,
+                inputs,
+            )]
         }
         SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
             vec![set_op_refusal(
@@ -1134,10 +1237,11 @@ fn build_f1_atom(
     index: usize,
     branch: &SelectStmt,
     after_columns: Option<&[String]>,
+    first_branch_order: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
     let atom_change = AtomicChange::AddedSetOpBranch { index };
-    match build_f1_option(branch, after_columns, inputs) {
+    match build_f1_option(branch, after_columns, first_branch_order, inputs) {
         Ok(option) => AtomAnalysis {
             change: atom_change,
             options: vec![option],
@@ -1157,9 +1261,21 @@ fn build_f1_atom(
 /// F1 admission (research §4 F1): `UNION ALL` is additive, so the added
 /// branch is exactly the delta — `INSERT INTO t (<cols>) SELECT <cols> FROM
 /// (<branch>) …`, no difference predicate needed (unlike E2/E4).
+///
+/// C4 fix (final-review finding): `UNION ALL` binds columns *positionally*,
+/// not by name — a rebuild's `CREATE TABLE ... AS <after>` (with a
+/// multi-branch UNION ALL) takes every branch's column *names* from the
+/// first branch alone; a later branch's own declared names are irrelevant
+/// to the rebuild, only its column *order* matters. This emitter's `INSERT`
+/// is name-based (`emit::emit_branch_insert` selects the branch's own output
+/// columns by name into the target), so an added branch whose own output
+/// names/order do not exactly match the first branch's would silently bind
+/// different values under the same names than a real rebuild's positional
+/// binding would — refused here rather than risking that divergence.
 fn build_f1_option(
     branch: &SelectStmt,
     after_columns: Option<&[String]>,
+    first_branch_order: Option<&[String]>,
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
     let after_columns = after_columns.ok_or_else(|| {
@@ -1172,6 +1288,24 @@ fn build_f1_option(
             "F1 (added UNION ALL branch) refused: the after-definition has no output columns"
                 .to_string(),
         );
+    }
+
+    let first_branch_order = first_branch_order.ok_or_else(|| {
+        "F1 (added UNION ALL branch) refused: the first branch's own declared output column \
+         order could not be determined (the SELECT-list diff is opaque, or this diff shape is \
+         not one the classifier can prove a stable first-branch order for)"
+            .to_string()
+    })?;
+    let branch_columns = branch_output_column_names(branch)?;
+    if branch_columns != first_branch_order {
+        return Err(format!(
+            "F1 (added UNION ALL branch) refused: the added branch's own output column names/order \
+             ({branch_columns:?}) do not exactly match the first branch's declared order \
+             ({first_branch_order:?}) — UNION ALL binds columns positionally, so a rebuild would \
+             bind the added branch's values under the first branch's names, while this name-based \
+             INSERT would bind them under the added branch's own names, silently diverging \
+             whenever the two orders differ"
+        ));
     }
 
     let branch_sql = branch_own_text(branch);
@@ -1199,6 +1333,52 @@ fn build_f1_option(
         reads_upstream: true,
         rerun_safe: identity_columns.is_some(),
     })
+}
+
+/// `branch`'s own output column names, in declared order — C4's
+/// positional-`UNION-ALL` validation (`build_f1_option`) needs this to
+/// compare against the first branch's own declared order. Mirrors
+/// `diff.rs`'s private `collect_named_columns` (out of this phase's
+/// touch-scope; a small, self-contained SELECT-list walk, not the
+/// dependency-collection machinery the "don't fork" rule is about), but only
+/// ever needs the ordered name sequence, not each item's expression. Fails
+/// closed (an `Err`, never a silently empty/partial list) on any item this
+/// module cannot key by output name — a wildcard, a spread, or an item with
+/// no derivable name — exactly like `diff.rs`'s comparator does for the
+/// top-level SELECT list.
+fn branch_output_column_names(branch: &SelectStmt) -> Result<Vec<String>, String> {
+    let list = branch
+        .select_list()
+        .ok_or_else(|| "the added branch has no SELECT list".to_string())?;
+    let mut names = Vec::new();
+    for entry in list.entries() {
+        match entry {
+            SelectEntry::Item(item) => {
+                if item.is_wildcard() {
+                    return Err(
+                        "a wildcard SELECT item (`*`) in the added branch is not resolvable to \
+                         a named column — F1's positional-order validation needs an explicit \
+                         name for every branch column"
+                            .to_string(),
+                    );
+                }
+                let name = item.column_name().ok_or_else(|| {
+                    "a SELECT item in the added branch has no derivable output column name"
+                        .to_string()
+                })?;
+                names.push(name);
+            }
+            SelectEntry::Spread(_) => {
+                return Err(
+                    "a spread (`...expr`) SELECT item in the added branch is not resolvable to \
+                     a named column — F1's positional-order validation needs an explicit name \
+                     for every branch column"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(names)
 }
 
 /// `branch`'s own source text — just its own `SELECT`/`FROM`/`WHERE`/…
@@ -2396,6 +2576,7 @@ fn classify_single_added_left_join(
     atoms.extend(classify_set_ops(
         &comparable.set_ops,
         Some(&after_columns),
+        None,
         inputs,
     ));
 
@@ -2684,6 +2865,7 @@ fn classify_b7_diff(
     atoms.extend(classify_set_ops(
         &comparable.set_ops,
         Some(&after_columns),
+        None,
         inputs,
     ));
 

@@ -1539,3 +1539,36 @@ fn i1_unqualified_dim_reference_in_where_refuses_b4() {
         atom.inadmissible
     );
 }
+
+// ===== C4 regression: F1 must validate the added branch's own output
+// column names/order against positional UNION ALL semantics (final-review
+// finding C4) — an added branch with swapped column names/order would bind
+// differently under a real rebuild's positional UNION ALL than this
+// emitter's name-based INSERT would. =====
+
+#[test]
+fn c4_added_branch_with_swapped_column_order_refuses() {
+    // The added branch declares its columns in the opposite order/name
+    // pairing from the first branch: the first branch declares (id, kind)
+    // but the added branch declares (kind, id). A real rebuild binds
+    // `UNION ALL` positionally under the first branch's own column names,
+    // so the added branch's `kind` value would actually land in the
+    // deployed table's `id` column — a name-based `INSERT` (matching by
+    // declared name instead) would do the opposite, silently diverging.
+    let before_sql = "SELECT id, kind FROM events_a";
+    let after_sql = "SELECT id, kind FROM events_a UNION ALL SELECT kind, id FROM events_z";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("positionally")),
+        "expected a refusal naming UNION ALL's positional binding, got: {:?}",
+        atom.inadmissible
+    );
+}

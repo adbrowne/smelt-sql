@@ -1826,6 +1826,118 @@ fn f1_union_branch_insert() {
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
+// ===== C3 regression: multi-branch (UNION ALL) definitions must not
+// classify atoms from the positional first-branch diffs unless every one of
+// them is independently a no-op (final-review finding C3) — `diff.rs`
+// computes select_list/where/skeleton over each side's own first branch
+// only, while the branch multiset diff (`set_ops`) is reorder-insensitive; a
+// branch reorder alone can make the first-branch pair diverge without any
+// branch's own content changing, producing phantom atoms. =====
+
+#[test]
+fn c3_branch_reorder_of_non_first_branches_is_pure_noop() {
+    // Reordering the second and third branches (the first branch is
+    // byte-identical in both versions) never touches the positional
+    // first-branch diffs at all — this is a genuine A0 no-op, handled by
+    // the ordinary no-op short-circuit before the C3 gate is ever reached.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events_a (id INTEGER);
+         CREATE TABLE events_b (id INTEGER);
+         CREATE TABLE events_c (id INTEGER);
+         INSERT INTO events_a VALUES (1);
+         INSERT INTO events_b VALUES (2);
+         INSERT INTO events_c VALUES (3);",
+    );
+
+    let before_sql = "SELECT id FROM events_a UNION ALL SELECT id FROM events_b UNION ALL \
+                       SELECT id FROM events_c";
+    let after_sql = "SELECT id FROM events_a UNION ALL SELECT id FROM events_c UNION ALL \
+                      SELECT id FROM events_b";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(
+        diff.is_noop(),
+        "a reorder of non-first branches must be a pure no-op: {diff:?}"
+    );
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert!(
+        options.atoms.is_empty(),
+        "an A0 no-op must yield no atoms (no phantom atoms from the branch reorder), got {:?}",
+        options.atoms
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
+#[test]
+fn c3_branch_reorder_with_first_branch_where_difference_refuses() {
+    // The reproduced C3 counter-example: swapping the two branches turns
+    // "branch A has the filter, branch B doesn't" into "branch A doesn't
+    // have the filter, branch B does" — a pure reorder, semantically a
+    // no-op for the UNION ALL as a whole (the same two clauses run either
+    // way) — but the positional first-branch WHERE diff (branch1-before had
+    // `WHERE ts >= '2025-01-01'`, branch1-after has no WHERE at all) reports
+    // a single removed conjunct with nothing added, which pre-fix admitted
+    // E2's unconditional "filter loosened" difference INSERT sourced from
+    // the *whole* (both-branches) after-definition — duplicating every row
+    // already present via the unconditional branch. Must refuse instead.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (id INTEGER, ts DATE);
+         INSERT INTO events VALUES
+           (1, '2023-06-01'),
+           (2, '2024-06-01'),
+           (3, '2025-06-01'),
+           (4, '2026-06-01');",
+    );
+
+    // `ts` is selected (not just filtered on) so it is a genuine stored
+    // representative — otherwise E2's own requalification would refuse for
+    // an unrelated reason (no representative for `ts` at all) without ever
+    // exercising the C3 gate this test targets.
+    let before_sql = "SELECT id, ts FROM events WHERE ts >= '2025-01-01' UNION ALL SELECT id, ts \
+                       FROM events";
+    let after_sql = "SELECT id, ts FROM events UNION ALL SELECT id, ts FROM events WHERE ts >= \
+                      '2025-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(
+        options.atoms.len(),
+        1,
+        "expected exactly one refusal atom, no phantom atoms: {:?}",
+        options.atoms
+    );
+    let atom = &options.atoms[0];
+    assert!(
+        atom.options.is_empty(),
+        "a branch reorder that makes the first-branch WHERE diff diverge must refuse, got {:?}",
+        atom.options
+    );
+    assert_eq!(atom.inadmissible.len(), 1, "{atom:?}");
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .contains("multi-branch definition changed"),
+        "expected the C3 multi-branch refusal reason, got: {}",
+        atom.inadmissible[0].reason
+    );
+
+    let targeted = assemble(&options, &targeted_of_len(1));
+    assert!(
+        targeted.is_empty(),
+        "a refused atom must yield no composed targeted script, got {targeted:?}"
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
+}
+
 // ===== H composites (task-8-brief.md) =====
 
 /// B2 (rename) + B1 (self-derived add) + E1 (filter tightened) in one diff,
