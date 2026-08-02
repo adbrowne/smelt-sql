@@ -69,6 +69,35 @@ pub fn emit_column_backfill_update_from(
     format!("UPDATE {table} SET {sets} FROM {upstream_physical} {upstream_alias} WHERE {predicate}")
 }
 
+/// `(SELECT <alias>.<dim_col> FROM <physical> <alias> WHERE <table>.<k1> =
+/// <alias>.<k1> AND ...)` — research §4 B4's per-reference substituted
+/// scalar-subquery shape: called once per dimension-column reference inside
+/// an added expression (the caller, `classify.rs`, splices each returned
+/// fragment into the expression via
+/// `requalify::requalify_scalar_subquery`). A subquery that matches zero
+/// dimension rows yields NULL for exactly this one reference — LEFT-JOIN
+/// NULL-extension preserved at the leaf, while the rest of the surrounding
+/// expression (e.g. a `COALESCE`) still runs; the naive whole-expression
+/// form (wrapping the entire added expression in one subquery) is wrong for
+/// exactly this reason (research §4 B4).
+pub fn emit_scalar_subquery_fragment(
+    table: &str,
+    dim_col: &str,
+    upstream_physical: &str,
+    upstream_alias: &str,
+    key_pairs: &[(String, String)],
+) -> String {
+    let predicate = key_pairs
+        .iter()
+        .map(|(t_col, u_col)| format!("{table}.{t_col} = {upstream_alias}.{u_col}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!(
+        "(SELECT {upstream_alias}.{dim_col} FROM {upstream_physical} {upstream_alias} WHERE \
+         {predicate})"
+    )
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -140,6 +169,37 @@ mod tests {
             ),
             "UPDATE t SET total = u.amount FROM orders u WHERE t.region = u.region AND \
              t.order_id = u.order_id"
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_fragment_shape_single_key() {
+        assert_eq!(
+            emit_scalar_subquery_fragment(
+                "t",
+                "customer_name",
+                "customers",
+                "c",
+                &[("customer_id".to_string(), "customer_id".to_string())],
+            ),
+            "(SELECT c.customer_name FROM customers c WHERE t.customer_id = c.customer_id)"
+        );
+    }
+
+    #[test]
+    fn scalar_subquery_fragment_shape_composite_key() {
+        assert_eq!(
+            emit_scalar_subquery_fragment(
+                "t",
+                "name",
+                "dims",
+                "d",
+                &[
+                    ("region".to_string(), "region".to_string()),
+                    ("dim_id".to_string(), "dim_id".to_string()),
+                ],
+            ),
+            "(SELECT d.name FROM dims d WHERE t.region = d.region AND t.dim_id = d.dim_id)"
         );
     }
 }

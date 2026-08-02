@@ -392,6 +392,37 @@ pub enum Technique {
     /// `UPDATE t SET c = <requalified expr over u> FROM <upstream> u WHERE
     /// t.<k> = u.<k>` either way.
     UpstreamPullthrough,
+    /// B4 (research §4 B4), bare-pull-through shape: an added column that is
+    /// a bare pull-through (`d.x`) of a newly-added `LEFT JOIN`'s alias,
+    /// admitted once the join's row-set-preservation proof holds (LEFT +
+    /// at-most-one-match on the dimension side + the join key's NOT NULL
+    /// obligation). `ALTER TABLE t ADD COLUMN c <ty>;` then
+    /// `UPDATE t SET c = d.x FROM dim d WHERE t.<k> = d.<k>` — unmatched
+    /// rows stay at the post-`ALTER` NULL, exactly LEFT-JOIN semantics.
+    /// Only ever offered alongside [`Technique::JoinEnrichmentScalarSubquery`]
+    /// for the *same* atom (research §2 "Options, not choices"), never
+    /// alone — a bare pull-through always admits both shapes. Safety
+    /// asymmetry worth recording (research §2): under a wrongly-declared
+    /// `unique_key`, this shape silently picks one of several duplicate
+    /// dimension matches, whereas the scalar-subquery sibling errors loudly
+    /// at run time — a chooser reason to prefer the loud shape when
+    /// uniqueness is FD-derived rather than declared.
+    JoinEnrichmentUpdateFrom,
+    /// B4 (research §4 B4), per-reference substituted scalar-subquery shape:
+    /// each dimension-column reference inside the added expression is
+    /// individually replaced by its own scalar subquery
+    /// (`(SELECT d.x FROM dim d WHERE t.<k> = d.<k>)`), the surrounding
+    /// expression preserved around them — a subquery over zero matching
+    /// rows yields NULL for exactly that one reference, so a general
+    /// expression like `COALESCE(d.x, 'none')` still NULL-extends correctly
+    /// (unlike wrapping the *whole* expression in one subquery, which would
+    /// null the entire result before `COALESCE` ever runs — research §4
+    /// B4). The only option offered for a general expression; offered
+    /// alongside [`Technique::JoinEnrichmentUpdateFrom`] for a bare
+    /// pull-through. Each subquery also errors loudly on a duplicate
+    /// dimension match — the safety-asymmetry counterpart to
+    /// `JoinEnrichmentUpdateFrom`'s doc comment (research §2).
+    JoinEnrichmentScalarSubquery,
 }
 
 /// The research §2 "write scope" option metadata.

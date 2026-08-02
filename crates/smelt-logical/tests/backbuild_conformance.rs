@@ -25,7 +25,7 @@ use duckdb::Connection;
 
 use smelt_logical::backbuild::{
     assemble, definition_diff, derive_backbuild_options, BackbuildInputs, DefinitionDiff,
-    SelectListDiff, Selection, SourceRef,
+    SelectListDiff, Selection, SourceRef, Technique,
 };
 
 fn parse(sql: &str) -> smelt_parser::File {
@@ -747,4 +747,181 @@ fn b3_stale_upstream_documents_precondition() {
         "t must diverge from a full rebuild against current inputs — this is the documented \
          edge of the §2 precondition, not a correctness bug in the script"
     );
+}
+
+// ===== B4 (task-6-brief.md) =====
+
+fn customers_join_inputs(after_sql: &str, added_column_types: &[(&str, &str)]) -> BackbuildInputs {
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "c".to_string(),
+        source_ref("customers", &["customer_id"], &["customer_id"]),
+    );
+    BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        added_column_types: added_column_types
+            .iter()
+            .map(|(name, ty)| (name.to_string(), ty.to_string()))
+            .collect(),
+        sources,
+    }
+}
+
+#[test]
+fn b4_left_join_enrichment_fanout() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, customer_id INTEGER);
+         CREATE TABLE customers (customer_id INTEGER, customer_name TEXT);
+         INSERT INTO orders VALUES (1, 100), (2, 100), (3, 200);
+         INSERT INTO customers VALUES (100, 'alice'), (200, 'bob');",
+    );
+
+    // Genuine fan-out: two fact rows (1, 2) share dimension row 100 — the
+    // join must enrich both without dropping or duplicating either.
+    let before_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id, \
+                      c.customer_name AS customer_name FROM orders o LEFT JOIN customers c ON \
+                      o.customer_id = c.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = customers_join_inputs(after_sql, &[("customer_name", "TEXT")]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(
+        atom.options.len(),
+        2,
+        "a bare column pull must admit both B4 shapes, got {:?}",
+        atom.options
+    );
+    assert!(atom.inadmissible.is_empty());
+
+    let update_from = atom
+        .options
+        .iter()
+        .find(|o| o.technique == Technique::JoinEnrichmentUpdateFrom)
+        .expect("the UPDATE ... FROM shape");
+    assert!(update_from.statements[1].contains("FROM customers c"));
+    assert!(update_from.statements[1].contains("WHERE t.customer_id = c.customer_id"));
+
+    let scalar_subquery = atom
+        .options
+        .iter()
+        .find(|o| o.technique == Technique::JoinEnrichmentScalarSubquery)
+        .expect("the scalar-subquery shape");
+    assert!(scalar_subquery.statements[1].contains("(SELECT c.customer_name FROM customers c"));
+
+    // Each option is independently oracle-verified against its own fresh
+    // copy of the before-table (research §6).
+    for option in &atom.options {
+        harness::verify_option(&conn, "t", before_sql, after_sql, option);
+    }
+}
+
+#[test]
+fn b4_unmatched_rows_null_extend() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, customer_id INTEGER);
+         CREATE TABLE customers (customer_id INTEGER, customer_name TEXT);
+         INSERT INTO orders VALUES (1, 100), (2, 300);
+         INSERT INTO customers VALUES (100, 'alice');",
+    );
+
+    let before_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id, \
+                      c.customer_name AS customer_name FROM orders o LEFT JOIN customers c ON \
+                      o.customer_id = c.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = customers_join_inputs(after_sql, &[("customer_name", "TEXT")]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 2, "{:?}", atom.options);
+
+    // Each option matches a full rebuild exactly — the multiset oracle
+    // catches a wrongly-skipped or wrongly-defaulted unmatched row on its
+    // own, but pin the unmatched row's value directly too (NULL, not
+    // skipped or defaulted).
+    for option in &atom.options {
+        harness::verify_option(&conn, "t", before_sql, after_sql, option);
+    }
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &atom.options[0].statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply B4 backfill `{stmt}`: {e}"));
+    }
+    let unmatched = harness::text_column(
+        &conn,
+        "SELECT coalesce(customer_name, '<NULL>') FROM t WHERE order_id = 2",
+    );
+    assert_eq!(unmatched, vec!["<NULL>".to_string()]);
+}
+
+#[test]
+fn b4_general_expression_null_extension() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, customer_id INTEGER);
+         CREATE TABLE customers (customer_id INTEGER, customer_name TEXT);
+         INSERT INTO orders VALUES (1, 100), (2, 300);
+         INSERT INTO customers VALUES (100, 'alice');",
+    );
+
+    // COALESCE(c.customer_name, 'none') — NULL-extension must be
+    // *evaluated*, not skipped: an unmatched row must end 'none', not NULL.
+    let before_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id, \
+                      COALESCE(c.customer_name, 'none') AS customer_label FROM orders o LEFT \
+                      JOIN customers c ON o.customer_id = c.customer_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = customers_join_inputs(after_sql, &[("customer_label", "TEXT")]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = &options.atoms[0];
+    // The two naive shapes are the traps this test pins: a bare
+    // `UPDATE ... FROM` isn't even offered for a non-bare expression, and
+    // the whole-expression scalar subquery is not what
+    // `requalify_scalar_subquery` produces — only the per-reference
+    // substituted form is ever built.
+    assert_eq!(
+        atom.options.len(),
+        1,
+        "a general expression must offer only the per-reference substituted scalar-subquery \
+         option, got {:?}",
+        atom.options
+    );
+    assert_eq!(
+        atom.options[0].technique,
+        Technique::JoinEnrichmentScalarSubquery
+    );
+    assert!(
+        atom.options[0].statements[1].starts_with("UPDATE t SET customer_label = COALESCE("),
+        "{:?}",
+        atom.options[0].statements
+    );
+    assert!(atom.inadmissible.is_empty());
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &atom.options[0].statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply B4 backfill `{stmt}`: {e}"));
+    }
+    let unmatched = harness::text_column(&conn, "SELECT customer_label FROM t WHERE order_id = 2");
+    assert_eq!(unmatched, vec!["none".to_string()]);
 }

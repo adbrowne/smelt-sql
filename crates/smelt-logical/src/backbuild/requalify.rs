@@ -80,6 +80,41 @@ pub fn requalify_upstream(
     })
 }
 
+/// Requalify every column reference inside `expr` qualified by
+/// `source_alias` to a caller-supplied per-column scalar-subquery
+/// substitution — research `docs/research/20260802-backbuild-synthesis.md`
+/// §4 B4's "per-reference substituted" shape: each dimension-column
+/// reference is individually replaced by its own `(SELECT ...)` fragment
+/// (built by `substitute`, called with the reference's bare column name),
+/// the surrounding expression preserved around them.
+///
+/// This is what makes NULL-extension correct for a general expression
+/// (`COALESCE(d.x, 'none')`): a zero-row match nulls only the substituted
+/// leaf, so `COALESCE` still runs on it — wrapping the *whole* expression in
+/// one subquery instead would null the entire result before `COALESCE`
+/// ever sees it (research §4 B4).
+///
+/// Every reference must be qualified with exactly `source_alias` — the
+/// single dimension alias the caller's join row-set-preservation proof
+/// (`classify.rs`'s `admit_added_left_join`) already bound this
+/// expression's dependencies to — same fail-closed posture as
+/// [`requalify_upstream`]: a reference under a different qualifier, or with
+/// no qualifier at all, would mean that proof was unsound.
+pub fn requalify_scalar_subquery(
+    expr: &Expr,
+    source_alias: &str,
+    substitute: &impl Fn(&str) -> String,
+) -> Result<String, String> {
+    collect_and_splice(expr, &|col| match col.qualifier() {
+        Some(q) if q == source_alias => Ok(substitute(col.name())),
+        _ => Err(format!(
+            "column '{}' is not qualified with the dimension alias '{source_alias}' the join \
+             row-set-preservation proof bound this expression to",
+            col.name()
+        )),
+    })
+}
+
 fn collect_and_splice(
     expr: &Expr,
     resolve: &impl Fn(&ColumnRef) -> Result<String, String>,
@@ -332,6 +367,41 @@ mod tests {
     fn requalify_upstream_refuses_an_unqualified_reference() {
         let e = expr("discount");
         let err = requalify_upstream(&e, "o", "u").unwrap_err();
+        assert!(err.contains("discount"));
+    }
+
+    #[test]
+    fn requalify_scalar_subquery_substitutes_a_bare_reference() {
+        let e = expr("d.x");
+        let out = requalify_scalar_subquery(&e, "d", &|col| format!("(SUBQ {col})"))
+            .expect("requalify_scalar_subquery");
+        assert_eq!(out, "(SUBQ x)");
+    }
+
+    #[test]
+    fn requalify_scalar_subquery_substitutes_each_reference_inside_a_function_call() {
+        // Per-reference substitution, not whole-expression: the surrounding
+        // COALESCE call is preserved, and only the dim-column leaf is
+        // replaced — the shape research §4 B4 depends on for correct
+        // NULL-extension.
+        let e = expr("COALESCE(d.x, 'none')");
+        let out = requalify_scalar_subquery(&e, "d", &|col| format!("(SUBQ {col})"))
+            .expect("requalify_scalar_subquery");
+        assert_eq!(out, "COALESCE((SUBQ x), 'none')");
+    }
+
+    #[test]
+    fn requalify_scalar_subquery_substitutes_multiple_distinct_references() {
+        let e = expr("d.x + d.y");
+        let out = requalify_scalar_subquery(&e, "d", &|col| format!("(SUBQ {col})"))
+            .expect("requalify_scalar_subquery");
+        assert_eq!(out, "(SUBQ x) + (SUBQ y)");
+    }
+
+    #[test]
+    fn requalify_scalar_subquery_refuses_a_reference_under_a_different_alias() {
+        let e = expr("o.discount");
+        let err = requalify_scalar_subquery(&e, "d", &|col| format!("(SUBQ {col})")).unwrap_err();
         assert!(err.contains("discount"));
     }
 }

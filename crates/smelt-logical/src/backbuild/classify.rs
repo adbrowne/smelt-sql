@@ -25,7 +25,8 @@
 
 use std::collections::{BTreeSet, HashSet};
 
-use smelt_parser::{Expr, SelectStmt};
+use smelt_parser::syntax_kind::SyntaxNode;
+use smelt_parser::{Expr, JoinClause, JoinType, SelectStmt, SyntaxKind};
 
 use crate::analysis::model_diff;
 
@@ -58,11 +59,13 @@ pub fn derive_backbuild_options(
                 match &comparable.skeleton {
                     SkeletonDiff::Changed { reason } => vec![skeleton_refusal(reason)],
                     SkeletonDiff::Unchanged => classify_comparable(comparable, inputs),
-                    // Added LEFT JOIN(s) (B4/B7) are out of this phase's
-                    // scope — a conservative catch-all rather than
-                    // misclassifying a select-list change that arrived
-                    // alongside a new join.
-                    SkeletonDiff::AddedLeftJoins(_) => vec![unclassified_refusal()],
+                    // B4 (a single added LEFT JOIN feeding only added
+                    // columns, research §4 B4); two or more added LEFT
+                    // JOINs is B7 (research §4 B7), out of this phase's
+                    // scope.
+                    SkeletonDiff::AddedLeftJoins(joins) => {
+                        classify_added_left_join_diff(joins, comparable, inputs)
+                    }
                 }
             }
         }
@@ -135,10 +138,6 @@ fn classify_skeleton_reason(reason: &str) -> String {
     } else {
         format!("skeleton changed, not yet admissible — {reason}")
     }
-}
-
-fn unclassified_refusal() -> AtomAnalysis {
-    unclassified_refusal_named("whole-definition")
 }
 
 fn unclassified_refusal_named(atom: &str) -> AtomAnalysis {
@@ -269,6 +268,7 @@ fn classify_select_list(
             col,
             representatives,
             representative_sources,
+            None,
             inputs,
         ));
     }
@@ -322,11 +322,39 @@ fn classify_added_column(
     col: &SelectColumn,
     representatives: &BTreeSet<String>,
     representative_sources: &[RepresentativeSource],
+    join_admission: Option<&JoinAdmission>,
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
     let atom_change = AtomicChange::AddedColumn {
         name: col.name.clone(),
     };
+
+    // B4 (research §4 B4) takes priority when every dependency of `col`'s
+    // expression is qualified with a newly-added `LEFT JOIN`'s alias
+    // ("added SELECT items reference the new alias"): B1/B3 would refuse
+    // for such a column anyway (a brand-new alias never has a stored 1:1
+    // pull-through representative bound to it), so attempting them first
+    // would only produce confusing, redundant refusal text.
+    if let Some(admission) = join_admission {
+        if depends_only_on_join_alias(&col.expr, &admission.alias) {
+            return match try_b4(col, admission, inputs) {
+                Ok(options) => AtomAnalysis {
+                    change: atom_change,
+                    options,
+                    inadmissible: Vec::new(),
+                },
+                Err(reason) => AtomAnalysis {
+                    change: atom_change,
+                    options: Vec::new(),
+                    inadmissible: vec![BackbuildRefusal {
+                        atom: format!("added column '{}'", col.name),
+                        reason,
+                    }],
+                },
+            };
+        }
+    }
+
     match try_b1(col, representatives, inputs) {
         Ok(option) => AtomAnalysis {
             change: atom_change,
@@ -710,6 +738,505 @@ fn try_d2(
         // D1.
         rerun_safe: true,
     })
+}
+
+// ===== B4: new column via a newly-added LEFT JOIN — join-enrichment
+// backfill with the row-set-preservation proof (research §4 B4) =====
+
+/// A single added `LEFT JOIN`'s row-set-preservation proof, once admitted by
+/// [`admit_added_left_join`]: the join's FROM-tree alias, its upstream's
+/// physical table name, and the `(target output column, dimension raw
+/// column)` key-equality pairs the emitted backfill's predicate is built
+/// from — one per component of the dimension's declared `unique_key`.
+struct JoinAdmission {
+    alias: String,
+    physical_name: String,
+    key_pairs: Vec<(String, String)>,
+}
+
+/// The FROM-tree reference name an added join's own SQL uses to reach its
+/// table — its alias when the join aliases it, otherwise its bare table
+/// identifier (mirrors [`super::SourceRef`]'s doc comment: the same
+/// per-FROM-tree-alias binding B3/D2's grain-link proof uses).
+fn join_reference_name(join: &JoinClause) -> Option<String> {
+    let table_ref = join.table_ref()?;
+    table_ref.alias().or_else(|| table_ref.identifier())
+}
+
+/// The row-set-preservation proof for a single added `LEFT JOIN` (research
+/// §4 B4): LEFT (never removes a row) + at-most-one-match (the ON's
+/// dim-side key columns exactly match the dimension's declared
+/// `unique_key`) + the shared NOT NULL obligation on that key (research §4
+/// intro "Key addressability") + the ON condition being a bare key equality
+/// (no extra dim-side conjuncts, no non-equality comparison) + the
+/// fact-side key columns having a stored bare representative (so the
+/// emitted backfill can address `t` by them) + "nothing but the added
+/// SELECT items reference the new alias" (a WHERE conjunct or a changed
+/// column reading it means the join is not a pure enrichment — the row set
+/// is no longer preserved by the join alone). A pre-existing join's
+/// condition referencing the new alias is impossible by construction:
+/// `diff.rs`'s `join_equal` requires every non-added join's condition to be
+/// byte-identical (modulo trivia) to its before-version, which could not
+/// have referenced an alias that did not exist yet — so that leg needs no
+/// separate check here.
+fn admit_added_left_join(
+    join: &JoinClause,
+    changed: &[ChangedColumn],
+    where_added: &[Expr],
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<JoinAdmission, String> {
+    // Defensive only: `diff.rs`'s `SkeletonDiff::AddedLeftJoins` is only
+    // constructed for `LEFT JOIN`s (a non-LEFT added join routes to
+    // `SkeletonDiff::Changed`'s G2 refusal before this function is ever
+    // called) — never reachable in practice.
+    if join.join_type() != Some(JoinType::Left) {
+        return Err("B4 requires a LEFT JOIN — an INNER/other join type can drop rows".to_string());
+    }
+
+    let alias = join_reference_name(join).ok_or_else(|| {
+        "the added join's table reference has no resolvable alias or identifier".to_string()
+    })?;
+
+    if let Some(w) = where_added.iter().find(|w| references_alias(w, &alias)) {
+        let _ = w;
+        return Err(format!(
+            "the WHERE clause now references the added join's alias '{alias}' — the join is not \
+             a pure enrichment (the row set is no longer preserved by the join alone)"
+        ));
+    }
+    if let Some(c) = changed.iter().find(|c| references_alias(&c.after, &alias)) {
+        return Err(format!(
+            "changed column '{}' now references the added join's alias '{alias}' — B4 only \
+             admits a join that feeds solely added columns",
+            c.name
+        ));
+    }
+
+    let source = inputs.sources.get(&alias).ok_or_else(|| {
+        format!(
+            "no source declared for the added join's alias '{alias}' in \
+             BackbuildInputs::sources"
+        )
+    })?;
+
+    let condition = join
+        .condition()
+        .ok_or_else(|| "the added join has no ON/USING condition".to_string())?;
+    if !condition.is_on() {
+        return Err(
+            "the added join's condition is not a bare ON key equality (USING is not yet \
+             supported by B4)"
+                .to_string(),
+        );
+    }
+    let on_expr = condition
+        .on_expression()
+        .ok_or_else(|| "the added join's ON condition has no expression".to_string())?;
+
+    let mut conjuncts = Vec::new();
+    split_top_level_and(&on_expr, &mut conjuncts);
+
+    let mut dim_cols = BTreeSet::new();
+    let mut key_pairs_raw: Vec<(Option<String>, String, String)> = Vec::new();
+    for conjunct in &conjuncts {
+        let bin = conjunct
+            .as_binary()
+            .filter(|b| b.operator().as_deref() == Some("="));
+        let Some(bin) = bin else {
+            return Err(bare_key_equality_refusal());
+        };
+        let l = bin.left().and_then(|e| e.as_column_ref());
+        let r = bin.right().and_then(|e| e.as_column_ref());
+        let (Some(l), Some(r)) = (l, r) else {
+            return Err(bare_key_equality_refusal());
+        };
+        let l_is_dim = l.qualifier() == Some(alias.as_str());
+        let r_is_dim = r.qualifier() == Some(alias.as_str());
+        let (dim_col, fact_qualifier, fact_col) = match (l_is_dim, r_is_dim) {
+            (true, false) => (
+                l.name().to_string(),
+                r.qualifier().map(|q| q.to_string()),
+                r.name().to_string(),
+            ),
+            (false, true) => (
+                r.name().to_string(),
+                l.qualifier().map(|q| q.to_string()),
+                l.name().to_string(),
+            ),
+            _ => return Err(bare_key_equality_refusal()),
+        };
+        dim_cols.insert(dim_col.clone());
+        key_pairs_raw.push((fact_qualifier, fact_col, dim_col));
+    }
+
+    let unique_key = source
+        .unique_key
+        .as_ref()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "upstream '{alias}' has no declared unique_key — the join's at-most-one-match \
+                 proof needs an addressable identity"
+            )
+        })?;
+    let unique_key_set: BTreeSet<String> = unique_key.iter().cloned().collect();
+    if dim_cols != unique_key_set {
+        return Err(format!(
+            "the added join's ON key columns ({dim_cols:?}) do not exactly match upstream \
+             '{alias}''s declared unique_key ({unique_key_set:?}) — at-most-one-match is not \
+             proven"
+        ));
+    }
+
+    for k in &dim_cols {
+        if !source.not_null_columns.contains(k) {
+            return Err(format!(
+                "upstream '{alias}''s join key column '{k}' is not declared NOT NULL \
+                 (BackbuildInputs::sources[...].not_null_columns) — SQL UNIQUE admits NULLs, and \
+                 an equality join never matches a NULL-keyed row"
+            ));
+        }
+    }
+
+    let mut key_pairs = Vec::with_capacity(key_pairs_raw.len());
+    for (fact_qualifier, fact_col, dim_col) in key_pairs_raw {
+        let rep = representative_sources
+            .iter()
+            .find(|r| r.qualifier == fact_qualifier && r.raw_name == fact_col);
+        let Some(rep) = rep else {
+            return Err(format!(
+                "the added join's key column '{fact_col}' has no stored bare representative in \
+                 the model's own output — a join keyed on a column the model does not store is \
+                 unaddressable; add it to the SELECT list to make this backfillable"
+            ));
+        };
+        key_pairs.push((rep.output_name.clone(), dim_col));
+    }
+
+    Ok(JoinAdmission {
+        alias,
+        physical_name: source.physical_name.clone(),
+        key_pairs,
+    })
+}
+
+fn bare_key_equality_refusal() -> String {
+    "the added join's ON condition contains something beyond a bare key equality (extra \
+     dim-side conjuncts or a non-equality comparison are not reproduced)"
+        .to_string()
+}
+
+/// Recursively split `expr` into its top-level `AND`-joined conjuncts.
+/// Mirrors `diff.rs`'s private `split_conjuncts` (out of this phase's
+/// touch-scope) — a small, self-contained comparator duplicated here rather
+/// than exposed, same posture as [`expr_equal_modulo_trivia`] below.
+fn split_top_level_and(expr: &Expr, out: &mut Vec<Expr>) {
+    if let Some(bin) = expr.as_binary() {
+        if bin.operator().as_deref() == Some("AND") {
+            if let (Some(l), Some(r)) = (bin.left(), bin.right()) {
+                split_top_level_and(&l, out);
+                split_top_level_and(&r, out);
+                return;
+            }
+        }
+    }
+    out.push(expr.clone());
+}
+
+/// Whether `expr`'s subtree contains any column reference qualified by
+/// `alias` — a permissive existence probe over one already-bounded node (a
+/// WHERE conjunct or a changed column's expression), unlike the fail-closed
+/// `collect_qualified_dependencies`/`model_diff::collect_dependencies`
+/// walks elsewhere in this file: this is a leaf classifier answering "does
+/// this reference the alias at all", not a derivability proof, so an
+/// unrecognised sub-shape is simply walked through rather than refused.
+/// Mirrors the `collect_column_refs`/`_rec` shape duplicated across this
+/// crate's analysis modules (e.g. `analysis/fingerprint.rs`).
+fn references_alias(expr: &Expr, alias: &str) -> bool {
+    references_alias_node(expr.syntax(), alias)
+}
+
+fn references_alias_node(node: &SyntaxNode, alias: &str) -> bool {
+    if node.kind() == SyntaxKind::EXPRESSION {
+        if let Some(col) = Expr::cast(node.clone()).and_then(|e| e.as_column_ref()) {
+            return col.qualifier() == Some(alias);
+        }
+    }
+    node.children()
+        .any(|child| references_alias_node(&child, alias))
+}
+
+/// Whether every dependency of `expr` is qualified with `alias` — the B4
+/// detection gate (research §4 B4: "added SELECT items reference the new
+/// alias"). `false` for an expression with no dependencies at all, or a
+/// mix of alias-qualified and other dependencies (mixed fact/dimension
+/// dependencies are not yet supported — such a column falls through to the
+/// ordinary B1/B3 attempt, which will refuse on its own, unrelated,
+/// merits).
+fn depends_only_on_join_alias(expr: &Expr, alias: &str) -> bool {
+    match collect_qualified_dependencies(expr) {
+        Ok(deps) if !deps.is_empty() => deps.iter().all(|(q, _)| q.as_deref() == Some(alias)),
+        _ => false,
+    }
+}
+
+/// B4 (research §4 B4): an added SELECT item whose dependencies are wholly
+/// qualified by a newly-added `LEFT JOIN`'s alias, admitted once
+/// [`admit_added_left_join`]'s row-set-preservation proof holds for the
+/// join. Shape enumeration is expression-driven (research §2 "Options, not
+/// choices"): a bare column pull (`d.x`) admits both the `UPDATE ... FROM`
+/// shape and the per-reference substituted scalar-subquery shape; any other
+/// expression admits only the scalar-subquery shape — the NULL-extension
+/// case (`COALESCE(d.x, 'none')`) is *wrong* under a whole-expression
+/// subquery (a zero-row match nulls the entire expression before the
+/// surrounding function ever runs), which is exactly why each dim-column
+/// *reference* is individually substituted rather than the whole expression
+/// (research §4 B4). See [`Technique::JoinEnrichmentUpdateFrom`] and
+/// [`Technique::JoinEnrichmentScalarSubquery`]'s doc comments for the
+/// safety-asymmetry metadata research §2 asks to be recorded per option.
+fn try_b4(
+    col: &SelectColumn,
+    admission: &JoinAdmission,
+    inputs: &BackbuildInputs,
+) -> Result<Vec<BackbuildOption>, String> {
+    let deps = collect_qualified_dependencies(&col.expr).map_err(|reason| {
+        format!(
+            "B4 (join-enrichment backfill) refused for '{}': {reason}",
+            col.name
+        )
+    })?;
+    if deps.is_empty()
+        || !deps
+            .iter()
+            .all(|(q, _)| q.as_deref() == Some(admission.alias.as_str()))
+    {
+        return Err(format!(
+            "B4 (join-enrichment backfill) refused for '{}': every dependency must be qualified \
+             with the added join's alias '{}' — a mix of fact- and dimension-side dependencies \
+             is not yet supported",
+            col.name, admission.alias
+        ));
+    }
+
+    let sql_type = inputs.added_column_types.get(&col.name).ok_or_else(|| {
+        format!(
+            "B4 (join-enrichment backfill) refused for '{}': no declared SQL type in \
+             BackbuildInputs::added_column_types",
+            col.name
+        )
+    })?;
+    let alter = emit::emit_alter_add_column(&inputs.table, &col.name, sql_type);
+
+    let mut options = Vec::new();
+
+    // Bare column pull (`d.x`) additionally admits the `UPDATE ... FROM`
+    // shape (research §4 B4).
+    if let Some(bare) = col.expr.as_column_ref() {
+        let update_from = emit::emit_column_backfill_update_from(
+            &inputs.table,
+            &[(
+                col.name.clone(),
+                format!("{}.{}", admission.alias, bare.name()),
+            )],
+            &admission.physical_name,
+            &admission.alias,
+            &admission.key_pairs,
+        );
+        options.push(BackbuildOption {
+            technique: Technique::JoinEnrichmentUpdateFrom,
+            slot: Some(HSlot::Alter),
+            statements: vec![alter.clone(), update_from],
+            write_scope: WriteScope::ColumnScoped,
+            reads_upstream: true,
+            // The `ALTER ADD` step is DDL and not re-runnable (research §2
+            // "Idempotence"), same as B1/B3.
+            rerun_safe: false,
+        });
+    }
+
+    // The per-reference substituted scalar-subquery shape — the only option
+    // for a general expression, and always offered alongside the bare-pull
+    // `UPDATE ... FROM` shape above.
+    let subquery_for = |dim_col: &str| {
+        emit::emit_scalar_subquery_fragment(
+            &inputs.table,
+            dim_col,
+            &admission.physical_name,
+            &admission.alias,
+            &admission.key_pairs,
+        )
+    };
+    let scalar_expr =
+        requalify::requalify_scalar_subquery(&col.expr, &admission.alias, &subquery_for).map_err(
+            |reason| {
+                format!(
+                    "B4 (join-enrichment backfill) refused for '{}': {reason}",
+                    col.name
+                )
+            },
+        )?;
+    let scalar_update =
+        emit::emit_in_place_update(&inputs.table, &[(col.name.clone(), scalar_expr)]);
+    options.push(BackbuildOption {
+        technique: Technique::JoinEnrichmentScalarSubquery,
+        slot: Some(HSlot::Alter),
+        statements: vec![alter, scalar_update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: true,
+        rerun_safe: false,
+    });
+
+    Ok(options)
+}
+
+/// B7 (research §4 B7, "sequential multi-join enrichment"): two or more
+/// added `LEFT JOIN`s, backfilled one step at a time — out of this phase's
+/// scope. Refuse with a named reason rather than misclassifying it as a
+/// single B4 backfill.
+fn b7_refusal() -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Skeleton {
+            reason: "two or more added LEFT JOINs".to_string(),
+        },
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: "skeleton".to_string(),
+            reason: "B7 (sequential multi-join enrichment) is out of this phase's scope — two \
+                     or more added LEFT JOINs are refused here rather than misclassified as a \
+                     single B4 backfill"
+                .to_string(),
+        }],
+    }
+}
+
+/// A single, named refusal for the whole added-`LEFT JOIN` skeleton change
+/// (research §4 B4): used both when [`admit_added_left_join`]'s proof fails
+/// outright and when the select list this phase cannot factor (`Opaque`)
+/// arrives alongside an added join. Mirrors [`skeleton_refusal`]'s shape —
+/// the shared B/D-class row-set-unchanged precondition (research §4 intro)
+/// fails for the *whole* diff once the join cannot be licensed, so (as with
+/// any other skeleton refusal) no per-column classification is attempted.
+fn added_left_join_refusal(reason: &str) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Skeleton {
+            reason: reason.to_string(),
+        },
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: "skeleton".to_string(),
+            reason: format!("B4 (join-enrichment backfill) refused: {reason}"),
+        }],
+    }
+}
+
+/// Classify a diff whose skeleton is [`SkeletonDiff::AddedLeftJoins`]
+/// (research §4 B4): exactly one added `LEFT JOIN`, admitted via
+/// [`admit_added_left_join`] once for the whole join, then classified per
+/// atom — added SELECT items depending solely on the new alias go through
+/// [`try_b4`] (via [`classify_added_column`]'s `join_admission` parameter);
+/// everything else (rename pairing, ordinary B1/B3 adds, D1/D2 changed
+/// columns, the WHERE/set-operation catch-alls) runs through the same
+/// machinery [`classify_comparable`] uses for an unchanged skeleton. Two or
+/// more added joins refuse outright (B7, out of scope); an admission
+/// failure for the single join refuses the *whole* diff (no atom list),
+/// since the shared row-set-unchanged precondition (research §4 intro) then
+/// fails for every atom, not just the join's own added columns.
+fn classify_added_left_join_diff(
+    joins: &[JoinClause],
+    comparable: &ComparableDiff,
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
+    if joins.len() != 1 {
+        return vec![b7_refusal()];
+    }
+    let join = &joins[0];
+
+    let (added, dropped, changed, unchanged) = match &comparable.select_list {
+        SelectListDiff::Opaque { reason } => {
+            return vec![unclassified_refusal_named(&format!(
+                "select-list: {reason}"
+            ))];
+        }
+        SelectListDiff::Diffed {
+            added,
+            dropped,
+            changed,
+            unchanged,
+        } => (added, dropped, changed, unchanged),
+    };
+
+    let where_added: &[Expr] = match &comparable.where_clause {
+        ConjunctDiff::Diffed { added, .. } => added.as_slice(),
+        ConjunctDiff::Opaque { .. } => &[],
+    };
+
+    let representatives = representative_names(unchanged);
+    let representative_sources = representative_sources(unchanged);
+
+    let admission =
+        match admit_added_left_join(join, changed, where_added, &representative_sources, inputs) {
+            Ok(admission) => admission,
+            Err(reason) => return vec![added_left_join_refusal(&reason)],
+        };
+
+    let mut atoms = Vec::new();
+
+    let RenamePairing {
+        atoms: mut rename_atoms,
+        consumed_added,
+    } = pair_renames(dropped, added, inputs);
+    atoms.append(&mut rename_atoms);
+
+    for col in added {
+        if consumed_added.contains(&col.name) {
+            continue;
+        }
+        atoms.push(classify_added_column(
+            col,
+            &representatives,
+            &representative_sources,
+            Some(&admission),
+            inputs,
+        ));
+    }
+
+    let changed_names: BTreeSet<String> = changed.iter().map(|c| c.name.clone()).collect();
+    for c in changed {
+        atoms.push(classify_changed_column(
+            c,
+            &representatives,
+            &representative_sources,
+            &changed_names,
+            inputs,
+        ));
+    }
+
+    match &comparable.where_clause {
+        ConjunctDiff::Diffed { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
+            atoms.push(unclassified_refusal_named("where-clause"));
+        }
+        ConjunctDiff::Opaque { reason } => {
+            atoms.push(unclassified_refusal_named(&format!(
+                "where-clause: {reason}"
+            )));
+        }
+        _ => {}
+    }
+
+    match &comparable.set_ops {
+        SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
+            atoms.push(unclassified_refusal_named("set-operations"));
+        }
+        SetOpDiff::Opaque { reason } => {
+            atoms.push(unclassified_refusal_named(&format!(
+                "set-operations: {reason}"
+            )));
+        }
+        _ => {}
+    }
+
+    atoms
 }
 
 // ===== D1: changed existing-column expression, derivable from stored

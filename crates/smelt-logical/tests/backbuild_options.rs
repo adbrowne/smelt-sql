@@ -759,3 +759,153 @@ fn b3_self_join_binds_per_alias() {
         atom.inadmissible
     );
 }
+
+// ===== B4 (task-6-brief.md) =====
+
+fn dims_inputs(
+    added_column_types: &[(&str, &str)],
+    unique_key: Option<&[&str]>,
+    not_null_columns: &[&str],
+) -> BackbuildInputs {
+    inputs_with_sources(
+        added_column_types,
+        &[("d", source_ref("dims", unique_key, not_null_columns))],
+    )
+}
+
+#[test]
+fn b4_join_key_not_stored_refuses() {
+    // `order_id` is never pulled through at all — nothing to bind the
+    // added join's fact-side key to.
+    let before_sql = "SELECT o.customer AS customer FROM orders o";
+    let after_sql = "SELECT o.customer AS customer, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("order_id") && r.reason.contains("stored")),
+        "expected a named, actionable refusal naming 'order_id', got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b4_on_beyond_bare_key_equality_refuses() {
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id AND d.active";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("bare key equality")),
+        "expected a refusal naming the ON condition, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b4_nullable_join_key_refuses() {
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    // `unique_key` is declared, but the key column is not declared NOT NULL
+    // (research §4 "Key addressability").
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &[]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("not null")),
+        "expected a NOT NULL refusal, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b4_inner_join_refuses() {
+    // A bare `JOIN` (no LEFT keyword) defaults to INNER — `diff.rs` never
+    // even produces `SkeletonDiff::AddedLeftJoins` for it (it lands in
+    // `SkeletonDiff::Changed`'s G2 refusal), so this never reaches B4's own
+    // admission code at all.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o JOIN dims \
+                      d ON o.order_id = d.order_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+}
+
+#[test]
+fn b4_nonunique_dim_key_refuses() {
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], None, &[]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("unique_key")),
+        "expected a refusal naming the missing unique_key, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b4_alias_referenced_in_where_refuses() {
+    // The new alias 'd' is referenced in the WHERE clause — the join is no
+    // longer a pure enrichment (the row set is no longer preserved by the
+    // join alone), even though the join's own row-set-preservation proof
+    // (LEFT + unique + NOT NULL + bare key equality) otherwise holds.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id WHERE d.active = TRUE";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("where")),
+        "expected a refusal naming the WHERE reference, got: {:?}",
+        atom.inadmissible
+    );
+}
