@@ -137,17 +137,24 @@ impl ConjunctDiff {
     }
 }
 
-/// The FROM/JOIN-tree + GROUP BY + dedup ("skeleton") diff.
+/// The FROM/JOIN-tree + GROUP BY + dedup ("skeleton") diff. Also covers the
+/// post-processing clauses that gate row-set, ordering, or row-count
+/// semantics on their own — `HAVING`, `QUALIFY`, `WINDOW`, `ORDER BY`, and
+/// `LIMIT`/`OFFSET` — since none of those has anywhere else to be
+/// represented and a silent pass-through would misreport a real semantic
+/// change as unchanged.
 #[derive(Debug, Clone)]
 pub enum SkeletonDiff {
     Unchanged,
     /// Otherwise-unchanged skeleton (same FROM target, same GROUP BY /
-    /// DISTINCT, all pre-existing joins present and unchanged in order) plus
-    /// one or more newly added `LEFT JOIN`s.
+    /// DISTINCT, same HAVING/QUALIFY/WINDOW/ORDER BY/LIMIT, all pre-existing
+    /// joins present and unchanged in order) plus one or more newly added
+    /// `LEFT JOIN`s.
     AddedLeftJoins(Vec<JoinClause>),
     /// Any other skeleton difference: the FROM target changed, GROUP BY /
-    /// DISTINCT changed, an existing join's condition or type changed, a
-    /// join was removed, or an added join is not a `LEFT JOIN`.
+    /// DISTINCT changed, HAVING/QUALIFY/WINDOW/ORDER BY/LIMIT changed, an
+    /// existing join's condition or type changed, a join was removed, or an
+    /// added join is not a `LEFT JOIN`.
     Changed {
         reason: String,
     },

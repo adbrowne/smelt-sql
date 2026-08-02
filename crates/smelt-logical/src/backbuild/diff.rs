@@ -312,7 +312,9 @@ fn split_conjuncts(expr: &Expr, out: &mut Vec<Expr>) {
     out.push(expr.clone());
 }
 
-// ===== Skeleton (FROM/JOIN tree, GROUP BY, dedup) =====
+// ===== Skeleton (FROM/JOIN tree, GROUP BY, dedup, and the post-processing
+// clauses — HAVING/QUALIFY/WINDOW/ORDER BY/LIMIT — that also gate row-set,
+// ordering, or row-count semantics) =====
 
 fn skeleton_diff(before: &SelectStmt, after: &SelectStmt) -> SkeletonDiff {
     let before_from = before.from_clause();
@@ -349,6 +351,10 @@ fn skeleton_diff(before: &SelectStmt, after: &SelectStmt) -> SkeletonDiff {
         };
     }
 
+    if let Some(reason) = post_processing_clause_changed(before, after) {
+        return SkeletonDiff::Changed { reason };
+    }
+
     let before_joins: Vec<JoinClause> = before_from.iter().flat_map(|f| f.joins()).collect();
     let after_joins: Vec<JoinClause> = after_from.iter().flat_map(|f| f.joins()).collect();
 
@@ -357,6 +363,75 @@ fn skeleton_diff(before: &SelectStmt, after: &SelectStmt) -> SkeletonDiff {
         JoinDiffResult::AddedLeft(added) => SkeletonDiff::AddedLeftJoins(added),
         JoinDiffResult::Changed(reason) => SkeletonDiff::Changed { reason },
     }
+}
+
+/// Compare the five post-processing clauses the row-set/skeleton comparison
+/// above would otherwise silently ignore: `HAVING`, `QUALIFY`, `WINDOW`,
+/// `ORDER BY`, `LIMIT`/`OFFSET`. Each of these gates row-set, ordering, or
+/// row-count semantics on its own — research §4's honest-refusals catalogue
+/// (G-class) calls out "LIMIT/ORDER BY changes: refuse" specifically — so a
+/// difference here must never be folded into an otherwise-`Unchanged`
+/// verdict. Returns the reason for the first difference found, or `None` if
+/// all five compare equal (modulo trivia) between versions.
+///
+/// `HAVING`/`QUALIFY` are compared via their single expression (there is no
+/// other content in either clause); `WINDOW`/`ORDER BY`/`LIMIT` are compared
+/// as whole subtrees. A clause present on one side with no expression at all
+/// (a shape this module doesn't expect from a successful parse) never counts
+/// as equal to the clause being absent — fail closed rather than guess.
+fn post_processing_clause_changed(before: &SelectStmt, after: &SelectStmt) -> Option<String> {
+    let having_equal = match (before.having_clause(), after.having_clause()) {
+        (None, None) => true,
+        (Some(b), Some(a)) => match (b.expression(), a.expression()) {
+            (Some(be), Some(ae)) => same_modulo_trivia(be.syntax(), ae.syntax()),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !having_equal {
+        return Some("HAVING changed".to_string());
+    }
+
+    let qualify_equal = match (before.qualify_clause(), after.qualify_clause()) {
+        (None, None) => true,
+        (Some(b), Some(a)) => match (b.expression(), a.expression()) {
+            (Some(be), Some(ae)) => same_modulo_trivia(be.syntax(), ae.syntax()),
+            _ => false,
+        },
+        _ => false,
+    };
+    if !qualify_equal {
+        return Some("QUALIFY changed".to_string());
+    }
+
+    let window_equal = match (before.window_clause(), after.window_clause()) {
+        (None, None) => true,
+        (Some(b), Some(a)) => same_modulo_trivia(b.syntax(), a.syntax()),
+        _ => false,
+    };
+    if !window_equal {
+        return Some("WINDOW changed".to_string());
+    }
+
+    let order_by_equal = match (before.order_by_clause(), after.order_by_clause()) {
+        (None, None) => true,
+        (Some(b), Some(a)) => same_modulo_trivia(b.syntax(), a.syntax()),
+        _ => false,
+    };
+    if !order_by_equal {
+        return Some("ORDER BY changed".to_string());
+    }
+
+    let limit_equal = match (before.limit_clause(), after.limit_clause()) {
+        (None, None) => true,
+        (Some(b), Some(a)) => same_modulo_trivia(b.syntax(), a.syntax()),
+        _ => false,
+    };
+    if !limit_equal {
+        return Some("LIMIT/OFFSET changed".to_string());
+    }
+
+    None
 }
 
 enum JoinDiffResult {

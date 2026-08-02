@@ -3796,9 +3796,8 @@ impl LimitClause {
         None
     }
 
-    /// Get the underlying syntax node (for printer)
-    #[allow(dead_code)] // Used by printer module
-    pub(crate) fn syntax(&self) -> &SyntaxNode {
+    /// Get the underlying syntax node.
+    pub fn syntax(&self) -> &SyntaxNode {
         &self.0
     }
 }

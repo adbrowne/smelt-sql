@@ -253,3 +253,114 @@ fn changed_cte_is_opaque() {
         other => panic!("expected Diffed select_list, got {other:?}"),
     }
 }
+
+// Regression coverage for a review finding: a change confined to HAVING,
+// QUALIFY, WINDOW, ORDER BY, or LIMIT must never be silently treated as a
+// no-op — every tracked sub-diff (select_list/where_clause/skeleton/set_ops)
+// stays unchanged in these cases except skeleton, which must surface the
+// difference as `SkeletonDiff::Changed`.
+
+#[test]
+fn having_only_change_is_not_noop() {
+    let before = parse("SELECT id, count(*) AS n FROM orders GROUP BY id HAVING count(*) > 5");
+    let after = parse("SELECT id, count(*) AS n FROM orders GROUP BY id HAVING count(*) > 1");
+
+    let diff = definition_diff(&before, &after);
+    assert!(!diff.is_noop(), "a HAVING-only change must not be a no-op");
+    let c = comparable(&diff);
+    match &c.skeleton {
+        SkeletonDiff::Changed { reason } => {
+            assert!(reason.contains("HAVING"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected Changed skeleton diff for a HAVING edit, got {other:?}"),
+    }
+}
+
+#[test]
+fn qualify_only_change_is_not_noop() {
+    let before =
+        parse("SELECT id, row_number() OVER (ORDER BY id) AS rn FROM orders QUALIFY rn = 1");
+    let after =
+        parse("SELECT id, row_number() OVER (ORDER BY id) AS rn FROM orders QUALIFY rn <= 2");
+
+    let diff = definition_diff(&before, &after);
+    assert!(!diff.is_noop(), "a QUALIFY-only change must not be a no-op");
+    let c = comparable(&diff);
+    match &c.skeleton {
+        SkeletonDiff::Changed { reason } => {
+            assert!(reason.contains("QUALIFY"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected Changed skeleton diff for a QUALIFY edit, got {other:?}"),
+    }
+}
+
+#[test]
+fn window_only_change_is_not_noop() {
+    let before = parse("SELECT id, rank() OVER w AS r FROM orders WINDOW w AS (ORDER BY id)");
+    let after = parse("SELECT id, rank() OVER w AS r FROM orders WINDOW w AS (ORDER BY id DESC)");
+
+    let diff = definition_diff(&before, &after);
+    assert!(!diff.is_noop(), "a WINDOW-only change must not be a no-op");
+    let c = comparable(&diff);
+    match &c.skeleton {
+        SkeletonDiff::Changed { reason } => {
+            assert!(reason.contains("WINDOW"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected Changed skeleton diff for a WINDOW edit, got {other:?}"),
+    }
+}
+
+#[test]
+fn order_by_only_change_is_not_noop() {
+    let before = parse("SELECT id, amount FROM orders ORDER BY amount ASC");
+    let after = parse("SELECT id, amount FROM orders ORDER BY amount DESC");
+
+    let diff = definition_diff(&before, &after);
+    assert!(
+        !diff.is_noop(),
+        "an ORDER BY-only change must not be a no-op"
+    );
+    let c = comparable(&diff);
+    match &c.skeleton {
+        SkeletonDiff::Changed { reason } => {
+            assert!(reason.contains("ORDER BY"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected Changed skeleton diff for an ORDER BY edit, got {other:?}"),
+    }
+}
+
+#[test]
+fn limit_only_change_is_not_noop() {
+    let before = parse("SELECT id, amount FROM orders LIMIT 10");
+    let after = parse("SELECT id, amount FROM orders LIMIT 5");
+
+    let diff = definition_diff(&before, &after);
+    assert!(!diff.is_noop(), "a LIMIT-only change must not be a no-op");
+    let c = comparable(&diff);
+    match &c.skeleton {
+        SkeletonDiff::Changed { reason } => {
+            assert!(reason.contains("LIMIT"), "unexpected reason: {reason}");
+        }
+        other => panic!("expected Changed skeleton diff for a LIMIT edit, got {other:?}"),
+    }
+}
+
+#[test]
+fn having_qualify_window_order_by_limit_unchanged_stays_noop() {
+    // Sanity check for the fix: identical HAVING/QUALIFY/WINDOW/ORDER
+    // BY/LIMIT clauses (reformatted only) must still compose to a no-op.
+    let before = parse(
+        "SELECT id, count(*) AS n FROM orders GROUP BY id \
+         HAVING count(*) > 5 ORDER BY id LIMIT 10",
+    );
+    let after = parse(
+        "SELECT id, count(*) AS n FROM orders GROUP BY id \
+         HAVING   count(*) > 5   ORDER BY id LIMIT 10",
+    );
+
+    let diff = definition_diff(&before, &after);
+    assert!(
+        diff.is_noop(),
+        "whitespace-only reformat of these clauses must stay a no-op"
+    );
+}
