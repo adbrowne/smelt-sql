@@ -643,23 +643,41 @@ research §4H).
   A symmetry gap against research §2 "returns every admissible technique", not a
   correctness bug — every offered option remains proven. Revisit when the cost model
   arrives (it is the only consumer that benefits from the second option).
-- **B4 dim-key uniqueness: FD-derivation is inapplicable pre-wiring** (surfaced in Phase 6
-  review, 2026-08-02): the brief's implementation shape names `analysis::functional_dependency`
-  as a fallback source of dim-side uniqueness when no `unique_key` is declared. Checked the
-  actual API: `functional_dependency_verdict_over_vector` needs a `PropertyVector` derived by
-  parsing and walking *the model's own SQL* (`analysis::walk::model_property_vector`); the
-  simpler `functional_dependency_verdict` needs a `Cardinality` from
-  `analysis::join_shape::fan_out` over a `JoinContext` built the same way. Both require a CST
-  for the relation whose uniqueness is being proven — but B4's dimension is an *external*
-  source declared only via `BackbuildInputs::SourceRef` (`physical_name`/`unique_key`/
-  `not_null_columns`, plain facts, no SQL of its own anywhere in this standalone module).
-  There is nothing to walk, so wiring dead FD-consulting machinery here would be
-  indistinguishable from always taking the `NotProven`/undeclared branch. `admit_added_left_join`
-  therefore consumes only the declared `unique_key`, with a doc comment at the check
-  recording this reasoning in place. Revisit when wiring supplies the dimension's own
-  definition (e.g. it is itself a smelt model with a derivable grain/FD verdict via the real
-  `analysis::walk` machinery) — until then, an undeclared `unique_key` refuses
-  (`b4_nonunique_dim_key_refuses`).
+- **B4 dim-key uniqueness: the FD route is redundant, not blocked** (surfaced in Phase 6
+  review, 2026-08-02; rationale corrected 2026-08-02 after a scoped re-review caught the
+  first write-up over-claiming): the brief's implementation shape names
+  `analysis::functional_dependency` as a fallback source of dim-side uniqueness when no
+  `unique_key` is declared. Checked both entry points' actual signatures — they are not
+  equally inapplicable:
+  - `functional_dependency_verdict_over_vector` genuinely needs a `PropertyVector` derived
+    by parsing and walking *the model's own SQL* (`analysis::walk::model_property_vector`).
+    B4's dimension is an *external* source declared only via `BackbuildInputs::SourceRef`
+    (`physical_name`/`unique_key`/`not_null_columns`, plain facts, no SQL of its own
+    anywhere in this standalone module) — there is nothing to walk, so this entry point is
+    genuinely inapplicable pre-wiring.
+  - `functional_dependency_verdict(determines_fan_out: Option<Cardinality>, declared: bool)`
+    is **callable today**: its `Cardinality` comes from
+    `analysis::join_shape::fan_out(join: &JoinClause, ctx: &JoinContext)`, which only needs
+    the already-parsed `JoinClause` (`admit_added_left_join` already holds one) and
+    `JoinContext.unique_keys`, populated purely from hand-declared facts — structurally the
+    same data `BackbuildInputs.sources[dim].unique_key` already is. Routing through it would
+    be pure indirection, though: with no declared key, `fan_out` returns `OneToMany` and the
+    verdict refuses unconditionally, exactly matching the manual `unique_key` check
+    `admit_added_left_join` already performs — no added admission power, only a
+    differently-shaped input (`JoinContext`'s `HashMap<String, Vec<HashSet<String>>>` vs.
+    `SourceRef.unique_key`) to construct for the same outcome. (One real difference worth
+    naming: `fan_out` proves `OneToOne` when the ON's equality columns are a *superset* of a
+    declared key-set, while B4's own separate "bare key equality" leg already forbids any
+    ON conjunct beyond the key — by the time uniqueness is checked, B4's `dim_cols` is
+    already exactly the ON's key columns, so the two would coincide in practice, not
+    diverge.)
+
+  `admit_added_left_join` therefore consumes only the declared `unique_key` directly, with a
+  doc comment at the check recording this reasoning in place. Revisit
+  `functional_dependency_verdict_over_vector` specifically once wiring supplies the
+  dimension's own definition (e.g. it is itself a smelt model with a derivable grain/FD
+  verdict via the real `analysis::walk` machinery) — until then, an undeclared `unique_key`
+  refuses (`b4_nonunique_dim_key_refuses`).
 
 ## Verification
 

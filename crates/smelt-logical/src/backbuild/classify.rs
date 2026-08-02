@@ -898,19 +898,31 @@ fn admit_added_left_join(
         key_pairs_raw.push((fact_qualifier, fact_col, dim_col));
     }
 
-    // Declared `unique_key` only — no `analysis::functional_dependency` fallback for an
-    // absent declaration, unlike the brief's implementation shape sketch. Checked the
-    // actual API before deciding this (`docs/plans/20260802-backbuild-synthesis.md`
-    // §"Deferred during implementation", 2026-08-02 entry): both
-    // `functional_dependency_verdict_over_vector` and `functional_dependency_verdict`
-    // derive their verdict from a `PropertyVector`/`Cardinality` built by parsing and
-    // walking *this model's own SQL* (`analysis::walk::model_property_vector`,
-    // `analysis::join_shape::fan_out`). The dimension here is an *external* source
-    // declared only via `BackbuildInputs::SourceRef` — no SQL of its own exists anywhere
-    // in this standalone, unwired module to walk, so there is no derivable FD verdict to
-    // consult. Wiring the FD module in here today would be dead code, structurally
-    // equivalent to always taking the `NotProven` branch. Revisit once wiring supplies the
-    // dimension's own definition (e.g. it is itself a smelt model with a derivable
+    // Declared `unique_key` only — no `analysis::functional_dependency` route, unlike the
+    // brief's implementation shape sketch. Checked both entry points' actual signatures
+    // before deciding this (`docs/plans/20260802-backbuild-synthesis.md` §"Deferred during
+    // implementation", 2026-08-02 entry, corrected 2026-08-02): they are not equally
+    // inapplicable.
+    //   - `functional_dependency_verdict_over_vector` genuinely needs a `PropertyVector`
+    //     derived by parsing and walking *the model's own SQL*
+    //     (`analysis::walk::model_property_vector`) — inapplicable, since the dimension
+    //     here is an *external* source declared only via `BackbuildInputs::SourceRef`, with
+    //     no SQL of its own anywhere in this standalone, unwired module to walk.
+    //   - `functional_dependency_verdict(determines_fan_out: Option<Cardinality>, declared:
+    //     bool)` IS callable today: its `Cardinality` comes from
+    //     `analysis::join_shape::fan_out(join, ctx)`, which only needs `join` — already
+    //     held right here — and a `JoinContext.unique_keys` populated purely from
+    //     hand-declared facts, structurally the same data as `source.unique_key` below. It
+    //     is not used because it would be pure indirection: with no declared key, `fan_out`
+    //     returns `OneToMany` and the verdict refuses unconditionally — exactly the manual
+    //     check below, just re-routed through a differently-shaped input
+    //     (`JoinContext`'s `HashMap<String, Vec<HashSet<String>>>`) for no added admission
+    //     power. (`fan_out` proves `OneToOne` off a *superset* match on the ON's equality
+    //     columns, while the "bare key equality" leg above already forbids any ON conjunct
+    //     beyond the key — so by this point `dim_cols` is already exactly the ON's key
+    //     columns, and the two checks would coincide in practice.)
+    // Revisit `functional_dependency_verdict_over_vector` specifically once wiring supplies
+    // the dimension's own definition (e.g. it is itself a smelt model with a derivable
     // grain/FD verdict).
     let unique_key = source
         .unique_key
