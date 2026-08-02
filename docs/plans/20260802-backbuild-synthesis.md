@@ -47,6 +47,9 @@ subagent → reviewer subagent → iterate → record + commit + push.
   multiset equality per research §6 "Conformance harness". A case admitting several
   options verifies **every** option independently, each against a fresh copy of the
   staged before-table.
+- The template's real-fixture `examples/` convention is deliberately replaced by the
+  DuckDB oracle harness: the module is unwired, so no example workspace can exercise it;
+  example coverage arrives with wiring.
 - Verification gate is `bash .claude/scripts/verify-phase.sh` (one call; failures-only
   output) — do not run the four commands separately.
 - Atomic per-phase commits with the phase's `Commit.` line verbatim.
@@ -68,7 +71,8 @@ Between "fingerprint-equal ⇒ reuse" and "changed ⇒ full refresh" sits a clas
 reachable by targeted scripts (research §0). This plan builds the pure derivation:
 `(before CST, after CST, BackbuildInputs) → BackbuildOptions → statement strings`, as a
 standalone `smelt-logical` module with DuckDB oracle-equivalence tests, priority-ordered per
-research §5. Classification returns **every** admissible technique per atomic change
+research §5 (one deliberate regrouping: D2 is pulled forward into Phase 5 to ride B3's
+machinery — research §4 D2 names them one admission path). Classification returns **every** admissible technique per atomic change
 (research §2 "Options, not choices") — there is no cost model and no chooser in this plan;
 callers select, and tests verify each option independently. Wiring (CLI verb,
 virtual-environment acceleration, maintained-model ledger integration, Spark dialect, the
@@ -78,8 +82,9 @@ cost model) is explicitly out of scope.
 
 ### In scope (research coverage)
 
-- Research §4 cases: A0, B1, B2, B3, B4, B7, D1, D2, E1, E2, E4, F1; G-class and
-  CTE-change refusals; H composite ordering.
+- Research §4 cases: A0, B1, B2, B3, B4, B7, D1, D2, E1, E2, E3 (delivered as E1+E2
+  composition; non-factorable rewrites refuse), E4, F1; G-class and CTE-change refusals;
+  H composite ordering.
 - Option enumeration per research §2 "Options, not choices": per-atom option sets, the
   always-present model-level `FullRefresh` baseline, `assemble(options, selection)`. No
   cost model, no chooser.
@@ -88,8 +93,13 @@ cost model) is explicitly out of scope.
 
 ### Explicitly deferred
 
-- **B5, B6, F2, E3-general, probe-gated G2** — Tier 3 (research §5); land in a follow-up
-  once the substrate has proven itself.
+- **B5, B6, F2, C-sequencing polish, probe-gated G2** — Tier 3 (research §5); land in a
+  follow-up once the substrate has proven itself.
+- **C1 / C2 / F3** — `ALTER DROP` and type-widening classification (and their opt-in flag
+  doctrine) stay owned by `docs/specs/schema_evolution.md`; F3 (ref repoint) is only
+  decidable with expansion + fingerprint at the wiring layer. Until then, a diff whose only
+  treatment would be one of these yields `FullRefresh`-only, and the H drop/type slots
+  exist in `assemble` but stay unpopulated in this plan.
 - **All wiring** — CLI surface, runtime execution, `.smelt/` before-SQL sourcing, ledger
   integration, fingerprint refinement of the no-op judgement, Spark dialect variants
   (research §7 items 4–6).
@@ -119,7 +129,8 @@ cost model) is explicitly out of scope.
 `DefinitionDiff` (research §6): SELECT-list diff with trivia-insensitive expression
 comparison, WHERE conjunct-set diff, skeleton comparison, UNION ALL branch diff. Includes
 the A0 whole-definition no-op verdict and the conservative CTE posture (unchanged `WITH`
-prefix diffs the final SELECT; changed CTE → `Changed::Opaque`).
+prefix diffs the final SELECT; changed CTE → an explicit opaque marker on the diff that
+classification refuses on).
 
 **Pre-conditions.** None (first phase).
 
@@ -144,8 +155,8 @@ prefix diffs the final SELECT; changed CTE → `Changed::Opaque`).
   variant; an unchanged `WITH` prefix with an edited final SELECT diffs normally.
 
 **Implementation shape.** `backbuild/diff.rs`:
-`pub fn definition_diff(before: &SourceFile, after: &SourceFile) -> DefinitionDiff` (exact
-parser entry type per `smelt_parser`'s existing AST). Trivia-insensitive comparison =
+`pub fn definition_diff(before: &File, after: &File) -> DefinitionDiff` (`smelt_parser::File`,
+the parser's root AST type). Trivia-insensitive comparison =
 token-text sequence equality skipping trivia kinds — one helper
 `fn same_modulo_trivia(a: &SyntaxNode, b: &SyntaxNode) -> bool` used by every clause
 comparator. Conjunct split at top-level `AND` only. Pure data out; no classification here.
@@ -188,15 +199,19 @@ baseline; a grain change yields `FullRefresh`-only with a named refusal.
   model's only option is `FullRefresh`.
 - `::g1_distinct_toggle_refuses`, `::g2_join_condition_change_refuses`,
   `::changed_cte_refuses` — named reasons; `FullRefresh`-only.
-- `crates/smelt-logical/tests/backbuild_plan.rs::atom_without_options_leaves_only_full_refresh`
-  — a diff with one admissible atom and one inadmissible atom yields **no** composed
-  targeted script (partial application never offered); refusals name the blocked atom;
-  `FullRefresh` remains.
+- `crates/smelt-logical/tests/backbuild_options.rs::atom_without_options_leaves_only_full_refresh`
+  — given a **hand-constructed** `BackbuildOptions` value (one atom carrying an option,
+  one with an empty option set), `assemble` offers **no** composed targeted script
+  (partial application never offered) and `FullRefresh` remains the only model option.
+  Hand-construction keeps this phase off Phase 3's admission logic; classification-driven
+  coverage of the same rule arrives with Phase 3's first admitted case.
 
 **Implementation shape.** `backbuild/mod.rs`:
 `BackbuildOptions { atoms: Vec<AtomAnalysis> }`,
 `AtomAnalysis { change: AtomicChange, options: Vec<BackbuildOption>, inadmissible: Vec<BackbuildRefusal> }`,
-`BackbuildOption` (technique variant + statement data; variants filled in by later phases),
+`BackbuildOption` (technique variant + statement data + the §2 option metadata: write
+scope `none`/`column-scoped`/`row-subset`/`full-write`, `reads_upstream`, statement count,
+`rerun_safe`; variants filled in by later phases),
 `BackbuildRefusal { atom: String, reason: String }`. `classify.rs`:
 `pub fn derive_backbuild_options(diff: &DefinitionDiff, inputs: &BackbuildInputs) -> BackbuildOptions`
 (this phase: refusal paths, empty-diff ⇒ no atoms, `FullRefresh` baseline).
@@ -209,7 +224,7 @@ two-way `EXCEPT ALL` plus column name/type check, per research §6.
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{mod,classify}.rs`
 - `crates/smelt-logical/tests/backbuild_conformance.rs` (+ harness module)
-- `crates/smelt-logical/tests/backbuild_plan.rs`
+- `crates/smelt-logical/tests/backbuild_options.rs`
 
 **Review checklist** (material findings only):
 - [ ] TDD tests listed above exist and assert what's specified
@@ -219,6 +234,7 @@ two-way `EXCEPT ALL` plus column name/type check, per research §6.
 - [ ] Harness asserts multiset + schema equality exactly as research §6 specifies, per
       option on a fresh table copy
 - [ ] Options are pure data; harness executes statements, never authors them
+- [ ] No scope creep into later phases
 
 **Commit.** `feat(logical): backbuild option enumeration, refusals, and DuckDB conformance harness`
 
@@ -239,11 +255,20 @@ classification.
   `qty` are stored 1:1; oracle-equal.
 - `::b2_rename_touches_no_rows` — renamed column; script is a single
   `ALTER … RENAME COLUMN`; oracle-equal.
-- `backbuild_plan.rs::b1_opaque_function_refuses` — added column calling an
-  unregistered function ⇒ named refusal (leaf-classifier fail-closed).
+- `backbuild_options.rs::b1_opaque_function_refuses` — added column calling an
+  unregistered function ⇒ named refusal. NOTE: the existing `collect_dependencies` walk
+  recurses into any `FunctionCall`'s arguments and returns `Ok(∅)` for an unknown
+  zero-arg function — this test forces the specified extension (registry-backed
+  opaqueness check), it does not pass against the walk as-is.
+- `::b1_volatile_function_refuses` — added column calling `random()`/`now()` ⇒ named
+  refusal (volatility check; research §2 determinism caveat — a volatile backfill can
+  never match a rebuild).
 - `::b1_subquery_refuses`, `::b1_window_refuses` — per `collect_dependencies` posture.
 - `::b2_ambiguous_rename_refuses` — two dropped columns with identical expressions ⇒
   refusal, not a guess (research §7.2).
+- `::b2_one_dropped_two_added_pins_lexicographic` — one dropped, two identical added ⇒
+  lexicographically-first added name takes the rename, the other classifies as B1
+  reading the renamed column (research §4 B2).
 - `::b1_dependency_on_upstream_only_column_is_not_b1` — an added column reading an
   upstream column with no stored 1:1 representative is **not** admitted as B1 (it is
   Phase 5's B3; here it must refuse, not misclassify).
@@ -252,7 +277,10 @@ classification.
 `(select_list.dropped × select_list.added)` by `same_modulo_trivia` on expressions, then
 B1 admission via the dependency walk (reuse/extract the `collect_dependencies` logic from
 `analysis/model_diff.rs` rather than duplicating it — a small `pub(crate)` promotion is in
-scope). `requalify.rs`: first user — requalify a B1 expression's input references to their
+scope), extended with a registry-backed opaqueness/volatility leaf check
+(`smelt_types` function registry; unknown or volatile function ⇒ named refusal, research
+§2). Representatives follow the uniform rule (research §4 intro): bare pull-throughs
+unchanged between both definitions. `requalify.rs`: first user — requalify a B1 expression's input references to their
 stored 1:1 representative columns. `emit.rs`: `emit_alter_add_column`,
 `emit_alter_rename_column`, and reuse of the `emit_in_place_update` shape (unregioned
 variant).
@@ -260,7 +288,9 @@ variant).
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{classify,requalify,emit}.rs`
 - `crates/smelt-logical/src/analysis/model_diff.rs` — visibility promotion of the
-  dependency walk only; no behaviour change
+  dependency walk, plus the specified registry-backed opaqueness/volatility check (the
+  one sanctioned behaviour change; existing `additive_only_diff` callers must be
+  reviewed for the tightened posture)
 - both test files
 
 **Review checklist** (material findings only):
@@ -270,6 +300,7 @@ variant).
 - [ ] Requalification is a CST rewrite with its own unit tests, not string replacement
 - [ ] B1 derivability = stored 1:1 representative exists for every dependency (research
       §4 B1/D1 subtlety), not name-coincidence
+- [ ] No scope creep into later phases
 
 **Commit.** `feat(logical): backbuild B1/B2 — self-derivable column adds and rename detection`
 
@@ -290,17 +321,24 @@ table" case). Includes the formatting-only guard.
   *not* touching them).
 - `::d1_formatting_only_change_is_noop` — reformatted expression ⇒ no step for that
   column (trivia-insensitivity end-to-end).
-- `backbuild_plan.rs::d1_new_expr_reading_own_old_value_refuses` — new expression whose
-  input has no stored 1:1 representative other than the changed column itself (e.g. the
-  column was the only, now-changed, carrier of that input) ⇒ refusal, never
+- `backbuild_options.rs::d1_new_expr_reading_own_old_value_refuses` — new expression whose
+  input has no stored representative other than the changed column itself ⇒ refusal, never
   self-substitution.
+- `::d1_swapped_columns_refuse` — `x AS a, y AS b` → `y AS a, x AS b`: both changed
+  columns fail the uniform representative rule (research §4 intro) ⇒ refusal. (The weaker
+  "not its own value" rule would admit mutually-invalidating updates.)
+- `::d1_lateral_alias_to_changed_sibling_refuses` — a changed/added expression referencing
+  a lateral alias of a *changed* sibling ⇒ refusal (representative must be unchanged).
+- `::d1_distinct_model_refuses` — D-class under `SELECT DISTINCT` ⇒ named refusal: an
+  UPDATE cannot merge rows the rebuild's DISTINCT would (research §4 grain guards).
 - `::d1_upstream_dependency_refuses_until_d2` — changed expression needing an upstream
   read refuses in this phase (admitted in Phase 5 as D2).
 
 **Implementation shape.** `classify.rs`: route `select_list.changed` through the same
-derivability check as B1, with the one extra rule: the changed column's *own* stored value
-is not an admissible representative for any input of its new expression. Reuses Phase 3
-emission unchanged.
+derivability check as B1 under the uniform representative rule (research §4 intro:
+representatives are bare pull-throughs **unchanged between both definitions** — this
+subsumes "never its own value" and excludes changed siblings/swaps), plus the D-class
+DISTINCT and LIMIT grain guards. Reuses Phase 3 emission unchanged.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/classify.rs`
@@ -340,15 +378,23 @@ upstream's declared unique key), emitted as a column-scoped `UPDATE … FROM`.
 - `::b3_stale_upstream_documents_precondition` — upstream mutated after `build_before`
   (precondition §2 violated); the test **demonstrates the divergence**: the backfilled
   column reflects current upstream while sibling columns reflect the stale build, so the
-  result ≠ a full rebuild against current inputs. Comment cites research §2 "stale-input
-  grading" — this is the contract's edge made visible, not a bug.
-- `backbuild_plan.rs::b3_missing_key_pullthrough_refuses` — output lacks the upstream key
+  result ≠ a full rebuild against current inputs. Comment cites research §2 "Why the
+  precondition is load-bearing" — this is the contract's edge made visible, not a bug.
+- `backbuild_options.rs::b3_missing_key_pullthrough_refuses` — output lacks the upstream key
   column ⇒ named refusal ("no addressable identity").
 - `::b3_undeclared_unique_key_refuses` — no `unique_key` in inputs ⇒ refusal.
+- `::b3_nullable_key_refuses` — key columns without a NOT NULL proof/declaration ⇒
+  refusal: SQL UNIQUE admits NULLs, an equality backfill never addresses a NULL-keyed
+  row, and the rebuild fills it (research §4 "Key addressability").
+- `::b3_self_join_binds_per_alias` — `orders o1 JOIN orders o2`: adding `o2.discount`
+  with only `o1.order_id` pulled through ⇒ refusal (the proof binds per FROM-tree alias,
+  not per table; a table-level match would backfill o1's discount where the rebuild wants
+  o2's).
 
 **Implementation shape.** `classify.rs`: grain-link proof = lineage over *unchanged*
-SELECT items (find output columns that are bare pull-throughs of the upstream's declared
-key), fail-closed. `requalify.rs`: statement-context aliasing (`t.` / `u.`). `emit.rs`:
+SELECT items, bound **per FROM-tree alias** (the pulled-through key and the added
+expression must resolve to the same alias), with the NOT NULL key obligation consumed
+from `analysis::not_null` or declared facts, fail-closed. `requalify.rs`: statement-context aliasing (`t.` / `u.`). `emit.rs`:
 `emit_column_backfill_update_from` (`UPDATE t SET c = <expr> FROM <ups> u WHERE t.k = u.k`,
 composite keys ANDed) — the `emit_column_scoped_merge` shape adapted to the standalone
 (unregioned, unledgered) setting.
@@ -362,6 +408,7 @@ composite keys ANDed) — the `emit_column_scoped_merge` shape adapted to the st
 - [ ] Grain-link proof is lineage-based (CST), fail-closed on computed pull-throughs
 - [ ] Stale-input case asserts the contract's actual guarantee, not a vaguer one
 - [ ] D2 reuses B3 machinery (one admission path, two triggers)
+- [ ] No scope creep into later phases
 
 **Commit.** `feat(logical): backbuild B3/D2 — upstream pull-through and upstream-read expression changes`
 
@@ -382,10 +429,19 @@ alias), emitted as a fan-out backfill.
 - `::b4_unmatched_rows_null_extend` — fact rows with no dim match end NULL, matching the
   rebuild exactly.
 - `::b4_general_expression_null_extension` — added column is `COALESCE(d.x, 'none')`;
-  only the scalar-subquery option is offered (the bare `UPDATE … FROM` shape would skip
-  NULL-extension and get unmatched rows wrong — assert the option *set*, then
-  oracle-verify the offered option).
-- `backbuild_plan.rs::b4_inner_join_refuses` — added INNER JOIN ⇒ refusal (can drop
+  only the **per-reference substituted** scalar-subquery option is offered:
+  `SET c = COALESCE((SELECT d.x FROM dim d WHERE d.jk = t.jk), 'none')`. Assert the
+  option set, then oracle-verify with an unmatched fact row — it must end `'none'`, not
+  NULL. Both naive shapes are the traps this test pins: bare `UPDATE … FROM` skips the
+  row, and the whole-expression subquery `SET c = (SELECT COALESCE(…) FROM …)` yields
+  NULL because a zero-row scalar subquery nulls the *whole* expression (research §4 B4).
+- `backbuild_options.rs::b4_join_key_not_stored_refuses` — fact-side ON column has no
+  stored bare representative ⇒ named, actionable refusal.
+- `::b4_on_beyond_bare_key_equality_refuses` — ON carries an extra dim-side conjunct
+  (`… AND d.active`) or a non-equality comparison ⇒ refusal.
+- `::b4_nullable_join_key_refuses` — join key without a NOT NULL proof/declaration ⇒
+  refusal (research §4 "Key addressability").
+- `backbuild_options.rs::b4_inner_join_refuses` — added INNER JOIN ⇒ refusal (can drop
   rows).
 - `::b4_nonunique_dim_key_refuses` — no declared/derived uniqueness ⇒ refusal.
 - `::b4_alias_referenced_in_where_refuses` — new alias in WHERE ⇒ refusal (row set no
@@ -396,11 +452,15 @@ exactly one element (two or more is Phase 9's B7 — refuse here with a named re
 uniqueness from `BackbuildInputs.sources[dim].unique_key` or
 `analysis::functional_dependency` where derivable; alias-reference sweep over every
 non-added clause. `emit.rs`: shape *enumeration* is expression-driven — bare column pull
-⇒ both `UPDATE … FROM` and scalar-subquery options; any other expression ⇒
-scalar-subquery only (research §4 B4, including the free multiplicity guard it provides).
+⇒ both `UPDATE … FROM` and scalar-subquery options; any other expression ⇒ the
+per-reference substituted scalar-subquery form only (each dim-column reference replaced
+by its own scalar subquery — research §4 B4, including the free multiplicity guard).
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{classify,emit}.rs`
+- `crates/smelt-logical/src/backbuild/requalify.rs` — only if the scalar-subquery shape's
+  embedded expression fragment needs statement-context requalification beyond Phase 5's
+  rewriter (otherwise reused unchanged)
 - both test files
 
 **Review checklist** (material findings only):
@@ -410,6 +470,7 @@ scalar-subquery only (research §4 B4, including the free multiplicity guard it 
 - [ ] Shape enumeration is expression-driven; the NULL-extension case demonstrates a
       *narrowed* option set, and every offered option is oracle-verified
 - [ ] Uniqueness consumed from declared facts / existing FD analysis, not re-derived ad hoc
+- [ ] No scope creep into later phases
 
 **Commit.** `feat(logical): backbuild B4 — join-enrichment backfill with row-set-preservation proof`
 
@@ -432,16 +493,30 @@ a region-scoped difference `INSERT`.
   script inserts exactly `[2024-01-01, 2025-01-01)` from upstream; oracle-equal.
 - `::e4_idempotent_with_identity` — declared row identity ⇒ anti-join guard; running the
   script twice still oracle-equal.
-- `backbuild_plan.rs::e1_conjunct_over_unstored_column_refuses` — added conjunct
+- `backbuild_options.rs::e1_conjunct_over_unstored_column_refuses` — added conjunct
   referencing an input with no stored representative ⇒ refusal.
 - `::e_opaque_predicate_rewrite_refuses` — `a OR b` → `a` (non-conjunctive) ⇒ refusal.
+- `::e_group_by_model_refuses` — predicate change on a GROUP BY model ⇒ named refusal (a
+  slice INSERT double-counts existing groups; the anti-join guard would silently skip
+  them instead — research §4 E grain precondition).
+- `backbuild_conformance.rs::e4_group_key_range_admits` — the carve-out: E4 where the
+  range column **is a group key** (extending history on a date-keyed aggregate) admits
+  and is oracle-equal — every group lies wholly inside or outside the region.
+- `backbuild_options.rs::e_distinct_model_refuses`, `::e_limit_model_refuses` — DISTINCT
+  and LIMIT presence refuse E-class atoms (research §4 grain guards).
+- `::e4_mixed_operator_refuses` — `ts > X` → `ts >= Y` ⇒ refusal (range classification
+  requires the same comparison operator; boundary semantics are not literal arithmetic).
 
-**Implementation shape.** `classify.rs`: E1 = added conjuncts, each requalified to stored
-columns; E4 = removed+added conjunct pair that are range predicates on the same column
-with a provably widened range (literal comparison), difference region `[new_lo, old_lo)`.
-`emit.rs`: `emit_predicate_delete` (`IS NOT TRUE` form), `emit_difference_insert` (the
-after-definition SELECT body with the difference predicate appended, plus the
-identity anti-join guard when identity is available).
+**Implementation shape.** `classify.rs`: the E-class grain guards first (no GROUP
+BY/DISTINCT/LIMIT, with the E4-on-group-key carve-out); E1 = added conjuncts, each
+requalified to stored columns; E4 = removed+added conjunct pair that are range predicates
+on the same column with the same operator and a provably widened literal — the range view
+classifies only, the **emitted predicate is always the complement form** (research §4 E4:
+new conjunct present, `AND (<old conjunct>) IS NOT TRUE`), which gets boundaries and NULLs
+right by construction. `emit.rs`: `emit_predicate_delete` (`IS NOT TRUE` form),
+`emit_difference_insert` (the after-definition SELECT body with the difference predicate
+appended, an **explicit column list** on the INSERT, plus the identity anti-join guard
+when identity is available).
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{classify,emit}.rs`
@@ -451,8 +526,9 @@ identity anti-join guard when identity is available).
 - [ ] TDD tests listed above exist and assert what's specified
 - [ ] Three-valued-logic form used and regression-tested
 - [ ] E4 range widening proven from literals, fail-closed otherwise
-- [ ] INSERT guard present exactly when identity exists; one-shot posture documented in
-      the emitted plan data when not
+- [ ] INSERT guard present exactly when identity exists; one-shot posture recorded on
+      the option data when not
+- [ ] No scope creep into later phases
 
 **Commit.** `feat(logical): backbuild E1/E4 — predicate tighten DELETE and horizon-extension INSERT`
 
@@ -460,9 +536,9 @@ identity anti-join guard when identity is available).
 
 ### Phase 8: E2 + F1 — general loosen INSERT, union-branch INSERT, and composites
 
-**Goal.** Complete the Tier-1/2 catalogue: removed conjunct ⇒ difference `INSERT`
-(general E2), added UNION ALL branch ⇒ branch `INSERT` (F1), and the H composite ordering
-proven end-to-end.
+**Goal.** Round out the predicate and structural cases: removed conjunct ⇒ difference
+`INSERT` (general E2 — with Phase 7's E1 this also delivers E3 by composition), added
+UNION ALL branch ⇒ branch `INSERT` (F1), and the H composite ordering proven end-to-end.
 
 **Pre-conditions.** Phases 1–7.
 
@@ -474,16 +550,22 @@ proven end-to-end.
   selection (one option per atom); statements in the H order (rename → alter/add →
   delete → update); oracle-equal. The ordering is the assertion — shuffled statements
   must fail the oracle (verify by construction in a comment, not a second test).
+- `::h_composite_add_plus_insert_aligns_columns` — B1 add (mid-declared-list position) +
+  F1 branch INSERT in one diff: after `ALTER ADD` the physical column order differs from
+  the declared order, and a positional INSERT silently misassigns same-typed columns —
+  the emitted INSERT carries an explicit column list (or `BY NAME`) and the composite is
+  oracle-equal (research §4H).
 - `::h_composite_with_blocked_atom_yields_only_full_refresh` — same composite plus a G1
   edit ⇒ no composed targeted script; refusals name the G1 atom; `FullRefresh` remains
   the only model option.
-- `backbuild_plan.rs::f1_plain_union_refuses` — `UNION` (dedup) ⇒ refusal; only
+- `backbuild_options.rs::f1_plain_union_refuses` — `UNION` (dedup) ⇒ refusal; only
   `UNION ALL` admits.
 
 **Implementation shape.** `classify.rs`: E2 from removed conjuncts (difference predicate
-in `IS NOT TRUE` form); F1 from `set_ops` branch diff. `mod.rs`: `assemble` finalises the
-H ordering (`rename → alter → delete → update/merge → insert → drop`) as a total order
-over the selected options' variants.
+in `IS NOT TRUE` form); F1 from `set_ops` branch diff. Every INSERT-family emitter takes
+an explicit target column list (research §4H — never positional). `mod.rs`: `assemble`
+finalises the H ordering (`rename → alter → delete → update/merge → insert → drop`) as a
+total order over the selected options' variants.
 
 **Critical files (allowed to touch in this phase).**
 - `crates/smelt-logical/src/backbuild/{mod,classify,emit}.rs`
@@ -495,8 +577,9 @@ over the selected options' variants.
 - [ ] `UNION` vs `UNION ALL` distinction enforced
 - [ ] Catalogue cases admitted so far are all conformance-tested; refusal reasons cover
       every inadmissible branch touched in this plan
+- [ ] No scope creep into later phases
 
-**Commit.** `feat(logical): backbuild E2/F1 and composite ordering — Tier-1/2 catalogue complete`
+**Commit.** `feat(logical): backbuild E2/F1 and composite ordering`
 
 ---
 
@@ -515,8 +598,13 @@ order within the update slot.
   dim1's columns first, then dim2's keyed on the now-stored column; oracle-equal.
 - `::b7_independent_joins_either_order` — two added joins each keyed on already-stored
   columns (no inter-dependency); both backfills emitted; oracle-equal.
-- `backbuild_plan.rs::b7_unstored_intermediate_refuses` — dim2 keys on a dim1 column the
-  model does **not** store ⇒ named refusal (multi-hop; research §7.7).
+- `backbuild_options.rs::b7_unstored_intermediate_refuses` — dim2 keys on a dim1 column the
+  model does **not** store ⇒ named refusal whose message names the column to add
+  (actionable refusal, research §2; multi-hop: research §7.7).
+- `::b7_nonbare_intermediate_refuses` — the stored carrier of dim1's column is wrapped
+  (`COALESCE(d1.c, 0) AS c`) ⇒ refusal: the carrier stores `0` where the rebuild has
+  NULL, so a later join on it can hit a dim row the rebuild misses (research §4 B7
+  bareness).
 - `::b7_per_join_proof_still_enforced` — second join is INNER, or its alias leaks into
   WHERE ⇒ refusal naming that join (B4's three legs hold per join, not just for the
   first).
@@ -534,9 +622,11 @@ research §4H).
 
 **Review checklist** (material findings only):
 - [ ] TDD tests listed above exist and assert what's specified
-- [ ] Per-join proof is the unmodified B4 proof plus only the stored-by-then extension
+- [ ] Per-join proof is the unmodified B4 proof plus only the stored-by-then extension,
+      and the stored intermediate is required **bare** (never a wrapped carrier)
 - [ ] Dependency ordering derived from CST references, fail-closed on cycles
 - [ ] Unstored-intermediate refusal names the join and the missing column
+- [ ] No scope creep beyond the catalogue cases this plan admits
 
 **Commit.** `feat(logical): backbuild B7 — sequential multi-join enrichment`
 
@@ -552,7 +642,7 @@ How to confirm the plan is satisfied at the end:
 
 - `cargo test -p smelt-logical --test backbuild_conformance` — every admitted catalogue
   case oracle-equal against DuckDB, including the stale-input and composite cases.
-- `cargo test -p smelt-logical --test backbuild_diff --test backbuild_plan` — diff and
+- `cargo test -p smelt-logical --test backbuild_diff --test backbuild_options` — diff and
   refusal coverage.
 - `bash .claude/scripts/verify-phase.sh` — full pre-commit gate.
 - Grep gate: no production dependency added from `smelt-logical` to `smelt-fingerprint`,

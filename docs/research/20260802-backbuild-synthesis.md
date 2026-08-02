@@ -9,16 +9,18 @@
 When a model's definition changes, today's outcomes are polar. Either the change is a purely
 additive column add on a *maintained* model — the definition-change trigger
 (`docs/specs/incremental_models.md` §"The definition-change trigger") backfills the new column
-group — or the deployed table is rebuilt from scratch (`schema_evolution.md`'s `FullRefresh`;
-`virtual_environments.md`'s "breaking ⇒ rebuild and cascade"). Between those poles sits a large
+group — or the deployed table is rebuilt from scratch (`docs/specs/schema_evolution.md`'s
+`FullRefresh`; `docs/specs/virtual_environments.md`'s "breaking ⇒ rebuild and cascade"). Between those poles sits a large
 class of edits whose effect on the deployed table is reachable by a targeted script — an
 `ALTER`, a column-scoped `UPDATE`/`MERGE`, a predicate-scoped `DELETE`/`INSERT` — orders of
 magnitude cheaper than recomputing a large table.
 
 **Backbuild synthesis**: given only the before and after model definitions (plus declared
-physical facts), factor the diff into atomic semantic changes, prove per atom that a targeted
-script reaches the same end state a full rebuild would, and emit the ordered script. Anything
-unprovable is a named refusal (fail-loud discipline), and full refresh remains the fallback.
+physical facts), factor the diff into atomic semantic changes and, per atom, enumerate
+*every* targeted technique provably reaching the same end state a full rebuild would — an
+option set, with `FullRefresh` always among the model's options and the ordered script
+assembled from a selection (§2). Anything unprovable is a named refusal (fail-loud
+discipline), never a silent fallback.
 
 Scope decisions taken up front (2026-08-02 discussion):
 
@@ -37,7 +39,7 @@ Scope decisions taken up front (2026-08-02 discussion):
 |---|---|---|
 | Definition-change trigger (`incremental_models.md`, `maintenance/derive.rs::derive_column_added`) | Classifies an **added** column on a **maintained** model: `SkeletonAdd` refuse / `PureBackfill` in-place `UPDATE` / `UpstreamRederive` column-scoped `MERGE` | Same verdict vocabulary, generalized: any table model, plus renames, changed expressions, row-set changes |
 | Additive-only model-diff (`analysis/model_diff.rs`, `model_properties.md`) | Proves an edit *purely adds* columns derivable from `{existing} ∪ {monotone dims}`; anything else (including any change to an existing column) is `NotAdditive` — the "L3 residue" left to declared migration intent | Backbuild **deliberately crosses the L3 boundary**: with both definitions in hand, a changed existing column *is* syntactically detectable, and its new expression can be re-proven derivable — no declared intent needed |
-| Schema evolution (`schema_evolution.md`, `smelt-state/schema_tracking.rs`) | Physical change classification (safe widenings, blocked drops) and backend `ALTER` capability; `default:`/`backfill:` are **user-declared** backfill expressions | Backbuild **derives** the backfill expression from the definition diff instead of asking the user to declare one; schema evolution keeps owning DDL capability/execution mechanics |
+| Schema evolution (`schema_evolution.md`, `crates/smelt-state/src/schema_tracking.rs`) | Physical change classification (safe widenings, blocked drops) and backend `ALTER` capability; `default:`/`backfill:` are **user-declared** backfill expressions | Backbuild **derives** the backfill expression from the definition diff instead of asking the user to declare one; schema evolution keeps owning DDL capability/execution mechanics |
 | Output fingerprint (`smelt-fingerprint`, `output_fingerprint.md`) | Model-level canonical-form equivalence: sound "nothing changed" judgement | The no-op short-circuit (case A0), and — at wiring time — a per-expression refinement that downgrades detected changes to no-ops |
 | Virtual environments (`virtual_environments.md`) | Fingerprint-equal ⇒ reuse; changed ⇒ rebuild (breaking) or reuse-downstream (non-breaking) | A third disposition for the *changed* class: clone-and-patch instead of rebuild. A consumer of backbuild, not a dependency |
 | Manipulation layer (`docs/research/20260726-beyond-ivm-differentiation.md` §11.2) | Column-scoped backfill as a verb over plan cells | Backbuild is that verb's *derivation*: the definition diff decides which cells (columns × regions × rows) need touching |
@@ -82,22 +84,45 @@ independently. The model-level baseline option **FullRefresh**
 (`CREATE OR REPLACE TABLE t AS <after>`) is always present, so the eventual cost model
 compares targeted scripts against the rebuild uniformly.
 
+Every option carries coarse cost- and safety-relevant metadata, recorded at classification
+time: **write scope** (`none` / `column-scoped` / `row-subset` / `full-write`),
+**reads_upstream**, statement count, and **rerun_safe** (see Idempotence below). This is
+exactly what the future chooser needs, and recording it here avoids re-deriving it later.
+One safety asymmetry worth recording per option: under a *wrong* declared uniqueness, the
+`UPDATE … FROM` shape silently picks one of the duplicate matches, while the
+scalar-subquery shape errors loudly — a chooser reason to prefer the loud shape when
+uniqueness is declared rather than FD-derived.
+
 **Refusal posture.** Admission stays fail-closed per technique: everything the classifier
 cannot prove for an atom is a named inadmissibility record (`fail-loud discipline`,
-`architecture.md`). A *composed targeted script* exists only when every atom has at least one
+`docs/specs/architecture.md`). A *composed targeted script* exists only when every atom has at least one
 admissible option — partial application is never offered; an atom with an empty option set
-leaves `FullRefresh` as the model's only option, with the refusals naming why.
+leaves `FullRefresh` as the model's only option, with the refusals naming why. Refusals are
+**actionable** where the missing fact is supplyable: when a small model edit or declaration
+would admit the technique, the refusal says which one ("join `dim2` keys on
+`dim1.region_id`, which the model does not store — add it to the SELECT list to make this
+backfillable").
 
 **Idempotence.** `UPDATE`-family steps are idempotent for deterministic expressions. Plain
 `INSERT`-family steps (E2/E4/F1) are not; each carries an anti-join guard on row identity
-where identity is available, making re-runs safe, and is otherwise documented one-shot. This
-mirrors the run-recovery posture of `incremental_models.md` (idempotent recovery is a
-property worth paying a guard for).
+where identity is available, making re-runs safe, and is otherwise documented one-shot
+(`rerun_safe: false` on the option). This mirrors the run-recovery posture of
+`incremental_models.md` (idempotent recovery is a property worth paying a guard for). Two
+honest limits: the guard itself assumes the declared identity is **unique in
+`eval(after, I)`** — if loosening a predicate legitimately admits a second row with an
+existing identity value, the guard would suppress a row the rebuild contains; this is
+declared-fact trust, stated on the option, not proven. And DDL steps (`ALTER
+ADD`/`RENAME`) are not re-runnable, so a *composed* script is one-shot pending wiring-time
+transactionality.
 
 **Determinism caveat.** A non-deterministic expression in the before-definition means
 `T_old` is not uniquely `eval(before, I)`; self-read scripts remain coherent relative to the
 stored draw, upstream-read recomputation may diverge from stored siblings. Same posture as
-`output_fingerprint.md`'s determinism signal: don't silently pretend; surface it.
+`output_fingerprint.md`'s determinism signal: don't silently pretend; surface it. On the
+*after* side the posture is stricter: a volatile or unrecognised function in an **added or
+changed** expression refuses the atom (registry-backed leaf check; an unknown function is
+refused fail-closed, never assumed pure) — a volatile backfill could never match a rebuild,
+and a flaky oracle test is worse than a refusal.
 
 ## 3. Inputs and outputs
 
@@ -140,8 +165,9 @@ byte-for-byte observable (the statement-parity posture). Two consequences:
   self-read `UPDATE`s). This is a small CST-fragment rewriter (resolve each column reference
   against the diff's alias map, re-print), tested on its own.
 - **DDL strings emitted here are test-grade DuckDB dialect.** Backend DDL generation
-  (`smelt-backend-duckdb/ddl_duckdb.rs`, Spark capability matrix) already exists under
-  `schema_evolution.md`; unifying backbuild's `ALTER` emission with it is wiring-time work.
+  (`crates/smelt-state/src/ddl_duckdb.rs` and `ddl_spark.rs`, the capability matrix)
+  already exists under `docs/specs/schema_evolution.md`; unifying backbuild's `ALTER`
+  emission with it is wiring-time work.
 
 ## 4. The catalogue
 
@@ -149,6 +175,28 @@ Case IDs (A0, B1, …) are the canonical names used by tests and the plan. Per c
 the `DefinitionDiff` detects it, what must be proven, and the script shape. A case describes
 one admissible *technique*; when an atom satisfies several cases' proofs, all the resulting
 techniques are returned as options (§2 "Options, not choices").
+
+Three obligations are shared across cases rather than restated per case:
+
+- **Key addressability.** Any technique that addresses rows by key — column-scoped merges
+  (B3/B5), join backfills (B4/B7), self-read window updates (B6), identity anti-join
+  guards (E2/E4/F1) — requires the key columns provably **NOT NULL**
+  (`analysis/not_null.rs`, or declared), refusing otherwise. SQL `UNIQUE` admits NULLs; an
+  equality join never matches a NULL key, so a NULL-keyed row is silently unaddressed —
+  and `IS NOT DISTINCT FROM` is no fix, since `UNIQUE` permits *multiple* NULL-keyed rows.
+- **Derivability representatives — one uniform rule.** An admissible stored representative
+  of an input is a **bare pull-through unchanged between both definitions**. A changed
+  column is never a representative (a mutual swap — `x AS a, y AS b` → `y AS a, x AS b` —
+  would otherwise emit self-invalidating updates in either order), and a lateral-alias
+  reference to a changed sibling refuses. This rule is also what keeps the H update slot
+  order-free: every update statement reads only unchanged columns.
+- **Grain guards.** Under `SELECT DISTINCT`, B-class adds stay sound — but by a different
+  argument than skeleton-unchanged: the added column is a function of the stored tuple
+  (via its own values or a key it contains), so distinct rows stay distinct — while
+  D-class and E-class **refuse** (an update can collapse rows a rebuild's DISTINCT would
+  merge, and predicate slices double-insert). Under `GROUP BY`, E-class refuses except the
+  E4 carve-out below. Any `LIMIT` in the definition refuses every non-A0 atom — row
+  selection under LIMIT is not stable under value or predicate changes.
 
 ### A. No-op class
 
@@ -175,37 +223,61 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   column `a` whose expression is identical (modulo trivia) to `d`'s old expression — matched
   as a pair *before* B1/C1 classification so drop+add is not misread. *Script*:
   `ALTER TABLE t RENAME COLUMN d TO a;` — zero rows touched. Ambiguity (two dropped columns
-  with identical expressions) refuses rather than guessing. On backends without column
+  with identical expressions) refuses rather than guessing; the inverse (one dropped, two
+  identical added) is value-sound either way, so it is pinned deterministically — the
+  lexicographically-first added name takes the rename, the rest classify as B1 reading the
+  renamed column. On backends without column
   rename the same atom admits an `ADD` + copy-`UPDATE` + `DROP` option — enumerated when
   dialect variants arrive with wiring.
 - **B3 — 1:1 pull-through from an upstream at the model's own grain** (user's scenario 1).
   *Detect*: added SELECT item whose dependencies resolve to columns of an upstream already
   in the FROM tree. *Prove*: the output contains a 1:1 pull-through of that upstream's
-  unique key (lineage through the SELECT list), and the upstream's `unique_key` is declared
-  in `BackbuildInputs` — together, each target row addresses at most one upstream row.
-  *Script*: `ALTER ADD`, then column-scoped
-  `UPDATE t SET c = <requalified expr over u> FROM <upstream> u WHERE t.<k> = u.<k>` (the
-  `emit_column_scoped_merge` family). Rows filtered out of `t` by the model's WHERE are
-  simply never matched — the join touches only existing rows.
+  unique key, bound **per FROM-tree alias**, not per table — the pulled-through key and the
+  added expression must resolve to the *same* alias (under a self-join `orders o1 JOIN
+  orders o2`, a pull-through of `o1.order_id` licenses nothing about `o2.discount`); the
+  alias's `unique_key` is declared in `BackbuildInputs`; and the key columns satisfy the
+  shared NOT NULL obligation. *Script*: `ALTER ADD`, then a column-scoped backfill
+  `UPDATE t SET c = <requalified expr over u> FROM <upstream> u WHERE t.<k> = u.<k>`
+  (standalone update-from emitter; the maintenance `emit_column_scoped_merge` has a
+  full-row `SET *` source contract and is not reused directly). Rows filtered out of `t`
+  by the model's WHERE are simply never matched — the join touches only existing rows.
 - **B4 — new column via a newly-added LEFT JOIN** (user's scenario 2; fan-out — one
   dimension row enriches many target rows). *Detect*: FROM-tree diff = one added
   LEFT JOIN (two or more: B7); added SELECT items reference the new alias; nothing else
-  references it (WHERE/GROUP BY/other SELECT items unchanged). *Prove* the join cannot change the row
-  set: LEFT JOIN (never removes rows) + at-most-one match (join key unique on the dimension
-  side — declared `unique_key` or the FD machinery `analysis/functional_dependency.rs`).
-  *Script*: two shapes, chosen by expression:
-  - bare pull-through (`d.x`): `UPDATE t SET c = d.x FROM dim d WHERE t.jk = d.jk` —
-    unmatched rows stay at the post-`ALTER` NULL, which is exactly LEFT-JOIN semantics;
-  - general expression (`COALESCE(d.x, 'none')` — NULL-extension must be *evaluated*, not
-    skipped): `UPDATE t SET c = (SELECT <expr> FROM dim d WHERE d.jk = t.jk)` — the scalar
-    subquery NULL-extends on no match and *errors on multiple matches*, a free runtime
-    uniqueness probe. The oracle decides both shapes' correctness; cost is wiring-time
-    tuning.
+  references it (WHERE/GROUP BY/other SELECT items unchanged). *Prove* the join cannot
+  change the row set: LEFT JOIN (never removes rows) + at-most-one match (join key unique
+  on the dimension side — declared `unique_key` or the FD machinery
+  `analysis/functional_dependency.rs`) + the shared NOT NULL obligation on the join key.
+  Two further legs: the ON condition must be a bare key equality (extra dim-side
+  conjuncts or a non-equality ON refuse — reproducing them verbatim is future work), and
+  the fact-side ON columns must themselves have stored bare representatives (a join keyed
+  on a column the model does not store is unaddressable — a named, actionable refusal).
+  *Script*: two shapes, *enumerated* by expression (§2 "Options, not choices"):
+  - bare pull-through (`d.x`) admits **both** shapes:
+    `UPDATE t SET c = d.x FROM dim d WHERE t.jk = d.jk` — unmatched rows stay at the
+    post-`ALTER` NULL, which is exactly LEFT-JOIN semantics — and the substituted
+    scalar-subquery shape below;
+  - a general expression (`COALESCE(d.x, 'none')` — NULL-extension must be *evaluated*,
+    not skipped) admits only the **per-reference substituted** scalar-subquery shape:
+    each dim-column reference inside the expression is replaced by its own scalar
+    subquery — `UPDATE t SET c = COALESCE((SELECT d.x FROM dim d WHERE d.jk = t.jk),
+    'none')`. A subquery over zero rows yields NULL, so every dim reference evaluates to
+    NULL exactly as LEFT-JOIN NULL-extension would, and the surrounding expression still
+    runs. (The naive whole-expression form
+    `SET c = (SELECT COALESCE(d.x, 'none') FROM dim d WHERE d.jk = t.jk)` is **wrong** —
+    zero rows makes the whole scalar NULL and the `COALESCE` never fires.) Each subquery
+    also *errors on multiple matches* — a free runtime uniqueness probe. The oracle
+    verifies every offered shape; choosing is the deferred cost model's job.
 - **B5 — new aggregate column at unchanged GROUP BY grain.** *Prove*: skeleton unchanged;
-  aggregate inputs available upstream. *Script*: column-scoped `MERGE` from a
-  re-aggregation `SELECT <keys>, <agg> FROM <upstream> GROUP BY <keys>` keyed on the
-  GROUP BY keys (which are the row identity by construction). Full upstream scan, but only
-  one column written. Tier 3.
+  aggregate inputs available upstream; shared NOT NULL obligation on the group keys.
+  *Script*: a matched-only column backfill from the **after-definition's own skeleton**
+  projected to keys + the new column — the re-aggregation must carry the model's full
+  FROM tree and WHERE (a bare `SELECT <keys>, <agg> FROM <upstream> GROUP BY <keys>`
+  over-counts filtered rows), it updates matched keys only (no insert arm — an insert
+  would add groups the stored row set proves cannot exist), and it uses the same
+  update-from emitter as B3, not `emit_column_scoped_merge` (whose `SET *` contract
+  requires a full-row source projection). Full upstream scan, but only one column
+  written. Tier 3.
 - **B6 — new window-function column over stored columns** (`ROW_NUMBER() OVER
   (PARTITION BY stored ORDER BY stored)`). *Prove*: window reads only stored columns.
   *Script*: self-read
@@ -217,11 +289,15 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   condition references columns an earlier join provides). *Prove*: per join, the full B4
   row-set-preservation proof (LEFT + unique key on the joined side + no stray references),
   with one extension — a later join's key may reference a column an *earlier step
-  backfills*, provided that column is part of the added output and therefore stored by the
-  time the step runs. *Script*: the B4 backfill per join, in dependency order — backfill
-  join 1's columns first, then join 2's backfill keys on the now-stored column. A later
-  join keying on an earlier join's column that is **not** stored in the output refuses
-  (the step would need a multi-hop traversal; §7).
+  backfills*, provided that column is a **bare** pull-through of exactly that dim column
+  and part of the added output, therefore stored by the time the step runs. Bareness is
+  load-bearing: a wrapped carrier (`COALESCE(d1.c, 0) AS c`) stores `0` where the rebuild
+  has NULL, and a later join on `c` would then *hit* a dim row the rebuild's NULL key
+  misses. *Script*: the B4 backfill per join, in dependency order — backfill join 1's
+  columns first, then join 2's backfill keys on the now-stored column. A later join keying
+  on an earlier join's column that is not stored bare in the output refuses with the
+  actionable message naming the column to add (§2 "Refusal posture"; multi-hop traversal:
+  §7).
 
 ### C. Removals and type changes
 
@@ -230,22 +306,27 @@ rows exist is a grain change), derived from the diff rather than the maintenance
   backbuild's job is only to *sequence* the drop (last, after rename extraction).
 - **C2 — type change**: safe widening → `ALTER COLUMN TYPE` (schema evolution owns the
   widening table); a representation change (`c` now cast differently) is not a C-case at
-  all — it is a changed expression, D1/D2.
+  all — it is a changed expression, D1/D2. A bare C2 atom is essentially unreachable from
+  a pure definition diff (types are inferred, so a type change without an expression
+  change has no syntactic trigger); it arrives wiring-fed, from deployed-schema
+  comparison.
 
 ### D. Changed-expression class
 
 *Detect*: same column name, before/after expressions differ modulo trivia. This is the
 deliberate L3-boundary crossing: no declared migration intent, the diff itself is the intent.
 The formatting-only false positive is absorbed by the trivia-insensitive comparator now and
-the fingerprint refinement at wiring.
+the fingerprint refinement at wiring. D-class **refuses under `SELECT DISTINCT`** (shared
+grain guards, §4 intro): an `UPDATE` cannot merge two stored rows that now agree on every
+column, while the rebuild's DISTINCT would — the multisets diverge.
 
 - **D1 — new expression derivable from stored columns.** The most valuable case in
-  practice: "fix a bug in one column of a 10 TB table". *Prove*: the new expression's
-  dependencies are available in the stored row — either the referenced input is stored 1:1
-  under some output column (lineage through the *unchanged* SELECT items), or the
-  expression references only output columns. *Script*: column-scoped
+  practice: "fix a bug in one column of a 10 TB table". *Prove*: every dependency of the
+  new expression has a stored representative under the uniform rule (§4 intro: a bare
+  pull-through unchanged between both definitions — never the changed column itself, never
+  a changed sibling). *Script*: column-scoped
   `UPDATE t SET c = <requalified expr>;` — siblings untouched. Note the subtlety: the new
-  expression is defined over *inputs*, so derivability means finding stored 1:1
+  expression is defined over *inputs*, so derivability means finding stored
   representatives of those inputs, not blindly substituting the old `c`.
 - **D2 — new expression needs an upstream read** (changed enrichment logic). Same proof
   and script as B3 with the trigger being an expression change rather than a column add.
@@ -255,6 +336,15 @@ the fingerprint refinement at wiring.
 SELECT list unchanged; the WHERE diff is a **conjunct-set diff** (split at top-level `AND`s
 only — a syntactic conjunct algebra, deliberately not a general implication prover; anything
 not expressible as added/removed conjuncts refuses).
+
+**Grain precondition** (shared guards, §4 intro): E-class requires no `GROUP BY`, no
+`DISTINCT`, no `LIMIT`. Under GROUP BY a predicate change re-partitions *inputs to
+aggregates*, not stored rows — a slice INSERT double-counts groups that already exist (and
+the identity anti-join guard makes it worse by silently skipping them); under DISTINCT a
+slice re-inserts values already merged. One principled carve-out: **E4 where the range
+column is itself a group key** — every group then lies wholly inside or outside the
+difference region, which is what "region-scoped" actually requires, and it is precisely the
+common shape (extending history on a date-keyed aggregate).
 
 Three-valued logic is load-bearing everywhere here: `WHERE p` keeps rows where `p` is TRUE,
 so set complements must be written `IS NOT TRUE`, never bare `NOT`:
@@ -273,7 +363,11 @@ so set complements must be written `IS NOT TRUE`, never bare `NOT`:
   difference slice `ts >= Y AND ts < X` is a *region-scoped* INSERT in the maintenance
   sense (a clean partition interval, the shape `emit_delete_insert`'s region machinery
   already speaks). Mechanically an E2 whose removed/added conjuncts are range predicates
-  on one column.
+  on one column — and the **emitted predicate is always E2's complement form** (`new
+  conjunct` present, `AND (<old conjunct>) IS NOT TRUE`), which gets every boundary and
+  NULL case right by construction; the range view is used for *classification only*
+  (same column, same comparison operator, provably widened literal — mixed operators like
+  `>` → `>=` refuse rather than trusting literal arithmetic at the boundary).
 
 ### F. Structural class
 
@@ -318,9 +412,13 @@ column UPDATEs/MERGEs (B1/B3/B4/B7/D*) → INSERTs (E2/E4/F1) → ALTER DROPs (C
 Rationale: renames first so requalified expressions reference final names; deletes before
 updates so updates touch fewer rows; inserts after updates because inserted rows come from
 the after-definition SELECT and are already correct (a deterministic re-update would be
-harmless but wasted); drops last so nothing mid-script loses a column it reads. Within the
-update slot, B7 steps run in their derived dependency order — the one place ordering is
-data-dependent rather than fixed by variant. An atom with no admissible option blocks any
+harmless but wasted); drops last so nothing mid-script loses a column it reads. The update
+slot is order-free by construction — the uniform representative rule (§4 intro) means every
+update reads only unchanged columns — except B7, whose steps run in their derived
+dependency order. INSERT-family statements always carry an **explicit column list** (or
+`INSERT INTO … BY NAME`): after an `ALTER ADD`, the table's physical column order differs
+from the after-definition's declared order, and a positional INSERT silently misassigns
+same-typed columns. An atom with no admissible option blocks any
 composed targeted script — `FullRefresh` stays the model's only option (§2). The oracle
 harness includes composite cases precisely because ordering bugs are silent in single-atom
 tests.
@@ -393,25 +491,34 @@ sampling (testkit-style, à la `maintenance_conformance`) deferred.
 
 ## 7. Open questions
 
-1. **INSERT idempotence.** The anti-join guard needs row identity; for identity-less models
-   (no GROUP BY, no declared key) E2/E4/F1 scripts are one-shot. Acceptable, or should
-   identity-less models refuse INSERT-family atoms outright?
-2. **Rename-match ambiguity.** Two dropped columns with syntactically identical expressions:
-   refuse (current position) or match by position? Refusal is sound; revisit if it bites.
+1. **INSERT idempotence** — *resolved 2026-08-02*: identity-less INSERT options stay
+   enumerated, honestly flagged `rerun_safe: false` (§2); refusing them would discard
+   useful options, hiding the risk would be dishonest. The guard's own obligation
+   (identity unique in the after-state) is recorded in §2. Residual: whether wiring adds a
+   discriminator-based guard for F1 branches without row identity.
+2. **Rename-match ambiguity** — *resolved 2026-08-02*: two-dropped × one-added refuses
+   (any guess is unsound); one-dropped × many-added is pinned lexicographically (§4 B2).
+   A declared `renamed_from:` hint is the escape hatch if refusal bites in practice —
+   acceptable despite the derive-don't-declare preference because a rename is *intent*,
+   genuinely underdetermined by the definitions, not a derivable fact.
 3. **Cost model.** Deliberately deferred (2026-08-02): the module enumerates every
-   admissible option per atom and never chooses. The open question narrows to the eventual
-   chooser's inputs — table/upstream sizes, backend capabilities (a rename is free on
-   DuckDB but a copy on Spark+Parquet), staleness tolerance — and where it runs (wiring
-   layer, comparing targeted scripts against the always-present FullRefresh baseline).
-4. **Where "before" comes from when wired.** `.smelt/schemas/` stores schema + hash, not
-   SQL; the expanded-logical-SQL snapshot (`run_state.md` §"Snapshot and environment
-   store") is the principled source and also what fingerprint comparison wants. Wiring
-   likely rides on the virtual-environments state store.
-5. **Maintained-model ledger integration.** The definition-change trigger instantiates new
-   groups at `S = ∅` and catches up; a backbuild script instead advances the group to
-   *current* in one shot. Reconciling the two (backbuild as "instantiate + immediate
-   full-input catch-up", which is what §"The definition-change trigger" already describes)
-   is wiring-time design.
+   admissible option per atom and never chooses; the cost-relevant option metadata (§2:
+   write scope, `reads_upstream`, statement count, `rerun_safe`) is recorded from day one
+   so the eventual chooser is a pure function over it. The open question narrows to the
+   chooser's remaining inputs — table/upstream sizes, backend capabilities (a rename is
+   free on DuckDB but a copy on Spark+Parquet), staleness tolerance — and where it runs
+   (wiring layer, comparing targeted scripts against the always-present FullRefresh
+   baseline).
+4. **Where "before" comes from when wired** — *position (2026-08-02)*: the
+   expanded-logical-SQL snapshot (`docs/specs/run_state.md` §"Snapshot and environment
+   store") is the source — it matches the store-the-SQL doctrine and is the same artifact
+   fingerprint reuse wants; `.smelt/schemas/` cannot serve (schema + hash only). A
+   `--before <file-or-git-ref>` convenience input for ad hoc use. Lands with wiring.
+5. **Maintained-model ledger integration** — *resolved framing (2026-08-02)*: backbuild
+   **is** the catch-up executor. "Instantiate at `S = ∅` then catch up full-input"
+   (§"The definition-change trigger") and "advance to current in one shot" are the same
+   operation at two granularities; wiring records the resulting processed-input vector.
+   No design change needed here.
 6. **Spark dialect.** Emitters are DuckDB-dialect first. `UPDATE … FROM` and scalar-subquery
    UPDATE have Spark/Delta variants (`MERGE`-based); the `MaintenanceDialect` enum is the
    template. Deferred with the rest of wiring.
