@@ -1629,6 +1629,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#remove-a-union-all-branch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remove a UNION ALL branch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#several-changes-at-once" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3083,6 +3094,17 @@
 </li>
         
           <li class="md-nav__item">
+  <a href="#remove-a-union-all-branch" class="md-nav__link">
+    <span class="md-ellipsis">
+      
+        Remove a UNION ALL branch
+      
+    </span>
+  </a>
+  
+</li>
+        
+          <li class="md-nav__item">
   <a href="#several-changes-at-once" class="md-nav__link">
     <span class="md-ellipsis">
       
@@ -3505,19 +3527,51 @@ name-based — so the added branch's declared column names must match the first
 branch's order exactly. A branch declaring <code>SELECT kind, id</code> against a first
 branch declaring <code>SELECT id, kind</code> would silently swap values under a rebuild's
 positional binding, and refuses here by name.</p>
+<h3 id="remove-a-union-all-branch">Remove a UNION ALL branch<a class="headerlink" href="#remove-a-union-all-branch" title="Permanent link">&para;</a></h3>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1">-- before</span>
+<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;a&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_a</span>
+<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="k">UNION</span><span class="w"> </span><span class="k">ALL</span>
+<a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;b&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_b</span>
+<a id="__codelineno-25-5" name="__codelineno-25-5" href="#__codelineno-25-5"></a><span class="c1">-- after</span>
+<a id="__codelineno-25-6" name="__codelineno-25-6" href="#__codelineno-25-6"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;a&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_a</span>
+</code></pre></div>
+<p>A removed branch needs a <strong>discriminator</strong>: a column that is a distinct
+literal constant in every branch of the before-definition (here, <code>src</code>). With
+one, the removed branch's own constant becomes an equality delete:</p>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;b&#39;</span>
+</code></pre></div>
+<p>This is an equality predicate, not the <code>IS NOT TRUE</code> complement form
+<a href="#tighten-a-filter">Tighten a filter</a> uses — the discriminator is proven to be
+a non-NULL literal that lands on exactly the removed branch's rows, so there's
+no NULL-evaluation case to guard against. That proof matters even when the
+removed branch's other columns happen to coincide with a surviving branch's —
+two branches unioning the same <code>id</code> values under different <code>src</code> constants
+still delete only the rows the removed branch actually contributed, because
+the predicate keys on the discriminator, not the payload.</p>
+<p>Without a discriminator, branch removal refuses with an actionable nudge:</p>
+<blockquote>
+<p>no provenance predicate distinguishes the removed branch's rows in the
+stored table — add a constant discriminator column (e.g. a literal <code>AS src</code>
+value distinct per branch) to make branch removal targetable</p>
+</blockquote>
+<p>The same proof also refuses when a candidate column isn't a constant in every
+branch (a non-literal expression in even one branch means the predicate can't
+be proven to hold everywhere it needs to), or when two branches share the same
+constant (the resulting predicate would delete a surviving branch's rows too).
+Plain <code>UNION</code> refuses here for the same reason it does on the add side.</p>
 <h3 id="several-changes-at-once">Several changes at once<a class="headerlink" href="#several-changes-at-once" title="Permanent link">&para;</a></h3>
 <p>Atomic changes compose. Rename a column, add a derived one, and tighten the
 filter in a single edit:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1">-- before</span>
-<a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
-<a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="c1">-- after</span>
-<a id="__codelineno-25-4" name="__codelineno-25-4" href="#__codelineno-25-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">unit_price</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">list_price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="c1">-- before</span>
+<a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
+<a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="c1">-- after</span>
+<a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">unit_price</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">list_price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
 </code></pre></div>
 <p>The assembled script (asserted verbatim in the conformance suite):</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
-<a id="__codelineno-26-2" name="__codelineno-26-2" href="#__codelineno-26-2"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">;</span>
-<a id="__codelineno-26-3" name="__codelineno-26-3" href="#__codelineno-26-3"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
-<a id="__codelineno-26-4" name="__codelineno-26-4" href="#__codelineno-26-4"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">;</span>
+<div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
+<a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">;</span>
+<a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
+<a id="__codelineno-28-4" name="__codelineno-28-4" href="#__codelineno-28-4"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">TRUE</span><span class="p">;</span>
 </code></pre></div>
 <p>Statements run in a fixed dependency order — renames first (so later
 expressions reference final names), then each added column's <code>ALTER ADD</code> with
@@ -3588,11 +3642,10 @@ converts a full rebuild into a column-scoped update.</p>
   script and full refresh — a cost model over the recorded option metadata is
   the planned chooser.</li>
 <li>Not yet classified: dropped columns (owned by
-  <a href="../schema-evolution/">schema evolution</a>), removed <code>UNION ALL</code> branches, refs
-  repointed to a different upstream. These refuse with named reasons today.
-  (A changed <em>cast</em> is not a type change — it is a changed expression, handled
-  above; a bare type change with no expression change has no trigger in a
-  definition diff at all.)</li>
+  <a href="../schema-evolution/">schema evolution</a>), refs repointed to a different
+  upstream. These refuse with named reasons today. (A changed <em>cast</em> is not a
+  type change — it is a changed expression, handled above; a bare type change
+  with no expression change has no trigger in a definition diff at all.)</li>
 </ul>
 <h2 id="related-pages">Related pages<a class="headerlink" href="#related-pages" title="Permanent link">&para;</a></h2>
 <ul>
