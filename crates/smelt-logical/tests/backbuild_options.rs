@@ -1595,3 +1595,135 @@ fn c4_added_branch_with_swapped_column_order_refuses() {
         atom.inadmissible
     );
 }
+
+// ===== F1 edited-survivor branch matching + the C4 reorder guard (research
+// §4 F1's edited-survivor generalization) =====
+
+#[test]
+fn edited_nonfirst_branch_refuses_named() {
+    // An edit sits in branch 1 (not branch 0) — the top-level
+    // (whole-definition) SELECT-list/WHERE/skeleton diff only ever
+    // describes branch 0's own content (`definition_diff` computes it from
+    // each side's outermost `SelectStmt`, which is branch 0 of its own
+    // chain), so a non-first branch's edit can never be classified from it.
+    // Must refuse by name rather than silently treating the (accidentally
+    // clean-looking) top-level diff as proof that nothing changed.
+    let before_sql = "SELECT id FROM t1 UNION ALL SELECT id, a FROM t2";
+    let after_sql = "SELECT id FROM t1 UNION ALL SELECT id, a, a * 2 AS doubled FROM t2";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[("doubled", "INTEGER")]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("branch 0")),
+        "expected a refusal naming that only branch 0's own edit is describable, got: {:?}",
+        atom.inadmissible
+    );
+
+    let targeted = assemble(
+        &options,
+        &Selection::Targeted {
+            atom_choices: vec![0],
+        },
+    );
+    assert!(targeted.is_empty());
+}
+
+#[test]
+fn c4_swapped_order_reorder_append_refuses() {
+    // A contrived corner: the before-definition's two branches already
+    // share the same name-set/expressions/FROM (no WHERE), but declare
+    // their columns in mutually swapped orders. A single edit that reorders
+    // the branches and appends a third makes the *name-keyed* top-level
+    // SELECT-list diff report a no-op (same names, same expressions on both
+    // sides — `id`/`kind` are plain column references either way) even
+    // though the real first branch's own *declared* column order changed
+    // from `(id, kind)` to `(kind, id)`. `UNION ALL` binds columns
+    // positionally, so this divergence must refuse rather than slip past a
+    // bare name-set no-op check (predecessor residual "C4 contrived
+    // corner").
+    let before_sql = "SELECT id, kind FROM t1 UNION ALL SELECT kind, id FROM t1";
+    let after_sql = "SELECT kind, id FROM t1 UNION ALL SELECT id, kind FROM t1 UNION ALL SELECT \
+                      id, kind FROM t3";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible.iter().any(|r| {
+            let lower = r.reason.to_lowercase();
+            lower.contains("declared") && lower.contains("order")
+        }),
+        "expected a refusal naming the declared-order divergence, got: {:?}",
+        atom.inadmissible
+    );
+
+    let targeted = assemble(
+        &options,
+        &Selection::Targeted {
+            atom_choices: vec![0],
+        },
+    );
+    assert!(targeted.is_empty());
+}
+
+#[test]
+fn branch_swap_with_edit_refuses_phantom_top_level_diff() {
+    // Reviewer-confirmed soundness bug (execution against real DuckDB): the
+    // trusted edited-branch-0 admission (`edited.len() == 1 &&
+    // edited[0].index == 0 && removed.is_empty()`) checked only the
+    // before-chain position of the leftover edit, not which after-position
+    // it was actually *paired* against. Here after's literal branch 0
+    // (`SELECT id, a FROM t1 WHERE a > 100`) exact-text-matches before's
+    // branch 1, so it is consumed into `unchanged`; before's branch 0's
+    // true edit (`a` -> `a * 2 AS a`) is left paired against after-position
+    // 1, not after's own declared branch 0. The top-level (whole-definition)
+    // diff nonetheless compares before's literal branch 0
+    // (`SELECT id, a FROM t1`) against after's literal branch 0
+    // (`SELECT id, a FROM t1 WHERE a > 100`), reporting a phantom added
+    // WHERE conjunct `a > 100` that describes no single branch's real
+    // change. Trusting it previously admitted a wrong E1
+    // `DELETE ... WHERE (a > 100) IS NOT TRUE`, which — against
+    // `t1 = {(1,10),(2,20),(3,200)}` — diverges from a full rebuild (a full
+    // rebuild keeps `(1,10)` doubled to `(1,20)` from the reordered-and-
+    // edited former branch 0, and keeps `(3,200)` from the now-filtered
+    // former branch 1; the wrong DELETE instead drops the stored `(1,10)`
+    // row outright). This must now be a named refusal (FullRefresh-only —
+    // no E1 atom admitted).
+    let before_sql = "SELECT id, a FROM t1 UNION ALL SELECT id, a FROM t1 WHERE a > 100";
+    let after_sql = "SELECT id, a FROM t1 WHERE a > 100 UNION ALL SELECT id, a * 2 AS a FROM t1";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        !atom
+            .options
+            .iter()
+            .any(|o| o.technique == Technique::PredicateTightenDelete),
+        "must not admit a wrong E1 DELETE from a phantom top-level diff, got options: {:?}",
+        atom.options
+    );
+
+    let targeted = assemble(
+        &options,
+        &Selection::Targeted {
+            atom_choices: vec![0],
+        },
+    );
+    assert!(
+        targeted.is_empty(),
+        "expected FullRefresh-only (no targeted atoms), got: {targeted:?}"
+    );
+}

@@ -348,18 +348,37 @@ SELECT list unchanged; the WHERE diff is a **conjunct-set diff** (split at top-l
 only — a syntactic conjunct algebra, deliberately not a general implication prover; anything
 not expressible as added/removed conjuncts refuses).
 
-**Trap (final review, fixed): the conjunct-set diff's own soundness precondition, under a
+**Trap (final review, fixed twice): the conjunct-set diff's own soundness precondition, under a
 multi-branch `UNION ALL` definition.** The WHERE-clause (and SELECT-list, and skeleton)
 diff is computed positionally from each definition's own *first* branch only, while the
-set-operation diff compares branches as a *multiset* (branch reorder is a no-op there). A
-pure branch reorder can therefore make the first-branch pair diverge — a phantom removed
-conjunct, say — even though no branch's own content changed at all, and (pre-fix) that
-phantom diff was classified exactly as if it described the whole definition: a phantom
-removed-conjunct-only shape unconditionally admits E2's difference INSERT, sourced from the
-*entire* (all-branches) after-definition, duplicating rows an unrelated branch's swap never
-touched. Fix: whenever more than one branch is in play, the SELECT-list/WHERE/skeleton
-diffs are trusted only when every one of them is independently a no-op; otherwise the whole
-diff refuses by name rather than classifying atoms from a diff that may not describe any
+set-operation diff matches branches by per-branch syntactic equality (branch reorder is a
+no-op there; a surviving branch that itself carries an edit is paired against a same-side
+leftover and diffed independently — see F1 below). A pure branch reorder can therefore make the
+first-branch pair diverge — a phantom removed conjunct, say — even though no branch's own
+content changed at all, and (pre-fix) that phantom diff was classified exactly as if it
+described the whole definition: a phantom removed-conjunct-only shape unconditionally admits
+E2's difference INSERT, sourced from the *entire* (all-branches) after-definition,
+duplicating rows an unrelated branch's swap never touched. Fix: whenever more than one branch
+is in play, the SELECT-list/WHERE/skeleton diffs are trusted in exactly two shapes: no branch
+carries its own edit and every one of the diffs is independently a no-op (with the SELECT
+list's declared column *order* also agreeing between versions — see F1's C4 reorder-guard
+note below), or exactly one branch carries its own edit *and* that edit is paired as before's
+own branch 0 against after's own branch 0, with every other branch surviving exactly (matched
+with no other edit and nothing genuinely removed) — in that second shape the top-level diff
+*is* that pairing's own diff, since it is computed from each definition's own outermost node
+on both sides. Both sides of the pairing must be checked, not just the before-side position:
+the leftover-pairing loop matches unmatched branches positionally *among the leftovers*, not by
+declared chain position, so a before-branch-0 edit can still end up paired against an
+after-leftover that is not after's own declared branch 0 — concretely, when after's literal
+branch 0 happens to exact-text-match a *different* before-branch and is consumed as an
+unedited survivor, before's true branch-0 edit is left paired with a later after-position, and
+the top-level diff (always before's literal branch 0 vs. after's literal branch 0) describes
+neither side of that real pairing even though it looks clean. A first fix admitted this shape
+by checking only the before-side position, which a differential run against real DuckDB caught
+admitting a wrong E1 DELETE; the check now requires both the before-side and the paired
+after-side position to be branch 0. Any other edited-branch shape (an edit paired away from
+branch 0 on either side, more than one edited branch, or an edited branch alongside a genuine
+removal) refuses by name rather than classifying atoms from a diff that may not describe any
 single branch's real change (`multi_branch_pure_diff_gate`,
 `crates/smelt-logical/src/backbuild/classify.rs`).
 
@@ -406,10 +425,18 @@ so set complements must be written `IS NOT TRUE`, never bare `NOT`:
 
 ### F. Structural class
 
-- **F1 — new UNION ALL branch.** *Detect*: branch multiset diff by per-branch syntactic
-  equality; exactly one added branch, others unchanged. *Script*: `INSERT INTO t SELECT …
-  <branch>;` — UNION ALL is additive, the branch is exactly the delta. (Plain `UNION`
-  dedups across branches: refuse.)
+- **F1 — new UNION ALL branch.** *Detect*: branches are matched by per-branch syntactic
+  (exact-text) equality first; any before/after branches left unmatched by that pass are
+  then paired positionally among themselves and diffed (`EditedBranch`, `diff.rs`'s
+  `set_op_diff`) — so an added branch is a leftover *after*-branch with no paired *before*
+  leftover, and a surviving branch that itself carries an edit (e.g. a B1 column add
+  confined to that one branch) is matched against its old self rather than reported as
+  "removed + added". *Admission*: exactly one added branch with nothing removed; an edited
+  branch is only ever admitted alongside F1 when it is uniquely branch 0 with every other
+  branch surviving exactly (`multi_branch_pure_diff_gate` — see the E-class trap above for
+  why: only branch 0's own edit is visible to the top-level diff at all). *Script*:
+  `INSERT INTO t SELECT … <branch>;` — UNION ALL is additive, the branch is exactly the
+  delta. (Plain `UNION` dedups across branches: refuse.)
   **Trap (final review, fixed):** `UNION ALL` binds columns *positionally*, not by name — a
   real rebuild's `CREATE TABLE ... AS <after>` takes every branch's column names from the
   *first* branch alone; a later branch's own declared names are irrelevant to what a
@@ -419,10 +446,22 @@ so set complements must be written `IS NOT TRUE`, never bare `NOT`:
   different values under the same names than a real rebuild's positional binding would —
   e.g. an added branch declaring `SELECT kind, id` against a first branch declaring
   `SELECT id, kind` silently swaps which value lands in which column. F1 now requires the
-  added branch's own declared output column names, in order, to exactly equal the first
-  branch's declared order, refusing by name otherwise (`build_f1_option`'s
-  `branch_output_column_names` check,
-  `crates/smelt-logical/src/backbuild/classify.rs`).
+  added branch's own declared output column names, in order, to exactly equal the after
+  side's own branch-0 declared order (`build_f1_option`'s `branch_output_column_names`
+  check against the SELECT-list diff's `after_order`, `crates/smelt-logical/src/backbuild/
+  classify.rs` and `diff.rs`), refusing by name otherwise — this stays correct even when
+  branch 0 itself is the diff's edited branch, since `after_order` is read directly off the
+  after side's own declared SELECT list rather than assembled from the (before-order-only)
+  unchanged-column set.
+  **Trap (contrived corner, fixed):** a bare name-set/expression equality check on the
+  top-level SELECT-list diff is not enough to prove the real first branch's column *order*
+  is unchanged — a before-definition whose two branches already share the same
+  name-set/expressions/FROM/WHERE but declare them in mutually swapped orders can, after a
+  reorder-plus-append edit, make the name-keyed top-level diff report a no-op (same names,
+  same expressions on each side) while the true declared order at the first-branch position
+  has actually changed. The multi-branch gate additionally requires the SELECT list's raw
+  declared column order (`before_order`/`after_order`) to agree between versions before
+  trusting a no-edited-branches diff as clean, closing this gap.
 - **F2 — removed UNION ALL branch.** Needs a provenance predicate distinguishing the
   branch's rows in the stored table (a discriminator constant/column —
   `analysis/discriminants.rs`); with one, `DELETE WHERE <discriminator>`; without, refuse.

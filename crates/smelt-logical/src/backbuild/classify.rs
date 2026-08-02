@@ -57,10 +57,13 @@ pub fn derive_backbuild_options(
                 // available regardless.
                 Vec::new()
             } else if let Some(refusal) = multi_branch_pure_diff_gate(comparable) {
-                // C3 fix (final-review finding): whenever more than one
+                // C3 fix (final-review finding), generalized for an edited
+                // surviving branch (research §4 F1): whenever more than one
                 // UNION ALL branch is in play, the select-list/WHERE/skeleton
                 // diffs below are trusted only when they are all
-                // independently no-ops — see the gate's own doc comment.
+                // independently no-ops, or when the diff's only edited
+                // branch is uniquely branch 0 with every other pair exact
+                // — see the gate's own doc comment.
                 vec![refusal]
             } else {
                 match &comparable.skeleton {
@@ -166,40 +169,146 @@ fn classify_skeleton_reason(reason: &str) -> String {
 /// the branch diff itself could not be factored at all — `SetOpDiff::Opaque`
 /// may still hide more than one branch, so this stays conservative there
 /// too), the `select_list`/`where_clause`/`skeleton` diffs are trusted only
-/// when every one of them is independently a no-op; otherwise the whole
-/// diff refuses with a named reason rather than classifying atoms from a
-/// diff that may not describe any single branch's actual change. F1's pure
-/// append case (every branch unchanged, one new branch at the tail) still
-/// passes this gate, since in that shape the first branch genuinely is
-/// unchanged between versions — `select_list`/`where_clause`/`skeleton` are
-/// all no-ops by construction.
+/// in two shapes:
+///
+/// - **No branch carries its own edit** (`SetOpDiff::Branches::edited` is
+///   empty — every surviving branch text-matched exactly, so any change is a
+///   pure add/remove/reorder of whole branches): trusted when
+///   `select_list`/`where_clause`/`skeleton` are all independently a no-op
+///   **and** the SELECT list's declared column *order* agrees between
+///   versions (research §4 F1's C4 reorder guard, below) — F1's pure append
+///   case (every branch unchanged, one new branch at the tail) passes this,
+///   since the first branch genuinely is unchanged between versions.
+/// - **Exactly one branch carries its own edit, it is paired before-branch 0
+///   against after-branch 0, and every other pair is exact**
+///   (`edited.len() == 1 && edited[0].index == 0 && edited[0].after_index ==
+///   0 && removed.is_empty()`): the top-level (whole-definition) diff *is*
+///   this pairing's own diff in this shape — `definition_diff` computes
+///   `select_list`/`where_clause`/`skeleton` from each side's outermost
+///   `SelectStmt`, i.e. before's own branch 0 against after's own branch 0
+///   — so it is safe to classify atoms from it exactly as the
+///   single-branch case would (research §4 F1's edited-survivor
+///   generalization). Both indices must be checked: `set_op_diff` pairs
+///   leftovers positionally *among the leftovers*, not by declared chain
+///   position, so a before-position-0 edit can still be paired against an
+///   after-leftover that is not after's own declared branch 0 — e.g. when
+///   after's literal branch 0 exact-text-matched a *different*
+///   before-branch and was consumed into `unchanged`, leaving the true
+///   edit paired with a later after-position. In that shape the top-level
+///   diff (which always compares before's literal branch 0 to after's
+///   literal branch 0) describes neither side of the actual pairing and
+///   must not be trusted, even though `index == 0` alone would suggest it
+///   is safe.
+///
+/// Any other edited-branch shape (an edit in a non-first branch, more than
+/// one edited branch, or an edited branch alongside a genuine removal)
+/// refuses unconditionally and by name: the top-level diff cannot describe
+/// a non-first branch's edit at all, so even a superficially "clean"
+/// top-level diff must not be trusted (research §4's E-class trap,
+/// generalized — an edit confined to, say, branch 1 leaves branch 0's own
+/// diff looking like a no-op, which would otherwise silently classify
+/// nothing while a real change went unrepresented).
+///
+/// **C4 reorder guard.** The name-keyed `select_list.is_noop()` alone is not
+/// enough even in the no-edited-branches shape: a before-definition whose
+/// two branches happen to share the same name-set/expressions but declare
+/// them in mutually swapped orders can, after a branch reorder, make the
+/// *name-keyed* top-level SELECT-list diff report a no-op (same names, same
+/// expressions on both sides) while the branches' true *declared* column
+/// order at the (real) first-branch position actually differs from before —
+/// exactly the shape F1's positional `UNION ALL` binding cares about. The
+/// declared-order equality check below (`before_order == after_order`)
+/// closes that gap.
 fn multi_branch_pure_diff_gate(comparable: &ComparableDiff) -> Option<AtomAnalysis> {
-    let multi_branch = match &comparable.set_ops {
-        SetOpDiff::NotApplicable => false,
+    let (edited, removed_len) = match &comparable.set_ops {
+        SetOpDiff::NotApplicable => return None,
         SetOpDiff::Branches {
             added,
             removed,
             unchanged,
-        } => unchanged.len() + added.len() > 1 || unchanged.len() + removed.len() > 1,
-        SetOpDiff::Opaque { .. } => true,
+            edited,
+        } => {
+            let multi_branch = unchanged.len() + edited.len() + added.len() > 1
+                || unchanged.len() + edited.len() + removed.len() > 1;
+            if !multi_branch {
+                return None;
+            }
+            (edited, removed.len())
+        }
+        SetOpDiff::Opaque { .. } => {
+            return multi_branch_pure_diff_gate_clean_check(comparable);
+        }
     };
-    if !multi_branch {
+
+    if edited.len() == 1 && edited[0].index == 0 && edited[0].after_index == 0 && removed_len == 0 {
+        // Trusted edited-branch-0 admission: the top-level diff *is* this
+        // pairing's own diff — before's own branch 0 paired against after's
+        // own branch 0 (see this function's doc comment) — proceed exactly
+        // as the single-branch case would.
         return None;
     }
 
+    if !edited.is_empty() {
+        let positions: Vec<String> = edited
+            .iter()
+            .map(|e| format!("before {} -> after {}", e.index, e.after_index))
+            .collect();
+        return Some(multi_branch_definition_changed_refusal(&format!(
+            "branch pairing(s) {} carry their own edit, but the top-level (whole-definition) \
+             SELECT-list/WHERE/skeleton diff only ever describes before's own branch 0 paired \
+             against after's own branch 0 — an edit confined to a non-first before-position, an \
+             edit paired against a non-first after-position (even when the before-position is \
+             0 — a branch reorder can pair before's true first-branch edit against a later \
+             after-position while after's own literal branch 0 matched a different, unchanged \
+             before-branch), more than one edited branch, or an edited branch alongside a \
+             genuine removal, is never visible there, even when that top-level diff itself \
+             looks like a no-op",
+            positions.join(", ")
+        )));
+    }
+
+    multi_branch_pure_diff_gate_clean_check(comparable)
+}
+
+/// The no-edited-branches leg of [`multi_branch_pure_diff_gate`]: trusted
+/// only when the top-level diff is a pure no-op (name/expression equality)
+/// *and* the SELECT list's declared column order agrees between versions
+/// (the C4 reorder guard — see the caller's doc comment).
+fn multi_branch_pure_diff_gate_clean_check(comparable: &ComparableDiff) -> Option<AtomAnalysis> {
     let clean = comparable.select_list.is_noop()
         && comparable.where_clause.is_noop()
         && comparable.skeleton.is_noop();
-    if clean {
-        return None;
+    if !clean {
+        return Some(multi_branch_definition_changed_refusal(
+            "the SELECT-list/WHERE/skeleton diff (computed from each definition's own first \
+             UNION ALL branch) shows a change, which cannot be trusted once more than one \
+             branch is in play — a branch reorder alone can make the first-branch pair diverge \
+             without any branch's own content actually changing",
+        ));
     }
 
-    Some(multi_branch_definition_changed_refusal(
-        "the SELECT-list/WHERE/skeleton diff (computed from each definition's own first UNION \
-         ALL branch) shows a change, which cannot be trusted once more than one branch is in \
-         play — a branch reorder alone can make the first-branch pair diverge without any \
-         branch's own content actually changing",
-    ))
+    let order_ok = match &comparable.select_list {
+        SelectListDiff::Diffed {
+            before_order,
+            after_order,
+            ..
+        } => before_order == after_order,
+        // `is_noop()` is `false` for `Opaque`, so `clean` above already
+        // refused before this arm is ever reached — kept exhaustive and
+        // fail-closed rather than unreachable.
+        SelectListDiff::Opaque { .. } => false,
+    };
+    if !order_ok {
+        return Some(multi_branch_definition_changed_refusal(
+            "the first branch's own declared output column order differs between versions even \
+             though the SELECT-list diff (name-keyed) reports no added/dropped/changed columns \
+             — UNION ALL binds columns positionally, so a bare name-set comparison cannot be \
+             trusted to prove the first branch's own declared order, only its column set, is \
+             unchanged, once more than one branch is in play",
+        ));
+    }
+
+    None
 }
 
 fn multi_branch_definition_changed_refusal(reason: &str) -> AtomAnalysis {
@@ -253,6 +362,8 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
             dropped,
             changed,
             unchanged,
+            after_order,
+            ..
         } => {
             let representative_sources = representative_sources(unchanged);
             let changed_names: BTreeSet<String> = changed.iter().map(|c| c.name.clone()).collect();
@@ -271,19 +382,16 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
                 ));
             }
             let after_columns = after_column_names(unchanged, changed, added);
-            // C4 fix: the first branch's own declared output column order
-            // (research §4 "H. Composites" positional-`UNION-ALL` note) —
-            // sound to read off `unchanged` here because the C3 gate
-            // (`multi_branch_pure_diff_gate`) already refused this diff
-            // outright, before `classify_comparable` was ever called,
-            // unless `select_list.is_noop()` holds whenever more than one
-            // branch is in play — meaning `added`/`dropped`/`changed` are
-            // all empty and `unchanged` is exactly the first branch's own
-            // SELECT list, in its original declared order (`diff.rs`'s
-            // `select_list_diff` preserves `before_cols`' iteration order
-            // into `unchanged`).
-            let first_branch_order: Vec<String> =
-                unchanged.iter().map(|c| c.name.clone()).collect();
+            // The after-definition's own branch-0 declared column order
+            // (research §4 "H. Composites" positional-`UNION-ALL` note),
+            // read directly off the diff's `after_order` — the after side's
+            // own SELECT list in its true declared order, correct whether
+            // or not branch 0 itself changed (unlike reading it off
+            // `unchanged`, which reflects only `before`'s order and
+            // silently drops any added/changed column's position — the
+            // trusted edited-branch-0 admission path below relies on this
+            // being right even when the SELECT list did change).
+            let first_branch_order = after_order.clone();
             (
                 representative_sources,
                 Some(after_columns),
@@ -1189,10 +1297,14 @@ fn set_op_refusal(atom: &str, reason: String) -> AtomAnalysis {
 /// §4 "H. Composites"' explicit-column-list requirement) — `None` only when
 /// the SELECT-list diff itself is opaque, which blocks F1 (its `INSERT`
 /// needs an explicit column list) exactly like it blocks E4. `first_branch_order`
-/// is the first branch's own output column names in declared order (C4 fix,
-/// final-review finding) — `None` from either call site that cannot supply
-/// it (the added-left-join paths, which the C3 gate already refuses ahead of
-/// reaching here whenever a genuine multi-branch F1 shape is in play).
+/// is the after-definition's own branch-0 output column names in declared
+/// order — read directly off the SELECT-list diff's `after_order` field
+/// (C4 fix, final-review finding), so it stays correct even when branch 0
+/// itself carries the diff's own edit (the trusted edited-branch-0
+/// admission path in `multi_branch_pure_diff_gate`). `None` from either
+/// call site that cannot supply it (the added-left-join paths, which the C3
+/// gate already refuses ahead of reaching here whenever a genuine
+/// multi-branch F1 shape is in play).
 fn classify_set_ops(
     set_ops: &SetOpDiff,
     after_columns: Option<&[String]>,
@@ -2519,6 +2631,7 @@ fn classify_single_added_left_join(
             dropped,
             changed,
             unchanged,
+            ..
         } => (added, dropped, changed, unchanged),
     };
 
@@ -2740,6 +2853,7 @@ fn classify_b7_diff(
             dropped,
             changed,
             unchanged,
+            ..
         } => (added, dropped, changed, unchanged),
     };
 

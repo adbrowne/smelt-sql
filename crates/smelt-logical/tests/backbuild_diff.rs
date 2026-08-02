@@ -49,6 +49,7 @@ fn added_column_detected() {
             unchanged,
             dropped,
             changed,
+            ..
         } => {
             assert_eq!(dropped.len(), 0);
             assert_eq!(changed.len(), 0);
@@ -79,6 +80,7 @@ fn dropped_and_changed_columns_detected() {
             dropped,
             changed,
             unchanged,
+            ..
         } => {
             assert_eq!(added.len(), 0);
             assert_eq!(dropped.len(), 1);
@@ -212,6 +214,7 @@ fn union_branch_diff() {
             added,
             removed,
             unchanged,
+            ..
         } => {
             assert_eq!(
                 removed.len(),
@@ -220,6 +223,84 @@ fn union_branch_diff() {
             );
             assert_eq!(unchanged.len(), 2);
             assert_eq!(added.len(), 1);
+        }
+        other => panic!("expected Branches set_ops diff, got {other:?}"),
+    }
+}
+
+// ===== F1 edited-survivor branch matching (research §4 F1's edited-survivor
+// generalization) =====
+
+#[test]
+fn edited_survivor_branch_pairs_and_diffs() {
+    // Branch 0 gains a SELECT item, branch 1 is byte-identical, and a third
+    // branch is appended. Exact-text multiset matching alone would report
+    // "1 branch removed (the old branch 0), 2 branches added (the edited
+    // branch 0 and the new branch)" — this pins the generalized behaviour:
+    // the edited branch 0 is recognized as a *surviving* branch carrying its
+    // own diff, not a remove-plus-add pair.
+    let before = parse("SELECT id, a FROM t1 UNION ALL SELECT id FROM t2");
+    let after = parse(
+        "SELECT id, a, a * 2 AS doubled FROM t1 UNION ALL SELECT id FROM t2 UNION ALL SELECT id \
+         FROM t3",
+    );
+
+    let diff = definition_diff(&before, &after);
+    let c = comparable(&diff);
+    match &c.set_ops {
+        SetOpDiff::Branches {
+            added,
+            removed,
+            unchanged,
+            edited,
+        } => {
+            assert_eq!(removed.len(), 0, "no branch was truly removed: {removed:?}");
+            assert_eq!(unchanged.len(), 1, "branch 1 (t2) is byte-identical");
+            assert_eq!(added.len(), 1, "the appended t3 branch is genuinely new");
+            assert_eq!(
+                edited.len(),
+                1,
+                "the edited branch 0 must be reported as a surviving edited pair, not removed"
+            );
+            assert_eq!(edited[0].index, 0, "the edit sits in branch 0");
+            match &edited[0].select_list {
+                SelectListDiff::Diffed { added, .. } => {
+                    assert_eq!(added.len(), 1);
+                    assert_eq!(added[0].name, "doubled");
+                }
+                other => panic!("expected Diffed select_list on the edited branch, got {other:?}"),
+            }
+        }
+        other => panic!("expected Branches set_ops diff, got {other:?}"),
+    }
+}
+
+#[test]
+fn edited_nonfirst_branch_is_reported_as_such() {
+    // The edit sits in branch 1 (not branch 0) this time — the edited pair
+    // must be reported with its own (non-zero) position so classification
+    // can refuse by name rather than mistakenly trusting the top-level
+    // (branch-0-only) diff to describe it.
+    let before = parse("SELECT id FROM t1 UNION ALL SELECT id, a FROM t2");
+    let after = parse("SELECT id FROM t1 UNION ALL SELECT id, a, a * 2 AS doubled FROM t2");
+
+    let diff = definition_diff(&before, &after);
+    let c = comparable(&diff);
+    match &c.set_ops {
+        SetOpDiff::Branches {
+            added,
+            removed,
+            unchanged,
+            edited,
+        } => {
+            assert_eq!(removed.len(), 0);
+            assert_eq!(added.len(), 0);
+            assert_eq!(unchanged.len(), 1, "branch 0 (t1) is byte-identical");
+            assert_eq!(edited.len(), 1);
+            assert_eq!(
+                edited[0].index, 1,
+                "the edit sits in branch 1, not branch 0"
+            );
         }
         other => panic!("expected Branches set_ops diff, got {other:?}"),
     }

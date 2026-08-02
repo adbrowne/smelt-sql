@@ -99,6 +99,23 @@ pub enum SelectListDiff {
         dropped: Vec<SelectColumn>,
         changed: Vec<ChangedColumn>,
         unchanged: Vec<SelectColumn>,
+        /// The `before` side's own declared output column names, in
+        /// declared order (including dropped/changed/unchanged columns —
+        /// every column `before` declares, positionally). Consumed by the
+        /// multi-branch pure-diff gate's declared-order equality check
+        /// (research §4 F1 "Trap … the C4 reorder guard"): a name-keyed
+        /// no-op (same names, same expressions) can still hide a pure
+        /// column-order swap, which a name-based `INSERT`/`UNION ALL`
+        /// positional-binding check must not trust.
+        before_order: Vec<String>,
+        /// The `after` side's own declared output column names, in
+        /// declared order — also this side's true first-branch column
+        /// order for F1's positional-`UNION ALL` validation
+        /// (`classify.rs`'s `first_branch_order`), correct even when the
+        /// SELECT list itself changed (unlike reading it off `unchanged`,
+        /// which only ever reflects `before`'s order and silently drops
+        /// added/changed columns' positions).
+        after_order: Vec<String>,
     },
     /// A SELECT list this module cannot key by output column name — a
     /// wildcard (`*`/`qualifier.*`), a spread (`...expr`), a missing
@@ -185,8 +202,12 @@ impl SkeletonDiff {
 }
 
 /// The set-operation (`UNION ALL`) branch diff: a multiset comparison over
-/// whole branches, so reordered-but-otherwise-identical branches compare
-/// unchanged.
+/// whole branches by exact text, so reordered-but-otherwise-identical
+/// branches compare unchanged; leftover (non-exact-text-matched) branches on
+/// each side are then paired up positionally among themselves and diffed as
+/// an [`EditedBranch`] — a surviving branch that carries its own edit,
+/// distinct from a branch that is purely added or purely removed (research
+/// §4 F1's edited-survivor generalization).
 #[derive(Debug, Clone)]
 pub enum SetOpDiff {
     /// Neither version has a top-level set operation.
@@ -195,6 +216,16 @@ pub enum SetOpDiff {
         added: Vec<SelectStmt>,
         removed: Vec<SelectStmt>,
         unchanged: Vec<SelectStmt>,
+        /// Surviving branches paired by position among the leftovers once
+        /// exact-text matching is exhausted, each carrying its own
+        /// SELECT-list/WHERE/skeleton diff. `classify.rs` admits atoms from
+        /// an edited branch only when it is uniquely `index == 0` and every
+        /// other pair is exact (`removed` empty) — the top-level
+        /// (`definition_diff`'s own) select-list/WHERE/skeleton diff *is*
+        /// branch 0's diff by construction only in that case; any other
+        /// edited-branch shape refuses by name (research §4 F1 trap,
+        /// generalized).
+        edited: Vec<EditedBranch>,
     },
     /// A set-operation shape this module does not diff: plain `UNION`
     /// (dedup) or `INTERSECT`/`EXCEPT` rather than `UNION ALL`, a `BY NAME`
@@ -207,10 +238,43 @@ impl SetOpDiff {
     pub fn is_noop(&self) -> bool {
         match self {
             SetOpDiff::NotApplicable => true,
-            SetOpDiff::Branches { added, removed, .. } => added.is_empty() && removed.is_empty(),
+            SetOpDiff::Branches {
+                added,
+                removed,
+                edited,
+                ..
+            } => added.is_empty() && removed.is_empty() && edited.is_empty(),
             SetOpDiff::Opaque { .. } => false,
         }
     }
+}
+
+/// One surviving `UNION ALL` branch, matched against its old self by
+/// position among the leftovers (research §4 F1's edited-survivor
+/// generalization — see [`SetOpDiff::Branches`]). `index` is the branch's
+/// position within the **before**-definition's own branch chain (0 =
+/// declared first); `after_index` is the branch it was *paired* against's
+/// position within the **after**-definition's own branch chain. Neither
+/// alone determines whether the top-level (whole-definition)
+/// SELECT-list/WHERE/skeleton diff actually describes this branch's edit —
+/// `definition_diff` computes those diffs from each side's outermost
+/// `SelectStmt` node, i.e. **before**'s own branch 0 against **after**'s own
+/// branch 0. That top-level diff is trustworthy for this edited branch only
+/// when *both* `index == 0` and `after_index == 0`: `set_op_diff` pairs
+/// leftovers by their position *among the leftovers*, not by declared
+/// chain position, so an edited branch whose before-position is 0 can still
+/// be paired against an after-leftover that is not after's own declared
+/// branch 0 (e.g. when after's literal branch 0 exact-text-matched a
+/// different before-branch and was consumed into `unchanged`) — in that
+/// shape the top-level diff describes neither this pairing's before side
+/// nor its after side, and must not be trusted.
+#[derive(Debug, Clone)]
+pub struct EditedBranch {
+    pub index: usize,
+    pub after_index: usize,
+    pub select_list: SelectListDiff,
+    pub where_clause: ConjunctDiff,
+    pub skeleton: SkeletonDiff,
 }
 
 // ===== The option-set data model (research §2 "Options, not choices"; §3

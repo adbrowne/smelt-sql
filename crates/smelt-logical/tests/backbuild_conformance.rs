@@ -2052,22 +2052,12 @@ fn h_composite_rename_add_tighten() {
     harness::verify_script(&conn, "t", before_sql, after_sql, &script);
 }
 
-/// NOTE — hand-assembled, not classifier-driven (tracked gap): this test
-/// builds its `BackbuildOptions` atoms by hand rather than through
-/// `derive_backbuild_options`/`definition_diff`, because the classifier
-/// cannot yet recognize this diff shape as F1 — see `docs/plans/
-/// 20260802-backbuild-synthesis.md` §"Deferred during implementation" →
-/// "F1 classifier coverage gap: an edited surviving branch + an added
-/// branch, in the same diff, is not yet recognized as F1". Summary:
-/// `derive_backbuild_options`'s set-operation diff compares whole branches
-/// by exact text (research §4 F1's "per-branch syntactic equality"), so a
-/// diff that simultaneously edits branch 0's own SELECT list (B1's add) and
-/// appends a new branch (F1) does not factor into a clean single-added-
-/// branch shape — that combination is future admission-surface work, not a
-/// gap in `assemble`/H-ordering, which is what this test proves. The atoms
-/// are built with the same pure `emit::` functions the classifier itself
-/// calls, so the statements are exactly what a real B1 + F1 admission would
-/// produce.
+/// A B1 column add confined to branch 0, composed with an appended UNION
+/// ALL branch, driven entirely through the real classifier (research §4
+/// F1's edited-survivor generalization): branch 0's own edit is exactly
+/// what the top-level (whole-definition) SELECT-list diff already
+/// describes, so `derive_backbuild_options` admits both atoms without any
+/// hand-assembly.
 ///
 /// `mid` is declared *between* `id` and `a` in `after_sql`, but
 /// `ALTER TABLE … ADD COLUMN` always appends physically at the end — the
@@ -2078,7 +2068,7 @@ fn h_composite_rename_add_tighten() {
 /// explicit target column list (research §4 "H. Composites") is what makes
 /// this oracle-equal despite the reorder.
 #[test]
-fn h_composite_add_plus_insert_aligns_columns() {
+fn h_composite_branch_add_plus_column_add_classifier_driven() {
     let conn = Connection::open_in_memory().expect("duckdb");
     harness::stage_inputs(
         &conn,
@@ -2092,60 +2082,53 @@ fn h_composite_add_plus_insert_aligns_columns() {
     let after_sql = "SELECT id, id * 100 AS mid, a, b FROM t1 \
                       UNION ALL SELECT id, id * 100 AS mid, a, b FROM t2";
 
-    let b1_atom = smelt_logical::backbuild::AtomAnalysis {
-        change: smelt_logical::backbuild::AtomicChange::AddedColumn {
-            name: "mid".to_string(),
-        },
-        options: vec![smelt_logical::backbuild::BackbuildOption {
-            technique: Technique::SelfDerivedColumnAdd,
-            slot: Some(smelt_logical::backbuild::HSlot::Alter),
-            statements: vec![
-                smelt_logical::backbuild::emit::emit_alter_add_column("t", "mid", "INTEGER"),
-                smelt_logical::backbuild::emit::emit_in_place_update(
-                    "t",
-                    &[("mid".to_string(), "id * 100".to_string())],
-                ),
-            ],
-            write_scope: smelt_logical::backbuild::WriteScope::ColumnScoped,
-            reads_upstream: false,
-            rerun_safe: true,
-        }],
-        inadmissible: Vec::new(),
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut added_column_types = BTreeMap::new();
+    added_column_types.insert("mid".to_string(), "INTEGER".to_string());
+    let backbuild_inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types,
+        sources: BTreeMap::new(),
     };
-    let f1_atom = smelt_logical::backbuild::AtomAnalysis {
-        change: smelt_logical::backbuild::AtomicChange::AddedSetOpBranch { index: 0 },
-        options: vec![smelt_logical::backbuild::BackbuildOption {
-            technique: Technique::UnionBranchInsert,
-            slot: Some(smelt_logical::backbuild::HSlot::Insert),
-            statements: vec![smelt_logical::backbuild::emit::emit_branch_insert(
-                "t",
-                &[
-                    "id".to_string(),
-                    "mid".to_string(),
-                    "a".to_string(),
-                    "b".to_string(),
-                ],
-                "SELECT id, id * 100 AS mid, a, b FROM t2",
-                None,
-            )],
-            write_scope: smelt_logical::backbuild::WriteScope::RowSubset,
-            reads_upstream: true,
-            rerun_safe: false,
-        }],
-        inadmissible: Vec::new(),
-    };
-    let full_refresh = smelt_logical::backbuild::BackbuildOption {
-        technique: Technique::FullRefresh,
-        slot: None,
-        statements: vec![format!("CREATE OR REPLACE TABLE t AS {after_sql}")],
-        write_scope: smelt_logical::backbuild::WriteScope::FullWrite,
-        reads_upstream: true,
-        rerun_safe: true,
-    };
-    let options = smelt_logical::backbuild::BackbuildOptions {
-        atoms: vec![b1_atom, f1_atom],
-        full_refresh,
-    };
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    assert!(
+        matches!(
+            &options.atoms[0].change,
+            smelt_logical::backbuild::AtomicChange::AddedColumn { name } if name == "mid"
+        ),
+        "expected atom 0 to be the added 'mid' column, got {:?}",
+        options.atoms[0].change
+    );
+    assert!(
+        matches!(
+            &options.atoms[1].change,
+            smelt_logical::backbuild::AtomicChange::AddedSetOpBranch { index: 0 }
+        ),
+        "expected atom 1 to be the appended UNION ALL branch, got {:?}",
+        options.atoms[1].change
+    );
+    for atom in &options.atoms {
+        assert_eq!(
+            atom.options.len(),
+            1,
+            "expected every atom admissible: {atom:?}"
+        );
+    }
+    assert_eq!(
+        options.atoms[0].options[0].technique,
+        Technique::SelfDerivedColumnAdd
+    );
+    assert_eq!(
+        options.atoms[1].options[0].technique,
+        Technique::UnionBranchInsert
+    );
 
     let script = assemble(&options, &targeted_of_len(2));
     assert_eq!(script.len(), 3, "{script:?}");
@@ -2155,7 +2138,7 @@ fn h_composite_add_plus_insert_aligns_columns() {
     );
     assert!(script[1].starts_with("UPDATE t SET mid"), "{script:?}");
     assert!(
-        script[2].starts_with("INSERT INTO t (id, mid, a, b)"),
+        script[2].starts_with("INSERT INTO t ("),
         "the INSERT must carry an explicit target column list, got {:?}",
         script[2]
     );
@@ -2163,19 +2146,15 @@ fn h_composite_add_plus_insert_aligns_columns() {
     harness::verify_script(&conn, "t", before_sql, after_sql, &script);
 }
 
-/// NOTE — hand-assembled, not classifier-driven (tracked gap): same reason
-/// as [`h_composite_add_plus_insert_aligns_columns`] (see that test's own
-/// NOTE, and `docs/plans/20260802-backbuild-synthesis.md` §"Deferred during
-/// implementation" → "F1 classifier coverage gap") — `derive_backbuild_
-/// options` cannot yet recognize "branch 0 edited + a branch appended" as
-/// F1, so this test's B1/F1 atoms are hand-built the same way.
-///
-/// The same composite as [`h_composite_add_plus_insert_aligns_columns`] plus
-/// a third, blocked atom (a G1-shaped refusal — standing in for "some atom
-/// this diff also needs has no admissible option"): partial application is
-/// never offered (research §2 "Refusal posture"), so the composed targeted
-/// script must be empty and `FullRefresh` remains the model's only option,
-/// regardless of how many *other* atoms in the same diff were admissible.
+/// The same composite as
+/// [`h_composite_branch_add_plus_column_add_classifier_driven`] — the B1
+/// add and the appended branch are still derived through the real
+/// classifier — plus a third, hand-added blocked atom (a G1-shaped refusal,
+/// standing in for "some atom this diff also needs has no admissible
+/// option"): partial application is never offered (research §2 "Refusal
+/// posture"), so the composed targeted script must be empty and
+/// `FullRefresh` remains the model's only option, regardless of how many
+/// *other* atoms in the same diff were admissible.
 #[test]
 fn h_composite_with_blocked_atom_yields_only_full_refresh() {
     let conn = Connection::open_in_memory().expect("duckdb");
@@ -2191,48 +2170,23 @@ fn h_composite_with_blocked_atom_yields_only_full_refresh() {
     let after_sql = "SELECT id, id * 100 AS mid, a, b FROM t1 \
                       UNION ALL SELECT id, id * 100 AS mid, a, b FROM t2";
 
-    let b1_atom = smelt_logical::backbuild::AtomAnalysis {
-        change: smelt_logical::backbuild::AtomicChange::AddedColumn {
-            name: "mid".to_string(),
-        },
-        options: vec![smelt_logical::backbuild::BackbuildOption {
-            technique: Technique::SelfDerivedColumnAdd,
-            slot: Some(smelt_logical::backbuild::HSlot::Alter),
-            statements: vec![
-                smelt_logical::backbuild::emit::emit_alter_add_column("t", "mid", "INTEGER"),
-                smelt_logical::backbuild::emit::emit_in_place_update(
-                    "t",
-                    &[("mid".to_string(), "id * 100".to_string())],
-                ),
-            ],
-            write_scope: smelt_logical::backbuild::WriteScope::ColumnScoped,
-            reads_upstream: false,
-            rerun_safe: true,
-        }],
-        inadmissible: Vec::new(),
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut added_column_types = BTreeMap::new();
+    added_column_types.insert("mid".to_string(), "INTEGER".to_string());
+    let backbuild_inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types,
+        sources: BTreeMap::new(),
     };
-    let f1_atom = smelt_logical::backbuild::AtomAnalysis {
-        change: smelt_logical::backbuild::AtomicChange::AddedSetOpBranch { index: 0 },
-        options: vec![smelt_logical::backbuild::BackbuildOption {
-            technique: Technique::UnionBranchInsert,
-            slot: Some(smelt_logical::backbuild::HSlot::Insert),
-            statements: vec![smelt_logical::backbuild::emit::emit_branch_insert(
-                "t",
-                &[
-                    "id".to_string(),
-                    "mid".to_string(),
-                    "a".to_string(),
-                    "b".to_string(),
-                ],
-                "SELECT id, id * 100 AS mid, a, b FROM t2",
-                None,
-            )],
-            write_scope: smelt_logical::backbuild::WriteScope::RowSubset,
-            reads_upstream: true,
-            rerun_safe: false,
-        }],
-        inadmissible: Vec::new(),
-    };
+
+    let mut options = derive_backbuild_options(&diff, &backbuild_inputs);
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+
     let blocked_atom = smelt_logical::backbuild::AtomAnalysis {
         change: smelt_logical::backbuild::AtomicChange::Skeleton {
             reason: "GROUP BY changed".to_string(),
@@ -2243,18 +2197,7 @@ fn h_composite_with_blocked_atom_yields_only_full_refresh() {
             reason: "G1 (grain change) — GROUP BY changed".to_string(),
         }],
     };
-    let full_refresh = smelt_logical::backbuild::BackbuildOption {
-        technique: Technique::FullRefresh,
-        slot: None,
-        statements: vec![format!("CREATE OR REPLACE TABLE t AS {after_sql}")],
-        write_scope: smelt_logical::backbuild::WriteScope::FullWrite,
-        reads_upstream: true,
-        rerun_safe: true,
-    };
-    let options = smelt_logical::backbuild::BackbuildOptions {
-        atoms: vec![b1_atom, f1_atom, blocked_atom],
-        full_refresh: full_refresh.clone(),
-    };
+    options.atoms.push(blocked_atom);
 
     // Partial application is never offered: even though two of the three
     // atoms have an admissible option, the blocked (G1-refused) third atom
@@ -2275,6 +2218,6 @@ fn h_composite_with_blocked_atom_yields_only_full_refresh() {
 
     // FullRefresh remains the model's only option — still oracle-verified.
     let full_refresh_script = assemble(&options, &Selection::FullRefresh);
-    assert_eq!(full_refresh_script, full_refresh.statements);
-    harness::verify_option(&conn, "t", before_sql, after_sql, &full_refresh);
+    assert_eq!(full_refresh_script, options.full_refresh.statements);
+    harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
 }

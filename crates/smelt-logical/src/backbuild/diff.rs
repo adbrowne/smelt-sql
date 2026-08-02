@@ -9,8 +9,8 @@
 //! reports `Opaque`/`Changed` with a reason, never a silent "unchanged".
 
 use super::{
-    ChangedColumn, ComparableDiff, ConjunctDiff, DefinitionDiff, SelectColumn, SelectListDiff,
-    SetOpDiff, SkeletonDiff,
+    ChangedColumn, ComparableDiff, ConjunctDiff, DefinitionDiff, EditedBranch, SelectColumn,
+    SelectListDiff, SetOpDiff, SkeletonDiff,
 };
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{Expr, File, JoinClause, JoinType, SelectEntry, SelectList, SelectStmt};
@@ -125,6 +125,9 @@ fn select_list_diff(before: Option<&SelectList>, after: Option<&SelectList>) -> 
         };
     }
 
+    let before_order: Vec<String> = before_cols.iter().map(|c| c.name.clone()).collect();
+    let after_order: Vec<String> = after_cols.iter().map(|c| c.name.clone()).collect();
+
     let mut dropped = Vec::new();
     let mut changed = Vec::new();
     let mut unchanged = Vec::new();
@@ -156,6 +159,8 @@ fn select_list_diff(before: Option<&SelectList>, after: Option<&SelectList>) -> 
         dropped,
         changed,
         unchanged,
+        before_order,
+        after_order,
     }
 }
 
@@ -543,7 +548,13 @@ fn set_op_diff(before: &SelectStmt, after: &SelectStmt) -> SetOpDiff {
             let a_tokens: Vec<_> = a.iter().map(branch_token_seq).collect();
             let mut matched_after = vec![false; a.len()];
             let mut unchanged = Vec::new();
-            let mut removed = Vec::new();
+            // Before-branches that found no exact-text match in `after`,
+            // carrying their own *original* (before-chain) position — this
+            // is what `EditedBranch::index` reports, since that position is
+            // what determines whether the top-level (whole-definition)
+            // SELECT-list/WHERE/skeleton diff describes this branch (see
+            // `EditedBranch`'s doc comment).
+            let mut leftover_before: Vec<(usize, &SelectStmt)> = Vec::new();
             for (bi, bb) in b.iter().enumerate() {
                 let found = a_tokens
                     .iter()
@@ -554,19 +565,57 @@ fn set_op_diff(before: &SelectStmt, after: &SelectStmt) -> SetOpDiff {
                         matched_after[idx] = true;
                         unchanged.push(bb.clone());
                     }
-                    None => removed.push(bb.clone()),
+                    None => leftover_before.push((bi, bb)),
                 }
             }
-            let added = a
-                .into_iter()
+            // After-branches that found no exact-text match, in their
+            // original relative order, each carrying its own *after*-chain
+            // position (`EditedBranch::after_index`) — `matched_after`
+            // preserves position, so the earliest unmatched `after` branch
+            // (in particular `after`'s own branch 0, when it changed) is
+            // always first here.
+            let leftover_after: Vec<(usize, &SelectStmt)> = a
+                .iter()
                 .enumerate()
                 .filter(|(i, _)| !matched_after[*i])
-                .map(|(_, x)| x)
                 .collect();
+
+            // Pair the leftovers positionally among themselves — a survivor
+            // that changed its own content no longer text-matches, but is
+            // still the "same" branch in the sense that matters for
+            // classification: research §4 F1's edited-survivor
+            // generalization. Any leftover beyond the shorter side's length
+            // is a genuine add or remove, not an edit.
+            let pair_count = leftover_before.len().min(leftover_after.len());
+            let mut edited = Vec::with_capacity(pair_count);
+            for i in 0..pair_count {
+                let (index, before_branch) = leftover_before[i];
+                let (after_index, after_branch) = leftover_after[i];
+                edited.push(EditedBranch {
+                    index,
+                    after_index,
+                    select_list: select_list_diff(
+                        before_branch.select_list().as_ref(),
+                        after_branch.select_list().as_ref(),
+                    ),
+                    where_clause: where_diff(before_branch, after_branch),
+                    skeleton: skeleton_diff(before_branch, after_branch),
+                });
+            }
+            let removed: Vec<SelectStmt> = leftover_before[pair_count..]
+                .iter()
+                .map(|(_, s)| (*s).clone())
+                .collect();
+            let added: Vec<SelectStmt> = leftover_after[pair_count..]
+                .iter()
+                .map(|(_, s)| (*s).clone())
+                .collect();
+
             SetOpDiff::Branches {
                 added,
                 removed,
                 unchanged,
+                edited,
             }
         }
         (Err(reason), _) | (_, Err(reason)) => SetOpDiff::Opaque { reason },

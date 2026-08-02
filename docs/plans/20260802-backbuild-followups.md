@@ -119,7 +119,7 @@ deferred (data-dependent contract; now recorded in `docs/ROADMAP.md` What's Next
 
 | Phase | Status   | Commit | Date |
 |-------|----------|--------|------|
-| 1     | pending  |        |      |
+| 1     | done     |        | 2026-08-02 |
 | 2     | pending  |        |      |
 | 3     | pending  |        |      |
 | 4     | pending  |        |      |
@@ -176,7 +176,8 @@ branch 0's diff); tighten the gate's no-op check from name-set to declared-order
 equality (C4). F1's `branch_output_column_names` first-branch order check is unchanged.
 
 **Critical files (allowed to touch in this phase).**
-- `crates/smelt-logical/src/backbuild/{diff,classify}.rs`
+- `crates/smelt-logical/src/backbuild/{mod,diff,classify}.rs` — `mod.rs` for the shared
+  diff-type definitions (`SetOpDiff`/`SelectListDiff` fields)
 - `crates/smelt-logical/tests/{backbuild_diff,backbuild_options,backbuild_conformance}.rs`
 
 **Docs touched.**
