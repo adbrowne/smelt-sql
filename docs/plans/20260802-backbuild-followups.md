@@ -125,8 +125,8 @@ deferred (data-dependent contract; now recorded in `docs/ROADMAP.md` What's Next
 | 4     | done     | 0e94acbf | 2026-08-02 |
 | 5     | done     | 771cbb4a | 2026-08-02 |
 | 6     | done     | 81f1987a | 2026-08-02 |
-| 7     | done     |        | 2026-08-03 |
-| 8     | pending  |        |      |
+| 7     | done     | 27eee1dd | 2026-08-03 |
+| 8     | done     |        | 2026-08-03 |
 
 ---
 

@@ -41,6 +41,7 @@ suite.
 
 Say this model is deployed as a table with millions of rows:
 
+<!-- backbuild-example(intro): before -->
 ```sql
 -- before
 SELECT id, amount, rate, amount AS amount_usd FROM orders
@@ -48,6 +49,7 @@ SELECT id, amount, rate, amount AS amount_usd FROM orders
 
 You spot the bug: `amount_usd` was never converted. You fix it:
 
+<!-- backbuild-example(intro): after -->
 ```sql
 -- after
 SELECT id, amount, rate, amount * rate AS amount_usd FROM orders
@@ -58,6 +60,7 @@ the two definitions, sees that exactly one output column's expression changed,
 checks that the new expression is computable from columns the table *already
 stores* (`amount` and `rate` pass through from the input unchanged), and emits:
 
+<!-- backbuild-example(intro): script -->
 ```sql
 UPDATE t SET amount_usd = amount * rate
 ```
@@ -120,6 +123,8 @@ fresh build from *after*.
 
 ### Rename a column
 
+<!-- backbuild-example(rename): before -->
+<!-- backbuild-example(rename): after -->
 ```sql
 -- before
 SELECT id, amount FROM orders
@@ -130,6 +135,7 @@ SELECT id, amount AS total FROM orders
 Detected as a dropped column and an added column with an identical expression —
 a rename, not a drop-plus-add:
 
+<!-- backbuild-example(rename): script -->
 ```sql
 ALTER TABLE t RENAME COLUMN amount TO total
 ```
@@ -139,6 +145,8 @@ would be ambiguous, and smelt refuses rather than guessing.
 
 ### Add a column computed from stored columns
 
+<!-- backbuild-example(add_stored): before -->
+<!-- backbuild-example(add_stored): after -->
 ```sql
 -- before
 SELECT id, price, qty FROM orders
@@ -149,6 +157,7 @@ SELECT id, price, qty, price * qty AS total FROM orders
 Every input of the new expression is already stored, so no upstream read is
 needed:
 
+<!-- backbuild-example(add_stored): script -->
 ```sql
 ALTER TABLE t ADD COLUMN total INTEGER;
 UPDATE t SET total = price * qty;
@@ -162,6 +171,8 @@ expression.)
 The example from the top of the page — and the highest-value case in practice:
 "fix a bug in one column of a huge table."
 
+<!-- backbuild-example(fix_in_place): before -->
+<!-- backbuild-example(fix_in_place): after -->
 ```sql
 -- before
 SELECT id, amount, rate, amount AS amount_usd FROM orders
@@ -169,6 +180,7 @@ SELECT id, amount, rate, amount AS amount_usd FROM orders
 SELECT id, amount, rate, amount * rate AS amount_usd FROM orders
 ```
 
+<!-- backbuild-example(fix_in_place): script -->
 ```sql
 UPDATE t SET amount_usd = amount * rate
 ```
@@ -184,6 +196,8 @@ the atom refuses with a message naming that sibling.
 
 ### Pull a column through from an upstream
 
+<!-- backbuild-example(pullthrough): before -->
+<!-- backbuild-example(pullthrough): after -->
 ```sql
 -- before
 SELECT o.order_id AS order_id, o.customer AS customer FROM orders o
@@ -196,6 +210,7 @@ model stores a 1:1 pull-through of that upstream's
 [declared `unique_key`](../reference/sources-yml.md) (`order_id`), each stored
 row can be addressed and enriched:
 
+<!-- backbuild-example(pullthrough): script -->
 ```sql
 ALTER TABLE t ADD COLUMN discount INTEGER;
 UPDATE t SET discount = u.discount FROM orders u WHERE t.order_id = u.order_id;
@@ -206,6 +221,8 @@ touches only rows the table already has.
 
 ### Add an aggregate at the model's own grain
 
+<!-- backbuild-example(aggregate): before -->
+<!-- backbuild-example(aggregate): after -->
 ```sql
 -- before
 SELECT o.customer_id AS customer_id, count(*) AS n
@@ -219,6 +236,7 @@ The new column is a recognized aggregate call, the `GROUP BY` grain is
 unchanged, and the grouping key (`customer_id`) is a stored, `NOT NULL`
 pull-through — so each stored group can be re-derived and matched by key:
 
+<!-- backbuild-example(aggregate): script -->
 ```sql
 ALTER TABLE t ADD COLUMN total_qty HUGEINT;
 UPDATE t SET total_qty = s.total_qty
@@ -237,6 +255,8 @@ backfill only ever updates matched keys.
 
 ### Enrich via a new LEFT JOIN
 
+<!-- backbuild-example(left_join_enrich): before -->
+<!-- backbuild-example(left_join_enrich): after -->
 ```sql
 -- before
 SELECT o.order_id AS order_id, o.customer_id AS customer_id FROM orders o
@@ -252,12 +272,15 @@ set**: it is a LEFT JOIN (never removes rows), the join key has a declared
 and nothing outside the added columns references the new alias. With that
 established, a bare pull-through admits *two* independently verified scripts:
 
+<!-- backbuild-example(left_join_enrich): script -->
 ```sql
 -- option 1: update-from
+ALTER TABLE t ADD COLUMN customer_name TEXT;
 UPDATE t SET customer_name = c.customer_name
 FROM customers c WHERE t.customer_id = c.customer_id;
 
 -- option 2: scalar subquery
+ALTER TABLE t ADD COLUMN customer_name TEXT;
 UPDATE t SET customer_name =
   (SELECT c.customer_name FROM customers c WHERE t.customer_id = c.customer_id);
 ```
@@ -272,7 +295,9 @@ Wrap the dimension column in an expression —
 shape survives, with the substitution applied **per column reference**, not
 around the whole expression:
 
+<!-- backbuild-example(left_join_wrapped): script -->
 ```sql
+ALTER TABLE t ADD COLUMN customer_label TEXT;
 UPDATE t SET customer_label =
   COALESCE((SELECT c.customer_name FROM customers c
             WHERE t.customer_id = c.customer_id), 'none')
@@ -286,6 +311,8 @@ oracle test pins this: an unmatched order ends up `'none'`, not `NULL`.
 
 ### Chain multiple joins
 
+<!-- backbuild-example(chain_joins): before -->
+<!-- backbuild-example(chain_joins): after -->
 ```sql
 -- before
 SELECT o.order_id AS order_id, o.dim1_id AS dim1_id FROM orders o
@@ -306,6 +333,8 @@ the rebuild's `NULL` key misses — so that shape refuses.
 
 ### Add a window column
 
+<!-- backbuild-example(window): before -->
+<!-- backbuild-example(window): after -->
 ```sql
 -- before
 SELECT o.order_id AS order_id, o.status AS status, o.amount AS amount FROM orders o
@@ -322,6 +351,7 @@ table itself, not the upstream, so the window computes over exactly the rows
 `t` already has — matching a rebuild by construction, even when the model's
 own `WHERE` has filtered rows out along the way.
 
+<!-- backbuild-example(window): script -->
 ```sql
 ALTER TABLE t ADD COLUMN rn BIGINT;
 UPDATE t SET rn = s.rn
@@ -342,6 +372,8 @@ backfillable.
 
 ### Tighten a filter
 
+<!-- backbuild-example(tighten): before -->
+<!-- backbuild-example(tighten): after -->
 ```sql
 -- before
 SELECT id, status FROM orders
@@ -352,6 +384,7 @@ SELECT id, status FROM orders WHERE status = 'active'
 The added conjunct is evaluable over stored columns, so the difference is a
 pure delete — no upstream read at all:
 
+<!-- backbuild-example(tighten): script -->
 ```sql
 DELETE FROM t WHERE (status = 'active') IS NOT TRUE
 ```
@@ -368,6 +401,8 @@ conformance suite pins exactly this case.
 
 The classic "backfill more history":
 
+<!-- backbuild-example(extend_history): before -->
+<!-- backbuild-example(extend_history): after -->
 ```sql
 -- before
 SELECT ts, amount FROM events WHERE ts >= '2025-01-01'
@@ -378,9 +413,10 @@ SELECT ts, amount FROM events WHERE ts >= '2024-01-01'
 The difference — rows the old predicate excluded and the new one admits — is
 inserted from the after-definition:
 
+<!-- backbuild-example(extend_history): script -->
 ```sql
-INSERT INTO t (ts, amount)
-SELECT ts, amount
+INSERT INTO t (amount, ts)
+SELECT amount, ts
 FROM (SELECT ts, amount FROM events WHERE ts >= '2024-01-01') AS __backbuild_diff
 WHERE (ts >= '2025-01-01') IS NOT TRUE
 ```
@@ -412,6 +448,8 @@ conjunct algebra is deliberately syntactic, not a general implication prover.
 
 ### Add a UNION ALL branch
 
+<!-- backbuild-example(union_add): before -->
+<!-- backbuild-example(union_add): after -->
 ```sql
 -- before
 SELECT id, 'a' AS kind FROM events_a
@@ -423,6 +461,7 @@ SELECT id, 'b' AS kind FROM events_b
 
 `UNION ALL` is additive, so the new branch is exactly the delta:
 
+<!-- backbuild-example(union_add): script -->
 ```sql
 INSERT INTO t (id, kind)
 SELECT id, kind FROM (SELECT id, 'b' AS kind FROM events_b) AS __backbuild_branch
@@ -437,6 +476,8 @@ positional binding, and refuses here by name.
 
 ### Remove a UNION ALL branch
 
+<!-- backbuild-example(union_remove): before -->
+<!-- backbuild-example(union_remove): after -->
 ```sql
 -- before
 SELECT id, 'a' AS src FROM events_a
@@ -450,6 +491,7 @@ A removed branch needs a **discriminator**: a column that is a distinct
 literal constant in every branch of the before-definition (here, `src`). With
 one, the removed branch's own constant becomes an equality delete:
 
+<!-- backbuild-example(union_remove): script -->
 ```sql
 DELETE FROM t WHERE src = 'b'
 ```
@@ -480,6 +522,8 @@ Plain `UNION` refuses here for the same reason it does on the add side.
 Atomic changes compose. Rename a column, add a derived one, tighten the
 filter, and drop an unrelated column, all in a single edit:
 
+<!-- backbuild-example(composite): before -->
+<!-- backbuild-example(composite): after -->
 ```sql
 -- before
 SELECT id, price, extra, qty FROM orders
@@ -489,6 +533,7 @@ SELECT id, price AS unit_price, price AS list_price, qty FROM orders WHERE qty >
 
 The assembled script (asserted verbatim in the conformance suite):
 
+<!-- backbuild-example(composite): script -->
 ```sql
 ALTER TABLE t RENAME COLUMN price TO list_price;
 ALTER TABLE t ADD COLUMN unit_price INTEGER;
@@ -551,6 +596,13 @@ A small edit to the model — storing a join key, qualifying a column — often
 converts a full rebuild into a column-scoped update.
 
 ## Why you can trust the scripts
+
+Every SQL snippet on this page — before, after, and emitted script — is
+generated by smelt's own `definition_diff` → `derive_backbuild_options` →
+`assemble` pipeline from the shown before/after definitions, byte-compared
+against this page's own text, and oracle-verified against a real DuckDB by a
+standing test suite (`crates/smelt-logical/tests/backbuild_docs.rs`); the
+page cannot drift from what smelt actually emits.
 
 - **Oracle-verified equivalence.** Every technique is tested the hard way:
   build the table from the before-definition, run the emitted script, build a
