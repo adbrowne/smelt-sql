@@ -118,7 +118,7 @@ cost model) is explicitly out of scope.
 | 5     | done     | 80a352c0 | 2026-08-02 |
 | 6     | done     | 600c627c, 75660a8f, ef74c6e6 | 2026-08-02 |
 | 7     | done     | 58fc17a0, 5d69e246 | 2026-08-02 |
-| 8     | pending  |        |      |
+| 8     | done     | 7185de56, 232d6c71, 3a7dda74 | 2026-08-02 |
 | 9     | pending  |        |      |
 
 ---
