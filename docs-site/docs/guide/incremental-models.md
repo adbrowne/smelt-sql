@@ -683,6 +683,8 @@ The `+` prefix means "include upstream dependencies." smelt will:
 
 Backbuilding shares the run-window semantics above — one engine query per chunk (or one query for the entire range when models are `FullyBatchSafe`), not per partition.
 
+Backbuilding reprocesses *data* under an unchanged definition. For the complementary problem — migrating a deployed table after the model's *definition* changes, without a full rebuild — see [Backbuild Synthesis](backbuild-synthesis.md).
+
 ## Incremental strategies
 
 smelt supports multiple strategies for how data is updated. The strategy is chosen based on your configuration and the backend's capabilities:

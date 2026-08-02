@@ -93,6 +93,7 @@ nav:
     - Materializations: guide/materializations.md
     - Incremental Models: guide/incremental-models.md
     - Schema Evolution: guide/schema-evolution.md
+    - Backbuild Synthesis: guide/backbuild-synthesis.md
     - Seeds: guide/seeds.md
     - Data Generation: guide/datagen.md
     - Model Selection: guide/model-selection.md
