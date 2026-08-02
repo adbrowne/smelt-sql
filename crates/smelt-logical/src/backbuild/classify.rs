@@ -165,11 +165,12 @@ fn unclassified_refusal_named(atom: &str) -> AtomAnalysis {
 fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) -> Vec<AtomAnalysis> {
     let mut atoms = Vec::new();
 
-    match &comparable.select_list {
+    let (representatives, after_columns) = match &comparable.select_list {
         SelectListDiff::Opaque { reason } => {
             atoms.push(unclassified_refusal_named(&format!(
                 "select-list: {reason}"
             )));
+            (BTreeSet::new(), None)
         }
         SelectListDiff::Diffed {
             added,
@@ -196,20 +197,17 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
                     inputs,
                 ));
             }
+            let after_columns = after_column_names(unchanged, changed, added);
+            (representatives, Some(after_columns))
         }
-    }
+    };
 
-    match &comparable.where_clause {
-        ConjunctDiff::Diffed { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
-            atoms.push(unclassified_refusal_named("where-clause"));
-        }
-        ConjunctDiff::Opaque { reason, .. } => {
-            atoms.push(unclassified_refusal_named(&format!(
-                "where-clause: {reason}"
-            )));
-        }
-        _ => {}
-    }
+    atoms.extend(classify_where_clause(
+        &comparable.where_clause,
+        &representatives,
+        after_columns.as_deref(),
+        inputs,
+    ));
 
     match &comparable.set_ops {
         SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
@@ -224,6 +222,515 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
     }
 
     atoms
+}
+
+// ===== E-class: row-set (predicate) techniques — E1 (filter tightened) and
+// E4 (time-horizon extension) only; E2/E3/F1 remain out of this phase's
+// scope (research §4 E-class) =====
+
+/// The `after`-definition's own output column names, keyed by the pieces
+/// [`SelectListDiff::Diffed`] already exposes (`unchanged` + `changed` +
+/// `added` — `dropped` columns are not in `after` at all). Sorted and
+/// deduplicated: `assemble`'s H-ordering already guarantees any atom's own
+/// `ALTER ADD` flushes before E4's `HSlot::Insert` step, so the INSERT/SELECT
+/// column-list pairing here only needs internal self-consistency (the same
+/// list on both sides of `emit::emit_difference_insert`), never physical
+/// table column order.
+fn after_column_names(
+    unchanged: &[SelectColumn],
+    changed: &[ChangedColumn],
+    added: &[SelectColumn],
+) -> Vec<String> {
+    let mut names: Vec<String> = unchanged
+        .iter()
+        .map(|c| c.name.clone())
+        .chain(changed.iter().map(|c| c.name.clone()))
+        .chain(added.iter().map(|c| c.name.clone()))
+        .collect();
+    names.sort();
+    names.dedup();
+    names
+}
+
+/// E-class grain facts (research §4 intro + E-class section), read straight
+/// from the CST via the enclosing `SelectStmt` rather than from the diff:
+/// `SkeletonDiff::Unchanged` only proves GROUP BY/DISTINCT/LIMIT are
+/// *identical* between versions, not that they're absent (research §4 E1's
+/// brief: "if unchanged-LIMIT is invisible to the diff, you must detect
+/// LIMIT presence from the CSTs"). Any conjunct's `Expr` (added or removed)
+/// works as the anchor — both sides' grain is already proven identical by
+/// `SkeletonDiff::Unchanged` by the time this is called.
+struct EClassGrain {
+    distinct: bool,
+    has_limit: bool,
+    has_group_by: bool,
+    /// Bare-column-ref GROUP BY expressions' raw names — the E4 group-key
+    /// carve-out compares a range predicate's column against this set. A
+    /// GROUP BY expression that isn't a bare column reference (e.g.
+    /// `date_trunc('day', ts)`) is simply absent here, which safely refuses
+    /// the carve-out for it (fail-closed) without misreporting "no GROUP BY
+    /// at all".
+    group_by_column_names: BTreeSet<String>,
+}
+
+fn e_class_grain(expr: &Expr) -> Option<EClassGrain> {
+    let stmt = expr.syntax().ancestors().find_map(SelectStmt::cast)?;
+    let group_by = stmt.group_by_clause();
+    let group_by_column_names = group_by
+        .as_ref()
+        .map(|g| {
+            g.expressions()
+                .filter_map(|e| e.as_column_ref().map(|c| c.name().to_string()))
+                .collect()
+        })
+        .unwrap_or_default();
+    Some(EClassGrain {
+        distinct: stmt.is_distinct(),
+        has_limit: stmt.limit_clause().is_some(),
+        has_group_by: group_by.is_some(),
+        group_by_column_names,
+    })
+}
+
+fn e_class_where_refusal(reason: String) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Unclassified,
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: "where-clause".to_string(),
+            reason,
+        }],
+    }
+}
+
+/// E-class dispatch for a `WHERE`-clause diff that actually changed
+/// something (research §4 E1/E4) — replaces the coarse "where-clause"
+/// catch-all for both call sites that classify a [`ComparableDiff`]'s
+/// `WHERE` clause (`classify_comparable` and `classify_added_left_join_diff`
+/// share this). `representatives` is the same stored 1:1 representative set
+/// B1/D1 use (research §4 intro "one uniform rule") — E1/E4 both requalify
+/// against it. `after_columns` is `None` only when the SELECT-list diff
+/// itself was [`SelectListDiff::Opaque`], which blocks E4 specifically (its
+/// difference `INSERT` needs an explicit column list) but not E1 (a `DELETE`
+/// needs no column list at all).
+fn classify_where_clause(
+    where_clause: &ConjunctDiff,
+    representatives: &BTreeSet<String>,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
+    match where_clause {
+        ConjunctDiff::Diffed { added, removed, .. } if added.is_empty() && removed.is_empty() => {
+            Vec::new()
+        }
+        ConjunctDiff::Diffed { added, removed, .. } => {
+            classify_conjunct_diff(added, removed, representatives, after_columns, inputs)
+        }
+        ConjunctDiff::Opaque { reason, .. } => vec![e_class_where_refusal(format!(
+            "E-class (row-set/predicate techniques) refused: the WHERE-clause diff could not \
+             be factored into a conjunct-set add/remove — a non-conjunctive rewrite (e.g. `a \
+             OR b` -> `a`) is unsound for a conjunct-set add/remove framing (research §4 \
+             E-class intro): {reason}"
+        ))],
+    }
+}
+
+fn classify_conjunct_diff(
+    added: &[Expr],
+    removed: &[Expr],
+    representatives: &BTreeSet<String>,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
+    let anchor = added.first().or_else(|| removed.first());
+    let grain = anchor.and_then(e_class_grain);
+
+    if grain.as_ref().is_some_and(|g| g.has_limit) {
+        return vec![e_class_where_refusal(
+            "E-class refuses when the definition has a LIMIT — row selection under LIMIT is \
+             not stable under a predicate change (research §4 intro grain guards)"
+                .to_string(),
+        )];
+    }
+    if grain.as_ref().is_some_and(|g| g.distinct) {
+        return vec![e_class_where_refusal(
+            "E-class refuses under SELECT DISTINCT — a row-subset DELETE/INSERT would diverge \
+             from a rebuild's DISTINCT-merged multiset (research §4 intro grain guards)"
+                .to_string(),
+        )];
+    }
+
+    // The only shape the group-by carve-out (or a plain, no-group-by E4)
+    // ever admits: exactly one removed conjunct paired with exactly one
+    // added conjunct, recognised as a provably-widened range predicate on
+    // the same column.
+    let e4_pair = if added.len() == 1 && removed.len() == 1 {
+        Some(try_e4_pair(&removed[0], &added[0]))
+    } else {
+        None
+    };
+
+    if let Some(g) = &grain {
+        if g.has_group_by {
+            if let Some(Ok(proof)) = &e4_pair {
+                if g.group_by_column_names.contains(&proof.column_name) {
+                    return vec![build_e4_atom(proof, representatives, after_columns, inputs)];
+                }
+            }
+            return vec![e_class_where_refusal(
+                "E-class refuses a WHERE-clause predicate change under GROUP BY — it \
+                 re-partitions inputs to aggregates, not stored rows, and a slice INSERT would \
+                 double-count groups that already exist while the identity anti-join guard \
+                 would silently skip them instead of double-counting, which is worse (research \
+                 §4 E-class grain precondition); only E4 with the range column itself a group \
+                 key is admitted"
+                    .to_string(),
+            )];
+        }
+    }
+
+    if let Some(Ok(proof)) = &e4_pair {
+        return vec![build_e4_atom(proof, representatives, after_columns, inputs)];
+    }
+
+    if removed.is_empty() {
+        return added
+            .iter()
+            .enumerate()
+            .map(|(index, conjunct)| classify_e1_conjunct(index, conjunct, representatives, inputs))
+            .collect();
+    }
+
+    let reason = match e4_pair {
+        Some(Err(reason)) => format!(
+            "the added+removed conjunct pair is not an admissible E4 (time-horizon extension) \
+             range-widening shape: {reason} — E2/E3 (filter loosened / arbitrary predicate \
+             change) are not yet implemented by this phase"
+        ),
+        _ => "the WHERE-clause diff removes one or more conjuncts without a single admissible \
+              E4 pair — E2/E3 (filter loosened / arbitrary predicate change) are not yet \
+              implemented by this phase"
+            .to_string(),
+    };
+    vec![e_class_where_refusal(reason)]
+}
+
+// ----- E1: filter tightened (research §4 E1) -----
+
+fn classify_e1_conjunct(
+    index: usize,
+    conjunct: &Expr,
+    representatives: &BTreeSet<String>,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    let atom_change = AtomicChange::AddedConjunct { index };
+    match try_e1(conjunct, representatives, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: atom_change,
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: atom_change,
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("added conjunct #{index}"),
+                reason,
+            }],
+        },
+    }
+}
+
+/// E1 admission (research §4 E1): the added conjunct, requalified to stored
+/// columns under the same uniform representative rule B1/D1 use. *Script*:
+/// `DELETE FROM t WHERE (<q'>) IS NOT TRUE;` — no upstream read.
+fn try_e1(
+    conjunct: &Expr,
+    representatives: &BTreeSet<String>,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let requalified = requalify::requalify(conjunct, representatives)
+        .map_err(|reason| format!("E1 (filter tightened) refused: {reason}"))?;
+
+    let statement = emit::emit_predicate_delete(&inputs.table, &requalified);
+
+    Ok(BackbuildOption {
+        technique: Technique::PredicateTightenDelete,
+        slot: Some(HSlot::Delete),
+        statements: vec![statement],
+        write_scope: WriteScope::RowSubset,
+        reads_upstream: false,
+        // A `DELETE` keyed on a predicate is naturally idempotent: rows a
+        // prior run already deleted can never match the predicate again.
+        rerun_safe: true,
+    })
+}
+
+// ----- E4: time-horizon extension (research §4 E4) -----
+
+/// The E4 range-widening proof's result: the range column's raw name (for
+/// the group-key carve-out check) and the *removed* conjunct's whole
+/// expression — E4's script always uses this verbatim (research §4: "the
+/// emitted predicate is always the complement form"), never a
+/// column/operator/literal reconstruction. The range view
+/// ([`as_range_conjunct`]/[`try_e4_pair`]) is classification-only.
+struct RangePairProof {
+    column_name: String,
+    removed_expr: Expr,
+}
+
+#[derive(PartialEq, Eq, Clone, Copy)]
+enum RangeLiteralKind {
+    Number,
+    Text,
+}
+
+struct RangeConjunctShape {
+    name: String,
+    /// Canonical form: the column is always on the left, so a reversed
+    /// source conjunct (`literal <op> column`) has its operator flipped
+    /// (e.g. `X <= ts` becomes `ts >= X`).
+    operator: String,
+    literal_kind: RangeLiteralKind,
+    literal_text: String,
+}
+
+/// Recognise `expr` as `column <op> literal` (or `literal <op> column`,
+/// flipped to canonical form), `<op>` one of `>`, `>=`, `<`, `<=`. `None`
+/// for any other shape — this is a permissive leaf classifier over one
+/// already-bounded conjunct, not a derivability proof (mirrors
+/// `references_alias`'s posture): failing to recognise a shape here simply
+/// means E4 does not apply, never a hard refusal on its own.
+fn as_range_conjunct(expr: &Expr) -> Option<RangeConjunctShape> {
+    let bin = expr.as_binary()?;
+    let op = bin.operator()?;
+    if !matches!(op.as_str(), ">" | ">=" | "<" | "<=") {
+        return None;
+    }
+    let left = bin.left()?;
+    let right = bin.right()?;
+
+    if let (Some(col), Some(lit)) = (left.as_column_ref(), bare_literal(&right)) {
+        return Some(RangeConjunctShape {
+            name: col.name().to_string(),
+            operator: op,
+            literal_kind: lit.0,
+            literal_text: lit.1,
+        });
+    }
+    if let (Some(lit), Some(col)) = (bare_literal(&left), right.as_column_ref()) {
+        return Some(RangeConjunctShape {
+            name: col.name().to_string(),
+            operator: flip_comparison_operator(&op),
+            literal_kind: lit.0,
+            literal_text: lit.1,
+        });
+    }
+    None
+}
+
+fn flip_comparison_operator(op: &str) -> String {
+    match op {
+        ">" => "<".to_string(),
+        ">=" => "<=".to_string(),
+        "<" => ">".to_string(),
+        "<=" => ">=".to_string(),
+        other => other.to_string(),
+    }
+}
+
+/// `expr` is a bare literal (exactly one non-trivia token, a `NUMBER` or
+/// `STRING`) — a comparison against anything else (a function call, another
+/// column, a parenthesised expression) is not a shape E4's literal-widening
+/// proof recognises. String literal text has its surrounding quotes
+/// stripped for comparison.
+fn bare_literal(expr: &Expr) -> Option<(RangeLiteralKind, String)> {
+    let mut tokens = expr
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia());
+    let first = tokens.next()?;
+    if tokens.next().is_some() {
+        return None;
+    }
+    match first.kind() {
+        SyntaxKind::NUMBER => Some((RangeLiteralKind::Number, first.text().to_string())),
+        SyntaxKind::STRING => Some((
+            RangeLiteralKind::Text,
+            first.text().trim_matches('\'').to_string(),
+        )),
+        _ => None,
+    }
+}
+
+/// The E4 range-widening proof (research §4 E4): `removed` and `added` must
+/// both recognise as [`as_range_conjunct`] shapes over the *same* column
+/// with the *same* (canonical) comparison operator, and `added`'s literal
+/// must provably widen `removed`'s bound — mixed operators refuse rather
+/// than trusting literal arithmetic at the boundary (research §4 E4: "mixed
+/// operators like `>` -> `>=` refuse rather than trusting literal
+/// arithmetic at the boundary").
+fn try_e4_pair(removed: &Expr, added: &Expr) -> Result<RangePairProof, String> {
+    let removed_shape = as_range_conjunct(removed).ok_or_else(|| {
+        "the removed conjunct is not a recognised `column <op> literal` range predicate".to_string()
+    })?;
+    let added_shape = as_range_conjunct(added).ok_or_else(|| {
+        "the added conjunct is not a recognised `column <op> literal` range predicate".to_string()
+    })?;
+
+    if removed_shape.name != added_shape.name {
+        return Err("the removed and added conjuncts range over different columns".to_string());
+    }
+
+    if removed_shape.operator != added_shape.operator {
+        return Err(format!(
+            "mixed comparison operators (removed '{}' vs added '{}') are not admitted — \
+             boundary semantics are not literal arithmetic (research §4 E4)",
+            removed_shape.operator, added_shape.operator
+        ));
+    }
+
+    if removed_shape.literal_kind != added_shape.literal_kind {
+        return Err(
+            "the removed and added conjuncts' literals are not the same kind (number vs text) \
+             — widening cannot be proven"
+                .to_string(),
+        );
+    }
+
+    let widened = match removed_shape.operator.as_str() {
+        ">" | ">=" => is_widened_lower_bound(
+            removed_shape.literal_kind,
+            &removed_shape.literal_text,
+            &added_shape.literal_text,
+        )?,
+        "<" | "<=" => !is_widened_lower_bound(
+            removed_shape.literal_kind,
+            &added_shape.literal_text,
+            &removed_shape.literal_text,
+        )?,
+        // Unreachable: `as_range_conjunct` only ever produces one of the
+        // four operators above.
+        _ => false,
+    };
+    if !widened {
+        return Err(
+            "the added conjunct's literal does not provably widen the removed conjunct's bound \
+             — E4 only admits a strictly widened range"
+                .to_string(),
+        );
+    }
+
+    Ok(RangePairProof {
+        column_name: removed_shape.name,
+        removed_expr: removed.clone(),
+    })
+}
+
+/// Whether `a` is strictly less than `b`, for a lower-bound (`>`/`>=`)
+/// widening check: `a < b` means moving the bound from `b` to `a` admits
+/// more rows. Numeric literals compare as parsed `f64`s (fail-closed on an
+/// unparseable literal — this should be unreachable given `bare_literal`
+/// only ever tags `NUMBER`-kind tokens this way, but a lexer accepting a
+/// shape `f64::from_str` rejects is reported, not panicked, per fail-loud
+/// discipline). Text literals compare lexicographically — sound for
+/// ISO-8601-shaped date/timestamp literals (the common E4 case), and
+/// conservative for anything else: a format where lexicographic order
+/// disagrees with the intended order simply fails to prove widening (`Ok`
+/// only asserts *this* comparison; a caller misreading it as "not widened"
+/// stays fail-closed, never fail-open).
+fn is_widened_lower_bound(kind: RangeLiteralKind, b: &str, a: &str) -> Result<bool, String> {
+    match kind {
+        RangeLiteralKind::Number => {
+            let b: f64 = b.parse().map_err(|_| {
+                "the removed conjunct's literal is not a parseable number".to_string()
+            })?;
+            let a: f64 = a.parse().map_err(|_| {
+                "the added conjunct's literal is not a parseable number".to_string()
+            })?;
+            Ok(a < b)
+        }
+        RangeLiteralKind::Text => Ok(a < b),
+    }
+}
+
+fn build_e4_atom(
+    proof: &RangePairProof,
+    representatives: &BTreeSet<String>,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    let atom_change = AtomicChange::RangePredicateChange {
+        column: proof.column_name.clone(),
+    };
+    match build_e4_option(proof, representatives, after_columns, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: atom_change,
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: atom_change,
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("range predicate on '{}'", proof.column_name),
+                reason,
+            }],
+        },
+    }
+}
+
+/// Build the E4 difference-`INSERT` option once [`try_e4_pair`]'s range
+/// proof holds. The emitted predicate is always the removed conjunct itself
+/// (research §4 E4's complement form), requalified to stored columns under
+/// the same rule E1 uses.
+fn build_e4_option(
+    proof: &RangePairProof,
+    representatives: &BTreeSet<String>,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let after_columns = after_columns.ok_or_else(|| {
+        "E4 (time-horizon extension) refused: the after-definition's output column list could \
+         not be determined (the SELECT-list diff is opaque)"
+            .to_string()
+    })?;
+    if after_columns.is_empty() {
+        return Err(
+            "E4 (time-horizon extension) refused: the after-definition has no output columns"
+                .to_string(),
+        );
+    }
+
+    let requalified_removed =
+        requalify::requalify(&proof.removed_expr, representatives).map_err(|reason| {
+            format!(
+                "E4 (time-horizon extension) refused for range predicate on '{}': {reason}",
+                proof.column_name
+            )
+        })?;
+
+    let identity_columns = inputs.row_identity.clone();
+    let statement = emit::emit_difference_insert(
+        &inputs.table,
+        after_columns,
+        &inputs.after_sql,
+        &requalified_removed,
+        identity_columns.as_deref(),
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::HorizonExtensionInsert,
+        slot: Some(HSlot::Insert),
+        statements: vec![statement],
+        write_scope: WriteScope::RowSubset,
+        reads_upstream: true,
+        // An anti-join guard on the declared identity makes a rerun safe;
+        // without identity this is documented one-shot (research §2
+        // "Idempotence").
+        rerun_safe: identity_columns.is_some(),
+    })
 }
 
 fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
@@ -1266,17 +1773,13 @@ fn classify_added_left_join_diff(
         ));
     }
 
-    match &comparable.where_clause {
-        ConjunctDiff::Diffed { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
-            atoms.push(unclassified_refusal_named("where-clause"));
-        }
-        ConjunctDiff::Opaque { reason, .. } => {
-            atoms.push(unclassified_refusal_named(&format!(
-                "where-clause: {reason}"
-            )));
-        }
-        _ => {}
-    }
+    let after_columns = after_column_names(unchanged, changed, added);
+    atoms.extend(classify_where_clause(
+        &comparable.where_clause,
+        &representatives,
+        Some(&after_columns),
+        inputs,
+    ));
 
     match &comparable.set_ops {
         SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {

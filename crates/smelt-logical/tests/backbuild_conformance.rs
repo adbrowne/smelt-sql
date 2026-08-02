@@ -925,3 +925,198 @@ fn b4_general_expression_null_extension() {
     let unmatched = harness::text_column(&conn, "SELECT customer_label FROM t WHERE order_id = 2");
     assert_eq!(unmatched, vec!["none".to_string()]);
 }
+
+// ===== E1/E4 (task-7-brief.md) =====
+
+#[test]
+fn e1_tighten_deletes_only() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, status TEXT);
+         INSERT INTO orders VALUES (1, 'active'), (2, 'cancelled'), (3, 'active');",
+    );
+
+    let before_sql = "SELECT id, status FROM orders";
+    let after_sql = "SELECT id, status FROM orders WHERE status = 'active'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::PredicateTightenDelete);
+    assert_eq!(option.statements.len(), 1, "{:?}", option.statements);
+    assert!(
+        option.statements[0].starts_with("DELETE FROM t WHERE"),
+        "{:?}",
+        option.statements
+    );
+    assert!(option.statements[0].contains("IS NOT TRUE"));
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn e1_null_semantics() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, amount INTEGER);
+         INSERT INTO orders VALUES (1, 10), (2, -5), (3, NULL);",
+    );
+
+    let before_sql = "SELECT id, amount FROM orders";
+    let after_sql = "SELECT id, amount FROM orders WHERE amount > 0";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    let atom = &options.atoms[0];
+    let option = &atom.options[0];
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply E1 delete `{stmt}`: {e}"));
+    }
+    // The regression trap (research §4 E1): a bare `NOT` would wrongly
+    // *keep* the NULL-amount row (id=3), since `NOT NULL` is itself NULL,
+    // and `WHERE NULL` drops the row from a DELETE's own predicate — the
+    // row would survive. `IS NOT TRUE` deletes it, matching the rebuild's
+    // three-valued `WHERE amount > 0` semantics.
+    let remaining_ids = harness::text_column(&conn, "SELECT id::TEXT FROM t ORDER BY id");
+    assert_eq!(remaining_ids, vec!["1".to_string()]);
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn e4_horizon_extension_inserts_region() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           ('2023-06-01', 1),
+           ('2024-06-01', 2),
+           ('2025-06-01', 3);",
+    );
+
+    let before_sql = "SELECT ts, amount FROM events WHERE ts >= '2025-01-01'";
+    let after_sql = "SELECT ts, amount FROM events WHERE ts >= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::HorizonExtensionInsert);
+    assert_eq!(option.statements.len(), 1, "{:?}", option.statements);
+    assert!(option.statements[0].starts_with("INSERT INTO t"));
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply E4 insert `{stmt}`: {e}"));
+    }
+    // Exactly the [2024-01-01, 2025-01-01) region is backfilled alongside
+    // the pre-existing 2025 row — the 2023 row stays excluded.
+    let inserted_ts = harness::text_column(&conn, "SELECT ts::TEXT FROM t ORDER BY ts");
+    assert_eq!(
+        inserted_ts,
+        vec!["2024-06-01".to_string(), "2025-06-01".to_string()]
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn e4_idempotent_with_identity() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events (id INTEGER, ts DATE, amount INTEGER);
+         INSERT INTO events VALUES
+           (1, '2023-06-01', 10),
+           (2, '2024-06-01', 20),
+           (3, '2025-06-01', 30);",
+    );
+
+    let before_sql = "SELECT id, ts, amount FROM events WHERE ts >= '2025-01-01'";
+    let after_sql = "SELECT id, ts, amount FROM events WHERE ts >= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut backbuild_inputs = inputs("t", after_sql);
+    backbuild_inputs.row_identity = Some(vec!["id".to_string()]);
+
+    let options = derive_backbuild_options(&diff, &backbuild_inputs);
+    let atom = &options.atoms[0];
+    let option = &atom.options[0];
+    assert!(
+        option.rerun_safe,
+        "a declared row identity must make E4's INSERT rerun-safe"
+    );
+    assert!(
+        option.statements[0].to_uppercase().contains("NOT EXISTS"),
+        "expected the identity anti-join guard, got: {:?}",
+        option.statements
+    );
+
+    harness::build_before(&conn, "t", before_sql);
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply E4 insert `{stmt}`: {e}"));
+    }
+    // Re-run: the anti-join guard must make this a no-op, not a duplicate
+    // insert.
+    for stmt in &option.statements {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("re-apply E4 insert `{stmt}`: {e}"));
+    }
+
+    harness::assert_matches_full_rebuild(&conn, "t", after_sql);
+}
+
+#[test]
+fn e4_group_key_range_admits() {
+    // The carve-out: E4 where the range column is itself a GROUP BY key —
+    // every group lies wholly inside or outside the difference region, so
+    // extending history on a date-keyed aggregate is sound (research §4
+    // E-class grain precondition).
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_date DATE, amount INTEGER);
+         INSERT INTO orders VALUES
+           ('2023-06-01', 5),
+           ('2024-06-01', 10),
+           ('2024-06-01', 15),
+           ('2025-06-01', 20);",
+    );
+
+    let before_sql = "SELECT order_date, SUM(amount) AS total FROM orders \
+                       WHERE order_date >= '2025-01-01' GROUP BY order_date";
+    let after_sql = "SELECT order_date, SUM(amount) AS total FROM orders \
+                      WHERE order_date >= '2024-01-01' GROUP BY order_date";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    assert_eq!(atom.options[0].technique, Technique::HorizonExtensionInsert);
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}

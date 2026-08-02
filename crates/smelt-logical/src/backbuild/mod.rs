@@ -333,10 +333,23 @@ pub enum AtomicChange {
     /// name whose computing expression differs (research §4 D-class; D1 in
     /// this phase, D2 in a later one). `name` is the column's output name.
     ChangedColumn { name: String },
+    /// One added `WHERE`-clause conjunct (research §4 E1 "filter
+    /// tightened") — classified and scripted independently per conjunct
+    /// (unlike E4's single paired atom), each its own `DELETE ... WHERE
+    /// (<q>) IS NOT TRUE`. `index` is this conjunct's position within the
+    /// diff's `added` conjunct set.
+    AddedConjunct { index: usize },
+    /// A removed+added `WHERE`-clause conjunct pair recognised as a
+    /// provably-widened range predicate on one column (research §4 E4
+    /// "time-horizon extension"). `column` is the range column's raw name.
+    /// The range view classifies only — the emitted script is always the
+    /// complement-form difference `INSERT` (research §4 E4).
+    RangePredicateChange { column: String },
     /// A non-empty, non-skeleton-refused diff this phase does not yet
     /// classify into admissible techniques (research catalogue classes
-    /// C/E/F, an unpaired dropped column, an ambiguous rename cluster, a
-    /// D-class change this phase cannot admit as D1, or an opaque
+    /// C/F, an unpaired dropped column, an ambiguous rename cluster, a
+    /// D-class change this phase cannot admit as D1, a `WHERE`-clause change
+    /// this phase's E-class (E1/E4 only) cannot admit, or an opaque
     /// SELECT-list/WHERE/set-operation diff). A conservative catch-all: an
     /// honest "not yet handled" refusal, never a silently empty atom list
     /// for a definition that did change.
@@ -435,6 +448,24 @@ pub enum Technique {
     /// dimension match — the safety-asymmetry counterpart to
     /// `JoinEnrichmentUpdateFrom`'s doc comment (research §2).
     JoinEnrichmentScalarSubquery,
+    /// E1 — filter tightened (research §4): `DELETE FROM t WHERE (<q'>) IS
+    /// NOT TRUE;`, `q'` the added conjunct requalified to stored columns.
+    /// Three-valued logic pinned at the single authoring site
+    /// (`emit::emit_predicate_delete`): a NULL-evaluating conjunct deletes
+    /// the row — a bare `NOT q'` would wrongly keep it (research §4 E1's
+    /// named regression trap). No upstream read.
+    PredicateTightenDelete,
+    /// E4 — time-horizon extension (research §4): a region-scoped
+    /// difference `INSERT` built from the after-definition's own SELECT
+    /// body, scoped by the always-complement-form predicate (the *added*
+    /// conjunct is already implied by reading the after-definition; the
+    /// script adds `AND (<removed conjunct>) IS NOT TRUE`, requalified to
+    /// stored columns) — this gets every boundary and NULL case right by
+    /// construction (research §4 E4). Carries an identity anti-join guard
+    /// when `BackbuildInputs::row_identity` is declared, making reruns safe;
+    /// otherwise the option records `rerun_safe: false` (research §2
+    /// "Idempotence").
+    HorizonExtensionInsert,
 }
 
 /// The research §2 "write scope" option metadata.

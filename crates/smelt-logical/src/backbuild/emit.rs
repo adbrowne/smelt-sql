@@ -98,6 +98,68 @@ pub fn emit_scalar_subquery_fragment(
     )
 }
 
+/// `DELETE FROM t WHERE (<predicate>) IS NOT TRUE;` — research §4 E1's
+/// filter-tightened `DELETE`. Three-valued logic is pinned here, at the
+/// single authoring site: `IS NOT TRUE` deletes a row whose `predicate`
+/// evaluates NULL, not just FALSE — a bare `NOT predicate` would wrongly
+/// *keep* such a row (the regression trap research §4 E1 names explicitly).
+pub fn emit_predicate_delete(table: &str, predicate: &str) -> String {
+    format!("DELETE FROM {table} WHERE ({predicate}) IS NOT TRUE")
+}
+
+/// `INSERT INTO t (<cols>) SELECT <cols> FROM (<after_sql>) AS
+/// __backbuild_diff WHERE (<difference_predicate>) IS NOT TRUE [AND NOT
+/// EXISTS (<identity anti-join>)]` — research §4 E2/E4's region-scoped
+/// difference `INSERT`.
+///
+/// `after_sql` is wrapped as a derived table rather than string-spliced into
+/// (research §3 "Alias requalification is a CST rewrite, not string
+/// surgery" — the same posture extended to whole-statement composition):
+/// its own output columns are already named exactly like `table`'s stored
+/// columns, so both `difference_predicate` and the identity anti-join guard
+/// can address them by name without knowing anything about `after_sql`'s
+/// own `FROM`/`JOIN` structure. `columns` is an explicit column list on
+/// *both* the `INSERT` target and the `SELECT` — the research §4 E4
+/// requirement — so column order only needs to agree between the two lists
+/// here, never with `table`'s physical column order.
+///
+/// `difference_predicate` is E4's always-complement-form predicate (research
+/// §4 E4: "the emitted predicate is always the complement form") — the
+/// caller passes the bare removed/old conjunct text (already requalified to
+/// stored-column names); this emitter applies the `IS NOT TRUE` wrapping,
+/// the single authoring site for the three-valued-logic form, mirroring
+/// [`emit_predicate_delete`].
+///
+/// `identity_columns` is `None` when `BackbuildInputs::row_identity` is
+/// undeclared — the caller then records `rerun_safe: false` on the option
+/// this backs (research §2 "Idempotence": "Plain INSERT-family steps … are
+/// not [idempotent]; each carries an anti-join guard on row identity where
+/// identity is available … and is otherwise documented one-shot").
+pub fn emit_difference_insert(
+    table: &str,
+    columns: &[String],
+    after_sql: &str,
+    difference_predicate: &str,
+    identity_columns: Option<&[String]>,
+) -> String {
+    let col_list = columns.join(", ");
+    let mut sql = format!(
+        "INSERT INTO {table} ({col_list}) SELECT {col_list} FROM ({after_sql}) AS \
+         __backbuild_diff WHERE ({difference_predicate}) IS NOT TRUE"
+    );
+    if let Some(identity) = identity_columns {
+        let guard = identity
+            .iter()
+            .map(|c| format!("{table}.{c} = __backbuild_diff.{c}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql.push_str(&format!(
+            " AND NOT EXISTS (SELECT 1 FROM {table} WHERE {guard})"
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,6 +262,63 @@ mod tests {
                 ],
             ),
             "(SELECT d.name FROM dims d WHERE t.region = d.region AND t.dim_id = d.dim_id)"
+        );
+    }
+
+    #[test]
+    fn predicate_delete_shape() {
+        assert_eq!(
+            emit_predicate_delete("t", "status = 'active'"),
+            "DELETE FROM t WHERE (status = 'active') IS NOT TRUE"
+        );
+    }
+
+    #[test]
+    fn difference_insert_shape_without_identity() {
+        assert_eq!(
+            emit_difference_insert(
+                "t",
+                &["ts".to_string(), "amount".to_string()],
+                "SELECT ts, amount FROM events WHERE ts >= '2024-01-01'",
+                "ts >= '2025-01-01'",
+                None,
+            ),
+            "INSERT INTO t (ts, amount) SELECT ts, amount FROM (SELECT ts, amount FROM events \
+             WHERE ts >= '2024-01-01') AS __backbuild_diff WHERE (ts >= '2025-01-01') IS NOT \
+             TRUE"
+        );
+    }
+
+    #[test]
+    fn difference_insert_shape_with_identity_guard() {
+        assert_eq!(
+            emit_difference_insert(
+                "t",
+                &["id".to_string(), "ts".to_string()],
+                "SELECT id, ts FROM events WHERE ts >= '2024-01-01'",
+                "ts >= '2025-01-01'",
+                Some(&["id".to_string()]),
+            ),
+            "INSERT INTO t (id, ts) SELECT id, ts FROM (SELECT id, ts FROM events WHERE ts >= \
+             '2024-01-01') AS __backbuild_diff WHERE (ts >= '2025-01-01') IS NOT TRUE AND NOT \
+             EXISTS (SELECT 1 FROM t WHERE t.id = __backbuild_diff.id)"
+        );
+    }
+
+    #[test]
+    fn difference_insert_shape_composite_identity_guard() {
+        assert_eq!(
+            emit_difference_insert(
+                "t",
+                &["region".to_string(), "ts".to_string()],
+                "SELECT region, ts FROM events WHERE ts >= '2024-01-01'",
+                "ts >= '2025-01-01'",
+                Some(&["region".to_string(), "ts".to_string()]),
+            ),
+            "INSERT INTO t (region, ts) SELECT region, ts FROM (SELECT region, ts FROM events \
+             WHERE ts >= '2024-01-01') AS __backbuild_diff WHERE (ts >= '2025-01-01') IS NOT \
+             TRUE AND NOT EXISTS (SELECT 1 FROM t WHERE t.region = __backbuild_diff.region AND \
+             t.ts = __backbuild_diff.ts)"
         );
     }
 }

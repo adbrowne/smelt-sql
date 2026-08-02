@@ -910,6 +910,142 @@ fn b4_alias_referenced_in_where_refuses() {
     );
 }
 
+// ===== E1/E4 (task-7-brief.md) =====
+
+#[test]
+fn e1_conjunct_over_unstored_column_refuses() {
+    // `status` is never selected at all — no stored representative to
+    // requalify the added conjunct against.
+    let before_sql = "SELECT id FROM orders";
+    let after_sql = "SELECT id FROM orders WHERE status = 'active'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert!(
+        matches!(&atom.change, AtomicChange::AddedConjunct { index: 0 }),
+        "expected an AddedConjunct atom, got {:?}",
+        atom.change
+    );
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.contains("representative"),
+        "expected the refusal to name the missing stored representative, got: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn e_opaque_predicate_rewrite_refuses() {
+    // `a OR b` -> `a`: a top-level OR is not a conjunctive predicate — a
+    // conjunct-set add/remove framing is unsound for a non-conjunctive
+    // rewrite (research §4 E-class intro).
+    let before_sql = "SELECT id, status FROM orders WHERE status = 'a' OR status = 'b'";
+    let after_sql = "SELECT id, status FROM orders WHERE status = 'a'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .to_lowercase()
+            .contains("conjunctive"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn e_group_by_model_refuses() {
+    // A predicate change under GROUP BY re-partitions inputs to aggregates,
+    // not stored rows — refused even though this shape (an equality swap,
+    // not a range widening) isn't the E4 group-key carve-out either way.
+    let before_sql = "SELECT status, COUNT(*) AS n FROM orders WHERE status = 'a' GROUP BY status";
+    let after_sql = "SELECT status, COUNT(*) AS n FROM orders WHERE status = 'b' GROUP BY status";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .to_lowercase()
+            .contains("group by"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn e_distinct_model_refuses() {
+    let before_sql = "SELECT DISTINCT id, status FROM orders";
+    let after_sql = "SELECT DISTINCT id, status FROM orders WHERE status = 'active'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .to_lowercase()
+            .contains("distinct"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn e_limit_model_refuses() {
+    // The LIMIT is identical on both sides, so the skeleton diff stays
+    // `Unchanged` (LIMIT presence is otherwise invisible to it) — the
+    // E-class guard must detect LIMIT from the CST directly.
+    let before_sql = "SELECT id, status FROM orders LIMIT 10";
+    let after_sql = "SELECT id, status FROM orders WHERE status = 'active' LIMIT 10";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.to_lowercase().contains("limit"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn e4_mixed_operator_refuses() {
+    // `ts > X` -> `ts >= Y`: mixed comparison operators — boundary
+    // semantics are not literal arithmetic, so this refuses rather than
+    // trusting the literals alone (research §4 E4).
+    let before_sql = "SELECT ts FROM events WHERE ts > '2025-01-01'";
+    let after_sql = "SELECT ts FROM events WHERE ts >= '2024-01-01'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(reason.contains("mixed"), "reason: {reason}");
+    assert!(reason.contains("operator"), "reason: {reason}");
+}
+
 #[test]
 fn b4_alias_in_opaque_where_refuses() {
     // A top-level OR makes the WHERE conjunct-set diff `Opaque` — no `added`
