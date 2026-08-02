@@ -1225,6 +1225,82 @@ fn e2_loosen_inserts_difference() {
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
+/// E3 (research §4: "arbitrary predicate change = added ∧ removed
+/// conjuncts: compose E1 + E2") via the disjoint-column middle path: the
+/// removed conjunct (`region = 'EU'`) and the added conjunct (`qty > 0`)
+/// reference different columns, so `classify_conjunct_diff` composes an E1
+/// `DELETE` (for the added conjunct) with an E2 `INSERT` (for the removed
+/// one) rather than refusing — proving the plan's committed-to E3 surface
+/// end-to-end against a real DuckDB, distinct from the (still-refusing)
+/// same-column pairs `e4_mixed_operator_refuses` et al. pin in
+/// `backbuild_options.rs`.
+#[test]
+fn e3_disjoint_conjunct_swap_composes() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, region TEXT, qty INTEGER);
+         INSERT INTO orders VALUES
+           (1, 'EU', 5),
+           (2, 'EU', -1),
+           (3, 'US', 10),
+           (4, 'US', -5);",
+    );
+
+    let before_sql = "SELECT id, region, qty FROM orders WHERE region = 'EU'";
+    let after_sql = "SELECT id, region, qty FROM orders WHERE qty > 0";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    assert!(
+        matches!(
+            &options.atoms[0].change,
+            smelt_logical::backbuild::AtomicChange::AddedConjunct { index: 0 }
+        ),
+        "expected the added conjunct (qty > 0) to classify as E1, got {:?}",
+        options.atoms[0].change
+    );
+    assert!(
+        matches!(
+            &options.atoms[1].change,
+            smelt_logical::backbuild::AtomicChange::RemovedConjunct { index: 0 }
+        ),
+        "expected the removed conjunct (region = 'EU') to classify as E2, got {:?}",
+        options.atoms[1].change
+    );
+    for atom in &options.atoms {
+        assert_eq!(
+            atom.options.len(),
+            1,
+            "expected both atoms admissible: {atom:?}"
+        );
+    }
+    assert_eq!(
+        options.atoms[0].options[0].technique,
+        Technique::PredicateTightenDelete
+    );
+    assert_eq!(
+        options.atoms[1].options[0].technique,
+        Technique::FilterLoosenInsert
+    );
+
+    let script = assemble(&options, &targeted_of_len(2));
+    assert_eq!(script.len(), 2, "{script:?}");
+    assert!(
+        script[0].starts_with("DELETE FROM t WHERE"),
+        "H order puts DELETE before INSERT: {script:?}"
+    );
+    assert!(
+        script[1].starts_with("INSERT INTO t"),
+        "H order puts DELETE before INSERT: {script:?}"
+    );
+
+    harness::verify_script(&conn, "t", before_sql, after_sql, &script);
+}
+
 #[test]
 fn f1_union_branch_insert() {
     let conn = Connection::open_in_memory().expect("duckdb");
@@ -1274,17 +1350,42 @@ fn f1_union_branch_insert() {
 /// composed through the real classifier and `assemble` — the H order is
 /// `rename → alter/add → delete → update/merge → insert → drop`.
 ///
-/// Why a shuffled script fails (argued by construction, not a second test):
-/// `bonus`'s own option pairs `ALTER TABLE t ADD COLUMN bonus …` with
-/// `UPDATE t SET bonus = qty * 10` *in that literal order* inside its own
-/// `statements` list (`build_b1_option`) — swapping them would have the
-/// `UPDATE` reference a column that does not exist yet, an outright DDL
-/// error, not just a wrong answer. More generally (research §4 "H.
-/// Composites"'s own rationale, which this test exercises the concrete
-/// instance of): renames run first so any atom whose requalified expression
-/// addresses a column by its *final* name resolves correctly — an atom's
-/// own alter/update pair spliced in before the rename it depends on would
-/// referencing a column that has not been renamed into existence yet.
+/// `unit_price`'s own added-column expression is the bare rename target
+/// `list_price` itself — this is the B2 "one dropped, two identical added"
+/// tie-break shape (research §4 B2, `classify_rename_loser`): `price` is
+/// dropped, and BOTH `list_price` and `unit_price` are added with the
+/// identical expression `price`, so `pair_renames` pins the
+/// lexicographically-first name (`list_price`) as the rename target and
+/// classifies `unit_price` as a B1-shaped atom that reads the *winning
+/// rename's target name directly* (`build_b1_option(loser, renamed_to,
+/// ..)`), not through the general representative-requalification path
+/// (which cannot reference a renamed-away name at all — see
+/// `classify_rename_loser`'s own doc comment). This makes the rename→add
+/// dependency real, not merely juxtaposed: `unit_price`'s `UPDATE`
+/// literally reads a column (`list_price`) that only exists once the rename
+/// has run.
+///
+/// Why a shuffled script fails (argued by construction, not a second test —
+/// each claim below was checked by reasoning through the actual statements):
+/// - `UPDATE t SET unit_price = list_price` run before `ALTER TABLE t
+///   RENAME COLUMN price TO list_price` errors outright: `t` has no
+///   `list_price` column yet (still `price`) — DuckDB reports "column
+///   \"list_price\" does not exist", not a wrong answer. This is the
+///   concrete instance of the general H rationale (research §4 "H.
+///   Composites"): "renames first so requalified expressions reference
+///   final names."
+/// - `UPDATE t SET unit_price = list_price` run before `ALTER TABLE t ADD
+///   COLUMN unit_price INTEGER` errors identically: `t` has no target
+///   column `unit_price` to assign into yet.
+/// - `DELETE FROM t WHERE (qty > 0) IS NOT TRUE` running *before* the
+///   rename/alter/update trio is, by contrast, NOT load-bearing here: its
+///   predicate only ever addresses `qty`, a representative untouched by
+///   either the rename or the add, so this particular reordering still
+///   produces the oracle-correct result — an honest limit of this
+///   composite's coverage (E1's `try_e1` can only requalify against the
+///   *unchanged* representative set, which by construction never includes
+///   a renamed-away name, so no admitted E1 atom in this classifier can
+///   ever be made to depend on a rename this way).
 #[test]
 fn h_composite_rename_add_tighten() {
     let conn = Connection::open_in_memory().expect("duckdb");
@@ -1295,14 +1396,14 @@ fn h_composite_rename_add_tighten() {
     );
 
     let before_sql = "SELECT id, price, qty FROM orders";
-    let after_sql =
-        "SELECT id, price AS unit_price, qty, qty * 10 AS bonus FROM orders WHERE qty > 0";
+    let after_sql = "SELECT id, price AS unit_price, price AS list_price, qty FROM orders \
+                      WHERE qty > 0";
 
     let diff = definition_diff(&parse(before_sql), &parse(after_sql));
     assert!(!diff.is_noop());
 
     let mut added_column_types = BTreeMap::new();
-    added_column_types.insert("bonus".to_string(), "INTEGER".to_string());
+    added_column_types.insert("unit_price".to_string(), "INTEGER".to_string());
     let backbuild_inputs = BackbuildInputs {
         table: "t".to_string(),
         after_sql: after_sql.to_string(),
@@ -1321,25 +1422,49 @@ fn h_composite_rename_add_tighten() {
             "expected every atom admissible: {atom:?}"
         );
     }
+    assert!(
+        matches!(
+            &options.atoms[0].change,
+            smelt_logical::backbuild::AtomicChange::RenamedColumn { from, to }
+                if from == "price" && to == "list_price"
+        ),
+        "expected price->list_price to win the lexicographic tie-break, got {:?}",
+        options.atoms[0].change
+    );
+    assert_eq!(
+        options.atoms[1].options[0].statements,
+        vec![
+            "ALTER TABLE t ADD COLUMN unit_price INTEGER".to_string(),
+            "UPDATE t SET unit_price = list_price".to_string(),
+        ],
+        "expected unit_price's UPDATE to read the rename's target name directly: {:?}",
+        options.atoms[1]
+    );
 
     let selection = targeted_of_len(3);
     let script = assemble(&options, &selection);
     assert_eq!(script.len(), 4, "{script:?}");
-    assert!(
-        script[0].starts_with("ALTER TABLE t RENAME COLUMN"),
-        "{script:?}"
+    assert_eq!(
+        script,
+        vec![
+            "ALTER TABLE t RENAME COLUMN price TO list_price".to_string(),
+            "ALTER TABLE t ADD COLUMN unit_price INTEGER".to_string(),
+            "UPDATE t SET unit_price = list_price".to_string(),
+            "DELETE FROM t WHERE (qty > 0) IS NOT TRUE".to_string(),
+        ],
+        "H order: rename -> alter/add -> delete -> update/merge -> insert -> drop"
     );
-    assert!(
-        script[1].starts_with("ALTER TABLE t ADD COLUMN"),
-        "{script:?}"
-    );
-    assert!(script[2].starts_with("UPDATE t SET bonus"), "{script:?}");
-    assert!(script[3].starts_with("DELETE FROM t WHERE"), "{script:?}");
 
     harness::verify_script(&conn, "t", before_sql, after_sql, &script);
 }
 
-/// B1 (self-derived add) + F1 (UNION ALL branch insert), hand-assembled:
+/// NOTE — hand-assembled, not classifier-driven (tracked gap): this test
+/// builds its `BackbuildOptions` atoms by hand rather than through
+/// `derive_backbuild_options`/`definition_diff`, because the classifier
+/// cannot yet recognize this diff shape as F1 — see `docs/plans/
+/// 20260802-backbuild-synthesis.md` §"Deferred during implementation" →
+/// "F1 classifier coverage gap: an edited surviving branch + an added
+/// branch, in the same diff, is not yet recognized as F1". Summary:
 /// `derive_backbuild_options`'s set-operation diff compares whole branches
 /// by exact text (research §4 F1's "per-branch syntactic equality"), so a
 /// diff that simultaneously edits branch 0's own SELECT list (B1's add) and
@@ -1444,6 +1569,13 @@ fn h_composite_add_plus_insert_aligns_columns() {
     harness::verify_script(&conn, "t", before_sql, after_sql, &script);
 }
 
+/// NOTE — hand-assembled, not classifier-driven (tracked gap): same reason
+/// as [`h_composite_add_plus_insert_aligns_columns`] (see that test's own
+/// NOTE, and `docs/plans/20260802-backbuild-synthesis.md` §"Deferred during
+/// implementation" → "F1 classifier coverage gap") — `derive_backbuild_
+/// options` cannot yet recognize "branch 0 edited + a branch appended" as
+/// F1, so this test's B1/F1 atoms are hand-built the same way.
+///
 /// The same composite as [`h_composite_add_plus_insert_aligns_columns`] plus
 /// a third, blocked atom (a G1-shaped refusal — standing in for "some atom
 /// this diff also needs has no admissible option"): partial application is

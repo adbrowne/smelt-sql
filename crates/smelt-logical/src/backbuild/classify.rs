@@ -428,52 +428,89 @@ fn classify_conjunct_diff(
             .collect();
     }
 
-    // E2 (research §4: "filter loosened") — admitted only when the removed
-    // conjunct is the diff's *sole* predicate change (no added conjunct
-    // alongside it): the general "arbitrary predicate change" shape (E3 —
-    // both an added and a removed conjunct, e.g. an equality swap or a mixed
-    // comparison operator that fails E4's range-widening proof) composes E1
-    // + E2 mathematically (research §4 E3), but that combined single-diff
-    // admission is not yet oracle-conformance-tested by this phase — a
-    // future phase can lift this same removed-conjunct classifier to fire
-    // alongside a non-empty `added` list once it has that coverage. This
-    // phase's proven surface is: E1 alone (`added` non-empty, `removed`
-    // empty, handled above) and E2 alone (`removed` has exactly one
-    // conjunct, `added` empty, handled here) — H's ordering already proves
-    // *composite* deletes-before-inserts across independent atoms (the H
-    // composite conformance tests), so a future E3 lift is purely an
-    // admission-surface widening, not new machinery.
-    if added.is_empty() && removed.len() == 1 {
-        return vec![build_e2_atom(
-            0,
-            &removed[0],
-            representatives,
-            after_columns,
-            inputs,
-        )];
+    // E2 (research §4: "filter loosened"), and E3 by disjoint-column
+    // composition (research §4: "E3 — arbitrary predicate change = added ∧
+    // removed conjuncts: compose E1 + E2"): admitted when there is exactly
+    // one removed conjunct, AND every added conjunct's own bare-column
+    // dependency set is disjoint from the removed conjunct's. Disjointness
+    // is the middle path between "pure loosen" (`added` empty — trivially
+    // disjoint) and the *same-column* pair E4 exclusively owns: E1's DELETE
+    // and E2's INSERT are each independently sound in isolation (E1 shrinks
+    // the table to the intersection of before/after regardless of what else
+    // changed; E2's difference INSERT reads the after-definition — which
+    // already reflects every added conjunct — filtered by the removed
+    // conjunct's three-valued-safe complement), so composing them never
+    // needs the added and removed conjuncts to interact *unless they share
+    // a column*, in which case only a proof like E4's range-widening (same
+    // column, same operator, provably widened literal) can be trusted — an
+    // unrelated column swap on the *same* column (e.g. an equality change,
+    // or a mixed-operator/non-ISO-8601-literal pair E4 itself refuses,
+    // research §4 E4) is deliberately NOT re-admitted here: disjointness
+    // fails for those (they share the column), so they fall through to the
+    // refusal below unchanged.
+    if removed.len() == 1 {
+        if let Ok(removed_cols) = model_diff::collect_dependencies(&removed[0]) {
+            let disjoint = added.iter().all(|conjunct| {
+                model_diff::collect_dependencies(conjunct)
+                    .is_ok_and(|added_cols| added_cols.is_disjoint(&removed_cols))
+            });
+            if disjoint {
+                let mut atoms: Vec<AtomAnalysis> = added
+                    .iter()
+                    .enumerate()
+                    .map(|(index, conjunct)| {
+                        classify_e1_conjunct(index, conjunct, representatives, inputs)
+                    })
+                    .collect();
+                atoms.push(build_e2_atom(
+                    0,
+                    &removed[0],
+                    representatives,
+                    after_columns,
+                    inputs,
+                ));
+                return atoms;
+            }
+        }
     }
 
-    let reason = match e4_pair {
-        // `added.len() == 1 && removed.len() == 1` (the only shape
-        // `try_e4_pair` is ever attempted for) but the pair failed E4's
-        // range-widening proof: surface *that* specific reason — it names
-        // exactly why (mixed operators, a non-ISO-8601 literal, …) — rather
-        // than the generic multi-conjunct message below, which would lose
-        // that detail.
-        Some(Err(reason)) => format!(
-            "the added+removed conjunct pair is not an admissible E4 (time-horizon extension) \
-             range-widening shape: {reason} — E3 (arbitrary predicate change, composing E1 + \
-             E2) is not yet admitted for this shape by this phase (E2 alone only admits a \
-             removed conjunct with no added conjunct alongside it)"
-        ),
-        _ => format!(
-            "the WHERE-clause diff removes {} conjunct(s) alongside {} added conjunct(s) — \
-             this phase admits E2 (filter loosened) only for a single removed conjunct with no \
-             added conjunct alongside it; E3 (arbitrary predicate change, composing E1 + E2) is \
-             not yet admitted for this shape",
-            removed.len(),
-            added.len()
-        ),
+    let reason = if removed.len() > 1 {
+        format!(
+            "the WHERE-clause diff removes {} conjuncts — this phase admits E2/E3 (filter \
+             loosened / arbitrary predicate change, composing E1 + E2) only for a single \
+             removed conjunct at a time (multiple simultaneous removed conjuncts risk a \
+             double-counted difference INSERT without a stronger multi-conjunct proof)",
+            removed.len()
+        )
+    } else {
+        match e4_pair {
+            // `added.len() == 1 && removed.len() == 1` (the only shape
+            // `try_e4_pair` is ever attempted for) but the pair failed E4's
+            // range-widening proof, AND the pair shares a column
+            // (disjointness above already refused it otherwise it would
+            // have composed): surface the E4-specific reason — it names
+            // exactly why (mixed operators, a non-ISO-8601 literal, an
+            // equality swap on the same column, …) — rather than the
+            // generic message below, which would lose that detail.
+            Some(Err(reason)) => format!(
+                "the added+removed conjunct pair is not an admissible E4 (time-horizon \
+                 extension) range-widening shape: {reason} — the pair shares a column, so the \
+                 E3 disjoint-column composition (research §4 E3, E1 + E2) does not apply \
+                 either; only a same-column proof like E4's range-widening can admit this shape"
+            ),
+            // `removed.len() == 1` but `added.len() != 1` (so `e4_pair` was
+            // never attempted) and the disjointness check above failed —
+            // some added conjunct shares a column with the removed one, or
+            // a conjunct's own dependencies could not be determined (a
+            // subquery, window, or unregistered/non-deterministic function
+            // — the same leaf check B1/E1 share).
+            _ => "at least one added conjunct shares a column with the removed conjunct (or a \
+                  conjunct's own dependencies could not be determined) — E3 (arbitrary \
+                  predicate change, composing E1 + E2) only admits a removed conjunct whose \
+                  column set is disjoint from every added conjunct's; a shared column needs a \
+                  same-column proof like E4's range-widening instead"
+                .to_string(),
+        }
     };
     vec![e_class_where_refusal(reason)]
 }

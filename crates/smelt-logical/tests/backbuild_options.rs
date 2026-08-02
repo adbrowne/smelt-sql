@@ -1157,6 +1157,40 @@ fn b4_alias_in_opaque_where_refuses() {
     );
 }
 
+// ===== E3 (task-8 review fix) =====
+
+#[test]
+fn e3_same_column_pair_still_refuses() {
+    // `status = 'a'` -> `status = 'b'`: added and removed conjuncts on the
+    // SAME column, but not a recognised range-widening shape at all
+    // (equality, not `>`/`>=`/`<`/`<=`) — the disjoint-column E3 middle path
+    // must not over-reach here: same-column pairs stay exclusively E4's
+    // territory (a proof like range-widening), refusing when no such proof
+    // holds, same posture as `e4_mixed_operator_refuses` et al.
+    let before_sql = "SELECT id, status FROM orders WHERE status = 'a'";
+    let after_sql = "SELECT id, status FROM orders WHERE status = 'b'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("e4") && reason.contains("column"),
+        "expected a refusal naming the shared-column/E4 territory, got: {reason}"
+    );
+
+    let targeted = assemble(
+        &options,
+        &Selection::Targeted {
+            atom_choices: vec![0],
+        },
+    );
+    assert!(targeted.is_empty());
+}
+
 // ===== F1 (task-8-brief.md) =====
 
 #[test]

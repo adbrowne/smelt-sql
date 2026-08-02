@@ -678,6 +678,25 @@ research §4H).
   dimension's own definition (e.g. it is itself a smelt model with a derivable grain/FD
   verdict via the real `analysis::walk` machinery) — until then, an undeclared `unique_key`
   refuses (`b4_nonunique_dim_key_refuses`).
+- **F1 classifier coverage gap: an edited surviving branch + an added branch, in the same
+  diff, is not yet recognized as F1** (surfaced in Phase 8 review, 2026-08-02):
+  `SetOpDiff`'s branch matching (`diff.rs::set_op_diff`) compares whole branches by exact
+  token-for-token text (research §4 F1's "per-branch syntactic equality"). A diff that
+  simultaneously edits an existing (surviving) branch's own `SELECT` list — e.g. a B1 column
+  add landing inside that branch — *and* appends a brand-new branch therefore does not
+  text-match the edited branch against its old self, so `set_op_diff` reports "1 branch
+  removed, 2 branches added" rather than "1 branch unchanged, 1 branch added" — not an
+  F1-admissible shape today, even though the underlying change (an add on one branch, plus a
+  wholly new branch) is exactly the composite research §4 "H. Composites" describes.
+  `h_composite_add_plus_insert_aligns_columns` and
+  `h_composite_with_blocked_atom_yields_only_full_refresh` cover the emitter
+  (`emit::emit_branch_insert`'s explicit column list) and `assemble`'s H-ordering for this
+  shape by hand-assembling the atoms directly (bypassing `derive_backbuild_options`), rather
+  than driving them through the real classifier — see the doc comment on each test. Real
+  classifier-driven coverage unlocks once `set_op_diff`'s branch matching tolerates an
+  *edited* survivor (e.g. diffing a matched branch pair's own `SELECT`-list/`WHERE` the same
+  way the top-level (branch-0-only) diff already does, rather than requiring exact text
+  equality) — out of scope for this plan (touches `diff.rs`, explicitly not a Phase 8 file).
 
 ## Verification
 
