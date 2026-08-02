@@ -1,4 +1,5 @@
 pub mod analysis;
+pub mod backbuild;
 pub mod data_tests;
 pub mod graph;
 pub mod logical;
