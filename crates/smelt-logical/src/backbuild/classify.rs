@@ -203,7 +203,7 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
         ConjunctDiff::Diffed { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
             atoms.push(unclassified_refusal_named("where-clause"));
         }
-        ConjunctDiff::Opaque { reason } => {
+        ConjunctDiff::Opaque { reason, .. } => {
             atoms.push(unclassified_refusal_named(&format!(
                 "where-clause: {reason}"
             )));
@@ -763,6 +763,30 @@ fn join_reference_name(join: &JoinClause) -> Option<String> {
     table_ref.alias().or_else(|| table_ref.identifier())
 }
 
+/// Whether the model's `WHERE` clause references `alias` anywhere — the B4
+/// "nothing else references it" sweep's WHERE leg (research §4 B4),
+/// covering both shapes [`ConjunctDiff`] can take: a factored
+/// [`ConjunctDiff::Diffed`] diff is swept over its `added` conjuncts only
+/// (an `unchanged`/`removed` conjunct cannot reference a brand-new alias,
+/// same structural argument as the other joins' conditions, since it is
+/// byte-identical, modulo trivia, to a before-side conjunct that could not
+/// have referenced an alias that did not exist yet); an unfactored
+/// [`ConjunctDiff::Opaque`] diff (e.g. a top-level `OR`) has no `added` set
+/// at all to check, so both retained raw sides (`before`/`after`) are swept
+/// instead — a top-level `OR` is exactly the shape where "the conjunct-set
+/// diff could not be factored" must never be misread as "nothing changed",
+/// since `where_diff` returns `Opaque` independently of whether the alias
+/// is actually referenced.
+fn where_clause_references_alias(where_clause: &ConjunctDiff, alias: &str) -> bool {
+    match where_clause {
+        ConjunctDiff::Diffed { added, .. } => added.iter().any(|w| references_alias(w, alias)),
+        ConjunctDiff::Opaque { before, after, .. } => {
+            before.as_ref().is_some_and(|e| references_alias(e, alias))
+                || after.as_ref().is_some_and(|e| references_alias(e, alias))
+        }
+    }
+}
+
 /// The row-set-preservation proof for a single added `LEFT JOIN` (research
 /// §4 B4): LEFT (never removes a row) + at-most-one-match (the ON's
 /// dim-side key columns exactly match the dimension's declared
@@ -773,8 +797,13 @@ fn join_reference_name(join: &JoinClause) -> Option<String> {
 /// emitted backfill can address `t` by them) + "nothing but the added
 /// SELECT items reference the new alias" (a WHERE conjunct or a changed
 /// column reading it means the join is not a pure enrichment — the row set
-/// is no longer preserved by the join alone). A pre-existing join's
-/// condition referencing the new alias is impossible by construction:
+/// is no longer preserved by the join alone; checked for both a factored
+/// [`ConjunctDiff::Diffed`] WHERE diff — via its `added` conjuncts — and an
+/// unfactored [`ConjunctDiff::Opaque`] one — e.g. a top-level `OR`, where
+/// "no added conjuncts" would otherwise be misread as "nothing changed", so
+/// both retained raw sides are swept instead, see
+/// [`where_clause_references_alias`]) — a pre-existing join's condition
+/// referencing the new alias is impossible by construction, though:
 /// `diff.rs`'s `join_equal` requires every non-added join's condition to be
 /// byte-identical (modulo trivia) to its before-version, which could not
 /// have referenced an alias that did not exist yet — so that leg needs no
@@ -782,7 +811,7 @@ fn join_reference_name(join: &JoinClause) -> Option<String> {
 fn admit_added_left_join(
     join: &JoinClause,
     changed: &[ChangedColumn],
-    where_added: &[Expr],
+    where_clause: &ConjunctDiff,
     representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> Result<JoinAdmission, String> {
@@ -798,8 +827,7 @@ fn admit_added_left_join(
         "the added join's table reference has no resolvable alias or identifier".to_string()
     })?;
 
-    if let Some(w) = where_added.iter().find(|w| references_alias(w, &alias)) {
-        let _ = w;
+    if where_clause_references_alias(where_clause, &alias) {
         return Err(format!(
             "the WHERE clause now references the added join's alias '{alias}' — the join is not \
              a pure enrichment (the row set is no longer preserved by the join alone)"
@@ -870,6 +898,20 @@ fn admit_added_left_join(
         key_pairs_raw.push((fact_qualifier, fact_col, dim_col));
     }
 
+    // Declared `unique_key` only — no `analysis::functional_dependency` fallback for an
+    // absent declaration, unlike the brief's implementation shape sketch. Checked the
+    // actual API before deciding this (`docs/plans/20260802-backbuild-synthesis.md`
+    // §"Deferred during implementation", 2026-08-02 entry): both
+    // `functional_dependency_verdict_over_vector` and `functional_dependency_verdict`
+    // derive their verdict from a `PropertyVector`/`Cardinality` built by parsing and
+    // walking *this model's own SQL* (`analysis::walk::model_property_vector`,
+    // `analysis::join_shape::fan_out`). The dimension here is an *external* source
+    // declared only via `BackbuildInputs::SourceRef` — no SQL of its own exists anywhere
+    // in this standalone, unwired module to walk, so there is no derivable FD verdict to
+    // consult. Wiring the FD module in here today would be dead code, structurally
+    // equivalent to always taking the `NotProven` branch. Revisit once wiring supplies the
+    // dimension's own definition (e.g. it is itself a smelt model with a derivable
+    // grain/FD verdict).
     let unique_key = source
         .unique_key
         .as_ref()
@@ -1166,19 +1208,19 @@ fn classify_added_left_join_diff(
         } => (added, dropped, changed, unchanged),
     };
 
-    let where_added: &[Expr] = match &comparable.where_clause {
-        ConjunctDiff::Diffed { added, .. } => added.as_slice(),
-        ConjunctDiff::Opaque { .. } => &[],
-    };
-
     let representatives = representative_names(unchanged);
     let representative_sources = representative_sources(unchanged);
 
-    let admission =
-        match admit_added_left_join(join, changed, where_added, &representative_sources, inputs) {
-            Ok(admission) => admission,
-            Err(reason) => return vec![added_left_join_refusal(&reason)],
-        };
+    let admission = match admit_added_left_join(
+        join,
+        changed,
+        &comparable.where_clause,
+        &representative_sources,
+        inputs,
+    ) {
+        Ok(admission) => admission,
+        Err(reason) => return vec![added_left_join_refusal(&reason)],
+    };
 
     let mut atoms = Vec::new();
 
@@ -1216,7 +1258,7 @@ fn classify_added_left_join_diff(
         ConjunctDiff::Diffed { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
             atoms.push(unclassified_refusal_named("where-clause"));
         }
-        ConjunctDiff::Opaque { reason } => {
+        ConjunctDiff::Opaque { reason, .. } => {
             atoms.push(unclassified_refusal_named(&format!(
                 "where-clause: {reason}"
             )));

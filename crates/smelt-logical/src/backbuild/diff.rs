@@ -214,9 +214,13 @@ fn where_diff(before: &SelectStmt, after: &SelectStmt) -> ConjunctDiff {
         Some(w) => match w.expression() {
             Some(e) => Some(e),
             None => {
+                // Malformed-clause degenerate case (no expression at all) —
+                // nothing meaningful to retain for a later alias sweep.
                 return ConjunctDiff::Opaque {
                     reason: "before WHERE clause has no expression".to_string(),
-                }
+                    before: None,
+                    after: None,
+                };
             }
         },
         None => None,
@@ -227,6 +231,8 @@ fn where_diff(before: &SelectStmt, after: &SelectStmt) -> ConjunctDiff {
             None => {
                 return ConjunctDiff::Opaque {
                     reason: "after WHERE clause has no expression".to_string(),
+                    before: before_expr,
+                    after: None,
                 }
             }
         },
@@ -238,6 +244,8 @@ fn where_diff(before: &SelectStmt, after: &SelectStmt) -> ConjunctDiff {
             reason: "before WHERE clause is a top-level OR, not a conjunctive predicate — a \
                      conjunct-set add/remove framing is unsound for a non-conjunctive rewrite"
                 .to_string(),
+            before: before_expr,
+            after: after_expr,
         };
     }
     if after_expr.as_ref().is_some_and(is_top_level_or) {
@@ -245,6 +253,8 @@ fn where_diff(before: &SelectStmt, after: &SelectStmt) -> ConjunctDiff {
             reason: "after WHERE clause is a top-level OR, not a conjunctive predicate — a \
                      conjunct-set add/remove framing is unsound for a non-conjunctive rewrite"
                 .to_string(),
+            before: before_expr,
+            after: after_expr,
         };
     }
 

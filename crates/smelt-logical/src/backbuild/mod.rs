@@ -130,7 +130,19 @@ pub enum ConjunctDiff {
     /// rewrite (removing a conjunct always relaxes an `AND`-predicate;
     /// removing a disjunct does the opposite), so this refuses rather than
     /// reporting a member swap.
-    Opaque { reason: String },
+    ///
+    /// `before`/`after` retain the raw (un-factored) `WHERE` expression from
+    /// each side, when present — the conjunct-set diff could not be
+    /// factored, but B4's opaque-WHERE alias sweep
+    /// (`classify.rs`'s `admit_added_left_join`) still needs to know whether
+    /// *either* side's whole predicate references a newly-added join's
+    /// alias, since a top-level `OR` is exactly the shape where "no added
+    /// conjuncts" would otherwise be misread as "nothing changed".
+    Opaque {
+        reason: String,
+        before: Option<Expr>,
+        after: Option<Expr>,
+    },
 }
 
 impl ConjunctDiff {

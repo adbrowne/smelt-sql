@@ -909,3 +909,35 @@ fn b4_alias_referenced_in_where_refuses() {
         atom.inadmissible
     );
 }
+
+#[test]
+fn b4_alias_in_opaque_where_refuses() {
+    // A top-level OR makes the WHERE conjunct-set diff `Opaque` — no `added`
+    // conjuncts to inspect at all, independently of whether the alias is
+    // actually referenced. Without sweeping the retained raw before/after
+    // WHERE expressions, this would pass the alias check vacuously and
+    // admit B4 even though the join's row-set-preservation precondition
+    // (nothing outside the added columns references the new alias) does
+    // not hold: `o.order_id = 1 OR d.active` means some fact rows are kept
+    // or dropped based on the dimension side, which a plain LEFT JOIN
+    // enrichment backfill does not reproduce.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d.name AS dim_name FROM orders o LEFT JOIN \
+                      dims d ON o.order_id = d.order_id WHERE o.order_id = 1 OR d.active";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = dims_inputs(&[("dim_name", "TEXT")], Some(&["order_id"]), &["order_id"]);
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("where")),
+        "expected a refusal naming the WHERE reference even though the WHERE diff is opaque \
+         (a top-level OR), got: {:?}",
+        atom.inadmissible
+    );
+}

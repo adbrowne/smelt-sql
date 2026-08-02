@@ -643,6 +643,23 @@ research §4H).
   A symmetry gap against research §2 "returns every admissible technique", not a
   correctness bug — every offered option remains proven. Revisit when the cost model
   arrives (it is the only consumer that benefits from the second option).
+- **B4 dim-key uniqueness: FD-derivation is inapplicable pre-wiring** (surfaced in Phase 6
+  review, 2026-08-02): the brief's implementation shape names `analysis::functional_dependency`
+  as a fallback source of dim-side uniqueness when no `unique_key` is declared. Checked the
+  actual API: `functional_dependency_verdict_over_vector` needs a `PropertyVector` derived by
+  parsing and walking *the model's own SQL* (`analysis::walk::model_property_vector`); the
+  simpler `functional_dependency_verdict` needs a `Cardinality` from
+  `analysis::join_shape::fan_out` over a `JoinContext` built the same way. Both require a CST
+  for the relation whose uniqueness is being proven — but B4's dimension is an *external*
+  source declared only via `BackbuildInputs::SourceRef` (`physical_name`/`unique_key`/
+  `not_null_columns`, plain facts, no SQL of its own anywhere in this standalone module).
+  There is nothing to walk, so wiring dead FD-consulting machinery here would be
+  indistinguishable from always taking the `NotProven`/undeclared branch. `admit_added_left_join`
+  therefore consumes only the declared `unique_key`, with a doc comment at the check
+  recording this reasoning in place. Revisit when wiring supplies the dimension's own
+  definition (e.g. it is itself a smelt model with a derivable grain/FD verdict via the real
+  `analysis::walk` machinery) — until then, an undeclared `unique_key` refuses
+  (`b4_nonunique_dim_key_refuses`).
 
 ## Verification
 
