@@ -435,6 +435,46 @@ branch's order exactly. A branch declaring `SELECT kind, id` against a first
 branch declaring `SELECT id, kind` would silently swap values under a rebuild's
 positional binding, and refuses here by name.
 
+### Remove a UNION ALL branch
+
+```sql
+-- before
+SELECT id, 'a' AS src FROM events_a
+UNION ALL
+SELECT id, 'b' AS src FROM events_b
+-- after
+SELECT id, 'a' AS src FROM events_a
+```
+
+A removed branch needs a **discriminator**: a column that is a distinct
+literal constant in every branch of the before-definition (here, `src`). With
+one, the removed branch's own constant becomes an equality delete:
+
+```sql
+DELETE FROM t WHERE src = 'b'
+```
+
+This is an equality predicate, not the `IS NOT TRUE` complement form
+[Tighten a filter](#tighten-a-filter) uses — the discriminator is proven to be
+a non-NULL literal that lands on exactly the removed branch's rows, so there's
+no NULL-evaluation case to guard against. That proof matters even when the
+removed branch's other columns happen to coincide with a surviving branch's —
+two branches unioning the same `id` values under different `src` constants
+still delete only the rows the removed branch actually contributed, because
+the predicate keys on the discriminator, not the payload.
+
+Without a discriminator, branch removal refuses with an actionable nudge:
+
+> no provenance predicate distinguishes the removed branch's rows in the
+> stored table — add a constant discriminator column (e.g. a literal `AS src`
+> value distinct per branch) to make branch removal targetable
+
+The same proof also refuses when a candidate column isn't a constant in every
+branch (a non-literal expression in even one branch means the predicate can't
+be proven to hold everywhere it needs to), or when two branches share the same
+constant (the resulting predicate would delete a surviving branch's rows too).
+Plain `UNION` refuses here for the same reason it does on the add side.
+
 ### Several changes at once
 
 Atomic changes compose. Rename a column, add a derived one, and tighten the
@@ -533,11 +573,10 @@ converts a full rebuild into a column-scoped update.
   script and full refresh — a cost model over the recorded option metadata is
   the planned chooser.
 - Not yet classified: dropped columns (owned by
-  [schema evolution](schema-evolution.md)), removed `UNION ALL` branches, refs
-  repointed to a different upstream. These refuse with named reasons today.
-  (A changed *cast* is not a type change — it is a changed expression, handled
-  above; a bare type change with no expression change has no trigger in a
-  definition diff at all.)
+  [schema evolution](schema-evolution.md)), refs repointed to a different
+  upstream. These refuse with named reasons today. (A changed *cast* is not a
+  type change — it is a changed expression, handled above; a bare type change
+  with no expression change has no trigger in a definition diff at all.)
 
 ## Related pages
 

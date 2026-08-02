@@ -1740,6 +1740,130 @@ fn f1_plain_union_refuses() {
     assert!(targeted.is_empty());
 }
 
+// ===== F2 (task-11-brief.md) =====
+
+#[test]
+fn f2_no_discriminator_refuses() {
+    // Neither branch carries any constant column at all — there is no
+    // candidate discriminator, so F2 refuses with an actionable nudge.
+    let before_sql = "SELECT id FROM events_a UNION ALL SELECT id FROM events_b";
+    let after_sql = "SELECT id FROM events_a";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(reason.contains("provenance predicate"), "reason: {reason}");
+    assert!(reason.contains("discriminator column"), "reason: {reason}");
+}
+
+#[test]
+fn f2_shared_discriminator_refuses() {
+    // The removed branch (`events_b`) shares its 'src' constant ('a') with
+    // a surviving branch (`events_a`) — an equality predicate on it would
+    // also delete the surviving branch's rows, so F2 must refuse.
+    let before_sql = "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, 'a' AS src FROM \
+                       events_b UNION ALL SELECT id, 'c' AS src FROM events_c";
+    let after_sql =
+        "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, 'c' AS src FROM events_c";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("not distinct per branch"),
+        "reason: {reason}"
+    );
+    assert!(reason.contains("surviving branch"), "reason: {reason}");
+}
+
+#[test]
+fn f2_mixed_literal_kind_discriminator_refuses() {
+    // The removed branch's 'src' discriminator is a NUMBER literal (`1`)
+    // while the surviving branches' 'src' discriminators are TEXT literals
+    // (`'1'`, `'2'`) — UNION ALL coerces the column to a common supertype
+    // (VARCHAR), so the emitted `DELETE ... WHERE src = 1` implicit-casts
+    // and also matches the surviving `'1'` rows even though `(Number, "1")`
+    // and `(Text, "1")` compare unequal as a Rust tuple. F2 must refuse by
+    // name rather than admit a same-text-but-different-kind "distinct"
+    // discriminator.
+    let before_sql = "SELECT id, '1' AS src FROM events_a UNION ALL SELECT id, 1 AS src FROM \
+                       events_b UNION ALL SELECT id, '2' AS src FROM events_c";
+    let after_sql =
+        "SELECT id, '1' AS src FROM events_a UNION ALL SELECT id, '2' AS src FROM events_c";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("mixes literal kinds across branches"),
+        "reason: {reason}"
+    );
+    assert!(reason.contains("union-coerced"), "reason: {reason}");
+
+    let targeted = assemble(
+        &options,
+        &Selection::Targeted {
+            atom_choices: vec![0],
+        },
+    );
+    assert!(targeted.is_empty());
+}
+
+#[test]
+fn f2_nonconstant_discriminator_refuses() {
+    // The removed branch's own 'src' column is not a constant (it's a bare
+    // column reference), even though the surviving branches' own 'src'
+    // columns are constants — fail-closed, since only a constant-per-branch
+    // discriminator is provable from the definitions alone.
+    let before_sql = "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, tag AS src FROM \
+                       events_b UNION ALL SELECT id, 'c' AS src FROM events_c";
+    let after_sql =
+        "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, 'c' AS src FROM events_c";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(
+        reason.contains("not a constant literal in every branch"),
+        "reason: {reason}"
+    );
+}
+
+#[test]
+fn f2_plain_union_refuses() {
+    // Plain `UNION` dedups across branches — the pure diff module does not
+    // attempt to diff dedup semantics, so removal via F2 refuses just like
+    // F1's addition does (research §4 F2's posture extends F1's).
+    let before_sql = "SELECT id, 'a' AS src FROM events_a UNION SELECT id, 'b' AS src FROM \
+                       events_b";
+    let after_sql = "SELECT id, 'a' AS src FROM events_a";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(reason.contains("union all"), "reason: {reason}");
+}
+
 // ===== C2 regression: representative matching is qualifier-aware, not
 // bare-name keyed (final-review finding C2) — a qualified dependency must
 // only resolve against a representative bound to that same qualifier and

@@ -2198,6 +2198,87 @@ fn f1_union_branch_insert() {
     harness::verify_option(&conn, "t", before_sql, after_sql, option);
 }
 
+// ===== F2 (task-11-brief.md) =====
+
+#[test]
+fn f2_discriminated_branch_delete() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events_a (id INTEGER);
+         CREATE TABLE events_b (id INTEGER);
+         CREATE TABLE events_c (id INTEGER);
+         INSERT INTO events_a VALUES (1), (2);
+         INSERT INTO events_b VALUES (3);
+         INSERT INTO events_c VALUES (4), (5);",
+    );
+
+    let before_sql = "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, 'b' AS src FROM \
+                       events_b UNION ALL SELECT id, 'c' AS src FROM events_c";
+    let after_sql =
+        "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, 'c' AS src FROM events_c";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert!(
+        matches!(
+            &atom.change,
+            smelt_logical::backbuild::AtomicChange::RemovedSetOpBranch { index: 0 }
+        ),
+        "expected a RemovedSetOpBranch atom, got {:?}",
+        atom.change
+    );
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::DiscriminatedBranchDelete);
+    assert_eq!(option.statements.len(), 1, "{:?}", option.statements);
+    assert_eq!(option.statements[0], "DELETE FROM t WHERE src = 'b'");
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn f2_duplicate_payload_rows_survive_correctly() {
+    // events_a and events_b carry the *same* ids — a content-matching
+    // DELETE (matching on `id` alone) would be ambiguous or wrong; only the
+    // discriminator ('src') distinguishes which copies belong to the
+    // removed branch.
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE events_a (id INTEGER);
+         CREATE TABLE events_b (id INTEGER);
+         INSERT INTO events_a VALUES (1), (2);
+         INSERT INTO events_b VALUES (1), (2);",
+    );
+
+    let before_sql = "SELECT id, 'a' AS src FROM events_a UNION ALL SELECT id, 'b' AS src FROM \
+                       events_b";
+    let after_sql = "SELECT id, 'a' AS src FROM events_a";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::DiscriminatedBranchDelete);
+    assert_eq!(option.statements[0], "DELETE FROM t WHERE src = 'b'");
+
+    // Before the DELETE, `t` has 4 rows: (1,'a'),(2,'a'),(1,'b'),(2,'b').
+    // A correct discriminated DELETE removes exactly the two 'b' rows,
+    // leaving the two same-id 'a' rows untouched — `verify_option`'s
+    // two-way `EXCEPT ALL` multiset check catches a wrong row count even
+    // when the surviving id values coincide.
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
 // ===== C3 regression: multi-branch (UNION ALL) definitions must not
 // classify atoms from the positional first-branch diffs unless every one of
 // them is independently a no-op (final-review finding C3) — `diff.rs`

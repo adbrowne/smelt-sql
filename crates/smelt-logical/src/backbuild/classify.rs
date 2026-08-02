@@ -1322,14 +1322,24 @@ fn classify_set_ops(
                 inputs,
             )]
         }
+        SetOpDiff::Branches {
+            added,
+            removed,
+            unchanged,
+            ..
+        } if added.is_empty() && removed.len() == 1 => {
+            vec![build_f2_atom(0, &removed[0], unchanged, inputs)]
+        }
         SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
             vec![set_op_refusal(
                 "set-operations",
                 format!(
                     "the set-operation branch diff changed in a way this phase does not yet \
                      classify into an admissible technique — F1 (added UNION ALL branch) only \
-                     admits a single added branch with no removed branch ({} added, {} \
-                     removed here); F2 (removed UNION ALL branch) is out of this phase's scope",
+                     admits a single added branch with no removed branch, and F2 (removed UNION \
+                     ALL branch) only admits a single removed branch with no added branch ({} \
+                     added, {} removed here); more than one added or removed branch, or a mix \
+                     of both, is refused rather than classified branch-by-branch",
                     added.len(),
                     removed.len()
                 ),
@@ -1338,11 +1348,287 @@ fn classify_set_ops(
         SetOpDiff::Opaque { reason } => vec![set_op_refusal(
             "set-operations",
             format!(
-                "F1 (added UNION ALL branch) refused: the set-operation diff could not be \
-                 factored into a UNION ALL branch add/remove — {reason}"
+                "branch add/remove refused: the set-operation diff could not be factored into a \
+                 UNION ALL branch add (F1) or remove (F2) — {reason}"
             ),
         )],
         _ => Vec::new(),
+    }
+}
+
+fn build_f2_atom(
+    index: usize,
+    removed_branch: &SelectStmt,
+    unchanged: &[SelectStmt],
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    let atom_change = AtomicChange::RemovedSetOpBranch { index };
+    match build_f2_option(removed_branch, unchanged, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: atom_change,
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: atom_change,
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("removed set-operation branch #{index}"),
+                reason,
+            }],
+        },
+    }
+}
+
+/// F2 admission (research §4 F2): a removed `UNION ALL` branch needs a
+/// provenance predicate distinguishing its rows in the stored table — a
+/// discriminator column that is a distinct literal constant in *every*
+/// branch of the before-definition (`find_branch_discriminator`, below).
+/// `unchanged` is the before-definition's surviving branches (exact-text
+/// matches — the multi-branch pure-diff gate already refuses any diff where
+/// a surviving branch carries its own edit alongside a removal, so by the
+/// time this is reached every non-removed before-branch is known to be
+/// exactly one of `unchanged`). *Script*: `DELETE FROM t WHERE <column> =
+/// <literal>;` — an equality predicate (not `PredicateTightenDelete`'s `IS
+/// NOT TRUE`), justified because the discriminator is a proven non-NULL
+/// literal that lands on exactly the removed branch's rows (see
+/// [`Technique::DiscriminatedBranchDelete`]'s doc comment).
+fn build_f2_option(
+    removed_branch: &SelectStmt,
+    unchanged: &[SelectStmt],
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let (column, kind, text) = find_branch_discriminator(removed_branch, unchanged)
+        .map_err(|reason| format!("F2 (removed UNION ALL branch) refused: {reason}"))?;
+    let literal_sql = render_bare_literal_sql(kind, &text);
+    let statement = emit::emit_discriminated_branch_delete(&inputs.table, &column, &literal_sql);
+
+    Ok(BackbuildOption {
+        technique: Technique::DiscriminatedBranchDelete,
+        slot: Some(HSlot::Delete),
+        statements: vec![statement],
+        write_scope: WriteScope::RowSubset,
+        reads_upstream: false,
+        // An equality `DELETE` keyed on a proven-distinct discriminator
+        // constant is naturally idempotent: rows a prior run already
+        // deleted can never match the predicate again.
+        rerun_safe: true,
+    })
+}
+
+/// The F2 discriminator proof (research §4 F2): find a SELECT-list output
+/// column that is present, under the same output name, in `removed_branch`
+/// and every one of `other_branches` (the before-definition's surviving
+/// branches), whose expression is a bare literal ([`bare_literal`]) in every
+/// one of those branches, and whose literal value is distinct across all of
+/// them. Candidates are tried in `removed_branch`'s own declared column
+/// order; the first fully-qualifying one wins. Returns the column name plus
+/// `removed_branch`'s own literal kind/text — the predicate's right-hand
+/// side.
+///
+/// Deliberately does **not** consult `analysis::discriminants.rs`: that
+/// module classifies an *aggregate combiner's* algebraic facts (is-monoid,
+/// decomposable, monotonicity — `docs/specs/model_properties.md` §"Algebraic
+/// discriminants") for maintenance-ladder purposes, and has no concept of a
+/// per-branch literal-constant provenance column at all — the two "discriminant"
+/// names are unrelated ideas that happen to share a word. This proof instead
+/// reuses [`bare_literal`], the same leaf classifier E4's range-widening
+/// proof already uses to recognise a bare `NUMBER`/`STRING` token, over each
+/// branch's own already-bounded SELECT-list expression — consistent with the
+/// property-composition-walk rule's "leaf classifier over one bounded node"
+/// carve-out (`docs/specs/architecture.md` §"Property composition walk
+/// rule").
+///
+/// Fail-closed with a specific, actionable reason:
+/// - no candidate column is ever a literal anywhere: "no provenance
+///   predicate" (an actionable nudge to add a constant discriminator
+///   column);
+/// - a candidate is a literal in some branches but a non-constant expression
+///   in at least one other: refused by name, since only a constant-per-branch
+///   discriminator is provable from the definitions alone;
+/// - a candidate is a literal in every branch but two branches share the
+///   same value: refused by name, since the resulting equality predicate
+///   would also delete a surviving branch's rows.
+/// - a candidate is a literal in every branch but not the *same* literal
+///   kind (e.g. `1` in one branch, `'1'` in another): refused by name — a
+///   `UNION ALL` coerces the column to a common supertype (e.g. VARCHAR),
+///   so the emitted equality predicate implicit-casts at execution and can
+///   match a surviving branch's differently-typed-but-textually-equal rows
+///   even though the two literals compare as distinct `(kind, text)` pairs
+///   here; only a discriminator that is the *same* literal kind in every
+///   branch is kind-safe to compare by value at all.
+fn find_branch_discriminator(
+    removed_branch: &SelectStmt,
+    other_branches: &[SelectStmt],
+) -> Result<(String, RangeLiteralKind, String), String> {
+    let removed_items = branch_named_items(removed_branch)?;
+    let mut other_items = Vec::with_capacity(other_branches.len());
+    for branch in other_branches {
+        other_items.push(branch_named_items(branch)?);
+    }
+
+    let mut nonconstant_candidate: Option<String> = None;
+    let mut shared_candidate: Option<(String, String)> = None;
+    let mut mixed_kind_candidate: Option<String> = None;
+
+    for (name, removed_expr) in &removed_items {
+        // Every other branch must declare this same output name, or it is
+        // not a candidate at all (not a column common to every branch).
+        let mut branch_exprs: Vec<&Expr> = vec![removed_expr];
+        let mut present_everywhere = true;
+        for items in &other_items {
+            match items.iter().find(|(n, _)| n == name) {
+                Some((_, e)) => branch_exprs.push(e),
+                None => {
+                    present_everywhere = false;
+                    break;
+                }
+            }
+        }
+        if !present_everywhere {
+            continue;
+        }
+
+        let literals: Vec<Option<(RangeLiteralKind, String)>> =
+            branch_exprs.iter().map(|e| bare_literal(e)).collect();
+        let literal_count = literals.iter().filter(|l| l.is_some()).count();
+
+        if literal_count == 0 {
+            // Never a literal anywhere: not a discriminator candidate, and
+            // uninformative for the "nonconstant" refusal either.
+            continue;
+        }
+        if literal_count < literals.len() {
+            // A literal in some branches, a non-constant expression in at
+            // least one other — fail-closed, but keep looking for a
+            // genuinely qualifying candidate before reporting this.
+            nonconstant_candidate.get_or_insert_with(|| name.clone());
+            continue;
+        }
+
+        // Every branch declares this column as a bare literal — check the
+        // values are pairwise distinct.
+        let values: Vec<(RangeLiteralKind, String)> = literals
+            .into_iter()
+            .map(|l| l.expect("literal_count check"))
+            .collect();
+
+        // The column must be the *same* literal kind in every branch: a
+        // `UNION ALL` coerces the column to one common supertype, so an
+        // equality predicate against a same-text-different-kind pair (e.g.
+        // `1` vs `'1'`) is not kind-safe — the emitted `DELETE` would
+        // implicit-cast and match the surviving branch's row too, even
+        // though the two literals are not `==` as a Rust tuple. Refused
+        // by name, distinct from the "not a constant literal" and "not
+        // distinct" refusals below, but kept looking for a genuinely
+        // qualifying candidate before reporting it (same posture as the
+        // other two fail-closed buckets).
+        let first_kind = values[0].0;
+        if values.iter().any(|(kind, _)| *kind != first_kind) {
+            mixed_kind_candidate.get_or_insert_with(|| name.clone());
+            continue;
+        }
+
+        let mut duplicate: Option<String> = None;
+        'outer: for i in 0..values.len() {
+            for j in (i + 1)..values.len() {
+                if values[i].0 == values[j].0 && values[i].1 == values[j].1 {
+                    duplicate = Some(values[i].1.clone());
+                    break 'outer;
+                }
+            }
+        }
+        match duplicate {
+            None => {
+                // A qualifying discriminator — removed_branch's own value is
+                // always `values[0]` (branch_exprs was built with
+                // removed_expr first).
+                return Ok((name.clone(), values[0].0, values[0].1.clone()));
+            }
+            Some(value) => {
+                shared_candidate.get_or_insert((name.clone(), value));
+            }
+        }
+    }
+
+    if let Some((name, value)) = shared_candidate {
+        return Err(format!(
+            "candidate discriminator column '{name}' is not distinct per branch — its constant \
+             value '{value}' is shared by more than one branch, so an equality predicate on it \
+             would also delete a surviving branch's rows"
+        ));
+    }
+    if let Some(name) = mixed_kind_candidate {
+        return Err(format!(
+            "discriminator column '{name}' mixes literal kinds across branches — column type is \
+             union-coerced, equality is not kind-safe"
+        ));
+    }
+    if let Some(name) = nonconstant_candidate {
+        return Err(format!(
+            "candidate discriminator column '{name}' is not a constant literal in every branch \
+             — a non-constant expression in at least one branch means branch removal cannot be \
+             proven targetable from the definitions alone"
+        ));
+    }
+    Err(
+        "no provenance predicate distinguishes the removed branch's rows in the stored table — \
+         add a constant discriminator column (e.g. a literal `AS src` value distinct per \
+         branch) to make branch removal targetable"
+            .to_string(),
+    )
+}
+
+/// `branch`'s own SELECT-list items as `(output name, expression)` pairs —
+/// the F2 discriminator proof's per-branch view. Mirrors
+/// [`branch_output_column_names`] (same wildcard/spread fail-closed
+/// posture) but also keeps each item's expression, which the discriminator
+/// proof needs to test with [`bare_literal`].
+fn branch_named_items(branch: &SelectStmt) -> Result<Vec<(String, Expr)>, String> {
+    let list = branch
+        .select_list()
+        .ok_or_else(|| "the branch has no SELECT list".to_string())?;
+    let mut items = Vec::new();
+    for entry in list.entries() {
+        match entry {
+            SelectEntry::Item(item) => {
+                if item.is_wildcard() {
+                    return Err(
+                        "a wildcard SELECT item (`*`) in a branch is not resolvable to a named \
+                         column — F2's discriminator proof needs an explicit name for every \
+                         branch column"
+                            .to_string(),
+                    );
+                }
+                let name = item.column_name().ok_or_else(|| {
+                    "a SELECT item in a branch has no derivable output column name".to_string()
+                })?;
+                let expr = item
+                    .expression()
+                    .ok_or_else(|| "a SELECT item in a branch has no expression".to_string())?;
+                items.push((name, expr));
+            }
+            SelectEntry::Spread(_) => {
+                return Err(
+                    "a spread (`...expr`) SELECT item in a branch is not resolvable to a named \
+                     column — F2's discriminator proof needs an explicit name for every branch \
+                     column"
+                        .to_string(),
+                );
+            }
+        }
+    }
+    Ok(items)
+}
+
+/// Render a [`bare_literal`] result back into SQL text for splicing into an
+/// equality predicate: a text literal is re-quoted, a numeric literal is
+/// bare. Test-grade DuckDB dialect (research §3) — no escaping beyond the
+/// bare re-quote, matching this module's other emitted-literal sites.
+fn render_bare_literal_sql(kind: RangeLiteralKind, text: &str) -> String {
+    match kind {
+        RangeLiteralKind::Number => text.to_string(),
+        RangeLiteralKind::Text => format!("'{text}'"),
     }
 }
 

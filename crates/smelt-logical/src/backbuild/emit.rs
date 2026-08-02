@@ -244,6 +244,21 @@ pub fn emit_branch_insert(
     sql
 }
 
+/// `DELETE FROM t WHERE <column> = <literal>;` — research §4 F2's
+/// discriminated-branch-removal `DELETE`. An **equality** predicate, unlike
+/// [`emit_predicate_delete`]'s `IS NOT TRUE` three-valued-logic form:
+/// `classify.rs`'s `find_branch_discriminator` only ever supplies a
+/// `column`/`literal` pair it has already proven is (a) a bare, non-NULL
+/// literal — so there is no NULL-evaluation case to guard against — and (b)
+/// distinct from every surviving branch's own constant for that column, so
+/// the predicate provably matches only the removed branch's rows. `literal`
+/// is caller-rendered SQL text (already quoted for a text literal, bare for
+/// a numeric one) — this emitter only splices it in, the single authoring
+/// site for the statement shape.
+pub fn emit_discriminated_branch_delete(table: &str, column: &str, literal: &str) -> String {
+    format!("DELETE FROM {table} WHERE {column} = {literal}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -457,6 +472,22 @@ mod tests {
             "INSERT INTO t (id, kind) SELECT id, kind FROM (SELECT id, 'b' AS kind FROM \
              events_b) AS __backbuild_branch WHERE NOT EXISTS (SELECT 1 FROM t WHERE t.id = \
              __backbuild_branch.id)"
+        );
+    }
+
+    #[test]
+    fn discriminated_branch_delete_shape_text_literal() {
+        assert_eq!(
+            emit_discriminated_branch_delete("t", "src", "'b'"),
+            "DELETE FROM t WHERE src = 'b'"
+        );
+    }
+
+    #[test]
+    fn discriminated_branch_delete_shape_number_literal() {
+        assert_eq!(
+            emit_discriminated_branch_delete("t", "src", "2"),
+            "DELETE FROM t WHERE src = 2"
         );
     }
 }

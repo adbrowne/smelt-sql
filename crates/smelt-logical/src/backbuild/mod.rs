@@ -491,6 +491,14 @@ pub enum AtomicChange {
     /// `added` branch set (today always `0`: this phase only admits a
     /// single added branch at a time).
     AddedSetOpBranch { index: usize },
+    /// One removed `UNION ALL` branch (research §4 F2), admitted when it is
+    /// the diff's *only* set-operation change — no added branch, and the
+    /// branch is distinguishable in the stored table by a discriminator
+    /// (a column that is a distinct literal constant in every branch of the
+    /// before-definition). `index` is this branch's position within the
+    /// diff's `removed` branch set (today always `0`: this phase only
+    /// admits a single removed branch at a time).
+    RemovedSetOpBranch { index: usize },
     /// A non-empty, non-skeleton-refused diff this phase does not yet
     /// classify into admissible techniques (research catalogue classes
     /// C/F, an unpaired dropped column, an ambiguous rename cluster, a
@@ -632,6 +640,24 @@ pub enum Technique {
     /// (unlike `FilterLoosenInsert`/`HorizonExtensionInsert`). Carries the
     /// same identity anti-join guard posture as those two techniques.
     UnionBranchInsert,
+    /// F2 — removed `UNION ALL` branch (research §4): `DELETE FROM t WHERE
+    /// <discriminator column> = <discriminator literal>;` — the discriminator
+    /// is a column proven (`classify.rs`'s `find_branch_discriminator`) to be
+    /// a distinct literal constant in *every* branch of the before-definition
+    /// (not re-derived from `analysis/discriminants.rs`, which classifies
+    /// aggregate-combiner algebra and has no branch-constant-column concept
+    /// to consume — see this technique's admission site for the note),
+    /// including the removed one; the removed branch's own literal, read
+    /// straight off its declared expression, builds the predicate. An
+    /// **equality** predicate, not `IS NOT TRUE` like
+    /// [`Technique::PredicateTightenDelete`]'s three-valued-logic form: the
+    /// discriminator is proven non-NULL (a bare literal, never NULL) and
+    /// proven to land on exactly the removed branch's rows (distinct from
+    /// every surviving branch's own constant), so there is no NULL-evaluation
+    /// case to guard against the way an arbitrary predicate would need. Naturally
+    /// idempotent (`rerun_safe: true`) — rows a prior run already deleted can
+    /// never match the predicate again.
+    DiscriminatedBranchDelete,
     /// B5 — new aggregate column at unchanged `GROUP BY` grain (research
     /// §4): `ALTER TABLE t ADD COLUMN c <ty>;` then a matched-only column
     /// backfill from the after-definition's own re-aggregation — full

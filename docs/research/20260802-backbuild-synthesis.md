@@ -486,9 +486,40 @@ so set complements must be written `IS NOT TRUE`, never bare `NOT`:
   declared column order (`before_order`/`after_order`) to agree between versions before
   trusting a no-edited-branches diff as clean, closing this gap.
 - **F2 — removed UNION ALL branch.** Needs a provenance predicate distinguishing the
-  branch's rows in the stored table (a discriminator constant/column —
-  `analysis/discriminants.rs`); with one, `DELETE WHERE <discriminator>`; without, refuse.
-  Tier 3.
+  branch's rows in the stored table: a discriminator column that is a distinct literal
+  constant in *every* branch of the before-definition (`classify.rs`'s
+  `find_branch_discriminator`, over the before-branches `diff.rs`'s `SetOpDiff::Branches`
+  already reports — not `analysis/discriminants.rs`, which classifies an aggregate
+  combiner's algebraic facts and has no per-branch literal-constant concept at all; the two
+  "discriminant" names are unrelated ideas that happen to share a word). With one, the
+  removed branch's own constant builds an **equality** `DELETE FROM t WHERE <discriminator>
+  = <literal>` — not `IS NOT TRUE` like E1's predicate-tightened delete, because the
+  discriminator is proven non-NULL (a bare literal) and proven to land on exactly the
+  removed branch's rows (distinct from every surviving branch's own constant), so there is
+  no NULL-evaluation case to guard against. Without a qualifying discriminator, refuse by
+  name: no candidate column is ever a literal in every branch ("no provenance predicate...");
+  a candidate is literal in some branches but not others (fail-closed — only a
+  constant-per-branch discriminator is provable from the definitions alone); the candidate's
+  literal kind (number vs. text) is not the *same* in every branch; or two branches share
+  the same constant (the predicate would also delete a surviving branch's rows).
+  The duplicate-payload case is the soundness argument for requiring the discriminator at
+  all: when the removed branch's non-discriminator columns coincide with a surviving
+  branch's (e.g. both branches union the same `id` values under different constants), a
+  content-matching `DELETE` would be ambiguous or wrong — only keying on the proven-distinct
+  discriminator deletes exactly the removed branch's rows, leaving the surviving branch's
+  same-valued rows untouched.
+  The kind-uniformity obligation is a distinct soundness requirement from distinctness
+  itself: `UNION ALL` coerces a column to one common supertype across all branches (e.g. a
+  number literal in one branch and a text literal in another both become `VARCHAR`), so the
+  *stored* column's runtime type is never kind-specific even when the definitions are. An
+  equality predicate built from one branch's literal therefore implicit-casts at execution
+  against every stored row regardless of which branch's literal kind produced it — a
+  same-text-different-kind pair (e.g. `1` and `'1'`) is not a safe discriminator even though
+  it is "distinct" by a kind-aware comparison, because after coercion and implicit cast the
+  two values compare equal and the emitted `DELETE` would also remove the surviving branch's
+  rows. Requiring every branch's candidate literal to share one literal kind before
+  comparing values at all closes this gap; the distinctness check downstream then only ever
+  needs to compare same-kind values.
 - **F3 — ref repointed to a different upstream.** Not decidable from the two definitions
   alone; at the wiring layer, expansion + fingerprint makes the equivalent-repoint case A0.
   Otherwise refuse.
@@ -550,7 +581,7 @@ pipelines and how galling the full refresh it replaces is:
 | 8 | E2 + D2 | Rounds out predicates and expression changes; reuses earlier machinery |
 | 9 | F1 | Cheap detection (branch diff), cheap script |
 | 10 | B7 | Sequential multi-join enrichment; builds directly on B4's proof, adds only the dependency ordering |
-| 11+ | F2, C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
+| 11+ | C-sequencing polish, probe-gated G2 | Tier 3 — real but rarer, or needing runtime probes |
 
 ## 6. Architecture
 
