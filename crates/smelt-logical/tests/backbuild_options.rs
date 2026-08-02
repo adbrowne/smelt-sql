@@ -17,6 +17,19 @@ fn parse(sql: &str) -> smelt_parser::File {
     smelt_parser::File::cast(parse.syntax()).expect("file")
 }
 
+fn inputs(added_column_types: &[(&str, &str)]) -> BackbuildInputs {
+    BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: "SELECT 1".to_string(),
+        row_identity: None,
+        added_column_types: added_column_types
+            .iter()
+            .map(|(name, ty)| (name.to_string(), ty.to_string()))
+            .collect(),
+        sources: BTreeMap::new(),
+    }
+}
+
 /// Hand-construct a `BackbuildOptions` value with two atoms — one carrying
 /// an admissible option, one with an empty option set — bypassing
 /// `derive_backbuild_options` entirely so this test pins `assemble`'s
@@ -134,4 +147,288 @@ fn unclassified_diff_still_refuses_rather_than_reporting_no_atoms() {
         },
     );
     assert!(targeted.is_empty());
+}
+
+// ===== B1/B2 (task-3-brief.md) =====
+
+fn single_atom(options: &BackbuildOptions) -> &AtomAnalysis {
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    &options.atoms[0]
+}
+
+fn assert_refused(atom: &AtomAnalysis) {
+    assert!(
+        atom.options.is_empty(),
+        "expected no admissible option, got {:?}",
+        atom.options
+    );
+    assert_eq!(
+        atom.inadmissible.len(),
+        1,
+        "inadmissible: {:?}",
+        atom.inadmissible
+    );
+    assert!(
+        !atom.inadmissible[0].reason.is_empty(),
+        "the refusal must carry a named reason"
+    );
+}
+
+#[test]
+fn b1_opaque_function_refuses() {
+    let before_sql = "SELECT id FROM orders";
+    let after_sql = "SELECT id, mystery_function() AS computed FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert!(matches!(
+        &atom.change,
+        AtomicChange::AddedColumn { name } if name == "computed"
+    ));
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.contains("mystery_function"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn b1_volatile_function_refuses() {
+    for volatile_expr in ["RANDOM()", "NOW()"] {
+        let before_sql = "SELECT id FROM orders";
+        let after_sql = format!("SELECT id, {volatile_expr} AS computed FROM orders");
+
+        let diff = definition_diff(&parse(before_sql), &parse(&after_sql));
+        assert!(!diff.is_noop());
+
+        let options = derive_backbuild_options(&diff, &inputs(&[]));
+        let atom = single_atom(&options);
+        assert_refused(atom);
+        assert!(
+            atom.inadmissible[0]
+                .reason
+                .to_lowercase()
+                .contains("non-deterministic"),
+            "reason for {volatile_expr}: {}",
+            atom.inadmissible[0].reason
+        );
+    }
+}
+
+#[test]
+fn b1_subquery_refuses() {
+    let before_sql = "SELECT id FROM orders";
+    let after_sql = "SELECT id, (SELECT MAX(amount) FROM orders) AS max_amount FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .to_lowercase()
+            .contains("subquery"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn b1_window_refuses() {
+    let before_sql = "SELECT id FROM orders";
+    let after_sql = "SELECT id, ROW_NUMBER() OVER (ORDER BY id) AS rn FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0]
+            .reason
+            .to_lowercase()
+            .contains("window"),
+        "reason: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn b1_dependency_on_upstream_only_column_is_not_b1() {
+    let before_sql = "SELECT o.id AS id FROM orders o JOIN regions r ON o.region_id = r.region_id";
+    let after_sql = "SELECT o.id AS id, r.region_name AS region_name FROM orders o JOIN regions r \
+                      ON o.region_id = r.region_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert!(matches!(
+        &atom.change,
+        AtomicChange::AddedColumn { name } if name == "region_name"
+    ));
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible[0].reason.contains("representative"),
+        "expected the refusal to name the missing stored representative, got: {}",
+        atom.inadmissible[0].reason
+    );
+}
+
+#[test]
+fn b1_constant_and_arithmetic_columns_admit_alter_plus_update() {
+    let before_sql = "SELECT id, price, qty FROM orders";
+    let after_sql = "SELECT id, price, qty, 'active' AS status, price * qty AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options =
+        derive_backbuild_options(&diff, &inputs(&[("status", "TEXT"), ("total", "INTEGER")]));
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+
+    let status_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, AtomicChange::AddedColumn { name } if name == "status"))
+        .expect("status atom");
+    assert_eq!(status_atom.options.len(), 1, "options: {status_atom:?}");
+    assert!(status_atom.inadmissible.is_empty());
+    let status_option = &status_atom.options[0];
+    assert_eq!(status_option.technique, Technique::SelfDerivedColumnAdd);
+    assert_eq!(status_option.slot, Some(HSlot::Alter));
+    assert_eq!(status_option.statements.len(), 2, "{status_option:?}");
+    assert!(status_option.statements[0].starts_with("ALTER TABLE t ADD COLUMN status"));
+    assert!(status_option.statements[1].starts_with("UPDATE t SET status ="));
+
+    let total_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, AtomicChange::AddedColumn { name } if name == "total"))
+        .expect("total atom");
+    assert_eq!(total_atom.options.len(), 1, "options: {total_atom:?}");
+    let total_option = &total_atom.options[0];
+    assert!(total_option.statements[1].contains("price * qty"));
+}
+
+#[test]
+fn b2_clean_rename_pairs_and_no_b1_atom_remains() {
+    let before_sql = "SELECT id, amount FROM orders";
+    let after_sql = "SELECT id, amount AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    match &atom.change {
+        AtomicChange::RenamedColumn { from, to } => {
+            assert_eq!(from, "amount");
+            assert_eq!(to, "total");
+        }
+        other => panic!("expected a RenamedColumn atom, got {other:?}"),
+    }
+    assert_eq!(atom.options.len(), 1, "{atom:?}");
+    let option = &atom.options[0];
+    assert_eq!(option.technique, Technique::Rename);
+    assert_eq!(option.slot, Some(HSlot::Rename));
+    assert_eq!(
+        option.statements,
+        vec!["ALTER TABLE t RENAME COLUMN amount TO total"]
+    );
+    assert!(atom.inadmissible.is_empty());
+}
+
+#[test]
+fn b2_ambiguous_rename_refuses() {
+    // Two dropped columns share an identical expression; one added column
+    // matches — ambiguous which dropped column it came from (research §7.2).
+    let before_sql = "SELECT id, amount AS old1, amount AS old2 FROM orders";
+    let after_sql = "SELECT id, amount AS new1 FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+
+    let ambiguous: Vec<_> = options
+        .atoms
+        .iter()
+        .filter(|a| {
+            a.inadmissible
+                .iter()
+                .any(|r| r.reason.to_lowercase().contains("ambiguous"))
+        })
+        .collect();
+    assert_eq!(
+        ambiguous.len(),
+        2,
+        "expected both dropped columns to refuse ambiguously, got {:?}",
+        options.atoms
+    );
+    for atom in &ambiguous {
+        assert!(atom.options.is_empty());
+    }
+    // Neither dropped column is ever offered as a rename anywhere in the
+    // option set.
+    assert!(!options
+        .atoms
+        .iter()
+        .any(|a| matches!(&a.change, AtomicChange::RenamedColumn { .. })));
+}
+
+#[test]
+fn b2_one_dropped_two_added_pins_lexicographic() {
+    // One dropped column, two added columns with an identical expression:
+    // the lexicographically-first added name ("a" < "b") takes the rename;
+    // "b" classifies as B1 reading the renamed column "a".
+    let before_sql = "SELECT id, amount AS old FROM orders";
+    let after_sql = "SELECT id, amount AS b, amount AS a FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[("b", "INTEGER")]));
+
+    let rename_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, AtomicChange::RenamedColumn { .. }))
+        .expect("a rename atom");
+    match &rename_atom.change {
+        AtomicChange::RenamedColumn { from, to } => {
+            assert_eq!(from, "old");
+            assert_eq!(to, "a");
+        }
+        _ => unreachable!(),
+    }
+    assert_eq!(rename_atom.options.len(), 1);
+
+    let b_atom = options
+        .atoms
+        .iter()
+        .find(|a| matches!(&a.change, AtomicChange::AddedColumn { name } if name == "b"))
+        .expect("b atom");
+    assert_eq!(b_atom.options.len(), 1, "b_atom: {b_atom:?}");
+    assert!(b_atom.inadmissible.is_empty());
+    let b_option = &b_atom.options[0];
+    assert_eq!(b_option.technique, Technique::SelfDerivedColumnAdd);
+    assert_eq!(b_option.statements.len(), 2);
+    assert!(
+        b_option.statements[1].contains("SET b = a"),
+        "expected b's update to read the renamed column 'a' directly, got: {:?}",
+        b_option.statements
+    );
+
+    // Exactly two atoms: the rename and b's B1-via-rename atom.
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
 }

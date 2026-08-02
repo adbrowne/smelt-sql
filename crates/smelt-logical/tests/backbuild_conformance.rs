@@ -230,6 +230,108 @@ fn g2_join_condition_change_refuses() {
     harness::verify_option(&conn, "t", before_sql, after_sql, &options.full_refresh);
 }
 
+// ===== B1/B2 (task-3-brief.md) =====
+
+#[test]
+fn b1_constant_column() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, amount INTEGER);
+         INSERT INTO orders VALUES (1, 10), (2, 20), (3, -5);",
+    );
+
+    let before_sql = "SELECT id, amount FROM orders";
+    let after_sql = "SELECT id, amount, 'active' AS status FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut added_column_types = BTreeMap::new();
+    added_column_types.insert("status".to_string(), "TEXT".to_string());
+    let inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        added_column_types,
+        sources: BTreeMap::new(),
+    };
+
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    assert!(atom.inadmissible.is_empty());
+    let option = &atom.options[0];
+    assert_eq!(option.statements.len(), 2, "{option:?}");
+    assert!(option.statements[0].starts_with("ALTER TABLE"));
+    assert!(option.statements[1].starts_with("UPDATE"));
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
+#[test]
+fn b1_arithmetic_over_stored_columns() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, price INTEGER, qty INTEGER);
+         INSERT INTO orders VALUES (1, 10, 2), (2, 5, 3), (3, 7, 0);",
+    );
+
+    let before_sql = "SELECT id, price, qty FROM orders";
+    let after_sql = "SELECT id, price, qty, price * qty AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut added_column_types = BTreeMap::new();
+    added_column_types.insert("total".to_string(), "INTEGER".to_string());
+    let inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        added_column_types,
+        sources: BTreeMap::new(),
+    };
+
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    assert!(atom.inadmissible.is_empty());
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, &atom.options[0]);
+}
+
+#[test]
+fn b2_rename_touches_no_rows() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (id INTEGER, amount INTEGER);
+         INSERT INTO orders VALUES (1, 10), (2, 20);",
+    );
+
+    let before_sql = "SELECT id, amount FROM orders";
+    let after_sql = "SELECT id, amount AS total FROM orders";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs("t", after_sql));
+    assert_eq!(options.atoms.len(), 1, "atoms: {:?}", options.atoms);
+    let atom = &options.atoms[0];
+    assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+    let option = &atom.options[0];
+    assert_eq!(
+        option.statements,
+        vec!["ALTER TABLE t RENAME COLUMN amount TO total"]
+    );
+
+    harness::verify_option(&conn, "t", before_sql, after_sql, option);
+}
+
 #[test]
 fn changed_cte_refuses() {
     let conn = Connection::open_in_memory().expect("duckdb");

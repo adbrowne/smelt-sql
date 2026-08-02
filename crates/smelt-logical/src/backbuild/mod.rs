@@ -11,6 +11,8 @@
 
 pub mod classify;
 pub mod diff;
+pub mod emit;
+pub mod requalify;
 
 pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
@@ -269,11 +271,12 @@ pub struct AtomAnalysis {
     pub inadmissible: Vec<BackbuildRefusal>,
 }
 
-/// This phase's atom granularity is coarse — a diff factors into at most
-/// one atom, describing the whole definition or its skeleton. Later phases'
-/// classifiers explode a diff into the finer per-column, per-conjunct,
-/// per-join atoms research §4's catalogue cases describe (B1/B2/D1/…), each
-/// getting its own [`AtomAnalysis`].
+/// This phase's atom granularity explodes the SELECT-list diff into one
+/// atom per added or renamed column (research §4's B1/B2); everything else
+/// (a changed existing column, a dropped column not paired into a rename, a
+/// `WHERE`/set-operation change) still lands in the coarse
+/// [`AtomicChange::Unclassified`] catch-all — those catalogue classes
+/// (D/C/E/F) arrive in later phases.
 #[derive(Debug, Clone)]
 pub enum AtomicChange {
     /// The whole model definition, when the pure diff could not factor it
@@ -285,11 +288,21 @@ pub enum AtomicChange {
     /// (research §4 intro, G-class) refuse outright — a grain change (G1)
     /// or a join-multiplicity change (G2).
     Skeleton { reason: String },
+    /// One added SELECT-list output column (research §4 B1, and B3/B4/B5/B6
+    /// in later phases) that was not consumed by rename pairing. `name` is
+    /// the after-definition's output column name.
+    AddedColumn { name: String },
+    /// A dropped column `from` paired with an added column `to` whose
+    /// expression is identical (modulo trivia) to `from`'s old expression
+    /// (research §4 B2 "rename") — matched *before* add/drop classification
+    /// so a genuine rename is never misread as a drop-plus-unrelated-add.
+    RenamedColumn { from: String, to: String },
     /// A non-empty, non-skeleton-refused diff this phase does not yet
     /// classify into admissible techniques (research catalogue classes
-    /// B/C/D/E/F — arriving in later phases). A conservative catch-all: an
-    /// honest "not yet handled" refusal, never a silently empty atom list
-    /// for a definition that did change.
+    /// C/D/E/F, an unpaired dropped column, an ambiguous rename cluster, or
+    /// an opaque SELECT-list/WHERE/set-operation diff). A conservative
+    /// catch-all: an honest "not yet handled" refusal, never a silently
+    /// empty atom list for a definition that did change.
     Unclassified,
 }
 
@@ -328,15 +341,20 @@ impl BackbuildOption {
     }
 }
 
-/// The technique a [`BackbuildOption`] implements. Only
-/// [`Technique::FullRefresh`] exists this phase; later phases add one
-/// variant per research §4 catalogue case (B1's in-place update, B2's
-/// rename, …).
+/// The technique a [`BackbuildOption`] implements. Later phases add one
+/// variant per remaining research §4 catalogue case.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Technique {
     /// `CREATE OR REPLACE TABLE t AS <after>` — the always-present
     /// model-level baseline (research §2).
     FullRefresh,
+    /// B1 — new column = pure function of existing stored columns
+    /// (research §4): `ALTER TABLE t ADD COLUMN c <ty>; UPDATE t SET c =
+    /// <requalified expr>;`.
+    SelfDerivedColumnAdd,
+    /// B2 — rename (research §4): `ALTER TABLE t RENAME COLUMN d TO a;`,
+    /// zero rows touched.
+    Rename,
 }
 
 /// The research §2 "write scope" option metadata.

@@ -428,10 +428,14 @@ fn ex36_pure_function_field_add_is_in_place_update_with_ledger_catch_up() {
     let new = vec![
         column_def("event_id", "event_id"),
         column_def("referrer", "referrer"),
-        column_def(
-            "referrer_domain",
-            "regexp_extract(referrer, '://([^/]+)', 1)",
-        ),
+        // A registry-recognised pure function (backbuild Phase 3 tightened
+        // `collect_dependencies`'s opaqueness check — an unregistered
+        // function name now fails closed rather than being silently
+        // treated as having no dependencies; `SUBSTRING` stands in for the
+        // original `regexp_extract` illustration of "pure function of an
+        // existing stored column", which this test's assertions never
+        // depended on the specific function for).
+        column_def("referrer_domain", "SUBSTRING(referrer, 1, 10)"),
     ];
     let proof = additive_only_diff(&old, &new, &[]);
     assert!(proof.is_additive_only());

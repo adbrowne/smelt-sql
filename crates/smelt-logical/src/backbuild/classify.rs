@@ -3,23 +3,36 @@
 //! `assemble`: turn a [`super::BackbuildOptions`] plus a [`Selection`] into
 //! an ordered statement script. See the module doc comment in
 //! `backbuild/mod.rs` and `docs/research/20260802-backbuild-synthesis.md`
-//! §2 ("The contract"), §4 ("The catalogue" — G-class "Honest refusals" and
-//! the CTE posture note), and §6 ("Architecture").
+//! §2 ("The contract"), §4 ("The catalogue" — G-class "Honest refusals",
+//! the B1/B2 cases, and the CTE posture note), and §6 ("Architecture").
 //!
-//! This phase implements exactly the refusal paths research §4's G-class
-//! names outright — G1 (grain change), G2 (join-multiplicity change), and a
-//! changed CTE (or any other whole-definition opacity) — plus the A0 no-op
-//! short-circuit and the always-present model-level `FullRefresh` baseline.
-//! No admissible targeted technique (B1/B2/D1/…) is produced here; that
-//! starts with later phases. Every diff shape this phase does not
-//! recognise still yields a named, fail-closed refusal rather than a
+//! This phase implements the refusal paths research §4's G-class names
+//! outright — G1 (grain change), G2 (join-multiplicity change), and a
+//! changed CTE (or any other whole-definition opacity) — the A0 no-op
+//! short-circuit, the always-present model-level `FullRefresh` baseline,
+//! and the first two admissible targeted techniques: B1 (a new column that
+//! is a pure function of existing stored columns) and B2 (a rename, paired
+//! *before* B1/add-drop classification). Every other diff shape — a
+//! changed existing column (D-class), a dropped column not paired into a
+//! rename (C1), a `WHERE`/set-operation change (E/F-class), an ambiguous
+//! rename cluster — still yields a named, fail-closed refusal rather than a
 //! silently empty atom list — fail-loud discipline
 //! (`docs/specs/architecture.md` §"Fail-loud discipline").
 
+use std::collections::{BTreeSet, HashSet};
+
+use smelt_parser::Expr;
+
+use crate::analysis::model_diff;
+
 use super::{
     AtomAnalysis, AtomicChange, BackbuildInputs, BackbuildOption, BackbuildOptions,
-    BackbuildRefusal, DefinitionDiff, HSlot, SkeletonDiff, Technique, WriteScope,
+    BackbuildRefusal, ComparableDiff, ConjunctDiff, DefinitionDiff, HSlot, SelectColumn,
+    SelectListDiff, SetOpDiff, SkeletonDiff, Technique, WriteScope,
 };
+
+use super::emit;
+use super::requalify;
 
 /// Derive the option set for a `(before, after)` diff (research §2, §4).
 pub fn derive_backbuild_options(
@@ -37,15 +50,16 @@ pub fn derive_backbuild_options(
                 // empty (`assemble` over zero atoms); `FullRefresh` remains
                 // available regardless.
                 Vec::new()
-            } else if let SkeletonDiff::Changed { reason } = &comparable.skeleton {
-                vec![skeleton_refusal(reason)]
             } else {
-                // Something changed (select list, WHERE, or set-ops) but
-                // this phase does not yet classify it into an admissible
-                // technique. A conservative, honest catch-all — never a
-                // silently empty atom list for a definition that did
-                // change.
-                vec![unclassified_refusal()]
+                match &comparable.skeleton {
+                    SkeletonDiff::Changed { reason } => vec![skeleton_refusal(reason)],
+                    SkeletonDiff::Unchanged => classify_comparable(comparable, inputs),
+                    // Added LEFT JOIN(s) (B4/B7) are out of this phase's
+                    // scope — a conservative catch-all rather than
+                    // misclassifying a select-list change that arrived
+                    // alongside a new join.
+                    SkeletonDiff::AddedLeftJoins(_) => vec![unclassified_refusal()],
+                }
             }
         }
     };
@@ -120,15 +134,448 @@ fn classify_skeleton_reason(reason: &str) -> String {
 }
 
 fn unclassified_refusal() -> AtomAnalysis {
+    unclassified_refusal_named("whole-definition")
+}
+
+fn unclassified_refusal_named(atom: &str) -> AtomAnalysis {
     AtomAnalysis {
         change: AtomicChange::Unclassified,
         options: Vec::new(),
         inadmissible: vec![BackbuildRefusal {
-            atom: "whole-definition".to_string(),
+            atom: atom.to_string(),
             reason: "the definition changed in a way this phase does not yet classify into an \
                      admissible technique (targeted-technique admission arrives in later phases)"
                 .to_string(),
         }],
+    }
+}
+
+// ===== Comparable-diff classification: SELECT-list B1/B2, plus the
+// residual WHERE/set-operation/D-class/C1 catch-alls (research §4) =====
+
+/// Classify a diff whose skeleton is proven [`SkeletonDiff::Unchanged`] —
+/// only the SELECT list, `WHERE` clause, and/or set operations may differ.
+/// One atom per added or renamed column (B1/B2), plus one coarse
+/// [`AtomicChange::Unclassified`] atom per residual category that changed
+/// (a changed column, an unpaired dropped column, a `WHERE`/set-operation
+/// diff, or an opaque SELECT-list/`WHERE`/set-operation shape).
+fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) -> Vec<AtomAnalysis> {
+    let mut atoms = Vec::new();
+
+    match &comparable.select_list {
+        SelectListDiff::Opaque { reason } => {
+            atoms.push(unclassified_refusal_named(&format!(
+                "select-list: {reason}"
+            )));
+        }
+        SelectListDiff::Diffed {
+            added,
+            dropped,
+            changed,
+            unchanged,
+        } => {
+            atoms.extend(classify_select_list(added, dropped, unchanged, inputs));
+            for c in changed {
+                atoms.push(changed_column_unclassified(&c.name));
+            }
+        }
+    }
+
+    match &comparable.where_clause {
+        ConjunctDiff::Diffed { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
+            atoms.push(unclassified_refusal_named("where-clause"));
+        }
+        ConjunctDiff::Opaque { reason } => {
+            atoms.push(unclassified_refusal_named(&format!(
+                "where-clause: {reason}"
+            )));
+        }
+        _ => {}
+    }
+
+    match &comparable.set_ops {
+        SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
+            atoms.push(unclassified_refusal_named("set-operations"));
+        }
+        SetOpDiff::Opaque { reason } => {
+            atoms.push(unclassified_refusal_named(&format!(
+                "set-operations: {reason}"
+            )));
+        }
+        _ => {}
+    }
+
+    atoms
+}
+
+fn changed_column_unclassified(name: &str) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Unclassified,
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: format!("changed column '{name}'"),
+            reason: "a changed existing-column expression (research §4 D-class) is not yet \
+                     classified into an admissible technique by this phase"
+                .to_string(),
+        }],
+    }
+}
+
+fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Unclassified,
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: format!("dropped column '{name}'"),
+            reason: "a dropped column not paired into a rename (research §4 C1) is not yet \
+                     classified into an admissible technique by this phase"
+                .to_string(),
+        }],
+    }
+}
+
+/// Rename pairing (B2) runs *before* add/drop classification, then every
+/// remaining added column is classified as B1 or refused (research §4 B1,
+/// B2, §7.2 "Rename-match ambiguity").
+fn classify_select_list(
+    added: &[SelectColumn],
+    dropped: &[SelectColumn],
+    unchanged: &[SelectColumn],
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
+    let representatives = representative_names(unchanged);
+    let RenamePairing {
+        atoms: mut rename_atoms,
+        consumed_added,
+    } = pair_renames(dropped, added, inputs);
+
+    for col in added {
+        if consumed_added.contains(&col.name) {
+            // Already produced its own atom inside `pair_renames` (either
+            // the rename atom itself, for the winner, or a "reads the
+            // renamed column" B1 atom, for a tie-break loser).
+            continue;
+        }
+        rename_atoms.push(classify_added_column(col, &representatives, inputs));
+    }
+
+    rename_atoms
+}
+
+/// The stored 1:1 representative output-column names (research §4 intro
+/// "Derivability representatives — one uniform rule"): every SELECT-list
+/// output column present, unchanged, in both definitions (`unchanged`) *and*
+/// whose own expression is a bare column reference — a bare pull-through,
+/// never a computed expression. A changed column is never a representative
+/// by construction (it is not in `unchanged` at all).
+fn representative_names(unchanged: &[SelectColumn]) -> BTreeSet<String> {
+    unchanged
+        .iter()
+        .filter(|c| c.expr.as_column_ref().is_some())
+        .map(|c| c.name.clone())
+        .collect()
+}
+
+fn classify_added_column(
+    col: &SelectColumn,
+    representatives: &BTreeSet<String>,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    match try_b1(col, representatives, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: AtomicChange::AddedColumn {
+                name: col.name.clone(),
+            },
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: AtomicChange::AddedColumn {
+                name: col.name.clone(),
+            },
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("added column '{}'", col.name),
+                reason,
+            }],
+        },
+    }
+}
+
+/// B1 admission (research §4 B1): every dependency of `col`'s expression
+/// must resolve to a stored 1:1 representative. Reuses
+/// `analysis::model_diff::collect_dependencies` — the same dependency walk
+/// `additive_only_diff` uses, not a fork of it (`docs/specs/architecture.md`
+/// §"Property composition walk rule") — which already fails closed on
+/// subqueries, window `OVER` clauses, unregistered functions, and
+/// non-deterministic functions (research §2 "Determinism caveat").
+fn try_b1(
+    col: &SelectColumn,
+    representatives: &BTreeSet<String>,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let deps = model_diff::collect_dependencies(&col.expr).map_err(|reason| {
+        format!(
+            "B1 (self-derivable column add) refused for '{}': {reason}",
+            col.name
+        )
+    })?;
+
+    let mut missing: Vec<&String> = deps
+        .iter()
+        .filter(|d| !representatives.contains(*d))
+        .collect();
+    missing.sort();
+    if let Some(dep) = missing.first() {
+        return Err(format!(
+            "B1 (self-derivable column add) refused for '{}': depends on '{dep}', which has no \
+             1:1 stored representative (a bare pull-through unchanged between both definitions) \
+             in the model's own output — an upstream-only dependency needs a later phase's B3, \
+             not B1",
+            col.name
+        ));
+    }
+
+    let requalified = requalify::requalify(&col.expr, representatives).map_err(|reason| {
+        format!(
+            "B1 (self-derivable column add) refused for '{}': {reason}",
+            col.name
+        )
+    })?;
+
+    build_b1_option(col, &requalified, inputs)
+}
+
+/// Build the B1 `ALTER ADD` + in-place `UPDATE` option once `requalified_expr`
+/// is known to be safe to splice into a self-read `UPDATE` (either the
+/// generic dependency-derived text from [`try_b1`], or — for a B2 tie-break
+/// loser — a bare reference to the rename's winning column name).
+fn build_b1_option(
+    col: &SelectColumn,
+    requalified_expr: &str,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let sql_type = inputs.added_column_types.get(&col.name).ok_or_else(|| {
+        format!(
+            "B1 (self-derivable column add) refused for '{}': no declared SQL type in \
+             BackbuildInputs::added_column_types",
+            col.name
+        )
+    })?;
+
+    let alter = emit::emit_alter_add_column(&inputs.table, &col.name, sql_type);
+    let update = emit::emit_in_place_update(
+        &inputs.table,
+        &[(col.name.clone(), requalified_expr.to_string())],
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::SelfDerivedColumnAdd,
+        // Both statements sit in one H-slot bucket: the `ALTER ADD` must
+        // still run before any rename-dependent add (`HSlot::Alter` flushes
+        // strictly after `HSlot::Rename` — see `assemble`), and the paired
+        // `UPDATE` only ever touches this atom's own freshly-added column,
+        // so it never needs to be reordered relative to a sibling atom's
+        // own alter/update pair.
+        slot: Some(HSlot::Alter),
+        statements: vec![alter, update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: false,
+        // The `ALTER ADD` step is DDL and not re-runnable (research §2
+        // "Idempotence": "DDL steps (ALTER ADD/RENAME) are not
+        // re-runnable"), even though the paired `UPDATE` alone would be.
+        rerun_safe: false,
+    })
+}
+
+struct RenamePairing {
+    atoms: Vec<AtomAnalysis>,
+    consumed_added: HashSet<String>,
+}
+
+/// Pair dropped × added columns by expression equality (research §4 B2,
+/// §7.2). Groups `dropped` into expression-equivalence clusters first,
+/// since the ambiguity rule operates on the *dropped* side: a cluster of
+/// two or more dropped columns sharing an identical expression can never be
+/// safely paired to a rename, even when exactly one added column matches —
+/// refuse rather than guess which dropped column it came from. A
+/// single-dropped cluster matched by two or more identical added columns is
+/// pinned deterministically: the lexicographically-first added name takes
+/// the rename, the rest classify as B1 reading the renamed column.
+fn pair_renames(
+    dropped: &[SelectColumn],
+    added: &[SelectColumn],
+    inputs: &BackbuildInputs,
+) -> RenamePairing {
+    let mut atoms = Vec::new();
+    let mut consumed_added = HashSet::new();
+
+    for cluster in cluster_by_expr(dropped) {
+        let candidates: Vec<&SelectColumn> = added
+            .iter()
+            .filter(|a| expr_equal_modulo_trivia(&a.expr, &cluster[0].expr))
+            .collect();
+
+        if cluster.len() == 1 {
+            let d = cluster[0];
+            match candidates.len() {
+                0 => atoms.push(dropped_column_unclassified(&d.name)),
+                1 => {
+                    let winner = candidates[0];
+                    atoms.push(rename_atom(&inputs.table, &d.name, &winner.name));
+                    consumed_added.insert(winner.name.clone());
+                }
+                _ => {
+                    let mut sorted = candidates;
+                    sorted.sort_by(|a, b| a.name.cmp(&b.name));
+                    let winner = sorted[0];
+                    atoms.push(rename_atom(&inputs.table, &d.name, &winner.name));
+                    consumed_added.insert(winner.name.clone());
+                    for loser in &sorted[1..] {
+                        consumed_added.insert(loser.name.clone());
+                        atoms.push(classify_rename_loser(loser, &winner.name, inputs));
+                    }
+                }
+            }
+        } else if candidates.is_empty() {
+            for d in &cluster {
+                atoms.push(dropped_column_unclassified(&d.name));
+            }
+        } else {
+            let sibling_names: Vec<String> = cluster.iter().map(|d| d.name.clone()).collect();
+            let candidate_names: Vec<String> = candidates.iter().map(|c| c.name.clone()).collect();
+            for d in &cluster {
+                atoms.push(ambiguous_rename_refusal(
+                    &d.name,
+                    &sibling_names,
+                    &candidate_names,
+                ));
+            }
+        }
+    }
+
+    RenamePairing {
+        atoms,
+        consumed_added,
+    }
+}
+
+/// Group `dropped` into expression-equivalence clusters (pairwise
+/// `expr_equal_modulo_trivia`).
+fn cluster_by_expr(dropped: &[SelectColumn]) -> Vec<Vec<&SelectColumn>> {
+    let mut clusters: Vec<Vec<&SelectColumn>> = Vec::new();
+    'outer: for d in dropped {
+        for cluster in clusters.iter_mut() {
+            if expr_equal_modulo_trivia(&cluster[0].expr, &d.expr) {
+                cluster.push(d);
+                continue 'outer;
+            }
+        }
+        clusters.push(vec![d]);
+    }
+    clusters
+}
+
+fn rename_atom(table: &str, from: &str, to: &str) -> AtomAnalysis {
+    let stmt = emit::emit_alter_rename_column(table, from, to);
+    AtomAnalysis {
+        change: AtomicChange::RenamedColumn {
+            from: from.to_string(),
+            to: to.to_string(),
+        },
+        options: vec![BackbuildOption {
+            technique: Technique::Rename,
+            slot: Some(HSlot::Rename),
+            statements: vec![stmt],
+            write_scope: WriteScope::None,
+            reads_upstream: false,
+            // DDL rename is not re-runnable (research §2 "Idempotence").
+            rerun_safe: false,
+        }],
+        inadmissible: Vec::new(),
+    }
+}
+
+fn ambiguous_rename_refusal(
+    name: &str,
+    siblings: &[String],
+    candidates: &[String],
+) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Unclassified,
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: format!("dropped column '{name}'"),
+            reason: format!(
+                "ambiguous rename: {} dropped columns ({}) share an identical expression \
+                 matching added column(s) ({}) — refusing rather than guessing which dropped \
+                 column renamed to which (research §7.2 'Rename-match ambiguity')",
+                siblings.len(),
+                siblings.join(", "),
+                candidates.join(", ")
+            ),
+        }],
+    }
+}
+
+/// A B2 tie-break loser (research §4 B2: "one dropped, two identical added
+/// … the rest classify as B1 reading the renamed column"): rather than
+/// re-deriving `loser`'s dependencies from scratch (which could refuse if
+/// its underlying inputs have no independent representative), its script
+/// reads the winning rename target directly — a bare reference, valid
+/// regardless of how complex the shared expression was, since the winner
+/// already stores exactly that value once the rename statement runs first
+/// (`HSlot::Rename` precedes `HSlot::Alter` in `assemble`'s composition).
+fn classify_rename_loser(
+    loser: &SelectColumn,
+    renamed_to: &str,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    match build_b1_option(loser, renamed_to, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: AtomicChange::AddedColumn {
+                name: loser.name.clone(),
+            },
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: AtomicChange::AddedColumn {
+                name: loser.name.clone(),
+            },
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("added column '{}'", loser.name),
+                reason,
+            }],
+        },
+    }
+}
+
+/// Trivia-insensitive structural equality of two expressions. Duplicates
+/// `diff.rs`'s private `same_modulo_trivia` (over `Expr` rather than
+/// `SyntaxNode`) rather than exposing it: `diff.rs` is out of this phase's
+/// touch-scope, and this is a small, self-contained comparator, not the
+/// dependency walk the "don't fork" rule is about.
+fn expr_equal_modulo_trivia(a: &Expr, b: &Expr) -> bool {
+    let mut ta = a
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .map(|t| (t.kind(), t.text().to_string()));
+    let mut tb = b
+        .syntax()
+        .descendants_with_tokens()
+        .filter_map(|e| e.into_token())
+        .filter(|t| !t.kind().is_trivia())
+        .map(|t| (t.kind(), t.text().to_string()));
+    loop {
+        match (ta.next(), tb.next()) {
+            (None, None) => return true,
+            (Some(x), Some(y)) if x == y => continue,
+            _ => return false,
+        }
     }
 }
 
