@@ -164,6 +164,42 @@ pub fn emit_difference_insert(
     sql
 }
 
+/// `INSERT INTO t (<cols>) SELECT <cols> FROM (<branch_sql>) AS
+/// __backbuild_branch [WHERE NOT EXISTS (<identity anti-join>)]` — research
+/// §4 F1's added-`UNION ALL`-branch `INSERT`. Unlike
+/// [`emit_difference_insert`] (E2/E4), there is no difference predicate to
+/// apply: `UNION ALL` is additive, so `branch_sql` — the added branch's own
+/// text, verbatim — already *is* exactly the delta; the only optional guard
+/// is the identity anti-join (same NOT-NULL-proven-identity conditionality
+/// as E2/E4, research §4 intro "Key addressability"). `columns` is an
+/// explicit column list on both the `INSERT` target and the `SELECT`
+/// (research §4 "H. Composites": after an `ALTER ADD`, the table's physical
+/// column order differs from the after-definition's declared order, so a
+/// positional `INSERT` would silently misassign same-typed columns).
+pub fn emit_branch_insert(
+    table: &str,
+    columns: &[String],
+    branch_sql: &str,
+    identity_columns: Option<&[String]>,
+) -> String {
+    let col_list = columns.join(", ");
+    let mut sql = format!(
+        "INSERT INTO {table} ({col_list}) SELECT {col_list} FROM ({branch_sql}) AS \
+         __backbuild_branch"
+    );
+    if let Some(identity) = identity_columns {
+        let guard = identity
+            .iter()
+            .map(|c| format!("{table}.{c} = __backbuild_branch.{c}"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        sql.push_str(&format!(
+            " WHERE NOT EXISTS (SELECT 1 FROM {table} WHERE {guard})"
+        ));
+    }
+    sql
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -323,6 +359,35 @@ mod tests {
              WHERE ts >= '2024-01-01') AS __backbuild_diff WHERE (ts >= '2025-01-01') IS NOT \
              TRUE AND NOT EXISTS (SELECT 1 FROM t WHERE t.region = __backbuild_diff.region AND \
              t.ts = __backbuild_diff.ts)"
+        );
+    }
+
+    #[test]
+    fn branch_insert_shape_without_identity() {
+        assert_eq!(
+            emit_branch_insert(
+                "t",
+                &["id".to_string(), "kind".to_string()],
+                "SELECT id, 'b' AS kind FROM events_b",
+                None,
+            ),
+            "INSERT INTO t (id, kind) SELECT id, kind FROM (SELECT id, 'b' AS kind FROM \
+             events_b) AS __backbuild_branch"
+        );
+    }
+
+    #[test]
+    fn branch_insert_shape_with_identity_guard() {
+        assert_eq!(
+            emit_branch_insert(
+                "t",
+                &["id".to_string(), "kind".to_string()],
+                "SELECT id, 'b' AS kind FROM events_b",
+                Some(&["id".to_string()]),
+            ),
+            "INSERT INTO t (id, kind) SELECT id, kind FROM (SELECT id, 'b' AS kind FROM \
+             events_b) AS __backbuild_branch WHERE NOT EXISTS (SELECT 1 FROM t WHERE t.id = \
+             __backbuild_branch.id)"
         );
     }
 }

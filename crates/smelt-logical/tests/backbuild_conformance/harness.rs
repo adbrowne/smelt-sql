@@ -58,18 +58,77 @@ pub fn verify_option(
     assert_matches_full_rebuild(conn, table, after_sql);
 }
 
+/// Rebuild `table` fresh from `before_sql`, apply an already-assembled
+/// multi-statement script (`classify::assemble`'s output — a composite
+/// spanning several atoms' chosen options, H-ordered) in order, then assert
+/// the result matches a full rebuild from `after_sql`. The composite
+/// (research §4 "H. Composites") sibling of [`verify_option`], which only
+/// ever verifies one atom's own option in isolation — this executes a
+/// caller-assembled script and authors nothing of its own (statement
+/// single-ownership, `docs/specs/architecture.md` §"Constraints &
+/// Invariants" item 12).
+pub fn verify_script(
+    conn: &Connection,
+    table: &str,
+    before_sql: &str,
+    after_sql: &str,
+    script: &[String],
+) {
+    build_before(conn, table, before_sql);
+    for stmt in script {
+        conn.execute_batch(stmt)
+            .unwrap_or_else(|e| panic!("apply backbuild script statement `{stmt}`: {e}"));
+    }
+    assert_matches_full_rebuild(conn, table, after_sql);
+}
+
 /// Assert `table`'s current contents equal a fresh full rebuild from
 /// `after_sql`: multiset row equality (two-way `EXCEPT ALL` — plain
 /// `EXCEPT` is set-based and would miss duplicate-row-count drift) plus
-/// column name/type equality, per research §6.
+/// column name/type equality, per research §6 ("column name/type
+/// comparison").
+///
+/// Both checks are column-**name**-driven, not raw physical-position-driven:
+/// `table`'s physical column order can legitimately differ from
+/// `after_sql`'s declared order — an `ALTER TABLE … ADD COLUMN` always
+/// appends physically at the end, regardless of where the after-definition
+/// declares the column (research §4 "H. Composites": "after an `ALTER ADD`,
+/// the table's physical column order differs from the after-definition's
+/// declared order"). A raw `SELECT * ... EXCEPT ALL SELECT * ...` compares
+/// columns positionally, which would misreport a same-valued-but-reordered
+/// table as non-equivalent (or worse, silently compare two differently-named
+/// columns against each other) — so both sides are explicitly projected
+/// through the same after-definition-declared column-name list before the
+/// value comparison, and the schema check compares name/type *sets* rather
+/// than name/type *sequences*.
 pub fn assert_matches_full_rebuild(conn: &Connection, table: &str, after_sql: &str) {
     conn.execute_batch(&format!(
         "CREATE OR REPLACE TEMP VIEW __backbuild_after AS {after_sql}"
     ))
     .expect("create full-rebuild comparison view");
 
-    let table_select = format!("SELECT * FROM {table}");
-    let after_select = "SELECT * FROM __backbuild_after".to_string();
+    let table_schema = describe(conn, table);
+    let after_schema = describe(conn, "__backbuild_after");
+    let mut table_schema_sorted = table_schema.clone();
+    table_schema_sorted.sort();
+    let mut after_schema_sorted = after_schema.clone();
+    after_schema_sorted.sort();
+    assert_eq!(
+        table_schema_sorted, after_schema_sorted,
+        "{table}'s column name/type set does not match the full rebuild of after_sql"
+    );
+
+    // Project both sides through the same explicit, after-declared column
+    // list so positional `EXCEPT ALL` compares each name-matched column
+    // pair against itself, never against a differently-named column that
+    // merely happens to share the same physical ordinal position.
+    let col_list = after_schema
+        .iter()
+        .map(|(name, _)| name.clone())
+        .collect::<Vec<_>>()
+        .join(", ");
+    let table_select = format!("SELECT {col_list} FROM {table}");
+    let after_select = format!("SELECT {col_list} FROM __backbuild_after");
 
     let forward = except_all_count(conn, &table_select, &after_select);
     let backward = except_all_count(conn, &after_select, &table_select);
@@ -80,13 +139,6 @@ pub fn assert_matches_full_rebuild(conn: &Connection, table: &str, after_sql: &s
     assert_eq!(
         backward, 0,
         "the full rebuild of after_sql has rows not present in {table} (EXCEPT ALL backward)"
-    );
-
-    let table_schema = describe(conn, table);
-    let after_schema = describe(conn, "__backbuild_after");
-    assert_eq!(
-        table_schema, after_schema,
-        "{table}'s column name/type schema does not match the full rebuild of after_sql"
     );
 
     conn.execute_batch("DROP VIEW __backbuild_after")

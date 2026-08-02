@@ -357,6 +357,18 @@ pub enum AtomicChange {
     /// The range view classifies only — the emitted script is always the
     /// complement-form difference `INSERT` (research §4 E4).
     RangePredicateChange { column: String },
+    /// One removed `WHERE`-clause conjunct (research §4 E2 "filter
+    /// loosened"), admitted when it is the diff's *only* predicate change —
+    /// no added conjunct alongside it. `index` is this conjunct's position
+    /// within the diff's `removed` conjunct set (today always `0`: this
+    /// phase only admits a single removed conjunct at a time).
+    RemovedConjunct { index: usize },
+    /// One added `UNION ALL` branch (research §4 F1), admitted when it is
+    /// the diff's *only* set-operation change — no removed branch, no other
+    /// added branch. `index` is this branch's position within the diff's
+    /// `added` branch set (today always `0`: this phase only admits a
+    /// single added branch at a time).
+    AddedSetOpBranch { index: usize },
     /// A non-empty, non-skeleton-refused diff this phase does not yet
     /// classify into admissible techniques (research catalogue classes
     /// C/F, an unpaired dropped column, an ambiguous rename cluster, a
@@ -482,6 +494,22 @@ pub enum Technique {
     /// addressability"). Otherwise the option omits the guard and records
     /// `rerun_safe: false` (research §2 "Idempotence").
     HorizonExtensionInsert,
+    /// E2 — filter loosened (research §4): the after-definition's own
+    /// difference `INSERT`, scoped by the always-complement-form predicate
+    /// (`AND (<removed conjunct>) IS NOT TRUE`, requalified to stored
+    /// columns) — exactly the shape `HorizonExtensionInsert` uses, minus the
+    /// range-widening proof (research §4 E4: "mechanically an E2 whose
+    /// removed/added conjuncts are range predicates"). Carries the same
+    /// identity anti-join guard posture as `HorizonExtensionInsert`
+    /// (`rerun_safe` follows the same NOT-NULL-proven-identity
+    /// conditionality).
+    FilterLoosenInsert,
+    /// F1 — new `UNION ALL` branch (research §4): `INSERT INTO t (<cols>)
+    /// SELECT <cols> FROM (<branch>) …` — `UNION ALL` is additive, so the
+    /// added branch is exactly the delta; no difference predicate is needed
+    /// (unlike `FilterLoosenInsert`/`HorizonExtensionInsert`). Carries the
+    /// same identity anti-join guard posture as those two techniques.
+    UnionBranchInsert,
 }
 
 /// The research §2 "write scope" option metadata.

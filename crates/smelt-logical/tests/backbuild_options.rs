@@ -1156,3 +1156,32 @@ fn b4_alias_in_opaque_where_refuses() {
         atom.inadmissible
     );
 }
+
+// ===== F1 (task-8-brief.md) =====
+
+#[test]
+fn f1_plain_union_refuses() {
+    // Plain `UNION` dedups across branches — the pure diff module does not
+    // attempt to diff dedup semantics, so this refuses; only `UNION ALL`
+    // (additive, branch-diffable) admits F1 (research §4 F1).
+    let before_sql = "SELECT id FROM events_a";
+    let after_sql = "SELECT id FROM events_a UNION SELECT id FROM events_b";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    let reason = atom.inadmissible[0].reason.to_lowercase();
+    assert!(reason.contains("f1"), "reason: {reason}");
+    assert!(reason.contains("union all"), "reason: {reason}");
+
+    let targeted = assemble(
+        &options,
+        &Selection::Targeted {
+            atom_choices: vec![0],
+        },
+    );
+    assert!(targeted.is_empty());
+}

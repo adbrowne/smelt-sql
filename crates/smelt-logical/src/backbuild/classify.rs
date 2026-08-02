@@ -209,17 +209,11 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
         inputs,
     ));
 
-    match &comparable.set_ops {
-        SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
-            atoms.push(unclassified_refusal_named("set-operations"));
-        }
-        SetOpDiff::Opaque { reason } => {
-            atoms.push(unclassified_refusal_named(&format!(
-                "set-operations: {reason}"
-            )));
-        }
-        _ => {}
-    }
+    atoms.extend(classify_set_ops(
+        &comparable.set_ops,
+        after_columns.as_deref(),
+        inputs,
+    ));
 
     atoms
 }
@@ -434,18 +428,134 @@ fn classify_conjunct_diff(
             .collect();
     }
 
+    // E2 (research §4: "filter loosened") — admitted only when the removed
+    // conjunct is the diff's *sole* predicate change (no added conjunct
+    // alongside it): the general "arbitrary predicate change" shape (E3 —
+    // both an added and a removed conjunct, e.g. an equality swap or a mixed
+    // comparison operator that fails E4's range-widening proof) composes E1
+    // + E2 mathematically (research §4 E3), but that combined single-diff
+    // admission is not yet oracle-conformance-tested by this phase — a
+    // future phase can lift this same removed-conjunct classifier to fire
+    // alongside a non-empty `added` list once it has that coverage. This
+    // phase's proven surface is: E1 alone (`added` non-empty, `removed`
+    // empty, handled above) and E2 alone (`removed` has exactly one
+    // conjunct, `added` empty, handled here) — H's ordering already proves
+    // *composite* deletes-before-inserts across independent atoms (the H
+    // composite conformance tests), so a future E3 lift is purely an
+    // admission-surface widening, not new machinery.
+    if added.is_empty() && removed.len() == 1 {
+        return vec![build_e2_atom(
+            0,
+            &removed[0],
+            representatives,
+            after_columns,
+            inputs,
+        )];
+    }
+
     let reason = match e4_pair {
+        // `added.len() == 1 && removed.len() == 1` (the only shape
+        // `try_e4_pair` is ever attempted for) but the pair failed E4's
+        // range-widening proof: surface *that* specific reason — it names
+        // exactly why (mixed operators, a non-ISO-8601 literal, …) — rather
+        // than the generic multi-conjunct message below, which would lose
+        // that detail.
         Some(Err(reason)) => format!(
             "the added+removed conjunct pair is not an admissible E4 (time-horizon extension) \
-             range-widening shape: {reason} — E2/E3 (filter loosened / arbitrary predicate \
-             change) are not yet implemented by this phase"
+             range-widening shape: {reason} — E3 (arbitrary predicate change, composing E1 + \
+             E2) is not yet admitted for this shape by this phase (E2 alone only admits a \
+             removed conjunct with no added conjunct alongside it)"
         ),
-        _ => "the WHERE-clause diff removes one or more conjuncts without a single admissible \
-              E4 pair — E2/E3 (filter loosened / arbitrary predicate change) are not yet \
-              implemented by this phase"
-            .to_string(),
+        _ => format!(
+            "the WHERE-clause diff removes {} conjunct(s) alongside {} added conjunct(s) — \
+             this phase admits E2 (filter loosened) only for a single removed conjunct with no \
+             added conjunct alongside it; E3 (arbitrary predicate change, composing E1 + E2) is \
+             not yet admitted for this shape",
+            removed.len(),
+            added.len()
+        ),
     };
     vec![e_class_where_refusal(reason)]
+}
+
+// ----- E2: filter loosened (research §4 E2) -----
+
+fn build_e2_atom(
+    index: usize,
+    removed: &Expr,
+    representatives: &BTreeSet<String>,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    let atom_change = AtomicChange::RemovedConjunct { index };
+    match build_e2_option(removed, representatives, after_columns, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: atom_change,
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: atom_change,
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("removed conjunct #{index}"),
+                reason,
+            }],
+        },
+    }
+}
+
+/// E2 admission (research §4 E2): the after-definition's own difference
+/// `INSERT`, scoped by the removed conjunct in its always-complement form
+/// (`AND (<q>) IS NOT TRUE`) — exactly [`build_e4_option`]'s shape, minus the
+/// range-widening proof (research §4 E4: "mechanically an E2 whose
+/// removed/added conjuncts are range predicates on one column").
+fn build_e2_option(
+    removed: &Expr,
+    representatives: &BTreeSet<String>,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let after_columns = after_columns.ok_or_else(|| {
+        "E2 (filter loosened) refused: the after-definition's output column list could not be \
+         determined (the SELECT-list diff is opaque)"
+            .to_string()
+    })?;
+    if after_columns.is_empty() {
+        return Err(
+            "E2 (filter loosened) refused: the after-definition has no output columns".to_string(),
+        );
+    }
+
+    let requalified_removed = requalify::requalify(removed, representatives)
+        .map_err(|reason| format!("E2 (filter loosened) refused: {reason}"))?;
+
+    // Same key-addressability obligation as E4's identity anti-join guard
+    // (research §4 intro): an equality anti-join never matches a NULL-keyed
+    // row on either side, so a nullable identity column would let a rerun
+    // silently re-insert. A declared identity that isn't provably NOT NULL
+    // is treated exactly like no declared identity — the guard is omitted
+    // and the option is recorded one-shot, never a refusal.
+    let identity_columns = inputs.row_identity.as_ref().filter(|cols| {
+        cols.iter()
+            .all(|c| inputs.not_null_columns.contains(c.as_str()))
+    });
+    let statement = emit::emit_difference_insert(
+        &inputs.table,
+        after_columns,
+        &inputs.after_sql,
+        &requalified_removed,
+        identity_columns.map(Vec::as_slice),
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::FilterLoosenInsert,
+        slot: Some(HSlot::Insert),
+        statements: vec![statement],
+        write_scope: WriteScope::RowSubset,
+        reads_upstream: true,
+        rerun_safe: identity_columns.is_some(),
+    })
 }
 
 // ----- E1: filter tightened (research §4 E1) -----
@@ -879,6 +989,193 @@ fn build_e4_option(
         // NULL) this is documented one-shot (research §2 "Idempotence").
         rerun_safe: identity_columns.is_some(),
     })
+}
+
+// ===== F1: new UNION ALL branch (research §4 F1) =====
+
+/// A named, fail-closed refusal whose `reason` is caller-supplied verbatim
+/// (unlike [`unclassified_refusal_named`], whose reason is a fixed
+/// boilerplate string) — used for the set-operation diff's refusal paths so
+/// the reason text can name F1/F2 and the underlying diff reason directly,
+/// the same posture [`e_class_where_refusal`] gives the E-class.
+fn set_op_refusal(atom: &str, reason: String) -> AtomAnalysis {
+    AtomAnalysis {
+        change: AtomicChange::Unclassified,
+        options: Vec::new(),
+        inadmissible: vec![BackbuildRefusal {
+            atom: atom.to_string(),
+            reason,
+        }],
+    }
+}
+
+/// Classify a [`SetOpDiff`] into F1 atoms/refusals (research §4 F1) — shared
+/// by [`classify_comparable`] and [`classify_added_left_join_diff`], which
+/// otherwise duplicated this match. `after_columns` is the after-definition's
+/// declared output column list (the branches' shared column names, research
+/// §4 "H. Composites"' explicit-column-list requirement) — `None` only when
+/// the SELECT-list diff itself is opaque, which blocks F1 (its `INSERT`
+/// needs an explicit column list) exactly like it blocks E4.
+fn classify_set_ops(
+    set_ops: &SetOpDiff,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
+    match set_ops {
+        SetOpDiff::Branches { added, removed, .. } if added.len() == 1 && removed.is_empty() => {
+            vec![build_f1_atom(0, &added[0], after_columns, inputs)]
+        }
+        SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
+            vec![set_op_refusal(
+                "set-operations",
+                format!(
+                    "the set-operation branch diff changed in a way this phase does not yet \
+                     classify into an admissible technique — F1 (added UNION ALL branch) only \
+                     admits a single added branch with no removed branch ({} added, {} \
+                     removed here); F2 (removed UNION ALL branch) is out of this phase's scope",
+                    added.len(),
+                    removed.len()
+                ),
+            )]
+        }
+        SetOpDiff::Opaque { reason } => vec![set_op_refusal(
+            "set-operations",
+            format!(
+                "F1 (added UNION ALL branch) refused: the set-operation diff could not be \
+                 factored into a UNION ALL branch add/remove — {reason}"
+            ),
+        )],
+        _ => Vec::new(),
+    }
+}
+
+fn build_f1_atom(
+    index: usize,
+    branch: &SelectStmt,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> AtomAnalysis {
+    let atom_change = AtomicChange::AddedSetOpBranch { index };
+    match build_f1_option(branch, after_columns, inputs) {
+        Ok(option) => AtomAnalysis {
+            change: atom_change,
+            options: vec![option],
+            inadmissible: Vec::new(),
+        },
+        Err(reason) => AtomAnalysis {
+            change: atom_change,
+            options: Vec::new(),
+            inadmissible: vec![BackbuildRefusal {
+                atom: format!("added set-operation branch #{index}"),
+                reason,
+            }],
+        },
+    }
+}
+
+/// F1 admission (research §4 F1): `UNION ALL` is additive, so the added
+/// branch is exactly the delta — `INSERT INTO t (<cols>) SELECT <cols> FROM
+/// (<branch>) …`, no difference predicate needed (unlike E2/E4).
+fn build_f1_option(
+    branch: &SelectStmt,
+    after_columns: Option<&[String]>,
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let after_columns = after_columns.ok_or_else(|| {
+        "F1 (added UNION ALL branch) refused: the after-definition's output column list could \
+         not be determined (the SELECT-list diff is opaque)"
+            .to_string()
+    })?;
+    if after_columns.is_empty() {
+        return Err(
+            "F1 (added UNION ALL branch) refused: the after-definition has no output columns"
+                .to_string(),
+        );
+    }
+
+    let branch_sql = branch_own_text(branch);
+
+    // Same key-addressability obligation E2/E4's identity anti-join guard
+    // shares (research §4 intro): a declared identity that isn't provably
+    // NOT NULL is treated exactly like no declared identity — the guard is
+    // omitted and the option is recorded one-shot, never a refusal.
+    let identity_columns = inputs.row_identity.as_ref().filter(|cols| {
+        cols.iter()
+            .all(|c| inputs.not_null_columns.contains(c.as_str()))
+    });
+    let statement = emit::emit_branch_insert(
+        &inputs.table,
+        after_columns,
+        &branch_sql,
+        identity_columns.map(Vec::as_slice),
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::UnionBranchInsert,
+        slot: Some(HSlot::Insert),
+        statements: vec![statement],
+        write_scope: WriteScope::RowSubset,
+        reads_upstream: true,
+        rerun_safe: identity_columns.is_some(),
+    })
+}
+
+/// `branch`'s own source text — just its own `SELECT`/`FROM`/`WHERE`/…
+/// clauses, stopping before the `UNION`/`INTERSECT`/`EXCEPT` token that
+/// introduces its set-operation tail (if any). Mirrors `diff.rs`'s
+/// `branch_token_seq` (same direct-children walk, same stop condition) but
+/// returns the branch's actual source substring rather than a token-kind
+/// sequence — needed here to splice the branch verbatim into F1's `INSERT
+/// … SELECT <branch>` script. Duplicated rather than exposed from `diff.rs`
+/// (out of this phase's touch-scope) — a small, self-contained CST walk, not
+/// the dependency-collection machinery the "don't fork" rule is about.
+fn branch_own_text(branch: &SelectStmt) -> String {
+    use smelt_parser::SyntaxKind::{EXCEPT_KW, INTERSECT_KW, UNION_KW};
+
+    let node = branch.syntax();
+    let node_start = u32::from(node.text_range().start());
+    let full_text = node.text().to_string();
+
+    let mut first = None;
+    let mut last = None;
+    'outer: for child in node.children_with_tokens() {
+        if let Some(tok) = child.as_token() {
+            if matches!(tok.kind(), UNION_KW | INTERSECT_KW | EXCEPT_KW) {
+                // The set-operation tail (and the branch it introduces)
+                // starts here — everything from here on belongs to a
+                // different branch.
+                break 'outer;
+            }
+            if !tok.kind().is_trivia() {
+                if first.is_none() {
+                    first = Some(tok.text_range().start());
+                }
+                last = Some(tok.text_range().end());
+            }
+            continue;
+        }
+        if let Some(child_node) = child.as_node() {
+            for tok in child_node
+                .descendants_with_tokens()
+                .filter_map(|e| e.into_token())
+                .filter(|t| !t.kind().is_trivia())
+            {
+                if first.is_none() {
+                    first = Some(tok.text_range().start());
+                }
+                last = Some(tok.text_range().end());
+            }
+        }
+    }
+
+    match (first, last) {
+        (Some(start), Some(end)) => {
+            let start = (u32::from(start) - node_start) as usize;
+            let end = (u32::from(end) - node_start) as usize;
+            full_text[start..end].to_string()
+        }
+        _ => full_text,
+    }
 }
 
 fn dropped_column_unclassified(name: &str) -> AtomAnalysis {
@@ -1929,17 +2226,11 @@ fn classify_added_left_join_diff(
         inputs,
     ));
 
-    match &comparable.set_ops {
-        SetOpDiff::Branches { added, removed, .. } if !added.is_empty() || !removed.is_empty() => {
-            atoms.push(unclassified_refusal_named("set-operations"));
-        }
-        SetOpDiff::Opaque { reason } => {
-            atoms.push(unclassified_refusal_named(&format!(
-                "set-operations: {reason}"
-            )));
-        }
-        _ => {}
-    }
+    atoms.extend(classify_set_ops(
+        &comparable.set_ops,
+        Some(&after_columns),
+        inputs,
+    ));
 
     atoms
 }
@@ -2401,16 +2692,16 @@ pub enum Selection {
 /// classification already produced (statement single-ownership,
 /// `docs/specs/architecture.md` §"Constraints & Invariants" item 12).
 ///
-/// This phase's classifier only ever produces atoms with empty option
-/// sets, so [`Selection::Targeted`] composes to an empty script in every
-/// case it can reach today: zero atoms (the A0 no-op case), or one or more
-/// atoms that all lack an admissible option (every refusal case this phase
-/// derives). The H-ordering slot structure (research §4 "H. Composites":
-/// `renames → ALTER ADD/TYPE → DELETEs → UPDATEs/MERGEs → INSERTs → ALTER
-/// DROPs`) is built out in full regardless, so later phases — which
-/// populate atom options with real techniques — only need to give each new
-/// [`Technique`] an [`HSlot`]; this function's bucketing loop does not
-/// change.
+/// The H-ordering slot structure (research §4 "H. Composites": `renames →
+/// ALTER ADD/TYPE → DELETEs → UPDATEs/MERGEs → INSERTs → ALTER DROPs`) is a
+/// property of this function alone — one bucketing-and-concatenation pass
+/// over whatever [`Technique`]s the selection names, keyed purely by each
+/// chosen option's [`HSlot`]. Every new technique a classifier admits only
+/// ever needs to name its [`HSlot`]; this composition loop never changes
+/// per-technique. [`Selection::Targeted`] still composes to an empty script
+/// for the cases no technique is admissible for: zero atoms (the A0 no-op
+/// case), or one or more atoms that all lack an admissible option (every
+/// refusal case) — partial application is never offered (research §2).
 pub fn assemble(options: &BackbuildOptions, selection: &Selection) -> Vec<String> {
     match selection {
         Selection::FullRefresh => options.full_refresh.statements.clone(),
