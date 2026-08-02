@@ -102,26 +102,29 @@ describe('ModelDiagnostics', () => {
     expect(viewerTexts(container).some((t) => t.includes('DELETE FROM t'))).toBe(false)
   })
 
-  it('remove_comments_toggle_applies_to_every_viewer', async () => {
+  it('comments_are_folded_by_default_in_every_viewer', async () => {
     const { container } = renderPage()
 
     await waitFor(() => {
       expect(viewerTexts(container).some((t) => t.includes('DELETE FROM t'))).toBe(true)
     })
-    // Model SQL viewer's comment is present before toggling.
-    expect(viewerTexts(container).some((t) => t.includes('model comment'))).toBe(true)
-    // Technique-preview viewer's comment is present before toggling.
-    expect(viewerTexts(container).some((t) => t.includes('delete comment'))).toBe(true)
 
-    const toggle = screen.getByLabelText('Remove comments')
-    fireEvent.click(toggle)
-
-    await waitFor(() => {
-      expect(viewerTexts(container).some((t) => t.includes('model comment'))).toBe(false)
-    })
+    // Every viewer's comment starts folded away — the model SQL viewer's
+    // and the admitted technique preview's alike.
+    expect(viewerTexts(container).some((t) => t.includes('model comment'))).toBe(false)
     expect(viewerTexts(container).some((t) => t.includes('delete comment'))).toBe(false)
-    // Non-comment SQL text remains in every viewer.
+    // Non-comment SQL text remains visible in every viewer.
     expect(viewerTexts(container).some((t) => t.includes('SELECT id FROM events'))).toBe(true)
     expect(viewerTexts(container).some((t) => t.includes('DELETE FROM t WHERE 1=1'))).toBe(true)
+
+    // Unfolding one viewer's comment doesn't delete or reveal any other
+    // viewer's comment — folding is per-viewer, local editor state.
+    const placeholders = container.querySelectorAll('.cm-foldPlaceholder')
+    expect(placeholders.length).toBeGreaterThan(0)
+    fireEvent.click(placeholders[0])
+
+    await waitFor(() => {
+      expect(viewerTexts(container).some((t) => t.includes('comment'))).toBe(true)
+    })
   })
 })

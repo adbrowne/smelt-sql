@@ -2,7 +2,6 @@ pub mod ast;
 pub mod lexer;
 pub mod parser;
 pub mod printer;
-pub mod strip_comments;
 pub mod symbol;
 /// smelt-parser - Rowan-based parser for smelt SQL files
 ///
@@ -20,7 +19,6 @@ pub mod syntax_kind;
 pub use ast::*;
 pub use parser::{parse, parse_meta_expression_from_offset, Parse, ParseError};
 pub use printer::{FormatContext, FormatMode};
-pub use strip_comments::strip_sql_comments;
 pub use symbol::is_valid_sql_identifier;
 pub use syntax_kind::SyntaxKind;
 

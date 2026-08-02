@@ -1,12 +1,12 @@
-import { useMemo } from 'react'
+import { useCallback } from 'react'
 import CodeMirror from '@uiw/react-codemirror'
 import { sql as sqlLang } from '@codemirror/lang-sql'
 import { EditorView } from '@codemirror/view'
-import { stripSqlComments } from '../lib/stripSqlComments'
+import { foldEffect } from '@codemirror/language'
+import { findSqlCommentRanges } from '../lib/sqlCommentRanges'
 
 interface SqlViewerProps {
   sql: string
-  removeComments: boolean
 }
 
 const extensions = [sqlLang(), EditorView.lineWrapping]
@@ -15,26 +15,36 @@ const extensions = [sqlLang(), EditorView.lineWrapping]
  * Read-only, syntax-highlighted SQL display
  * (`docs/specs/ui_model_diagnostics.md` §Surface "UI page": "SQL … renders
  * in a read-only syntax-highlighted viewer, not a plain preformatted
- * block"). `removeComments` applies the page-wide "Remove comments" toggle
- * to this one viewer's content — see `stripSqlComments` for why the
- * stripping happens here, client-side, rather than in the API response.
+ * block"). `--`/`/* … *\/` comment spans (`findSqlCommentRanges`) are
+ * folded by default on load — the original text is untouched, so a
+ * comment is one click on the gutter's unfold marker away, and there is
+ * no risk of the leftover-blank-line artifact a text-deletion toggle
+ * would leave behind. See §Semantics "Comment folding" and §Design "Why
+ * comment folding, not comment stripping".
  */
-export function SqlViewer({ sql, removeComments }: SqlViewerProps) {
-  const displayedSql = useMemo(
-    () => (removeComments ? stripSqlComments(sql) : sql),
-    [sql, removeComments]
+export function SqlViewer({ sql }: SqlViewerProps) {
+  const handleCreateEditor = useCallback(
+    (view: EditorView) => {
+      const ranges = findSqlCommentRanges(sql)
+      if (ranges.length === 0) return
+      view.dispatch({
+        effects: ranges.map((range) => foldEffect.of(range)),
+      })
+    },
+    [sql]
   )
 
   return (
     <div className="rounded border border-gray-200 overflow-hidden text-xs">
       <CodeMirror
-        value={displayedSql}
+        value={sql}
         extensions={extensions}
         readOnly
         editable={false}
+        onCreateEditor={handleCreateEditor}
         basicSetup={{
           lineNumbers: true,
-          foldGutter: false,
+          foldGutter: true,
           highlightActiveLine: false,
           highlightActiveLineGutter: false,
         }}

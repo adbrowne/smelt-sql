@@ -75,12 +75,13 @@ real run will actually use. To change what a real run does, use the model's
 `maintenance:` frontmatter, as described in
 [Incremental Models](incremental-models.md#steering-prefer--technique).
 
-## Remove comments
+## Comment folding
 
-A single "Remove comments" toggle at the top of the page applies to every SQL viewer on the
-page at once — the model's own SQL and every technique preview's statements — stripping `--`
-and `/* */` comments while leaving the surrounding formatting untouched. This is purely a
-display filter; it doesn't change what SQL a run would execute.
+Every SQL viewer on the page — the model's own SQL and every technique preview's statements —
+folds `--` and `/* */` comments by default, so the SQL itself is easier to scan. A folded
+comment isn't deleted: click its viewer's fold marker to expand it back, independently of every
+other viewer on the page. This is purely a display convenience; it doesn't change what SQL a
+run would execute.
 
 ## Further reading
 

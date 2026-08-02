@@ -231,13 +231,7 @@ function PropertiesSection({ properties }: { properties: PropertySet }) {
   )
 }
 
-function TechniquePreviewBlock({
-  cell,
-  removeComments,
-}: {
-  cell: PlanCellDiagnostics
-  removeComments: boolean
-}) {
+function TechniquePreviewBlock({ cell }: { cell: PlanCellDiagnostics }) {
   const [selectedTechnique, setSelectedTechnique] = useState<Technique>(cell.admitted_technique)
 
   const selectedPreview: TechniquePreview | undefined = cell.technique_previews.find(
@@ -284,7 +278,7 @@ function TechniquePreviewBlock({
               <div className="text-xs text-gray-400">no statements for this technique</div>
             )}
             {selectedPreview.statements.map((statement, i) => (
-              <SqlViewer key={i} sql={statement.sql} removeComments={removeComments} />
+              <SqlViewer key={i} sql={statement.sql} />
             ))}
           </div>
         </div>
@@ -302,8 +296,6 @@ function TechniquePreviewBlock({
  * calls and its own scroll container.
  */
 export function ModelDiagnostics({ model, onClose }: ModelDiagnosticsProps) {
-  const [removeComments, setRemoveComments] = useState(false)
-
   const { data: detail, isLoading: detailLoading, error: detailError } = useQuery({
     queryKey: ['model', model],
     queryFn: () => fetchModel(model),
@@ -323,15 +315,6 @@ export function ModelDiagnostics({ model, onClose }: ModelDiagnosticsProps) {
         <div className="flex items-center justify-between mb-6">
           <h1 className="text-xl font-semibold text-gray-900">Diagnostics: {model}</h1>
           <div className="flex items-center gap-4">
-            <label className="flex items-center gap-2 text-sm text-gray-700">
-              <input
-                type="checkbox"
-                checked={removeComments}
-                onChange={(e) => setRemoveComments(e.target.checked)}
-                className="rounded border-gray-300"
-              />
-              Remove comments
-            </label>
             <button
               onClick={onClose}
               className="text-sm text-gray-500 hover:text-gray-800 border border-gray-300 rounded px-3 py-1"
@@ -408,7 +391,7 @@ export function ModelDiagnostics({ model, onClose }: ModelDiagnosticsProps) {
 
             <div>
               <h3 className="text-xs font-semibold text-gray-500 uppercase tracking-wide mb-2">Model SQL</h3>
-              <SqlViewer sql={detail.sql} removeComments={removeComments} />
+              <SqlViewer sql={detail.sql} />
             </div>
           </section>
         )}
@@ -433,7 +416,7 @@ export function ModelDiagnostics({ model, onClose }: ModelDiagnosticsProps) {
                 <p className="text-xs text-gray-400">No maintenance cells for this model.</p>
               )}
               {diagnostics.cells.map((cell, i) => (
-                <TechniquePreviewBlock key={`${cell.group}-${i}`} cell={cell} removeComments={removeComments} />
+                <TechniquePreviewBlock key={`${cell.group}-${i}`} cell={cell} />
               ))}
             </section>
           </>
