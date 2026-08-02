@@ -931,6 +931,176 @@ fn b4_general_expression_null_extension() {
     assert_eq!(unmatched, vec!["none".to_string()]);
 }
 
+// ===== B7 (task-9-brief.md) =====
+
+#[test]
+fn b7_two_joins_sequential_backfill() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, dim1_id INTEGER);
+         CREATE TABLE dim1 (dim1_id INTEGER, region_id INTEGER);
+         CREATE TABLE dim2 (region_id INTEGER, region_name TEXT);
+         INSERT INTO orders VALUES (1, 10), (2, 20), (3, 10);
+         INSERT INTO dim1 VALUES (10, 100), (20, 200);
+         INSERT INTO dim2 VALUES (100, 'north'), (200, 'south');",
+    );
+
+    // dim2's ON keys on `d1.region_id` — a column dim1 provides *and* the
+    // model stores (the added, bare `region_id` pull-through) — so dim2's
+    // backfill must run strictly after dim1's.
+    let before_sql = "SELECT o.order_id AS order_id, o.dim1_id AS dim1_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.dim1_id AS dim1_id, d1.region_id AS \
+                      region_id, d2.region_name AS region_name FROM orders o LEFT JOIN dim1 d1 \
+                      ON o.dim1_id = d1.dim1_id LEFT JOIN dim2 d2 ON d1.region_id = \
+                      d2.region_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "d1".to_string(),
+        source_ref("dim1", &["dim1_id"], &["dim1_id"]),
+    );
+    sources.insert(
+        "d2".to_string(),
+        source_ref("dim2", &["region_id"], &["region_id"]),
+    );
+    let inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types: [
+            ("region_id".to_string(), "INTEGER".to_string()),
+            ("region_name".to_string(), "TEXT".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        sources,
+    };
+
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    assert!(
+        matches!(
+            &options.atoms[0].change,
+            smelt_logical::backbuild::AtomicChange::AddedColumn { name } if name == "region_id"
+        ),
+        "expected dim1's backfill atom (region_id) first, got {:?}",
+        options.atoms[0].change
+    );
+    assert!(
+        matches!(
+            &options.atoms[1].change,
+            smelt_logical::backbuild::AtomicChange::AddedColumn { name } if name == "region_name"
+        ),
+        "expected dim2's backfill atom (region_name) second, got {:?}",
+        options.atoms[1].change
+    );
+    for atom in &options.atoms {
+        assert_eq!(atom.options.len(), 2, "atom: {atom:?}");
+        assert!(atom.inadmissible.is_empty());
+    }
+
+    // Both admitted shapes (bare pull-through `UPDATE ... FROM` and the
+    // scalar-subquery form) compose into an oracle-equal script, with
+    // dim1's ALTER+UPDATE always ordered before dim2's.
+    for shape in [0usize, 1] {
+        let selection = Selection::Targeted {
+            atom_choices: vec![shape, shape],
+        };
+        let script = assemble(&options, &selection);
+        assert_eq!(script.len(), 4, "shape {shape}: {script:?}");
+        assert!(
+            script[0].contains("region_id") && script[0].starts_with("ALTER"),
+            "shape {shape}: {script:?}"
+        );
+        assert!(
+            script[2].contains("region_name") && script[2].starts_with("ALTER"),
+            "shape {shape}: {script:?}"
+        );
+        harness::verify_script(&conn, "t", before_sql, after_sql, &script);
+    }
+}
+
+#[test]
+fn b7_independent_joins_either_order() {
+    let conn = Connection::open_in_memory().expect("duckdb");
+    harness::stage_inputs(
+        &conn,
+        "CREATE TABLE orders (order_id INTEGER, customer_id INTEGER, product_id INTEGER);
+         CREATE TABLE customers (customer_id INTEGER, customer_name TEXT);
+         CREATE TABLE products (product_id INTEGER, product_name TEXT);
+         INSERT INTO orders VALUES (1, 100, 900), (2, 200, 900), (3, 100, 800);
+         INSERT INTO customers VALUES (100, 'alice'), (200, 'bob');
+         INSERT INTO products VALUES (900, 'widget'), (800, 'gadget');",
+    );
+
+    // Two added joins, each keyed on an already-stored (pre-existing)
+    // representative column — no reference relationship between them, so
+    // either processing order is correct.
+    let before_sql =
+        "SELECT o.order_id AS order_id, o.customer_id AS customer_id, o.product_id AS product_id \
+         FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.customer_id AS customer_id, o.product_id \
+                      AS product_id, c.customer_name AS customer_name, p.product_name AS \
+                      product_name FROM orders o LEFT JOIN customers c ON o.customer_id = \
+                      c.customer_id LEFT JOIN products p ON o.product_id = p.product_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let mut sources = BTreeMap::new();
+    sources.insert(
+        "c".to_string(),
+        source_ref("customers", &["customer_id"], &["customer_id"]),
+    );
+    sources.insert(
+        "p".to_string(),
+        source_ref("products", &["product_id"], &["product_id"]),
+    );
+    let inputs = BackbuildInputs {
+        table: "t".to_string(),
+        after_sql: after_sql.to_string(),
+        row_identity: None,
+        not_null_columns: BTreeSet::new(),
+        added_column_types: [
+            ("customer_name".to_string(), "TEXT".to_string()),
+            ("product_name".to_string(), "TEXT".to_string()),
+        ]
+        .into_iter()
+        .collect(),
+        sources,
+    };
+
+    let options = derive_backbuild_options(&diff, &inputs);
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    for atom in &options.atoms {
+        assert_eq!(atom.options.len(), 2, "atom: {atom:?}");
+        assert!(atom.inadmissible.is_empty());
+    }
+    // Both backfills are emitted regardless of which alias happens to sort
+    // first — the independence case names no required relative order.
+    let names: BTreeSet<String> = options
+        .atoms
+        .iter()
+        .map(|a| match &a.change {
+            smelt_logical::backbuild::AtomicChange::AddedColumn { name } => name.clone(),
+            other => panic!("expected AddedColumn, got {other:?}"),
+        })
+        .collect();
+    assert_eq!(
+        names,
+        BTreeSet::from(["customer_name".to_string(), "product_name".to_string()])
+    );
+
+    let script = assemble(&options, &targeted_of_len(2));
+    assert_eq!(script.len(), 4, "{script:?}");
+    harness::verify_script(&conn, "t", before_sql, after_sql, &script);
+}
+
 // ===== E1/E4 (task-7-brief.md) =====
 
 #[test]

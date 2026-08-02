@@ -23,7 +23,7 @@
 //! atom list — fail-loud discipline (`docs/specs/architecture.md`
 //! §"Fail-loud discipline").
 
-use std::collections::{BTreeSet, HashSet};
+use std::collections::{BTreeMap, BTreeSet, HashSet};
 
 use smelt_parser::syntax_kind::SyntaxNode;
 use smelt_parser::{Expr, JoinClause, JoinType, SelectStmt, SyntaxKind};
@@ -60,9 +60,10 @@ pub fn derive_backbuild_options(
                     SkeletonDiff::Changed { reason } => vec![skeleton_refusal(reason)],
                     SkeletonDiff::Unchanged => classify_comparable(comparable, inputs),
                     // B4 (a single added LEFT JOIN feeding only added
-                    // columns, research §4 B4); two or more added LEFT
-                    // JOINs is B7 (research §4 B7), out of this phase's
-                    // scope.
+                    // columns, research §4 B4) for exactly one added join;
+                    // B7 (research §4 B7, "sequential multi-join
+                    // enrichment") for two or more — each join re-runs the
+                    // same B4 proof, in reference-dependency order.
                     SkeletonDiff::AddedLeftJoins(joins) => {
                         classify_added_left_join_diff(joins, comparable, inputs)
                     }
@@ -2197,33 +2198,18 @@ fn try_b4(
     Ok(options)
 }
 
-/// B7 (research §4 B7, "sequential multi-join enrichment"): two or more
-/// added `LEFT JOIN`s, backfilled one step at a time — out of this phase's
-/// scope. Refuse with a named reason rather than misclassifying it as a
-/// single B4 backfill.
-fn b7_refusal() -> AtomAnalysis {
-    AtomAnalysis {
-        change: AtomicChange::Skeleton {
-            reason: "two or more added LEFT JOINs".to_string(),
-        },
-        options: Vec::new(),
-        inadmissible: vec![BackbuildRefusal {
-            atom: "skeleton".to_string(),
-            reason: "B7 (sequential multi-join enrichment) is out of this phase's scope — two \
-                     or more added LEFT JOINs are refused here rather than misclassified as a \
-                     single B4 backfill"
-                .to_string(),
-        }],
-    }
-}
-
 /// A single, named refusal for the whole added-`LEFT JOIN` skeleton change
-/// (research §4 B4): used both when [`admit_added_left_join`]'s proof fails
-/// outright and when the select list this phase cannot factor (`Opaque`)
-/// arrives alongside an added join. Mirrors [`skeleton_refusal`]'s shape —
-/// the shared B/D-class row-set-unchanged precondition (research §4 intro)
-/// fails for the *whole* diff once the join cannot be licensed, so (as with
-/// any other skeleton refusal) no per-column classification is attempted.
+/// (research §4 B4/B7): used both when [`admit_added_left_join`]'s proof
+/// fails outright (for the single-join B4 path, or for any one join in a
+/// B7 chain — `reason` is prefixed with the failing join's own alias by
+/// [`classify_b7_diff`] so the refusal names which join, per research §2
+/// "Refusal posture"), when [`derive_join_order`] cannot resolve a
+/// dependency order, and when the select list this phase cannot factor
+/// (`Opaque`) arrives alongside an added join. Mirrors [`skeleton_refusal`]'s
+/// shape — the shared B/D-class row-set-unchanged precondition (research §4
+/// intro) fails for the *whole* diff once a join cannot be licensed, so (as
+/// with any other skeleton refusal) no per-column classification is
+/// attempted.
 fn added_left_join_refusal(reason: &str) -> AtomAnalysis {
     AtomAnalysis {
         change: AtomicChange::Skeleton {
@@ -2237,28 +2223,38 @@ fn added_left_join_refusal(reason: &str) -> AtomAnalysis {
     }
 }
 
-/// Classify a diff whose skeleton is [`SkeletonDiff::AddedLeftJoins`]
-/// (research §4 B4): exactly one added `LEFT JOIN`, admitted via
-/// [`admit_added_left_join`] once for the whole join, then classified per
-/// atom — added SELECT items depending solely on the new alias go through
-/// [`try_b4`] (via [`classify_added_column`]'s `join_admission` parameter);
-/// everything else (rename pairing, ordinary B1/B3 adds, D1/D2 changed
-/// columns, the WHERE/set-operation catch-alls) runs through the same
-/// machinery [`classify_comparable`] uses for an unchanged skeleton. Two or
-/// more added joins refuse outright (B7, out of scope); an admission
-/// failure for the single join refuses the *whole* diff (no atom list),
-/// since the shared row-set-unchanged precondition (research §4 intro) then
-/// fails for every atom, not just the join's own added columns.
+/// Dispatch a diff whose skeleton is [`SkeletonDiff::AddedLeftJoins`]:
+/// exactly one added `LEFT JOIN` is B4 ([`classify_single_added_left_join`]);
+/// two or more is B7 ([`classify_b7_diff`], research §4 B7) — each join
+/// re-runs the same B4 admission proof, in reference-dependency order.
 fn classify_added_left_join_diff(
     joins: &[JoinClause],
     comparable: &ComparableDiff,
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
-    if joins.len() != 1 {
-        return vec![b7_refusal()];
+    if joins.len() == 1 {
+        classify_single_added_left_join(&joins[0], comparable, inputs)
+    } else {
+        classify_b7_diff(joins, comparable, inputs)
     }
-    let join = &joins[0];
+}
 
+/// Classify a diff with exactly one added `LEFT JOIN` (research §4 B4):
+/// admitted via [`admit_added_left_join`] once for the whole join, then
+/// classified per atom — added SELECT items depending solely on the new
+/// alias go through [`try_b4`] (via [`classify_added_column`]'s
+/// `join_admission` parameter); everything else (rename pairing, ordinary
+/// B1/B3 adds, D1/D2 changed columns, the WHERE/set-operation catch-alls)
+/// runs through the same machinery [`classify_comparable`] uses for an
+/// unchanged skeleton. An admission failure for the join refuses the *whole*
+/// diff (no atom list), since the shared row-set-unchanged precondition
+/// (research §4 intro) then fails for every atom, not just the join's own
+/// added columns.
+fn classify_single_added_left_join(
+    join: &JoinClause,
+    comparable: &ComparableDiff,
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
     let (added, dropped, changed, unchanged) = match &comparable.select_list {
         SelectListDiff::Opaque { reason } => {
             return vec![unclassified_refusal_named(&format!(
@@ -2304,6 +2300,298 @@ fn classify_added_left_join_diff(
             &representatives,
             &representative_sources,
             Some(&admission),
+            inputs,
+        ));
+    }
+
+    let changed_names: BTreeSet<String> = changed.iter().map(|c| c.name.clone()).collect();
+    for c in changed {
+        atoms.push(classify_changed_column(
+            c,
+            &representatives,
+            &representative_sources,
+            &changed_names,
+            inputs,
+        ));
+    }
+
+    let after_columns = after_column_names(unchanged, changed, added);
+    atoms.extend(classify_where_clause(
+        &comparable.where_clause,
+        &representatives,
+        Some(&after_columns),
+        inputs,
+    ));
+
+    atoms.extend(classify_set_ops(
+        &comparable.set_ops,
+        Some(&after_columns),
+        inputs,
+    ));
+
+    atoms
+}
+
+/// Every FROM-tree alias/qualifier referenced anywhere in `expr`'s subtree
+/// — a permissive existence probe, same posture as
+/// [`references_alias_node`] (which only tests membership; this collects
+/// the whole set), used solely to build [`derive_join_order`]'s reference-
+/// dependency graph. Shape validation of the ON condition itself stays
+/// [`admit_added_left_join`]'s job — this is graph-building only, never a
+/// derivability proof, so an unrecognised sub-shape is simply walked
+/// through rather than refused.
+fn collect_referenced_qualifiers(node: &SyntaxNode, out: &mut BTreeSet<String>) {
+    if node.kind() == SyntaxKind::EXPRESSION {
+        if let Some(col) = Expr::cast(node.clone()).and_then(|e| e.as_column_ref()) {
+            if let Some(q) = col.qualifier() {
+                out.insert(q.to_string());
+            }
+            return;
+        }
+    }
+    for child in node.children() {
+        collect_referenced_qualifiers(&child, out);
+    }
+}
+
+/// Derive B7's reference-dependency order over `joins` (research §4 B7; "H.
+/// Composites"' one data-dependent within-slot ordering): join `i` must run
+/// after join `j` whenever `i`'s `ON` condition references `j`'s own alias
+/// anywhere (own-alias references, i.e. the dim-side of `i`'s own key
+/// equality, are excluded — that is not a dependency on another join). This
+/// is deliberately a syntactic, best-effort graph over *every* qualifier `i`
+/// references, not just ones [`admit_added_left_join`] will ultimately prove
+/// addressable — an edge to a join whose column turns out unstored (or
+/// non-bare) still orders correctly, and [`admit_added_left_join`]'s own
+/// proof (run afterward, per join, in this order) is what produces the
+/// actual, actionable refusal for that case (research §4 B7; §7 open
+/// question 7 "Multi-hop enrichment beyond B7" — the boundary this refusal
+/// sits at).
+///
+/// A topological sort (Kahn's algorithm, always picking the lowest-index
+/// ready join for determinism) over that graph; independent joins (no
+/// reference relationship at all — research's `b7_independent_joins_either_
+/// order`) end up in a deterministic, but not declaration-order-preserving,
+/// relative order — since neither depends on the other, either order is
+/// correct. A cycle (or, equivalently, any join whose dependency chain
+/// cannot be fully resolved) refuses fail-closed: `Err` names the aliases
+/// involved rather than guessing an order.
+fn derive_join_order(joins: &[JoinClause], aliases: &[String]) -> Result<Vec<usize>, String> {
+    let alias_index: BTreeMap<&str, usize> = aliases
+        .iter()
+        .enumerate()
+        .map(|(i, a)| (a.as_str(), i))
+        .collect();
+
+    let mut predecessors: Vec<BTreeSet<usize>> = vec![BTreeSet::new(); joins.len()];
+    for (i, join) in joins.iter().enumerate() {
+        let Some(on_expr) = join.condition().and_then(|c| c.on_expression()) else {
+            // No resolvable ON expression at all — nothing to derive a
+            // dependency edge from; `admit_added_left_join` will refuse this
+            // join on its own merits ("no ON/USING condition"/"not a bare
+            // ON key equality") once processing reaches it.
+            continue;
+        };
+        let mut referenced = BTreeSet::new();
+        collect_referenced_qualifiers(on_expr.syntax(), &mut referenced);
+        for q in referenced {
+            if q == aliases[i] {
+                continue;
+            }
+            if let Some(&j) = alias_index.get(q.as_str()) {
+                predecessors[i].insert(j);
+            }
+        }
+    }
+
+    let mut successors: Vec<Vec<usize>> = vec![Vec::new(); joins.len()];
+    let mut in_degree: Vec<usize> = vec![0; joins.len()];
+    for (i, preds) in predecessors.iter().enumerate() {
+        in_degree[i] = preds.len();
+        for &p in preds {
+            successors[p].push(i);
+        }
+    }
+
+    let mut ready: BTreeSet<usize> = (0..joins.len()).filter(|&i| in_degree[i] == 0).collect();
+    let mut order = Vec::with_capacity(joins.len());
+    while let Some(&next) = ready.iter().next() {
+        ready.remove(&next);
+        order.push(next);
+        for &succ in &successors[next] {
+            in_degree[succ] -= 1;
+            if in_degree[succ] == 0 {
+                ready.insert(succ);
+            }
+        }
+    }
+
+    if order.len() != joins.len() {
+        return Err(format!(
+            "the added joins' ON conditions form a reference cycle (or another unresolvable \
+             dependency order) among aliases {aliases:?} — B7 requires a strict dependency order \
+             between sequential join steps"
+        ));
+    }
+
+    Ok(order)
+}
+
+/// Classify a diff with two or more added `LEFT JOIN`s (research §4 B7,
+/// "sequential multi-join enrichment"). Each join runs through the
+/// *unmodified* B4 admission proof ([`admit_added_left_join`]) — LEFT +
+/// at-most-one-match + the shared NOT NULL obligation + bare key equality +
+/// "nothing but the added SELECT items reference the new alias" — in
+/// [`derive_join_order`]'s reference-dependency order, with one extension:
+/// the derivability environment (`representative_sources`) grows, one join
+/// at a time, with the *earlier* steps' own bare pull-through added columns
+/// — so a later join's `ON` condition may key on a column an earlier step
+/// backfills (research §4 B7's "stored-by-then" extension). Bareness is
+/// enforced purely by construction: only a bare column-ref added SELECT item
+/// is ever turned into a representative here (mirroring
+/// [`representative_sources`]'s own `unchanged`-side filter) — a wrapped
+/// carrier (`COALESCE(d1.c, 0) AS c`) never becomes one, so a later join
+/// keyed on it fails [`admit_added_left_join`]'s existing "no stored bare
+/// representative" check with its existing, already-actionable message
+/// (research §4 B7 bareness: a wrapped carrier stores a sentinel where the
+/// rebuild has NULL, so a later join on it could hit a dim row the
+/// rebuild's NULL key misses).
+///
+/// A cyclic/unresolvable order, or any one join's own admission failure,
+/// refuses the *whole* diff (mirrors [`classify_single_added_left_join`]'s
+/// posture) — the shared row-set-unchanged precondition (research §4 intro)
+/// then fails for every atom, not just the failing join's own columns. A
+/// per-join admission failure's refusal is prefixed with that join's own
+/// alias, so it names which join (research §2 "Refusal posture").
+///
+/// Atoms for each join's own added columns are pushed onto the atom list in
+/// that same dependency order — never SELECT-list declaration order.
+/// `assemble` (`mod.rs`) buckets `HSlot::Alter` options by a pure pass over
+/// `BackbuildOptions::atoms` in order (research §4 "H. Composites": "the
+/// update slot is order-free by construction ... except B7, whose steps run
+/// in their derived dependency order"), so pushing atoms in dependency
+/// order here is what makes the assembled script's within-`HSlot::Alter`
+/// statement order follow it — no change to `assemble`'s bucketing logic
+/// itself is needed for this.
+fn classify_b7_diff(
+    joins: &[JoinClause],
+    comparable: &ComparableDiff,
+    inputs: &BackbuildInputs,
+) -> Vec<AtomAnalysis> {
+    let (added, dropped, changed, unchanged) = match &comparable.select_list {
+        SelectListDiff::Opaque { reason } => {
+            return vec![unclassified_refusal_named(&format!(
+                "select-list: {reason}"
+            ))];
+        }
+        SelectListDiff::Diffed {
+            added,
+            dropped,
+            changed,
+            unchanged,
+        } => (added, dropped, changed, unchanged),
+    };
+
+    let mut aliases = Vec::with_capacity(joins.len());
+    for join in joins {
+        match join_reference_name(join) {
+            Some(alias) => aliases.push(alias),
+            None => {
+                return vec![added_left_join_refusal(
+                    "one of the added joins' table references has no resolvable alias or \
+                     identifier",
+                )];
+            }
+        }
+    }
+
+    let order = match derive_join_order(joins, &aliases) {
+        Ok(order) => order,
+        Err(reason) => return vec![added_left_join_refusal(&reason)],
+    };
+
+    let representatives = representative_names(unchanged);
+    let mut representative_sources = representative_sources(unchanged);
+
+    let mut admissions: BTreeMap<String, JoinAdmission> = BTreeMap::new();
+    for &idx in &order {
+        let alias = &aliases[idx];
+        let admission = match admit_added_left_join(
+            &joins[idx],
+            changed,
+            &comparable.where_clause,
+            &representative_sources,
+            inputs,
+        ) {
+            Ok(admission) => admission,
+            Err(reason) => {
+                return vec![added_left_join_refusal(&format!(
+                    "join '{alias}': {reason}"
+                ))];
+            }
+        };
+
+        // The stored-by-then extension (research §4 B7): a *bare* added
+        // pull-through of this join's own alias becomes a representative a
+        // later join's key may address. Never a wrapped one — see this
+        // function's doc comment.
+        for col in added {
+            if let Some(bare) = col.expr.as_column_ref() {
+                if bare.qualifier() == Some(alias.as_str()) {
+                    representative_sources.push(RepresentativeSource {
+                        output_name: col.name.clone(),
+                        qualifier: Some(alias.clone()),
+                        raw_name: bare.name().to_string(),
+                    });
+                }
+            }
+        }
+
+        admissions.insert(alias.clone(), admission);
+    }
+
+    let mut atoms = Vec::new();
+
+    let RenamePairing {
+        atoms: mut rename_atoms,
+        consumed_added,
+    } = pair_renames(dropped, added, inputs);
+    atoms.append(&mut rename_atoms);
+
+    let mut handled: HashSet<String> = HashSet::new();
+    for &idx in &order {
+        let alias = &aliases[idx];
+        let admission = &admissions[alias];
+        for col in added {
+            if consumed_added.contains(&col.name) || handled.contains(&col.name) {
+                continue;
+            }
+            if depends_only_on_join_alias(&col.expr, alias) {
+                handled.insert(col.name.clone());
+                atoms.push(classify_added_column(
+                    col,
+                    &representatives,
+                    &representative_sources,
+                    Some(admission),
+                    inputs,
+                ));
+            }
+        }
+    }
+
+    // Every remaining added column depends on no added join's alias at all
+    // — ordinary B1/B3 (a column depending on a mix of two aliases refuses
+    // on its own merits inside `classify_added_column`/`try_b4`, exactly as
+    // the single-join B4 path already does).
+    for col in added {
+        if consumed_added.contains(&col.name) || handled.contains(&col.name) {
+            continue;
+        }
+        atoms.push(classify_added_column(
+            col,
+            &representatives,
+            &representative_sources,
+            None,
             inputs,
         ));
     }

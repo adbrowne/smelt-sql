@@ -912,6 +912,161 @@ fn b4_alias_referenced_in_where_refuses() {
     );
 }
 
+// ===== B7 (task-9-brief.md) =====
+
+fn two_dims_inputs(
+    added_column_types: &[(&str, &str)],
+    d1_unique_key: Option<&[&str]>,
+    d1_not_null: &[&str],
+    d2_unique_key: Option<&[&str]>,
+    d2_not_null: &[&str],
+) -> BackbuildInputs {
+    inputs_with_sources(
+        added_column_types,
+        &[
+            ("d1", source_ref("dim1", d1_unique_key, d1_not_null)),
+            ("d2", source_ref("dim2", d2_unique_key, d2_not_null)),
+        ],
+    )
+}
+
+#[test]
+fn b7_unstored_intermediate_refuses() {
+    // dim2 keys on `d1.key_col`, but the model never pulls `d1.key_col`
+    // through to the output at all (bare or otherwise) — there is nothing
+    // to bind dim2's fact-side key to. dim1's own admission (keyed on the
+    // pre-existing, stored `order_id`) is otherwise unimpeachable, so this
+    // pins the refusal to dim2 specifically.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d2.name AS dim_name FROM orders o LEFT JOIN \
+                      dim1 d1 ON o.order_id = d1.order_id LEFT JOIN dim2 d2 ON d1.key_col = \
+                      d2.key_col";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = two_dims_inputs(
+        &[("dim_name", "TEXT")],
+        Some(&["order_id"]),
+        &["order_id"],
+        Some(&["key_col"]),
+        &["key_col"],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible.iter().any(|r| r.reason.contains("d2")),
+        "expected the refusal to name the failing join 'd2', got: {:?}",
+        atom.inadmissible
+    );
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("key_col") && r.reason.contains("stored")),
+        "expected a named, actionable refusal naming the missing column 'key_col', got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b7_nonbare_intermediate_refuses() {
+    // `key_col` IS pulled through, but wrapped (`COALESCE(d1.key_col, 0)`)
+    // rather than bare — the carrier stores `0` where a rebuild would leave
+    // NULL, so dim2's join on it could hit a dim row the rebuild's NULL key
+    // never would (research §4 B7 bareness). Bareness is enforced purely by
+    // construction: a wrapped carrier is never turned into a representative
+    // at all, so dim2's admission fails the same "no stored bare
+    // representative" check an entirely-unstored column would.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, COALESCE(d1.key_col, 0) AS key_col, \
+                      d2.name AS dim_name FROM orders o LEFT JOIN dim1 d1 ON o.order_id = \
+                      d1.order_id LEFT JOIN dim2 d2 ON d1.key_col = d2.key_col";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = two_dims_inputs(
+        &[("key_col", "INTEGER"), ("dim_name", "TEXT")],
+        Some(&["order_id"]),
+        &["order_id"],
+        Some(&["key_col"]),
+        &["key_col"],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    // The wrapped `key_col` column would otherwise be independently
+    // admissible on its own merits (a valid B4 scalar-subquery backfill) —
+    // but dim2's join can never be licensed, and partial application is
+    // never offered (research §2 "Refusal posture"), so the whole diff
+    // still refuses as a single atom.
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("key_col")),
+        "expected a refusal naming the unaddressable column 'key_col', got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b7_per_join_proof_still_enforced() {
+    // dim1 admits cleanly (keyed on the pre-existing, stored `order_id`);
+    // dim2's own row-set-preservation proof otherwise holds too, except its
+    // alias leaks into the WHERE clause — B4's three legs (LEFT + unique +
+    // NOT NULL + bare key equality + nothing else references the alias)
+    // hold *per join*, not just for the first one in the chain.
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, d1.name AS dim1_name, d2.name AS dim2_name \
+                      FROM orders o LEFT JOIN dim1 d1 ON o.order_id = d1.order_id LEFT JOIN dim2 \
+                      d2 ON o.order_id = d2.order_id WHERE d2.active = TRUE";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = two_dims_inputs(
+        &[("dim1_name", "TEXT"), ("dim2_name", "TEXT")],
+        Some(&["order_id"]),
+        &["order_id"],
+        Some(&["order_id"]),
+        &["order_id"],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("d2") && r.reason.to_lowercase().contains("where")),
+        "expected a refusal naming join 'd2' and the WHERE reference, got: {:?}",
+        atom.inadmissible
+    );
+
+    // The second leg of "B4's three legs hold per join": an added join that
+    // is not a LEFT JOIN at all is never even classified as
+    // `SkeletonDiff::AddedLeftJoins` (`diff.rs` requires *every* added join
+    // to be LEFT) — it refuses one level up, as a skeleton (G2) change, but
+    // is still a named, fail-closed refusal rather than a silent
+    // misclassification as an admissible B7 chain.
+    let inner_after_sql = "SELECT o.order_id AS order_id, d1.name AS dim1_name, d2.name AS \
+                            dim2_name FROM orders o LEFT JOIN dim1 d1 ON o.order_id = d1.order_id \
+                            JOIN dim2 d2 ON o.order_id = d2.order_id";
+    let inner_diff = definition_diff(&parse(before_sql), &parse(inner_after_sql));
+    assert!(!inner_diff.is_noop());
+    let inner_options = derive_backbuild_options(&inner_diff, &inputs);
+    let inner_atom = single_atom(&inner_options);
+    assert_refused(inner_atom);
+    assert!(
+        inner_atom
+            .inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("left join")),
+        "expected a refusal naming the non-LEFT added join, got: {:?}",
+        inner_atom.inadmissible
+    );
+}
+
 // ===== E1/E4 (task-7-brief.md) =====
 
 #[test]
