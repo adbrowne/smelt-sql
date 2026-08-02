@@ -3226,10 +3226,12 @@ executing an option. Emitted scripts are DuckDB dialect.</p>
 </div>
 <h2 id="the-idea-in-one-example">The idea in one example<a class="headerlink" href="#the-idea-in-one-example" title="Permanent link">&para;</a></h2>
 <p>Say this model is deployed as a table with millions of rows:</p>
+<!-- backbuild-example(intro): before -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-0-1" name="__codelineno-0-1" href="#__codelineno-0-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-0-2" name="__codelineno-0-2" href="#__codelineno-0-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="p">,</span><span class="w"> </span><span class="n">rate</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amount_usd</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 </code></pre></div>
 <p>You spot the bug: <code>amount_usd</code> was never converted. You fix it:</p>
+<!-- backbuild-example(intro): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-1-1" name="__codelineno-1-1" href="#__codelineno-1-1"></a><span class="c1">-- after</span>
 <a id="__codelineno-1-2" name="__codelineno-1-2" href="#__codelineno-1-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="p">,</span><span class="w"> </span><span class="n">rate</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rate</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amount_usd</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 </code></pre></div>
@@ -3237,6 +3239,7 @@ executing an option. Emitted scripts are DuckDB dialect.</p>
 the two definitions, sees that exactly one output column's expression changed,
 checks that the new expression is computable from columns the table <em>already
 stores</em> (<code>amount</code> and <code>rate</code> pass through from the input unchanged), and emits:</p>
+<!-- backbuild-example(intro): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-2-1" name="__codelineno-2-1" href="#__codelineno-2-1"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">amount_usd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rate</span>
 </code></pre></div>
 <p>One column written, zero upstream reads, siblings untouched. The conformance
@@ -3293,6 +3296,8 @@ SQL and the emitted script are verified against a DuckDB oracle — build the
 table from <em>before</em>, apply the script, and assert multiset equality with a
 fresh build from <em>after</em>.</p>
 <h3 id="rename-a-column">Rename a column<a class="headerlink" href="#rename-a-column" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(rename): before -->
+<!-- backbuild-example(rename): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-3-1" name="__codelineno-3-1" href="#__codelineno-3-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-3-2" name="__codelineno-3-2" href="#__codelineno-3-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 <a id="__codelineno-3-3" name="__codelineno-3-3" href="#__codelineno-3-3"></a><span class="c1">-- after</span>
@@ -3300,11 +3305,14 @@ fresh build from <em>after</em>.</p>
 </code></pre></div>
 <p>Detected as a dropped column and an added column with an identical expression —
 a rename, not a drop-plus-add:</p>
+<!-- backbuild-example(rename): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-4-1" name="__codelineno-4-1" href="#__codelineno-4-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">total</span>
 </code></pre></div>
 <p>Zero rows touched. If two dropped columns had identical expressions the match
 would be ambiguous, and smelt refuses rather than guessing.</p>
 <h3 id="add-a-column-computed-from-stored-columns">Add a column computed from stored columns<a class="headerlink" href="#add-a-column-computed-from-stored-columns" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(add_stored): before -->
+<!-- backbuild-example(add_stored): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-5-1" name="__codelineno-5-1" href="#__codelineno-5-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-5-2" name="__codelineno-5-2" href="#__codelineno-5-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 <a id="__codelineno-5-3" name="__codelineno-5-3" href="#__codelineno-5-3"></a><span class="c1">-- after</span>
@@ -3312,6 +3320,7 @@ would be ambiguous, and smelt refuses rather than guessing.</p>
 </code></pre></div>
 <p>Every input of the new expression is already stored, so no upstream read is
 needed:</p>
+<!-- backbuild-example(add_stored): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-6-1" name="__codelineno-6-1" href="#__codelineno-6-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">total</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">;</span>
 <a id="__codelineno-6-2" name="__codelineno-6-2" href="#__codelineno-6-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">total</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">qty</span><span class="p">;</span>
 </code></pre></div>
@@ -3320,11 +3329,14 @@ expression.)</p>
 <h3 id="fix-a-columns-logic-in-place">Fix a column's logic in place<a class="headerlink" href="#fix-a-columns-logic-in-place" title="Permanent link">&para;</a></h3>
 <p>The example from the top of the page — and the highest-value case in practice:
 "fix a bug in one column of a huge table."</p>
+<!-- backbuild-example(fix_in_place): before -->
+<!-- backbuild-example(fix_in_place): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-7-1" name="__codelineno-7-1" href="#__codelineno-7-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-7-2" name="__codelineno-7-2" href="#__codelineno-7-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="p">,</span><span class="w"> </span><span class="n">rate</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amount_usd</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 <a id="__codelineno-7-3" name="__codelineno-7-3" href="#__codelineno-7-3"></a><span class="c1">-- after</span>
 <a id="__codelineno-7-4" name="__codelineno-7-4" href="#__codelineno-7-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="p">,</span><span class="w"> </span><span class="n">rate</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rate</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amount_usd</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 </code></pre></div>
+<!-- backbuild-example(fix_in_place): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-8-1" name="__codelineno-8-1" href="#__codelineno-8-1"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">amount_usd</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="o">*</span><span class="w"> </span><span class="n">rate</span>
 </code></pre></div>
 <p>The proof obligation is subtle: the new expression is defined over the model's
@@ -3336,6 +3348,8 @@ representative of anything (otherwise a mutual swap like
 if the fixed expression depends on a sibling that changed in the same edit,
 the atom refuses with a message naming that sibling.</p>
 <h3 id="pull-a-column-through-from-an-upstream">Pull a column through from an upstream<a class="headerlink" href="#pull-a-column-through-from-an-upstream" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(pullthrough): before -->
+<!-- backbuild-example(pullthrough): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-9-1" name="__codelineno-9-1" href="#__codelineno-9-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-9-2" name="__codelineno-9-2" href="#__codelineno-9-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">order_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">order_id</span><span class="p">,</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">customer</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">customer</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="n">o</span>
 <a id="__codelineno-9-3" name="__codelineno-9-3" href="#__codelineno-9-3"></a><span class="c1">-- after</span>
@@ -3345,12 +3359,15 @@ the atom refuses with a message naming that sibling.</p>
 model stores a 1:1 pull-through of that upstream's
 <a href="../../reference/sources-yml/">declared <code>unique_key</code></a> (<code>order_id</code>), each stored
 row can be addressed and enriched:</p>
+<!-- backbuild-example(pullthrough): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-10-1" name="__codelineno-10-1" href="#__codelineno-10-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">discount</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">;</span>
 <a id="__codelineno-10-2" name="__codelineno-10-2" href="#__codelineno-10-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">discount</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u</span><span class="p">.</span><span class="n">discount</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="n">u</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">order_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">u</span><span class="p">.</span><span class="n">order_id</span><span class="p">;</span>
 </code></pre></div>
 <p>Rows the model's WHERE clause filtered out simply never match — the join
 touches only rows the table already has.</p>
 <h3 id="add-an-aggregate-at-the-models-own-grain">Add an aggregate at the model's own grain<a class="headerlink" href="#add-an-aggregate-at-the-models-own-grain" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(aggregate): before -->
+<!-- backbuild-example(aggregate): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-11-1" name="__codelineno-11-1" href="#__codelineno-11-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-11-2" name="__codelineno-11-2" href="#__codelineno-11-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">customer_id</span><span class="p">,</span><span class="w"> </span><span class="k">count</span><span class="p">(</span><span class="o">*</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">n</span>
 <a id="__codelineno-11-3" name="__codelineno-11-3" href="#__codelineno-11-3"></a><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="n">o</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span><span class="w"> </span><span class="k">GROUP</span><span class="w"> </span><span class="k">BY</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">customer_id</span>
@@ -3361,6 +3378,7 @@ touches only rows the table already has.</p>
 <p>The new column is a recognized aggregate call, the <code>GROUP BY</code> grain is
 unchanged, and the grouping key (<code>customer_id</code>) is a stored, <code>NOT NULL</code>
 pull-through — so each stored group can be re-derived and matched by key:</p>
+<!-- backbuild-example(aggregate): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-12-1" name="__codelineno-12-1" href="#__codelineno-12-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">total_qty</span><span class="w"> </span><span class="n">HUGEINT</span><span class="p">;</span>
 <a id="__codelineno-12-2" name="__codelineno-12-2" href="#__codelineno-12-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">total_qty</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">total_qty</span>
 <a id="__codelineno-12-3" name="__codelineno-12-3" href="#__codelineno-12-3"></a><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
@@ -3375,6 +3393,8 @@ the model's own filter drops. There is no insert arm: a key group missing
 from <code>t</code> is one the model's own row-set already proves cannot exist, so the
 backfill only ever updates matched keys.</p>
 <h3 id="enrich-via-a-new-left-join">Enrich via a new LEFT JOIN<a class="headerlink" href="#enrich-via-a-new-left-join" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(left_join_enrich): before -->
+<!-- backbuild-example(left_join_enrich): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-13-1" name="__codelineno-13-1" href="#__codelineno-13-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-13-2" name="__codelineno-13-2" href="#__codelineno-13-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">order_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">order_id</span><span class="p">,</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">customer_id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="n">o</span>
 <a id="__codelineno-13-3" name="__codelineno-13-3" href="#__codelineno-13-3"></a><span class="c1">-- after</span>
@@ -3387,13 +3407,16 @@ set</strong>: it is a LEFT JOIN (never removes rows), the join key has a declare
 <code>unique_key</code> on the dimension side, the key columns are provably <code>NOT NULL</code>,
 and nothing outside the added columns references the new alias. With that
 established, a bare pull-through admits <em>two</em> independently verified scripts:</p>
+<!-- backbuild-example(left_join_enrich): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-14-1" name="__codelineno-14-1" href="#__codelineno-14-1"></a><span class="c1">-- option 1: update-from</span>
-<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_name</span>
-<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="k">FROM</span><span class="w"> </span><span class="n">customers</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span><span class="p">;</span>
-<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a>
-<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a><span class="c1">-- option 2: scalar subquery</span>
-<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="o">=</span>
-<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="w">  </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_name</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">customers</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span><span class="p">);</span>
+<a id="__codelineno-14-2" name="__codelineno-14-2" href="#__codelineno-14-2"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">;</span>
+<a id="__codelineno-14-3" name="__codelineno-14-3" href="#__codelineno-14-3"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_name</span>
+<a id="__codelineno-14-4" name="__codelineno-14-4" href="#__codelineno-14-4"></a><span class="k">FROM</span><span class="w"> </span><span class="n">customers</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span><span class="p">;</span>
+<a id="__codelineno-14-5" name="__codelineno-14-5" href="#__codelineno-14-5"></a>
+<a id="__codelineno-14-6" name="__codelineno-14-6" href="#__codelineno-14-6"></a><span class="c1">-- option 2: scalar subquery</span>
+<a id="__codelineno-14-7" name="__codelineno-14-7" href="#__codelineno-14-7"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">;</span>
+<a id="__codelineno-14-8" name="__codelineno-14-8" href="#__codelineno-14-8"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">customer_name</span><span class="w"> </span><span class="o">=</span>
+<a id="__codelineno-14-9" name="__codelineno-14-9" href="#__codelineno-14-9"></a><span class="w">  </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_name</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">customers</span><span class="w"> </span><span class="k">c</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span><span class="p">);</span>
 </code></pre></div>
 <p>In both, an unmatched row keeps the <code>NULL</code> it got from <code>ALTER ADD</code> — exactly
 LEFT-JOIN semantics. The shapes differ under a <em>wrong</em> uniqueness declaration:
@@ -3403,9 +3426,11 @@ errors loudly — a free runtime uniqueness probe.</p>
 <code>COALESCE(c.customer_name, 'none') AS customer_label</code> — and only the subquery
 shape survives, with the substitution applied <strong>per column reference</strong>, not
 around the whole expression:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">customer_label</span><span class="w"> </span><span class="o">=</span>
-<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="w">  </span><span class="k">COALESCE</span><span class="p">((</span><span class="k">SELECT</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_name</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">customers</span><span class="w"> </span><span class="k">c</span>
-<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="w">            </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;none&#39;</span><span class="p">)</span>
+<!-- backbuild-example(left_join_wrapped): script -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-15-1" name="__codelineno-15-1" href="#__codelineno-15-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">customer_label</span><span class="w"> </span><span class="nb">TEXT</span><span class="p">;</span>
+<a id="__codelineno-15-2" name="__codelineno-15-2" href="#__codelineno-15-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">customer_label</span><span class="w"> </span><span class="o">=</span>
+<a id="__codelineno-15-3" name="__codelineno-15-3" href="#__codelineno-15-3"></a><span class="w">  </span><span class="k">COALESCE</span><span class="p">((</span><span class="k">SELECT</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_name</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">customers</span><span class="w"> </span><span class="k">c</span>
+<a id="__codelineno-15-4" name="__codelineno-15-4" href="#__codelineno-15-4"></a><span class="w">            </span><span class="k">WHERE</span><span class="w"> </span><span class="n">t</span><span class="p">.</span><span class="n">customer_id</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="k">c</span><span class="p">.</span><span class="n">customer_id</span><span class="p">),</span><span class="w"> </span><span class="s1">&#39;none&#39;</span><span class="p">)</span>
 </code></pre></div>
 <p>Wrapping the whole expression in one subquery would be wrong: for an unmatched
 row the subquery returns zero rows, the whole scalar becomes <code>NULL</code>, and the
@@ -3413,6 +3438,8 @@ row the subquery returns zero rows, the whole scalar becomes <code>NULL</code>, 
 reference evaluate to <code>NULL</code> exactly as LEFT-JOIN null-extension would. The
 oracle test pins this: an unmatched order ends up <code>'none'</code>, not <code>NULL</code>.</p>
 <h3 id="chain-multiple-joins">Chain multiple joins<a class="headerlink" href="#chain-multiple-joins" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(chain_joins): before -->
+<!-- backbuild-example(chain_joins): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-16-1" name="__codelineno-16-1" href="#__codelineno-16-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-16-2" name="__codelineno-16-2" href="#__codelineno-16-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">order_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">order_id</span><span class="p">,</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">dim1_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">dim1_id</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="n">o</span>
 <a id="__codelineno-16-3" name="__codelineno-16-3" href="#__codelineno-16-3"></a><span class="c1">-- after</span>
@@ -3429,6 +3456,8 @@ wrapped carrier like <code>COALESCE(d1.region_id, 0) AS region_id</code> would s
 where a rebuild has <code>NULL</code>, and the second join would then hit dimension rows
 the rebuild's <code>NULL</code> key misses — so that shape refuses.</p>
 <h3 id="add-a-window-column">Add a window column<a class="headerlink" href="#add-a-window-column" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(window): before -->
+<!-- backbuild-example(window): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-17-1" name="__codelineno-17-1" href="#__codelineno-17-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-17-2" name="__codelineno-17-2" href="#__codelineno-17-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">order_id</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">order_id</span><span class="p">,</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">status</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">status</span><span class="p">,</span><span class="w"> </span><span class="n">o</span><span class="p">.</span><span class="n">amount</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="n">o</span>
 <a id="__codelineno-17-3" name="__codelineno-17-3" href="#__codelineno-17-3"></a><span class="c1">-- after</span>
@@ -3442,6 +3471,7 @@ backfills it with a <strong>self-read</strong>: the source subquery reads the de
 table itself, not the upstream, so the window computes over exactly the rows
 <code>t</code> already has — matching a rebuild by construction, even when the model's
 own <code>WHERE</code> has filtered rows out along the way.</p>
+<!-- backbuild-example(window): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-18-1" name="__codelineno-18-1" href="#__codelineno-18-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">rn</span><span class="w"> </span><span class="nb">BIGINT</span><span class="p">;</span>
 <a id="__codelineno-18-2" name="__codelineno-18-2" href="#__codelineno-18-2"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">rn</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">s</span><span class="p">.</span><span class="n">rn</span>
 <a id="__codelineno-18-3" name="__codelineno-18-3" href="#__codelineno-18-3"></a><span class="k">FROM</span><span class="w"> </span><span class="p">(</span>
@@ -3458,6 +3488,8 @@ stored columns refuses too, the same uniform-representative rule every other
 backfill uses — add the missing column to the <code>SELECT</code> list to make it
 backfillable.</p>
 <h3 id="tighten-a-filter">Tighten a filter<a class="headerlink" href="#tighten-a-filter" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(tighten): before -->
+<!-- backbuild-example(tighten): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-19-1" name="__codelineno-19-1" href="#__codelineno-19-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-19-2" name="__codelineno-19-2" href="#__codelineno-19-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">status</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 <a id="__codelineno-19-3" name="__codelineno-19-3" href="#__codelineno-19-3"></a><span class="c1">-- after</span>
@@ -3465,6 +3497,7 @@ backfillable.</p>
 </code></pre></div>
 <p>The added conjunct is evaluable over stored columns, so the difference is a
 pure delete — no upstream read at all:</p>
+<!-- backbuild-example(tighten): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-20-1" name="__codelineno-20-1" href="#__codelineno-20-1"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="n">status</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;active&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">TRUE</span>
 </code></pre></div>
 <p>Note <code>IS NOT TRUE</code>, not <code>NOT</code>. SQL's <code>WHERE p</code> keeps rows where <code>p</code> is TRUE;
@@ -3476,6 +3509,8 @@ the negative <em>and</em> the <code>NULL</code> row, where a bare
 conformance suite pins exactly this case.</p>
 <h3 id="extend-the-history-window">Extend the history window<a class="headerlink" href="#extend-the-history-window" title="Permanent link">&para;</a></h3>
 <p>The classic "backfill more history":</p>
+<!-- backbuild-example(extend_history): before -->
+<!-- backbuild-example(extend_history): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-21-1" name="__codelineno-21-1" href="#__codelineno-21-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-21-2" name="__codelineno-21-2" href="#__codelineno-21-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">ts</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">ts</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2025-01-01&#39;</span>
 <a id="__codelineno-21-3" name="__codelineno-21-3" href="#__codelineno-21-3"></a><span class="c1">-- after</span>
@@ -3483,8 +3518,9 @@ conformance suite pins exactly this case.</p>
 </code></pre></div>
 <p>The difference — rows the old predicate excluded and the new one admits — is
 inserted from the after-definition:</p>
-<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="p">(</span><span class="n">ts</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="p">)</span>
-<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">ts</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span>
+<!-- backbuild-example(extend_history): script -->
+<div class="highlight"><pre><span></span><code><a id="__codelineno-22-1" name="__codelineno-22-1" href="#__codelineno-22-1"></a><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="p">(</span><span class="n">amount</span><span class="p">,</span><span class="w"> </span><span class="n">ts</span><span class="p">)</span>
+<a id="__codelineno-22-2" name="__codelineno-22-2" href="#__codelineno-22-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">amount</span><span class="p">,</span><span class="w"> </span><span class="n">ts</span>
 <a id="__codelineno-22-3" name="__codelineno-22-3" href="#__codelineno-22-3"></a><span class="k">FROM</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="n">ts</span><span class="p">,</span><span class="w"> </span><span class="n">amount</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">ts</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2024-01-01&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">__backbuild_diff</span>
 <a id="__codelineno-22-4" name="__codelineno-22-4" href="#__codelineno-22-4"></a><span class="k">WHERE</span><span class="w"> </span><span class="p">(</span><span class="n">ts</span><span class="w"> </span><span class="o">&gt;=</span><span class="w"> </span><span class="s1">&#39;2025-01-01&#39;</span><span class="p">)</span><span class="w"> </span><span class="k">IS</span><span class="w"> </span><span class="k">NOT</span><span class="w"> </span><span class="k">TRUE</span>
 </code></pre></div>
@@ -3510,6 +3546,8 @@ range-widening shape above is admitted). A predicate rewritten in a way that
 doesn't factor into added and removed top-level <code>AND</code> conjuncts refuses — the
 conjunct algebra is deliberately syntactic, not a general implication prover.</p>
 <h3 id="add-a-union-all-branch">Add a UNION ALL branch<a class="headerlink" href="#add-a-union-all-branch" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(union_add): before -->
+<!-- backbuild-example(union_add): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-23-1" name="__codelineno-23-1" href="#__codelineno-23-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-23-2" name="__codelineno-23-2" href="#__codelineno-23-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;a&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_a</span>
 <a id="__codelineno-23-3" name="__codelineno-23-3" href="#__codelineno-23-3"></a><span class="c1">-- after</span>
@@ -3518,6 +3556,7 @@ conjunct algebra is deliberately syntactic, not a general implication prover.</p
 <a id="__codelineno-23-6" name="__codelineno-23-6" href="#__codelineno-23-6"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;b&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_b</span>
 </code></pre></div>
 <p><code>UNION ALL</code> is additive, so the new branch is exactly the delta:</p>
+<!-- backbuild-example(union_add): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-24-1" name="__codelineno-24-1" href="#__codelineno-24-1"></a><span class="k">INSERT</span><span class="w"> </span><span class="k">INTO</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="p">(</span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">kind</span><span class="p">)</span>
 <a id="__codelineno-24-2" name="__codelineno-24-2" href="#__codelineno-24-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="p">(</span><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;b&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">kind</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_b</span><span class="p">)</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">__backbuild_branch</span>
 </code></pre></div>
@@ -3528,6 +3567,8 @@ branch's order exactly. A branch declaring <code>SELECT kind, id</code> against 
 branch declaring <code>SELECT id, kind</code> would silently swap values under a rebuild's
 positional binding, and refuses here by name.</p>
 <h3 id="remove-a-union-all-branch">Remove a UNION ALL branch<a class="headerlink" href="#remove-a-union-all-branch" title="Permanent link">&para;</a></h3>
+<!-- backbuild-example(union_remove): before -->
+<!-- backbuild-example(union_remove): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-25-1" name="__codelineno-25-1" href="#__codelineno-25-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-25-2" name="__codelineno-25-2" href="#__codelineno-25-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="s1">&#39;a&#39;</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">events_a</span>
 <a id="__codelineno-25-3" name="__codelineno-25-3" href="#__codelineno-25-3"></a><span class="k">UNION</span><span class="w"> </span><span class="k">ALL</span>
@@ -3538,6 +3579,7 @@ positional binding, and refuses here by name.</p>
 <p>A removed branch needs a <strong>discriminator</strong>: a column that is a distinct
 literal constant in every branch of the before-definition (here, <code>src</code>). With
 one, the removed branch's own constant becomes an equality delete:</p>
+<!-- backbuild-example(union_remove): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-26-1" name="__codelineno-26-1" href="#__codelineno-26-1"></a><span class="k">DELETE</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">src</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="s1">&#39;b&#39;</span>
 </code></pre></div>
 <p>This is an equality predicate, not the <code>IS NOT TRUE</code> complement form
@@ -3562,12 +3604,15 @@ Plain <code>UNION</code> refuses here for the same reason it does on the add sid
 <h3 id="several-changes-at-once">Several changes at once<a class="headerlink" href="#several-changes-at-once" title="Permanent link">&para;</a></h3>
 <p>Atomic changes compose. Rename a column, add a derived one, tighten the
 filter, and drop an unrelated column, all in a single edit:</p>
+<!-- backbuild-example(composite): before -->
+<!-- backbuild-example(composite): after -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-27-1" name="__codelineno-27-1" href="#__codelineno-27-1"></a><span class="c1">-- before</span>
 <a id="__codelineno-27-2" name="__codelineno-27-2" href="#__codelineno-27-2"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="p">,</span><span class="w"> </span><span class="n">extra</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span>
 <a id="__codelineno-27-3" name="__codelineno-27-3" href="#__codelineno-27-3"></a><span class="c1">-- after</span>
 <a id="__codelineno-27-4" name="__codelineno-27-4" href="#__codelineno-27-4"></a><span class="k">SELECT</span><span class="w"> </span><span class="n">id</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">unit_price</span><span class="p">,</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">AS</span><span class="w"> </span><span class="n">list_price</span><span class="p">,</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="k">FROM</span><span class="w"> </span><span class="n">orders</span><span class="w"> </span><span class="k">WHERE</span><span class="w"> </span><span class="n">qty</span><span class="w"> </span><span class="o">&gt;</span><span class="w"> </span><span class="mi">0</span>
 </code></pre></div>
 <p>The assembled script (asserted verbatim in the conformance suite):</p>
+<!-- backbuild-example(composite): script -->
 <div class="highlight"><pre><span></span><code><a id="__codelineno-28-1" name="__codelineno-28-1" href="#__codelineno-28-1"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">RENAME</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">price</span><span class="w"> </span><span class="k">TO</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
 <a id="__codelineno-28-2" name="__codelineno-28-2" href="#__codelineno-28-2"></a><span class="k">ALTER</span><span class="w"> </span><span class="k">TABLE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">ADD</span><span class="w"> </span><span class="k">COLUMN</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="nb">INTEGER</span><span class="p">;</span>
 <a id="__codelineno-28-3" name="__codelineno-28-3" href="#__codelineno-28-3"></a><span class="k">UPDATE</span><span class="w"> </span><span class="n">t</span><span class="w"> </span><span class="k">SET</span><span class="w"> </span><span class="n">unit_price</span><span class="w"> </span><span class="o">=</span><span class="w"> </span><span class="n">list_price</span><span class="p">;</span>
@@ -3619,6 +3664,12 @@ from cannot be determined; <strong>qualify it (e.g. <code>o.col</code>)</strong>
 <p>A small edit to the model — storing a join key, qualifying a column — often
 converts a full rebuild into a column-scoped update.</p>
 <h2 id="why-you-can-trust-the-scripts">Why you can trust the scripts<a class="headerlink" href="#why-you-can-trust-the-scripts" title="Permanent link">&para;</a></h2>
+<p>Every SQL snippet on this page — before, after, and emitted script — is
+generated by smelt's own <code>definition_diff</code> → <code>derive_backbuild_options</code> →
+<code>assemble</code> pipeline from the shown before/after definitions, byte-compared
+against this page's own text, and oracle-verified against a real DuckDB by a
+standing test suite (<code>crates/smelt-logical/tests/backbuild_docs.rs</code>); the
+page cannot drift from what smelt actually emits.</p>
 <ul>
 <li><strong>Oracle-verified equivalence.</strong> Every technique is tested the hard way:
   build the table from the before-definition, run the emitted script, build a
