@@ -17,7 +17,7 @@ pub mod requalify;
 pub use classify::{assemble, derive_backbuild_options, Selection};
 pub use diff::definition_diff;
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use smelt_parser::{Expr, JoinClause, SelectStmt};
 
@@ -234,10 +234,30 @@ pub struct BackbuildInputs {
 }
 
 /// One upstream's physical facts, as declared to [`BackbuildInputs`].
+///
+/// Keyed by the FROM-tree reference name the model's own SQL uses to reach
+/// this upstream — its alias when the model aliases it, otherwise its bare
+/// table identifier. A self-join (`orders o1 JOIN orders o2`) declares one
+/// entry *per alias* (`"o1"`, `"o2"`), even though both share the same
+/// `physical_name` — the B3/D2 grain-link proof binds per FROM-tree alias,
+/// not per physical table (research
+/// `docs/research/20260802-backbuild-synthesis.md` §4 B3).
 #[derive(Debug, Clone)]
 pub struct SourceRef {
     pub physical_name: String,
     pub unique_key: Option<Vec<String>>,
+    /// Declared NOT NULL columns of this source (a schema fact, not derived
+    /// here) — the shared key-addressability obligation (research §4 intro
+    /// "Key addressability") consumes this to prove `unique_key` columns are
+    /// NOT NULL before admitting an equality backfill. `analysis::not_null`
+    /// does not apply here: `partition_column_provably_not_null` is a narrow
+    /// proof scoped to a *timeseries model's own* partition column derived
+    /// from its driving source's clock column, not a general "is this
+    /// upstream's column NOT NULL" fact — so this mirrors the
+    /// `ModelInputs`/`SourceFacts` plain-data pattern
+    /// (`maintenance/derive.rs`) instead. Missing here means "not proven" —
+    /// fail-closed, never assumed.
+    pub not_null_columns: BTreeSet<String>,
 }
 
 /// Every admissible technique for one atomic change, plus every named
@@ -364,6 +384,14 @@ pub enum Technique {
     /// columns (research §4): `UPDATE t SET c = <requalified expr>;` —
     /// siblings untouched, no `ALTER`, no upstream read.
     SelfDerivedColumnRewrite,
+    /// B3 (added column) / D2 (changed column) — one admission path, two
+    /// triggers (research §4 B3/D2): the output carries a 1:1 bare
+    /// pull-through of an upstream's declared `unique_key`, bound per
+    /// FROM-tree alias. `ALTER TABLE t ADD COLUMN c <ty>;` precedes the
+    /// script for B3 only (D2's column already exists);
+    /// `UPDATE t SET c = <requalified expr over u> FROM <upstream> u WHERE
+    /// t.<k> = u.<k>` either way.
+    UpstreamPullthrough,
 }
 
 /// The research §2 "write scope" option metadata.

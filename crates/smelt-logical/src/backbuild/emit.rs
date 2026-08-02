@@ -37,6 +37,38 @@ pub fn emit_in_place_update(table: &str, assignments: &[(String, String)]) -> St
     format!("UPDATE {table} SET {sets}")
 }
 
+/// `UPDATE t SET c1 = e1, ... FROM <upstream> u WHERE t.k1 = u.k1 AND
+/// t.k2 = u.k2 ...` — research §4 B3/D2's column-scoped upstream backfill,
+/// the "one admission path, two triggers" shape shared by an added column
+/// pulling through an upstream (B3) and a changed column whose new
+/// expression reads one (D2). `key_pairs` is `(target column name, upstream
+/// column name)` per grain-link key component, ANDed for a composite key.
+///
+/// This is deliberately its own, simpler emitter rather than the
+/// maintenance `emit_column_scoped_merge` shape: that emitter's `SET *`
+/// source contract expects a full-row projection from the maintenance
+/// region machinery, not backbuild's single/few-column, unregioned,
+/// unledgered assignment list (research §4 B3).
+pub fn emit_column_backfill_update_from(
+    table: &str,
+    assignments: &[(String, String)],
+    upstream_physical: &str,
+    upstream_alias: &str,
+    key_pairs: &[(String, String)],
+) -> String {
+    let sets = assignments
+        .iter()
+        .map(|(c, expr)| format!("{c} = {expr}"))
+        .collect::<Vec<_>>()
+        .join(", ");
+    let predicate = key_pairs
+        .iter()
+        .map(|(t_col, u_col)| format!("{table}.{t_col} = {upstream_alias}.{u_col}"))
+        .collect::<Vec<_>>()
+        .join(" AND ");
+    format!("UPDATE {table} SET {sets} FROM {upstream_physical} {upstream_alias} WHERE {predicate}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -76,6 +108,38 @@ mod tests {
                 ]
             ),
             "UPDATE t SET a = 1, b = 2"
+        );
+    }
+
+    #[test]
+    fn column_backfill_update_from_shape_single_key() {
+        assert_eq!(
+            emit_column_backfill_update_from(
+                "t",
+                &[("discount".to_string(), "u.discount".to_string())],
+                "orders",
+                "u",
+                &[("order_id".to_string(), "order_id".to_string())],
+            ),
+            "UPDATE t SET discount = u.discount FROM orders u WHERE t.order_id = u.order_id"
+        );
+    }
+
+    #[test]
+    fn column_backfill_update_from_shape_composite_key() {
+        assert_eq!(
+            emit_column_backfill_update_from(
+                "t",
+                &[("total".to_string(), "u.amount".to_string())],
+                "orders",
+                "u",
+                &[
+                    ("region".to_string(), "region".to_string()),
+                    ("order_id".to_string(), "order_id".to_string()),
+                ],
+            ),
+            "UPDATE t SET total = u.amount FROM orders u WHERE t.region = u.region AND \
+             t.order_id = u.order_id"
         );
     }
 }

@@ -9,7 +9,8 @@ use std::collections::BTreeMap;
 
 use smelt_logical::backbuild::{
     assemble, definition_diff, derive_backbuild_options, AtomAnalysis, AtomicChange,
-    BackbuildInputs, BackbuildOption, BackbuildOptions, HSlot, Selection, Technique, WriteScope,
+    BackbuildInputs, BackbuildOption, BackbuildOptions, HSlot, Selection, SourceRef, Technique,
+    WriteScope,
 };
 
 fn parse(sql: &str) -> smelt_parser::File {
@@ -156,22 +157,29 @@ fn single_atom(options: &BackbuildOptions) -> &AtomAnalysis {
     &options.atoms[0]
 }
 
+/// At least one named, non-empty refusal, and no admissible option. Phase 5
+/// (B3/D2) can attempt a sibling technique after a same-shaped D1/B1
+/// failure (`d1_upstream_dependency_refuses_until_d2`,
+/// `b1_dependency_on_upstream_only_column_is_not_b1`): when that sibling
+/// attempt *also* refuses, the atom carries both named reasons rather than
+/// exactly one, so this checks "at least one, all non-empty" rather than
+/// pinning the count.
 fn assert_refused(atom: &AtomAnalysis) {
     assert!(
         atom.options.is_empty(),
         "expected no admissible option, got {:?}",
         atom.options
     );
-    assert_eq!(
-        atom.inadmissible.len(),
-        1,
-        "inadmissible: {:?}",
-        atom.inadmissible
-    );
     assert!(
-        !atom.inadmissible[0].reason.is_empty(),
-        "the refusal must carry a named reason"
+        !atom.inadmissible.is_empty(),
+        "expected at least one refusal, got none"
     );
+    for refusal in &atom.inadmissible {
+        assert!(
+            !refusal.reason.is_empty(),
+            "every refusal must carry a named reason"
+        );
+    }
 }
 
 #[test]
@@ -601,5 +609,153 @@ fn d1_upstream_dependency_refuses_until_d2() {
             .contains("also changed in this same edit"),
         "an upstream-only refusal must not be conflated with the changed-sibling case, got: {}",
         atom.inadmissible[0].reason
+    );
+}
+
+// ===== B3 (task-5-brief.md) =====
+
+fn inputs_with_sources(
+    added_column_types: &[(&str, &str)],
+    sources: &[(&str, SourceRef)],
+) -> BackbuildInputs {
+    let mut built = inputs(added_column_types);
+    built.sources = sources
+        .iter()
+        .map(|(alias, source)| (alias.to_string(), source.clone()))
+        .collect();
+    built
+}
+
+fn source_ref(
+    physical_name: &str,
+    unique_key: Option<&[&str]>,
+    not_null_columns: &[&str],
+) -> SourceRef {
+    SourceRef {
+        physical_name: physical_name.to_string(),
+        unique_key: unique_key.map(|k| k.iter().map(|s| s.to_string()).collect()),
+        not_null_columns: not_null_columns.iter().map(|s| s.to_string()).collect(),
+    }
+}
+
+#[test]
+fn b3_missing_key_pullthrough_refuses() {
+    // The output never pulls `order_id` through at all — there is nothing
+    // to bind the equality backfill's key to.
+    let before_sql = "SELECT o.customer AS customer FROM orders o";
+    let after_sql = "SELECT o.customer AS customer, o.discount AS discount FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = inputs_with_sources(
+        &[("discount", "INTEGER")],
+        &[(
+            "o",
+            source_ref("orders", Some(&["order_id"]), &["order_id"]),
+        )],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("no addressable identity")),
+        "expected a 'no addressable identity' refusal, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b3_undeclared_unique_key_refuses() {
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.discount AS discount FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = inputs_with_sources(
+        &[("discount", "INTEGER")],
+        &[("o", source_ref("orders", None, &[]))],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("unique_key")),
+        "expected a refusal naming the missing unique_key, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b3_nullable_key_refuses() {
+    // `unique_key` is declared and pulled through, but not declared NOT
+    // NULL — SQL UNIQUE admits NULLs, and an equality backfill never
+    // addresses a NULL-keyed row (research §4 "Key addressability").
+    let before_sql = "SELECT o.order_id AS order_id FROM orders o";
+    let after_sql = "SELECT o.order_id AS order_id, o.discount AS discount FROM orders o";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = inputs_with_sources(
+        &[("discount", "INTEGER")],
+        &[("o", source_ref("orders", Some(&["order_id"]), &[]))],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.to_lowercase().contains("not null")),
+        "expected a NOT NULL refusal, got: {:?}",
+        atom.inadmissible
+    );
+}
+
+#[test]
+fn b3_self_join_binds_per_alias() {
+    // Only `o1.order_id` is pulled through; adding `o2.discount` must not
+    // be licensed by `o1`'s key pull-through even though both aliases
+    // share the same physical table and both have a declared, NOT-NULL
+    // unique_key — the proof binds per FROM-tree alias, not per table (a
+    // table-level match would backfill o1's discount where the rebuild
+    // wants o2's).
+    let before_sql =
+        "SELECT o1.order_id AS order_id FROM orders o1 JOIN orders o2 ON o1.order_id = o2.order_id";
+    let after_sql = "SELECT o1.order_id AS order_id, o2.discount AS discount FROM orders o1 \
+                      JOIN orders o2 ON o1.order_id = o2.order_id";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let inputs = inputs_with_sources(
+        &[("discount", "INTEGER")],
+        &[
+            (
+                "o1",
+                source_ref("orders", Some(&["order_id"]), &["order_id"]),
+            ),
+            (
+                "o2",
+                source_ref("orders", Some(&["order_id"]), &["order_id"]),
+            ),
+        ],
+    );
+    let options = derive_backbuild_options(&diff, &inputs);
+    let atom = single_atom(&options);
+    assert_refused(atom);
+    assert!(
+        atom.inadmissible
+            .iter()
+            .any(|r| r.reason.contains("no addressable identity")),
+        "expected a 'no addressable identity' refusal (o1's pull-through must not license o2), \
+         got: {:?}",
+        atom.inadmissible
     );
 }

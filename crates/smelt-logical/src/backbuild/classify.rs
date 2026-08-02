@@ -179,17 +179,20 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
             unchanged,
         } => {
             let representatives = representative_names(unchanged);
+            let representative_sources = representative_sources(unchanged);
             let changed_names: BTreeSet<String> = changed.iter().map(|c| c.name.clone()).collect();
             atoms.extend(classify_select_list(
                 added,
                 dropped,
                 &representatives,
+                &representative_sources,
                 inputs,
             ));
             for c in changed {
                 atoms.push(classify_changed_column(
                     c,
                     &representatives,
+                    &representative_sources,
                     &changed_names,
                     inputs,
                 ));
@@ -247,6 +250,7 @@ fn classify_select_list(
     added: &[SelectColumn],
     dropped: &[SelectColumn],
     representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> Vec<AtomAnalysis> {
     let RenamePairing {
@@ -261,7 +265,12 @@ fn classify_select_list(
             // renamed column" B1 atom, for a tie-break loser).
             continue;
         }
-        rename_atoms.push(classify_added_column(col, representatives, inputs));
+        rename_atoms.push(classify_added_column(
+            col,
+            representatives,
+            representative_sources,
+            inputs,
+        ));
     }
 
     rename_atoms
@@ -281,29 +290,87 @@ fn representative_names(unchanged: &[SelectColumn]) -> BTreeSet<String> {
         .collect()
 }
 
+/// One stored 1:1 representative's own upstream provenance: the FROM-tree
+/// qualifier its bare pull-through expression reads from (`None` for an
+/// unqualified reference) and the raw column name at that qualifier,
+/// alongside the representative's own output name. Built from the same
+/// `unchanged` SELECT items [`representative_names`] draws from — the B3/D2
+/// grain-link proof (research §4 B3/D2: "the pulled-through key and the
+/// added expression must resolve to the SAME alias") needs the qualifier
+/// `representative_names`'s plain name set discards.
+struct RepresentativeSource {
+    output_name: String,
+    qualifier: Option<String>,
+    raw_name: String,
+}
+
+fn representative_sources(unchanged: &[SelectColumn]) -> Vec<RepresentativeSource> {
+    unchanged
+        .iter()
+        .filter_map(|c| {
+            let col_ref = c.expr.as_column_ref()?;
+            Some(RepresentativeSource {
+                output_name: c.name.clone(),
+                qualifier: col_ref.qualifier().map(|q| q.to_string()),
+                raw_name: col_ref.name().to_string(),
+            })
+        })
+        .collect()
+}
+
 fn classify_added_column(
     col: &SelectColumn,
     representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
+    let atom_change = AtomicChange::AddedColumn {
+        name: col.name.clone(),
+    };
     match try_b1(col, representatives, inputs) {
         Ok(option) => AtomAnalysis {
-            change: AtomicChange::AddedColumn {
-                name: col.name.clone(),
-            },
+            change: atom_change,
             options: vec![option],
             inadmissible: Vec::new(),
         },
-        Err(reason) => AtomAnalysis {
-            change: AtomicChange::AddedColumn {
-                name: col.name.clone(),
-            },
-            options: Vec::new(),
-            inadmissible: vec![BackbuildRefusal {
-                atom: format!("added column '{}'", col.name),
-                reason,
-            }],
-        },
+        Err(b1_reason) => {
+            // B3 shares B1's expression-validity leaf check (subquery/
+            // window/opaque function/non-determinism, research §4 intro) —
+            // when that is what refused B1, B3 would refuse identically, so
+            // it is never attempted (avoids a redundant, confusing second
+            // refusal for the exact same underlying reason).
+            if model_diff::collect_dependencies(&col.expr).is_err() {
+                return AtomAnalysis {
+                    change: atom_change,
+                    options: Vec::new(),
+                    inadmissible: vec![BackbuildRefusal {
+                        atom: format!("added column '{}'", col.name),
+                        reason: b1_reason,
+                    }],
+                };
+            }
+            match try_b3(col, representative_sources, inputs) {
+                Ok(option) => AtomAnalysis {
+                    change: atom_change,
+                    options: vec![option],
+                    inadmissible: Vec::new(),
+                },
+                Err(b3_reason) => AtomAnalysis {
+                    change: atom_change,
+                    options: Vec::new(),
+                    inadmissible: vec![
+                        BackbuildRefusal {
+                            atom: format!("added column '{}'", col.name),
+                            reason: b1_reason,
+                        },
+                        BackbuildRefusal {
+                            atom: format!("added column '{}'", col.name),
+                            reason: b3_reason,
+                        },
+                    ],
+                },
+            }
+        }
     }
 }
 
@@ -335,8 +402,7 @@ fn try_b1(
         return Err(format!(
             "B1 (self-derivable column add) refused for '{}': depends on '{dep}', which has no \
              1:1 stored representative (a bare pull-through unchanged between both definitions) \
-             in the model's own output — an upstream-only dependency needs a later phase's B3, \
-             not B1",
+             in the model's own output — an upstream-only dependency needs B3, not B1",
             col.name
         ));
     }
@@ -393,33 +459,369 @@ fn build_b1_option(
     })
 }
 
+// ===== B3 / D2: upstream pull-through — one admission path, two triggers
+// (research §4 B3, D2) =====
+
+/// The result of the shared B3/D2 grain-link proof
+/// ([`admit_upstream_pullthrough`]): the requalified expression text (every
+/// dependency rewritten from the bound FROM-tree alias to the statement's
+/// upstream alias, `requalify::requalify_upstream`), the upstream's physical
+/// table name, and the `(target column, upstream column)` key-equality pairs
+/// for the `WHERE` clause, one per `unique_key` component.
+struct UpstreamPullthrough {
+    requalified_expr: String,
+    upstream_physical: String,
+    key_pairs: Vec<(String, String)>,
+}
+
+/// The shared B3/D2 admission proof (research §4 B3/D2, intro "Key
+/// addressability"): `expr`'s dependencies must resolve to columns of a
+/// *single* FROM-tree alias (never a mix of aliases, never an unqualified
+/// reference — the proof cannot bind an alias it cannot name); that alias
+/// must have a `unique_key` declared in `BackbuildInputs::sources`; every
+/// key column must have a 1:1 stored bare pull-through bound to that *exact
+/// same* alias (`representative_sources` — never merely the same physical
+/// table under a different alias, which is what makes a self-join's `o1`
+/// pull-through refuse to license `o2`'s columns); and every key column must
+/// be declared NOT NULL for that source. One admission path shared by B3
+/// (an added column) and D2 (a changed column's new expression) — the two
+/// callers differ only in which statements they wrap the result in (B3
+/// prepends an `ALTER ADD`; D2 does not, since the column already exists).
+fn admit_upstream_pullthrough(
+    expr: &Expr,
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<UpstreamPullthrough, String> {
+    let deps = collect_qualified_dependencies(expr)?;
+    if deps.is_empty() {
+        return Err(
+            "the expression has no column dependencies — nothing to bind a FROM-tree alias to"
+                .to_string(),
+        );
+    }
+
+    let aliases: BTreeSet<Option<String>> = deps.iter().map(|(q, _)| q.clone()).collect();
+    if aliases.len() > 1 {
+        return Err(format!(
+            "depends on {} distinct FROM-tree aliases/qualifiers — not admissible as a single- \
+             upstream pull-through (the grain-link proof binds to exactly one alias)",
+            aliases.len()
+        ));
+    }
+    let alias = aliases.into_iter().next().flatten().ok_or_else(|| {
+        "depends on an unqualified column reference — the FROM-tree alias it reads from \
+             cannot be determined; qualify it (e.g. `o.col`)"
+            .to_string()
+    })?;
+
+    let source = inputs.sources.get(&alias).ok_or_else(|| {
+        format!("no source declared for FROM-tree alias '{alias}' in BackbuildInputs::sources")
+    })?;
+
+    let unique_key = source
+        .unique_key
+        .as_ref()
+        .filter(|k| !k.is_empty())
+        .ok_or_else(|| {
+            format!(
+                "upstream '{alias}' has no declared unique_key — an equality backfill needs an \
+                 addressable identity"
+            )
+        })?;
+
+    let mut key_pairs = Vec::with_capacity(unique_key.len());
+    for k in unique_key {
+        let rep = representative_sources
+            .iter()
+            .find(|r| r.qualifier.as_deref() == Some(alias.as_str()) && &r.raw_name == k);
+        let Some(rep) = rep else {
+            return Err(format!(
+                "no addressable identity — the output has no 1:1 stored pull-through of upstream \
+                 '{alias}''s unique_key column '{k}' bound to that same alias (a self-join binds \
+                 per FROM-tree alias, not per physical table)"
+            ));
+        };
+        if !source.not_null_columns.contains(k) {
+            return Err(format!(
+                "upstream '{alias}''s unique_key column '{k}' is not declared NOT NULL \
+                 (BackbuildInputs::sources[...].not_null_columns) — SQL UNIQUE admits NULLs, and \
+                 an equality backfill never addresses a NULL-keyed row"
+            ));
+        }
+        key_pairs.push((rep.output_name.clone(), rep.raw_name.clone()));
+    }
+
+    let requalified_expr = requalify::requalify_upstream(expr, &alias, "u")?;
+
+    Ok(UpstreamPullthrough {
+        requalified_expr,
+        upstream_physical: source.physical_name.clone(),
+        key_pairs,
+    })
+}
+
+/// The B3/D2 leaf classifier: walk the same recognised expression shapes
+/// [`model_diff::collect_dependencies`] already validated (subquery/window/
+/// opaque-function/non-determinism fail-closed — reused, not re-derived,
+/// per `docs/specs/architecture.md` §"Property composition walk rule"), but
+/// preserve each column reference's qualifier instead of discarding it. The
+/// grain-link proof needs to know *which* FROM-tree alias each dependency
+/// reads from, not just its bare name — `model_diff::collect_dependencies`'s
+/// `HashSet<String>` result has already thrown that away.
+fn collect_qualified_dependencies(expr: &Expr) -> Result<Vec<(Option<String>, String)>, String> {
+    model_diff::collect_dependencies(expr)?;
+    let mut deps = Vec::new();
+    walk_qualified(expr, &mut deps);
+    Ok(deps)
+}
+
+/// Mirrors [`collect_qualified_dependencies`]'s caller-validated shapes.
+/// Every subexpression reached here has already been proven (by the
+/// `collect_dependencies` call in `collect_qualified_dependencies`) to be
+/// one of these recognised shapes or a dependency-free literal, so this walk
+/// is total — nothing left to fail closed on.
+fn walk_qualified(expr: &Expr, out: &mut Vec<(Option<String>, String)>) {
+    if let Some(col) = expr.as_column_ref() {
+        out.push((
+            col.qualifier().map(|q| q.to_string()),
+            col.name().to_string(),
+        ));
+        return;
+    }
+    if let Some(func) = expr.as_function_call() {
+        for arg in func.arguments() {
+            walk_qualified(&arg, out);
+        }
+        return;
+    }
+    if let Some(bin) = expr.as_binary() {
+        for side in [bin.left(), bin.right()].into_iter().flatten() {
+            walk_qualified(&side, out);
+        }
+        return;
+    }
+    if let Some(case) = expr.as_case() {
+        if let Some(value) = case.case_value() {
+            walk_qualified(&value, out);
+        }
+        for when in case.when_clauses() {
+            for arm in [when.condition(), when.result()].into_iter().flatten() {
+                walk_qualified(&arm, out);
+            }
+        }
+        if let Some(else_expr) = case.else_expr() {
+            walk_qualified(&else_expr, out);
+        }
+        return;
+    }
+    if let Some(cast) = expr.as_cast() {
+        if let Some(inner) = cast.expression() {
+            walk_qualified(&inner, out);
+        }
+    }
+    // Anything else is a dependency-free literal (already proven safe by
+    // `collect_dependencies`) — nothing to record.
+}
+
+/// B3 (research §4 B3): an added column whose expression pulls through an
+/// upstream already in the FROM tree, admitted via
+/// [`admit_upstream_pullthrough`]. *Script*: `ALTER TABLE t ADD COLUMN c
+/// <ty>;` (the column does not exist yet, unlike D2) followed by the
+/// column-scoped `UPDATE ... FROM` backfill.
+fn try_b3(
+    col: &SelectColumn,
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let pullthrough = admit_upstream_pullthrough(&col.expr, representative_sources, inputs)
+        .map_err(|reason| {
+            format!(
+                "B3 (upstream pull-through) refused for '{}': {reason}",
+                col.name
+            )
+        })?;
+
+    let sql_type = inputs.added_column_types.get(&col.name).ok_or_else(|| {
+        format!(
+            "B3 (upstream pull-through) refused for '{}': no declared SQL type in \
+             BackbuildInputs::added_column_types",
+            col.name
+        )
+    })?;
+
+    let alter = emit::emit_alter_add_column(&inputs.table, &col.name, sql_type);
+    let update = emit::emit_column_backfill_update_from(
+        &inputs.table,
+        &[(col.name.clone(), pullthrough.requalified_expr)],
+        &pullthrough.upstream_physical,
+        "u",
+        &pullthrough.key_pairs,
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::UpstreamPullthrough,
+        // Both statements sit in one H-slot bucket for the same reason B1's
+        // do (see `build_b1_option`): the `ALTER ADD` must flush before any
+        // rename-dependent add, and the paired `UPDATE` only ever touches
+        // this atom's own freshly-added column.
+        slot: Some(HSlot::Alter),
+        statements: vec![alter, update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: true,
+        // The `ALTER ADD` step is DDL and not re-runnable (research §2
+        // "Idempotence"), same as B1.
+        rerun_safe: false,
+    })
+}
+
+/// D2 (research §4 D2): a changed column whose *new* expression pulls
+/// through an upstream already in the FROM tree — same proof and script as
+/// B3, triggered by an expression change rather than a column add. *Script*:
+/// a single column-scoped `UPDATE ... FROM` — the column already exists, so
+/// no `ALTER`.
+fn try_d2(
+    changed: &ChangedColumn,
+    representative_sources: &[RepresentativeSource],
+    inputs: &BackbuildInputs,
+) -> Result<BackbuildOption, String> {
+    let pullthrough = admit_upstream_pullthrough(&changed.after, representative_sources, inputs)
+        .map_err(|reason| {
+            format!(
+                "D2 (upstream-read expression change) refused for '{}': {reason}",
+                changed.name
+            )
+        })?;
+
+    let update = emit::emit_column_backfill_update_from(
+        &inputs.table,
+        &[(changed.name.clone(), pullthrough.requalified_expr)],
+        &pullthrough.upstream_physical,
+        "u",
+        &pullthrough.key_pairs,
+    );
+
+    Ok(BackbuildOption {
+        technique: Technique::UpstreamPullthrough,
+        slot: Some(HSlot::UpdateMerge),
+        statements: vec![update],
+        write_scope: WriteScope::ColumnScoped,
+        reads_upstream: true,
+        // Plain DML, no DDL step — deterministic and re-runnable, same as
+        // D1.
+        rerun_safe: true,
+    })
+}
+
 // ===== D1: changed existing-column expression, derivable from stored
 // columns (research §4 D1) =====
 
+/// Classify a `changed` column into its D1 and/or D2 options (research §4
+/// D1, D2). The shared D-class grain guard (`SELECT DISTINCT`/`LIMIT`,
+/// research §4 intro) is checked once, up front, for both techniques — a
+/// grain-guard refusal is never technique-specific. Otherwise D1 and D2 are
+/// attempted independently: D2 is *always* attempted alongside a successful
+/// D1 (research: "a changed expression derivable both from stored columns
+/// and from upstream yields both … options" — the dual-derivable case), and
+/// is attempted after a failed D1 only when [`d1_failure_licenses_d2_attempt`]
+/// says the failure was a genuine "no representative, might be upstream"
+/// shape — never for an expression-validity failure (D2 shares the same
+/// leaf check and would refuse identically) or a changed-sibling dependency
+/// (interfaces note: "changed-sibling refuses standalone" — a same-model
+/// reference has nothing to do with an upstream read). Whenever any
+/// technique succeeds, `inadmissible` stays empty (the atom has an
+/// admissible option; a sibling technique's own failure reason is not
+/// worth reporting) — the same invariant every other atom kind upholds.
 fn classify_changed_column(
     changed: &ChangedColumn,
     representatives: &BTreeSet<String>,
+    representative_sources: &[RepresentativeSource],
     changed_names: &BTreeSet<String>,
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
-    match try_d1(changed, representatives, changed_names, inputs) {
-        Ok(option) => AtomAnalysis {
-            change: AtomicChange::ChangedColumn {
-                name: changed.name.clone(),
-            },
-            options: vec![option],
-            inadmissible: Vec::new(),
-        },
-        Err(reason) => AtomAnalysis {
-            change: AtomicChange::ChangedColumn {
-                name: changed.name.clone(),
-            },
+    let atom_change = AtomicChange::ChangedColumn {
+        name: changed.name.clone(),
+    };
+
+    if let Some(reason) = grain_guard_refusal(&changed.after) {
+        return AtomAnalysis {
+            change: atom_change,
             options: Vec::new(),
             inadmissible: vec![BackbuildRefusal {
                 atom: format!("changed column '{}'", changed.name),
-                reason,
+                reason: format!("D-class refused for '{}': {reason}", changed.name),
             }],
-        },
+        };
+    }
+
+    let d1_result = try_d1(changed, representatives, changed_names, inputs);
+    let attempt_d2 = match &d1_result {
+        Ok(_) => true,
+        Err(_) => d1_failure_licenses_d2_attempt(changed, representatives, changed_names),
+    };
+    let d2_result = if attempt_d2 {
+        Some(try_d2(changed, representative_sources, inputs))
+    } else {
+        None
+    };
+
+    let mut options = Vec::new();
+    let mut inadmissible = Vec::new();
+    match d1_result {
+        Ok(opt) => options.push(opt),
+        Err(reason) => inadmissible.push(BackbuildRefusal {
+            atom: format!("changed column '{}'", changed.name),
+            reason,
+        }),
+    }
+    if let Some(d2_result) = d2_result {
+        match d2_result {
+            Ok(opt) => options.push(opt),
+            Err(reason) => inadmissible.push(BackbuildRefusal {
+                atom: format!("changed column '{}'", changed.name),
+                reason,
+            }),
+        }
+    }
+    if !options.is_empty() {
+        // At least one technique succeeded — an admissible atom never also
+        // carries stale refusal text for a sibling technique that wasn't
+        // chosen (matches every other atom kind in this module).
+        inadmissible.clear();
+    }
+
+    AtomAnalysis {
+        change: atom_change,
+        options,
+        inadmissible,
+    }
+}
+
+/// Whether a failed D1 licenses attempting D2 (see `classify_changed_column`
+/// doc comment). Re-derives D1's own "first missing dependency" (same sort
+/// order `try_d1` uses) rather than threading a richer error type back from
+/// `try_d1` — `try_d1` already fully validated the expression by the time
+/// this runs, so `collect_dependencies` here is guaranteed `Ok` in every
+/// reachable case except the one it exists to detect (an expression-validity
+/// failure, which also means "don't attempt D2").
+fn d1_failure_licenses_d2_attempt(
+    changed: &ChangedColumn,
+    representatives: &BTreeSet<String>,
+    changed_names: &BTreeSet<String>,
+) -> bool {
+    let Ok(deps) = model_diff::collect_dependencies(&changed.after) else {
+        return false;
+    };
+    let mut missing: Vec<&String> = deps
+        .iter()
+        .filter(|d| !representatives.contains(*d))
+        .collect();
+    missing.sort();
+    match missing.first() {
+        Some(dep) => !changed_names.contains(dep.as_str()),
+        // No missing dependency at all means D1 should have succeeded —
+        // unreachable from the `Err` branch that calls this, but false is
+        // the safe (skip D2) answer either way.
+        None => false,
     }
 }
 

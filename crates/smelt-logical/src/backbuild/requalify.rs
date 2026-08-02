@@ -19,7 +19,7 @@
 use std::collections::BTreeSet;
 
 use smelt_parser::syntax_kind::SyntaxNode;
-use smelt_parser::{Expr, SyntaxKind, TextRange};
+use smelt_parser::{ColumnRef, Expr, SyntaxKind, TextRange};
 
 /// Requalify every column reference inside `expr` against
 /// `representatives` (the exact set of stored 1:1 representative output
@@ -40,65 +40,106 @@ use smelt_parser::{Expr, SyntaxKind, TextRange};
 /// representative name (`price`); an already-bare reference matching a
 /// representative is left as-is (rewritten to itself, byte-identical).
 pub fn requalify(expr: &Expr, representatives: &BTreeSet<String>) -> Result<String, String> {
+    collect_and_splice(expr, &|col| {
+        representatives.get(col.name()).cloned().ok_or_else(|| {
+            format!(
+                "column '{}' has no stored representative to requalify against",
+                col.name()
+            )
+        })
+    })
+}
+
+/// Requalify every column reference inside `expr` to the upstream statement
+/// alias used inside a backbuild `UPDATE ... FROM <upstream> u` (research
+/// `docs/research/20260802-backbuild-synthesis.md` §4 B3/D2 and §3 "Alias
+/// requalification is a CST rewrite, not string surgery" — the "statement-
+/// context aliasing (`t.` / `u.`)" extension). Every reference must be
+/// qualified with exactly `source_alias` — the single FROM-tree alias the
+/// B3/D2 grain-link proof (`classify.rs`'s `admit_upstream_pullthrough`)
+/// already bound this expression's dependencies to — and is rewritten to
+/// `<upstream_alias>.<raw column name>` (e.g. `o.discount` with
+/// `source_alias = "o"`, `upstream_alias = "u"` becomes `u.discount`).
+///
+/// A reference under a different qualifier, or with no qualifier at all,
+/// would mean the caller's single-alias admission proof was unsound — an
+/// internal-invariant violation, reported as `Err` (fail-loud discipline)
+/// rather than silently reproduced or panicking.
+pub fn requalify_upstream(
+    expr: &Expr,
+    source_alias: &str,
+    upstream_alias: &str,
+) -> Result<String, String> {
+    collect_and_splice(expr, &|col| match col.qualifier() {
+        Some(q) if q == source_alias => Ok(format!("{upstream_alias}.{}", col.name())),
+        _ => Err(format!(
+            "column '{}' is not qualified with the upstream alias '{source_alias}' the \
+             grain-link proof bound this expression to",
+            col.name()
+        )),
+    })
+}
+
+fn collect_and_splice(
+    expr: &Expr,
+    resolve: &impl Fn(&ColumnRef) -> Result<String, String>,
+) -> Result<String, String> {
     let mut spans: Vec<(TextRange, String)> = Vec::new();
-    collect_replacements(expr, representatives, &mut spans)?;
+    collect_replacements(expr, resolve, &mut spans)?;
     spans.sort_by_key(|(range, _)| range.start());
     Ok(splice(expr.syntax(), &spans))
 }
 
 /// Mirrors `analysis::model_diff::walk`'s recognised shapes exactly, but
-/// records `(range, replacement)` pairs for column-reference leaves instead
-/// of collecting dependency names.
+/// records `(range, replacement)` pairs for column-reference leaves —
+/// resolved by the caller-supplied `resolve` closure — instead of
+/// collecting dependency names. Shared by [`requalify`] (self-read: replace
+/// with a bare representative name) and [`requalify_upstream`] (upstream
+/// statement-context: replace with `<alias>.<name>`); only the leaf
+/// resolution differs, the traversal is identical.
 fn collect_replacements(
     expr: &Expr,
-    representatives: &BTreeSet<String>,
+    resolve: &impl Fn(&ColumnRef) -> Result<String, String>,
     out: &mut Vec<(TextRange, String)>,
 ) -> Result<(), String> {
     if let Some(col) = expr.as_column_ref() {
-        return match representatives.get(col.name()) {
-            Some(bare_name) => {
-                out.push((trimmed_range(expr.syntax()), bare_name.clone()));
-                Ok(())
-            }
-            None => Err(format!(
-                "column '{}' has no stored representative to requalify against",
-                col.name()
-            )),
-        };
+        let replacement = resolve(&col)?;
+        out.push((trimmed_range(expr.syntax()), replacement));
+        return Ok(());
     }
 
     if let Some(func) = expr.as_function_call() {
         for arg in func.arguments() {
-            collect_replacements(&arg, representatives, out)?;
+            collect_replacements(&arg, resolve, out)?;
         }
         return Ok(());
     }
 
     if let Some(bin) = expr.as_binary() {
         for side in [bin.left(), bin.right()].into_iter().flatten() {
-            collect_replacements(&side, representatives, out)?;
+            collect_replacements(&side, resolve, out)?;
         }
         return Ok(());
     }
 
     if let Some(case) = expr.as_case() {
         if let Some(value) = case.case_value() {
-            collect_replacements(&value, representatives, out)?;
+            collect_replacements(&value, resolve, out)?;
         }
         for when in case.when_clauses() {
             for arm in [when.condition(), when.result()].into_iter().flatten() {
-                collect_replacements(&arm, representatives, out)?;
+                collect_replacements(&arm, resolve, out)?;
             }
         }
         if let Some(else_expr) = case.else_expr() {
-            collect_replacements(&else_expr, representatives, out)?;
+            collect_replacements(&else_expr, resolve, out)?;
         }
         return Ok(());
     }
 
     if let Some(cast) = expr.as_cast() {
         return match cast.expression() {
-            Some(inner) => collect_replacements(&inner, representatives, out),
+            Some(inner) => collect_replacements(&inner, resolve, out),
             None => Err("CAST has no inner expression to requalify".to_string()),
         };
     }
@@ -264,5 +305,33 @@ mod tests {
         let e = expr("o.region_name");
         let err = requalify(&e, &BTreeSet::new()).unwrap_err();
         assert!(err.contains("region_name"));
+    }
+
+    #[test]
+    fn requalify_upstream_rewrites_the_bound_alias_to_the_statement_alias() {
+        let e = expr("o.discount");
+        let out = requalify_upstream(&e, "o", "u").expect("requalify_upstream");
+        assert_eq!(out, "u.discount");
+    }
+
+    #[test]
+    fn requalify_upstream_rewrites_every_reference_under_the_bound_alias() {
+        let e = expr("o.price * o.qty");
+        let out = requalify_upstream(&e, "o", "u").expect("requalify_upstream");
+        assert_eq!(out, "u.price * u.qty");
+    }
+
+    #[test]
+    fn requalify_upstream_refuses_a_reference_under_a_different_alias() {
+        let e = expr("o2.discount");
+        let err = requalify_upstream(&e, "o1", "u").unwrap_err();
+        assert!(err.contains("discount"));
+    }
+
+    #[test]
+    fn requalify_upstream_refuses_an_unqualified_reference() {
+        let e = expr("discount");
+        let err = requalify_upstream(&e, "o", "u").unwrap_err();
+        assert!(err.contains("discount"));
     }
 }
