@@ -519,6 +519,16 @@ fn d1_lateral_alias_to_changed_sibling_refuses() {
         "expected the refusal to name the changed sibling 'net', got: {}",
         gross_atom.inadmissible[0].reason
     );
+    // A changed-sibling dependency has nothing to do with an upstream read
+    // (research §4 D2 is specifically "needs an upstream read"; `net` is a
+    // same-model column, not an upstream one) — the refusal must not point
+    // at D2, unlike the genuinely-upstream case
+    // (`d1_upstream_dependency_refuses_until_d2`).
+    assert!(
+        !gross_atom.inadmissible[0].reason.contains("D2"),
+        "a changed-sibling refusal must not be conflated with the upstream-read (D2) case, got: {}",
+        gross_atom.inadmissible[0].reason
+    );
 }
 
 #[test]
@@ -580,6 +590,16 @@ fn d1_upstream_dependency_refuses_until_d2() {
     assert!(
         atom.inadmissible[0].reason.contains("D2"),
         "expected the refusal to point at D2 (upstream read), got: {}",
+        atom.inadmissible[0].reason
+    );
+    // Distinguishable from the changed-sibling case
+    // (`d1_lateral_alias_to_changed_sibling_refuses`): a genuinely
+    // upstream-only dependency was never a changed column in this edit.
+    assert!(
+        !atom.inadmissible[0]
+            .reason
+            .contains("also changed in this same edit"),
+        "an upstream-only refusal must not be conflated with the changed-sibling case, got: {}",
         atom.inadmissible[0].reason
     );
 }

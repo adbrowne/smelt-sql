@@ -179,6 +179,7 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
             unchanged,
         } => {
             let representatives = representative_names(unchanged);
+            let changed_names: BTreeSet<String> = changed.iter().map(|c| c.name.clone()).collect();
             atoms.extend(classify_select_list(
                 added,
                 dropped,
@@ -186,7 +187,12 @@ fn classify_comparable(comparable: &ComparableDiff, inputs: &BackbuildInputs) ->
                 inputs,
             ));
             for c in changed {
-                atoms.push(classify_changed_column(c, &representatives, inputs));
+                atoms.push(classify_changed_column(
+                    c,
+                    &representatives,
+                    &changed_names,
+                    inputs,
+                ));
             }
         }
     }
@@ -393,9 +399,10 @@ fn build_b1_option(
 fn classify_changed_column(
     changed: &ChangedColumn,
     representatives: &BTreeSet<String>,
+    changed_names: &BTreeSet<String>,
     inputs: &BackbuildInputs,
 ) -> AtomAnalysis {
-    match try_d1(changed, representatives, inputs) {
+    match try_d1(changed, representatives, changed_names, inputs) {
         Ok(option) => AtomAnalysis {
             change: AtomicChange::ChangedColumn {
                 name: changed.name.clone(),
@@ -429,9 +436,20 @@ fn classify_changed_column(
 /// The new expression is defined over *inputs*, not over the old column
 /// value — this proof finds stored representatives of those inputs, it
 /// never substitutes the old expression or the old column's own value.
+///
+/// `changed_names` (every output column name in this diff's `changed` set,
+/// including `changed.name` itself) is used only to give a missing
+/// dependency's refusal the *right* reason: a dependency that also changed
+/// in this same edit is refused because a changed column is never a stored
+/// representative (research §4 intro's uniform rule) — a completely
+/// different cause from a dependency this model never stores at all, which
+/// points at D2 (research §4 D2 is specifically "needs an upstream read";
+/// an intra-model changed-sibling reference has no upstream involved, so it
+/// must never be pointed at D2).
 fn try_d1(
     changed: &ChangedColumn,
     representatives: &BTreeSet<String>,
+    changed_names: &BTreeSet<String>,
     inputs: &BackbuildInputs,
 ) -> Result<BackbuildOption, String> {
     if let Some(reason) = grain_guard_refusal(&changed.after) {
@@ -454,13 +472,24 @@ fn try_d1(
         .collect();
     missing.sort();
     if let Some(dep) = missing.first() {
-        return Err(format!(
-            "D1 (stored-derivable expression change) refused for '{}': depends on '{dep}', which \
-             has no 1:1 stored representative (a bare pull-through unchanged between both \
-             definitions) in the model's own output — an upstream-only dependency, or a \
-             dependency on a changed sibling, needs a later phase's D2, not D1",
-            changed.name
-        ));
+        return Err(if changed_names.contains(dep.as_str()) {
+            format!(
+                "D1 (stored-derivable expression change) refused for '{}': depends on '{dep}', \
+                 which also changed in this same edit — a changed column is never a stored \
+                 representative (research §4 intro: a representative must be a bare \
+                 pull-through unchanged between both definitions), so this cannot safely read \
+                 its new value without risking an order-dependent or self-invalidating update",
+                changed.name
+            )
+        } else {
+            format!(
+                "D1 (stored-derivable expression change) refused for '{}': depends on '{dep}', \
+                 which has no 1:1 stored representative (a bare pull-through unchanged between \
+                 both definitions) in the model's own output — an upstream-only dependency \
+                 needs a later phase's D2, not D1",
+                changed.name
+            )
+        });
     }
 
     let requalified = requalify::requalify(&changed.after, representatives).map_err(|reason| {
