@@ -258,3 +258,11 @@ categories in the table above, which together with `roundtrip_mismatch` account 
 ## Incremental-models spec redraft (2026-07-22)
 
 - PR #166 (branch `spec-redraft-incremental-models`): phases 0–5 done. Remaining: Phase 6 follow-up PR — run `/smelt:validate incremental_models`, sweep §-name references in code comments + sibling specs per the plan Appendix A heading map (docs/plans/ and docs/research/ stay untouched), delete the claims scaffolding file. See `docs/plans/20260722-incremental-models-spec-redraft.md`.
+
+## Backbuild property-test hardening (from 2026-08-03 mutation audit)
+
+Full findings: `docs/handoffs/2026-08-03-backbuild-property-test-review.md`.
+
+- [ ] **Rerun-safety leg** — apply composed scripts twice in `generated_options_match_full_rebuild_oracle` when all chosen options are `rerun_safe: true`; add E2/F1 siblings of `e4_idempotent_with_identity`. (M4b: dropping E2/F1 anti-join guards survives the entire suite today.)
+- [ ] **Generator additions** — tighten variant `o.status = 'open'` (E1 3VL), WHERE conjuncts on `Shape::Grouped` (B5 WHERE-carry), guaranteed `LoosenFilter`-removing-`StatusOpen` slot (E2/E4 3VL at N=24).
+- [ ] **Optional** — a drop+reader composite case for H drop-ordering, or document conformance-only coverage.
