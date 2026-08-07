@@ -71,6 +71,11 @@ pub struct SelectAnalysis {
     pub group_by_exprs: Vec<String>,
     /// Whether a `-- smelt:cube_split` comment was found.
     pub has_cube_split_annotation: bool,
+    /// Clauses present on the SELECT that a textual reassembly of
+    /// (items, FROM, WHERE, GROUP BY) would silently drop. Consumers that
+    /// rebuild the query from those parts (e.g. the cube_split rewrite)
+    /// must refuse when any of these is set.
+    pub unreconstructible_clauses: Vec<&'static str>,
 }
 
 /// Classify the items of an already-parsed `SelectList` into `SelectItemKind`s.
@@ -453,12 +458,30 @@ pub fn analyze_select(sql: &str) -> Option<SelectAnalysis> {
     // Check for smelt:cube_split annotation in comments
     let has_cube_split_annotation = check_cube_split_annotation(stripped);
 
+    let mut unreconstructible_clauses = Vec::new();
+    if select.is_distinct() {
+        unreconstructible_clauses.push("DISTINCT");
+    }
+    if select.having_clause().is_some() {
+        unreconstructible_clauses.push("HAVING");
+    }
+    if select.qualify_clause().is_some() {
+        unreconstructible_clauses.push("QUALIFY");
+    }
+    if select.order_by_clause().is_some() {
+        unreconstructible_clauses.push("ORDER BY");
+    }
+    if select.limit_clause().is_some() {
+        unreconstructible_clauses.push("LIMIT");
+    }
+
     Some(SelectAnalysis {
         items,
         from_text,
         where_text,
         group_by_exprs,
         has_cube_split_annotation,
+        unreconstructible_clauses,
     })
 }
 

@@ -16,6 +16,18 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
         return Ok(None);
     }
 
+    // The rewrite reassembles the query from (items, FROM, WHERE, GROUP BY)
+    // only; any other clause would be silently dropped from the split plan.
+    if !analysis.unreconstructible_clauses.is_empty() {
+        return Err(format!(
+            "Model '{}' has smelt:cube_split annotation but uses {} — the \
+             cube_split rewrite cannot reproduce this clause. Remove the \
+             clause or drop the annotation.",
+            model.name,
+            analysis.unreconstructible_clauses.join(", "),
+        ));
+    }
+
     let count_distincts: Vec<_> = analysis
         .items
         .iter()
@@ -63,6 +75,12 @@ pub fn detect(model: &ModelInfo) -> Result<Option<Opportunity>, String> {
 pub fn rewrite(model: &ModelInfo) -> Option<Vec<ExecutionStep>> {
     let sql = Frontmatter::strip(&model.sql);
     let analysis = analyze_select(sql)?;
+
+    // Defence in depth: `detect` refuses these shapes with an error; never
+    // emit a plan that would drop the clause even if called directly.
+    if !analysis.unreconstructible_clauses.is_empty() {
+        return None;
+    }
 
     // Separate items by kind
     let mut group_keys: Vec<(String, String)> = Vec::new(); // (expr, alias)
@@ -278,6 +296,51 @@ mod tests {
         let result = detect(&m);
         assert!(result.is_err());
         assert!(result.unwrap_err().contains("only 1"));
+    }
+
+    #[test]
+    fn test_detect_errors_on_having() {
+        let m = model(
+            "test",
+            "SELECT country, COUNT(DISTINCT user_id) as u, COUNT(DISTINCT session_id) as s FROM events GROUP BY 1 HAVING COUNT(*) > 1 -- smelt:cube_split",
+        );
+        let err = detect(&m).unwrap_err();
+        assert!(
+            err.contains("HAVING"),
+            "error should name the clause: {err}"
+        );
+        assert!(
+            rewrite(&m).is_none(),
+            "rewrite must not emit a plan that drops HAVING"
+        );
+    }
+
+    #[test]
+    fn test_detect_errors_on_select_distinct() {
+        let m = model(
+            "test",
+            "SELECT DISTINCT country, COUNT(DISTINCT user_id) as u, COUNT(DISTINCT session_id) as s FROM events GROUP BY 1 -- smelt:cube_split",
+        );
+        let err = detect(&m).unwrap_err();
+        assert!(
+            err.contains("DISTINCT"),
+            "error should name the clause: {err}"
+        );
+        assert!(rewrite(&m).is_none());
+    }
+
+    #[test]
+    fn test_detect_errors_on_order_by_limit() {
+        let m = model(
+            "test",
+            "SELECT country, COUNT(DISTINCT user_id) as u, COUNT(DISTINCT session_id) as s FROM events GROUP BY 1 ORDER BY 1 LIMIT 5 -- smelt:cube_split",
+        );
+        let err = detect(&m).unwrap_err();
+        assert!(
+            err.contains("ORDER BY") && err.contains("LIMIT"),
+            "error should name the clauses: {err}"
+        );
+        assert!(rewrite(&m).is_none());
     }
 
     #[test]
