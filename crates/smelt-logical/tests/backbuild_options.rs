@@ -2143,6 +2143,51 @@ fn branch_swap_with_edit_refuses_phantom_top_level_diff() {
 }
 
 #[test]
+fn e1_three_conjunct_and_chain_with_duplicate_splits_and_requalifies_fully() {
+    // Regression for the `Expr::as_binary` child-first-cast bug (found
+    // generatively, 2026-08-07): `a AND b AND c` parses left-associatively
+    // as `(a AND b) AND c` with bare `BINARY_EXPR` operands, and the old
+    // child-first cast made the inner `(a AND b)` subtree cast to its own
+    // first-child comparison — so `split_conjuncts` treated the whole
+    // subtree as ONE atomic conjunct, and `requalify`'s walk visited only
+    // the comparison, splicing `b` through verbatim. With a duplicated
+    // conjunct (the pre-existing `o.status = 'open'` re-added as the third
+    // conjunct), the diff then paired before's conjunct against the
+    // trailing duplicate and emitted a single half-requalified atom:
+    // `DELETE FROM t WHERE (status = 'open' AND o.status IS NOT NULL) IS
+    // NOT TRUE` — invalid SQL (no alias `o` in a DELETE), caught by DuckDB
+    // as a binder error at execution.
+    let before_sql = "SELECT o.id AS id, o.status AS status FROM orders o WHERE o.status = 'open'";
+    let after_sql = "SELECT o.id AS id, o.status AS status FROM orders o \
+                     WHERE o.status = 'open' AND o.status IS NOT NULL AND o.status = 'open'";
+
+    let diff = definition_diff(&parse(before_sql), &parse(after_sql));
+    assert!(!diff.is_noop());
+
+    let options = derive_backbuild_options(&diff, &inputs(&[]));
+    assert_eq!(options.atoms.len(), 2, "atoms: {:?}", options.atoms);
+    let statements: Vec<&str> = options
+        .atoms
+        .iter()
+        .map(|atom| {
+            assert_eq!(atom.options.len(), 1, "options: {:?}", atom.options);
+            let opt = &atom.options[0];
+            assert_eq!(opt.technique, Technique::PredicateTightenDelete);
+            assert_eq!(opt.statements.len(), 1, "statements: {:?}", opt.statements);
+            opt.statements[0].as_str()
+        })
+        .collect();
+    assert_eq!(
+        statements,
+        vec![
+            "DELETE FROM t WHERE (status IS NOT NULL) IS NOT TRUE",
+            "DELETE FROM t WHERE (status = 'open') IS NOT TRUE",
+        ],
+        "every added conjunct must be its own fully-requalified atom"
+    );
+}
+
+#[test]
 fn c1_option_marked_destructive() {
     let before_sql = "SELECT id, extra FROM orders";
     let after_sql = "SELECT id FROM orders";

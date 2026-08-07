@@ -2157,10 +2157,8 @@ impl Expr {
     /// (`smelt.functions.*` form). Matches both when this `Expr` node IS the
     /// `SMELT_PATH_CALL` and when it wraps one as a direct child.
     pub fn as_smelt_path_call(&self) -> Option<SmeltPathCall> {
-        self.0
-            .children()
-            .find_map(SmeltPathCall::cast)
-            .or_else(|| SmeltPathCall::cast(self.0.clone()))
+        SmeltPathCall::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(SmeltPathCall::cast))
     }
 
     /// Check if this expression is a `smelt.as_struct(alias [EXCEPT cols])`
@@ -2181,147 +2179,108 @@ impl Expr {
 
     /// Check if this is a CASE expression
     pub fn as_case(&self) -> Option<CaseExpr> {
-        self.0
-            .children()
-            .find_map(CaseExpr::cast)
-            .or_else(|| CaseExpr::cast(self.0.clone()))
+        CaseExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(CaseExpr::cast))
     }
 
     /// Check if this is an EXTRACT expression
     pub fn as_extract(&self) -> Option<ExtractExpr> {
-        self.0
-            .children()
-            .find_map(ExtractExpr::cast)
-            .or_else(|| ExtractExpr::cast(self.0.clone()))
+        ExtractExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(ExtractExpr::cast))
     }
 
     /// Check if this is an AT TIME ZONE expression
     pub fn as_at_time_zone(&self) -> Option<AtTimeZoneExpr> {
-        self.0
-            .children()
-            .find_map(AtTimeZoneExpr::cast)
-            .or_else(|| AtTimeZoneExpr::cast(self.0.clone()))
+        AtTimeZoneExpr::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(AtTimeZoneExpr::cast))
     }
 
     /// Check if this is a COLLATE expression
     pub fn as_collate(&self) -> Option<CollateExpr> {
-        self.0
-            .children()
-            .find_map(CollateExpr::cast)
-            .or_else(|| CollateExpr::cast(self.0.clone()))
+        CollateExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(CollateExpr::cast))
     }
 
     /// Check if this is a CAST expression
     pub fn as_cast(&self) -> Option<CastExpr> {
-        self.0
-            .children()
-            .find_map(CastExpr::cast)
-            .or_else(|| CastExpr::cast(self.0.clone()))
+        CastExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(CastExpr::cast))
     }
 
     /// Check if this is a subquery
     pub fn as_subquery(&self) -> Option<Subquery> {
-        self.0
-            .children()
-            .find_map(Subquery::cast)
-            .or_else(|| Subquery::cast(self.0.clone()))
+        Subquery::cast(self.0.clone()).or_else(|| self.0.children().find_map(Subquery::cast))
     }
 
     /// Check if this is a BETWEEN expression
     pub fn as_between(&self) -> Option<BetweenExpr> {
-        self.0
-            .children()
-            .find_map(BetweenExpr::cast)
-            .or_else(|| BetweenExpr::cast(self.0.clone()))
+        BetweenExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(BetweenExpr::cast))
     }
 
     /// Check if this is an IN expression
     pub fn as_in(&self) -> Option<InExpr> {
-        self.0
-            .children()
-            .find_map(InExpr::cast)
-            .or_else(|| InExpr::cast(self.0.clone()))
+        InExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(InExpr::cast))
     }
 
     /// Check if this is an EXISTS expression
     pub fn as_exists(&self) -> Option<ExistsExpr> {
-        self.0
-            .children()
-            .find_map(ExistsExpr::cast)
-            .or_else(|| ExistsExpr::cast(self.0.clone()))
+        ExistsExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(ExistsExpr::cast))
     }
 
-    /// Check if this is a binary expression
+    /// Check if this is a binary expression.
+    ///
+    /// Self-cast is tried FIRST: a node that is itself a `BINARY_EXPR` can
+    /// have a same-kind first child (left-associative chains parse
+    /// `a AND b AND c` as `(a AND b) AND c` with bare `BINARY_EXPR`
+    /// operands), and a child-first cast would silently return that child,
+    /// dropping the right operand from every recursive walk. The child
+    /// lookup remains only to unwrap `EXPRESSION` wrapper nodes, which can
+    /// never themselves cast.
     pub fn as_binary(&self) -> Option<BinaryExpr> {
-        self.0
-            .children()
-            .find_map(BinaryExpr::cast)
-            .or_else(|| BinaryExpr::cast(self.0.clone()))
+        BinaryExpr::cast(self.0.clone()).or_else(|| self.0.children().find_map(BinaryExpr::cast))
     }
 
     /// Check if this is an array literal (ARRAY[1, 2, 3])
     pub fn as_array_literal(&self) -> Option<ArrayLiteral> {
-        self.0
-            .children()
-            .find_map(ArrayLiteral::cast)
-            .or_else(|| ArrayLiteral::cast(self.0.clone()))
+        ArrayLiteral::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(ArrayLiteral::cast))
     }
 
     /// Check if this is a list comprehension (`[expr FOR x IN list]`)
     pub fn as_list_comprehension(&self) -> Option<ListComprehension> {
-        self.0
-            .children()
-            .find_map(ListComprehension::cast)
-            .or_else(|| ListComprehension::cast(self.0.clone()))
+        ListComprehension::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(ListComprehension::cast))
     }
 
     /// Check if this contains an array subscript (expr[index])
     pub fn as_array_subscript(&self) -> Option<ArraySubscript> {
-        self.0
-            .children()
-            .find_map(ArraySubscript::cast)
-            .or_else(|| ArraySubscript::cast(self.0.clone()))
+        ArraySubscript::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(ArraySubscript::cast))
     }
 
     /// Check if this contains an array slice (expr[start:end])
     pub fn as_array_slice(&self) -> Option<ArraySlice> {
-        self.0
-            .children()
-            .find_map(ArraySlice::cast)
-            .or_else(|| ArraySlice::cast(self.0.clone()))
+        ArraySlice::cast(self.0.clone()).or_else(|| self.0.children().find_map(ArraySlice::cast))
     }
 
     /// Check if this is a ROW constructor (ROW(1, 2, 3))
     pub fn as_row_constructor(&self) -> Option<RowConstructor> {
-        self.0
-            .children()
-            .find_map(RowConstructor::cast)
-            .or_else(|| RowConstructor::cast(self.0.clone()))
+        RowConstructor::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(RowConstructor::cast))
     }
 
     /// Check if this is a struct literal (STRUCT(1 AS a, 'hello' AS b))
     pub fn as_struct_literal(&self) -> Option<StructLiteral> {
-        self.0
-            .children()
-            .find_map(StructLiteral::cast)
-            .or_else(|| StructLiteral::cast(self.0.clone()))
+        StructLiteral::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(StructLiteral::cast))
     }
 
     /// Check if this is a MAP literal (MAP {'a': 1, 'b': 2})
     pub fn as_map_literal(&self) -> Option<MapLiteral> {
-        self.0
-            .children()
-            .find_map(MapLiteral::cast)
-            .or_else(|| MapLiteral::cast(self.0.clone()))
+        MapLiteral::cast(self.0.clone()).or_else(|| self.0.children().find_map(MapLiteral::cast))
     }
 
     /// Check if this is a brace-struct literal (`{expr AS name, ..spread}`
     /// meta-language form, or a DuckDB struct/dict literal `{'a': 1}`).
     pub fn as_brace_struct_literal(&self) -> Option<BraceStructLiteral> {
-        self.0
-            .children()
-            .find_map(BraceStructLiteral::cast)
-            .or_else(|| BraceStructLiteral::cast(self.0.clone()))
+        BraceStructLiteral::cast(self.0.clone())
+            .or_else(|| self.0.children().find_map(BraceStructLiteral::cast))
     }
 
     /// Check if this expression has a window specification (OVER clause)
@@ -5010,6 +4969,80 @@ mod tests {
                 call_text
             );
         }
+    }
+
+    /// `as_binary` on a node that is itself a `BINARY_EXPR` must wrap that
+    /// node, never a same-kind first child. `a AND b AND c` parses
+    /// left-associatively as `(a AND b) AND c`, and AND operands are bare
+    /// `BINARY_EXPR` children (no `EXPRESSION` wrapper) — so the inner
+    /// `a AND b` subtree has a `BINARY_EXPR` first child (the comparison
+    /// `a`), and a child-first cast silently returns that comparison,
+    /// dropping `b` from every recursive `as_binary` walk.
+    #[test]
+    fn as_binary_on_nested_and_chain_wraps_self_not_first_child() {
+        let src = "SELECT 1 FROM t WHERE x = 1 AND y IS NOT NULL AND z = 2";
+        let parsed = parse(src);
+        assert!(parsed.errors.is_empty(), "errors: {:?}", parsed.errors);
+        let file = File::cast(parsed.syntax()).expect("file");
+        let stmt = file.select_stmt().expect("stmt");
+        let top = stmt
+            .where_clause()
+            .and_then(|w| w.expression())
+            .expect("where expr");
+
+        let top_bin = top.as_binary().expect("top is binary");
+        assert_eq!(top_bin.operator().as_deref(), Some("AND"));
+        let left = top_bin.left().expect("left subtree");
+        assert_eq!(
+            left.syntax().text().to_string().trim(),
+            "x = 1 AND y IS NOT NULL"
+        );
+
+        let left_bin = left.as_binary().expect("left subtree is binary");
+        assert_eq!(
+            left_bin.operator().as_deref(),
+            Some("AND"),
+            "as_binary must wrap the AND subtree itself, not its first-child comparison"
+        );
+        assert_eq!(
+            left_bin
+                .right()
+                .expect("right operand")
+                .syntax()
+                .text()
+                .to_string()
+                .trim(),
+            "y IS NOT NULL",
+            "the right operand of the inner AND must be reachable through as_binary"
+        );
+    }
+
+    /// Same self-vs-first-child ambiguity as the `as_binary` test above, for
+    /// the other node kinds observed to nest a same-kind direct child:
+    /// `AT_TIME_ZONE_EXPR` (chained `AT TIME ZONE`) and `SUBQUERY`
+    /// (`((SELECT 1))`). A child-first cast returns the inner node, silently
+    /// dropping the outer node's own structure from a recursive walk.
+    #[test]
+    fn self_kind_accessors_prefer_self_over_same_kind_child() {
+        let src = "SELECT a AT TIME ZONE 'utc' AT TIME ZONE 'est' FROM t";
+        let parsed = parse(src);
+        assert!(parsed.errors.is_empty(), "errors: {:?}", parsed.errors);
+        let outer = parsed
+            .syntax()
+            .descendants()
+            .find(|n| n.kind() == SyntaxKind::AT_TIME_ZONE_EXPR)
+            .expect("outer AT_TIME_ZONE_EXPR");
+        let tz = Expr::cast(outer.clone())
+            .expect("expr")
+            .as_at_time_zone()
+            .expect("at-time-zone")
+            .timezone_expr()
+            .expect("timezone expr");
+        assert_eq!(
+            tz.syntax().text().to_string().trim(),
+            "'est'",
+            "as_at_time_zone on the outer chained node must wrap that node, not the inner one"
+        );
     }
 }
 
