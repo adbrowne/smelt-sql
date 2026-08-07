@@ -1609,12 +1609,10 @@ fn find_branch_discriminator(
             continue;
         }
 
-        // Every branch declares this column as a bare literal — check the
-        // values are pairwise distinct.
-        let values: Vec<(RangeLiteralKind, String)> = literals
-            .into_iter()
-            .map(|l| l.expect("literal_count check"))
-            .collect();
+        // Every branch declares this column as a bare literal (the
+        // `literal_count` check above proved every entry is `Some`, so
+        // `flatten` drops nothing) — check the values are pairwise distinct.
+        let values: Vec<(RangeLiteralKind, String)> = literals.into_iter().flatten().collect();
 
         // The column must be the *same* literal kind in every branch: a
         // `UNION ALL` coerces the column to one common supertype, so an
