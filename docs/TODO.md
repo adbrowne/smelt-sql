@@ -39,8 +39,8 @@ The generators in `crates/smelt-db/tests/prop_helpers/generators.rs` currently o
 
 - [x] **Interval type** — Added `BaseType::Interval` with `CAST('1 day' AS INTERVAL)`, Arrow mapping already handles `Duration`/`Interval`.
 - [x] **Time type** — Added `BaseType::Time` with `CAST('12:00:00' AS TIME)`, Arrow mapping already handles `Time32`/`Time64`.
-- [ ] **Array types** — Add ARRAY literals, ARRAY_AGG, array subscript, array slice
-- [ ] **Row/Struct types** — Add ROW(...) and STRUCT(...) constructors
+- [x] **Array types** — Added `ExprKind::ArrayLiteral` (`ARRAY[1, 2, 3]` / `[1, 2, 3]`), `ArraySubscript` (`arr[1]`), `ArraySlice` (`arr[1:2]`), and `ARRAY_AGG(col)` (wraps the aggregate's argument type in `Array<T>`). Arrow's `List`/`LargeList` already mapped recursively to `Array<T>` in `arrow_mapping.rs`, including nested `List<List<T>>`. One divergence registered: DuckDB returns `Array(Varchar)` from `ARRAY_AGG(str_col)` where smelt infers `Array(Text)` — folded into the existing string-family (`Text`/`Varchar`) leniency in `type_comparison.rs` by unwrapping one level of `Array` before the compatibility check, rather than adding separate Array-of-X registry entries.
+- [x] **Row/Struct types** — Added `ExprKind::RowConstructor` (`ROW(<lit1>, <lit2>)` with two distinct field base types) and `BraceStructLiteral` (`{'a': <lit1>, 'b': <lit2>}`) with field-exact struct comparison. `STRUCT(1 AS a, ...)` literal syntax omitted from generation: smelt parses it but real DuckDB does not (verified against DuckDB — `struct_pack`'s named-arg form is its actual equivalent).
 
 ### Syntax Variants
 
