@@ -284,10 +284,12 @@ planner surface:
   trusts declared cardinality) with no executable check. Either build a
   Plan→SQL printer (which would also let `--show-plan` output be verified) or
   keep the rules display-only and say so in a doc comment.
-- [ ] **Window-clamp metamorphic relation** — union of per-window clamped
-  runs over a partition of the time domain == unwindowed run
-  (`inject_time_filter` / `inject_source_filters`). Complements the
-  maintenance conformance gate with a transformer-local relation.
+- [x] **Window-clamp metamorphic relation** (2026-08-08) — `cargo test -p
+  smelt-cli --test transformer_metamorphic`: for generated partition-aligned
+  models, data, window partitions, and pushdown margins, asserts (A) the
+  full-domain clamp drops exactly the NULL-event-time rows, (B) union of
+  per-window clamps == full clamp, (C) union of pushdown+clamp windows ==
+  full clamp in the production compose order. Soaked at 500 cases.
 - [ ] **Cube-split rewrite is dead in the runtime** — `Transformation::ReplaceWithPlan`
   is never executed by `smelt-runtime` (only `smelt explain` and tests read
   it). The new gate proves the rewrite correct when it does fire; decide
